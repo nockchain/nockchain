@@ -558,6 +558,30 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let batch_entries = cli
+        .batch_manifest
+        .as_ref()
+        .map(|manifest| parse_batch_manifest(manifest))
+        .transpose()?;
+    if let Some(entries) = batch_entries.as_deref() {
+        let mut requires_reference = false;
+        for entry in entries {
+            requires_reference |=
+                entry_uses_unpinned_softed_constraints(&entry.entry, &cli.directory)?;
+        }
+        if requires_reference {
+            for entry in entries {
+                compile_entry_with_hoonc(&entry.entry, &cli.directory, &entry.output, entry.mode)
+                    .await?;
+            }
+            return Ok(());
+        }
+    } else if let (Some(entry), Some(output)) = (cli.entry.as_deref(), cli.output.as_deref()) {
+        if entry_uses_unpinned_softed_constraints(entry, &cli.directory)? {
+            return compile_entry_with_hoonc(entry, &cli.directory, output, cli.mode).await;
+        }
+    }
+
     let prelude_source = fs::read_to_string(&cli.prelude)?;
     // hoonc compiles DEPENDENCY files (the prelude) with debug OFF: no `%spot`
     // anywhere in the prelude's formula, coil seminouns, or stored arm ASTs (only
@@ -599,14 +623,13 @@ async fn run(cli: Cli) -> Result<()> {
         return dump_native_wrapper_assets(&mut builder, out_dir);
     }
 
-    if let Some(manifest) = &cli.batch_manifest {
-        let entries = parse_batch_manifest(manifest)?;
+    if let Some(entries) = batch_entries.as_deref() {
         return compile_batch_with_shared_prelude(
             &cli,
             &prelude_expr,
             &prelude_source,
             subject_type_jam.as_deref(),
-            &entries,
+            entries,
         )
         .await;
     }
@@ -788,6 +811,15 @@ fn build_entry_wer(path: &Path, deps_dir: &Path, absolute_entry_wer: bool) -> Ve
     }
     let lexical_path = lexical_absolute_path(path).unwrap_or_else(|_| path.to_path_buf());
     let wer_path = path.canonicalize().unwrap_or(lexical_path);
+    // Prefer a cwd-relative wer: a raw absolute path bakes the build
+    // machine's directory layout into the artifact, so two builds of the
+    // same tree from different checkouts can never be byte-identical.
+    if let Ok(cwd) = std::env::current_dir() {
+        let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
+        if let Ok(rel) = wer_path.strip_prefix(&canonical_cwd) {
+            return path_components_for_dbug(rel);
+        }
+    }
     path_components_for_dbug(&wer_path)
 }
 
@@ -2000,6 +2032,7 @@ impl<'a> NativeBuildContext<'a> {
         self.mint_with_sut(sut, expr, vet)
     }
 
+    #[allow(clippy::result_large_err)]
     fn mint_with_sut(&mut self, sut: Noun, expr: &Hoon, vet: bool) -> Result<(Noun, Noun)> {
         let gol = ty_noun(&mut *self.ut.slab);
         let ut = &mut self.ut;
@@ -2566,8 +2599,8 @@ fn should_reset_eval_memo(_path: &Path) -> bool {
 fn shot_gene() -> Hoon {
     Hoon::CenSig(
         vec![Limb::Term("$".to_string())],
-        Box::new(Hoon::Axis(2)),
-        vec![Hoon::Axis(3)],
+        Box::new(Hoon::Axis((2u64).into())),
+        vec![Hoon::Axis((3u64).into())],
     )
 }
 
@@ -2613,10 +2646,12 @@ fn seed_honc_type_with_ut(
 /// `chunked_tisgar_chain_matches_monolithic_mint`).
 /// Peel transparent wrappers the parser adds around the prelude (a single-
 /// element `=~`/TisSig, and `Dbug`/`Note` spot/hint wrappers) to reach the
-/// underlying compose node. NOTE: this is for NAVIGATION only — minting the
-/// peeled layers loses the outer `Dbug` location stack, so chunked output is
-/// NOT byte-exact under dbug=true yet (spot preservation is follow-on work);
-/// it is correct for measuring the memory trajectory and for dbug=false.
+/// underlying compose node. This is for NAVIGATION only: peeling would lose an
+/// outer `Dbug` location stack if the prelude were parsed with debugging spots.
+/// The native-parity route intentionally parses the prelude with `dbug=false`
+/// (see `prelude_dbug`), and the strict hoon-138 gate proves that configuration
+/// byte-exact against hoonc. A future caller that enables prelude dbug must
+/// preserve the peeled wrappers before treating chunked output as byte-exact.
 fn peel_transparent(mut hoon: &Hoon) -> &Hoon {
     loop {
         hoon = match hoon {
@@ -2801,12 +2836,13 @@ fn evaluate_honc_isolated(
     }
 }
 
-// honk cannot natively compile softed-constraints.hoon (it cues two large
-// constraint jams and `soft`s them), so it substitutes the cued jam pair
-// directly. That shortcut is valid ONLY for the exact source + jam content it
-// was proven against; key it on content hashes rather than the bare filename,
-// and hard-error on drift so a source/jam change cannot silently ship a stale
-// substitution. Pins are blake3 hex of the corresponding files.
+// Compiling the canonical softed-constraints.hoon is needlessly expensive: it
+// cues two large constraint jams and `soft`s them even though the result is
+// already known. Substitute the cued jam pair only for the exact source + jam
+// content against which the shortcut was proven. A build using changed content
+// is delegated to hoonc before native compilation begins: /dat nodes require
+// eager evaluation, and emitting an unevaluated native trap would silently
+// change /# import semantics. Pins are blake3 hex of the corresponding files.
 const SOFTED_CONSTRAINTS_SOURCE_B3: &str =
     "4fe81e9738b06b217b6fe13810dc23f650cc4b95d80d7671ac2392e6cb7e3c80";
 const CONSTRAINTS_0_1_JAM_B3: &str =
@@ -2820,46 +2856,93 @@ fn native_value_override(
     directory: &Path,
 ) -> Result<Option<Noun>> {
     if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
-        validate_softed_constraints_pins(path, directory)?;
-        return Ok(Some(softed_constraints_value(context, directory)?));
+        if softed_constraints_pins_match(path, directory)? {
+            return Ok(Some(softed_constraints_value(context, directory)?));
+        }
+        return Err(std::io::Error::other(format!(
+            "unpinned {} reached native compilation instead of the hoonc fallback",
+            path.display()
+        ))
+        .into());
     }
     Ok(None)
 }
 
-fn validate_softed_constraints_pins(path: &Path, directory: &Path) -> Result<()> {
+fn softed_constraints_pins_match(path: &Path, directory: &Path) -> Result<bool> {
     let checks = [
-        (
-            path.to_path_buf(),
-            SOFTED_CONSTRAINTS_SOURCE_B3,
-            "softed-constraints.hoon source",
-        ),
+        (path.to_path_buf(), SOFTED_CONSTRAINTS_SOURCE_B3),
         (
             directory.join("jams/constraints-0-1.jam"),
             CONSTRAINTS_0_1_JAM_B3,
-            "jams/constraints-0-1.jam",
         ),
         (
             directory.join("jams/constraints-2.jam"),
             CONSTRAINTS_2_JAM_B3,
-            "jams/constraints-2.jam",
         ),
     ];
-    let mut stale = Vec::new();
-    for (file, expected, label) in checks {
-        let actual = blake3::hash(&fs::read(&file)?).to_hex();
+    for (file, expected) in checks {
+        let bytes = match fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let actual = blake3::hash(&bytes).to_hex();
         if actual.as_str() != expected {
-            stale.push(format!("{label}: actual {actual}, pinned {expected}"));
+            return Ok(false);
         }
     }
-    if !stale.is_empty() {
-        return Err(format!(
-            "softed-constraints native shortcut is stale ({}). honk substitutes a fixed cued \
-             jam pair for this exact content; re-validate byte parity and update the pins in \
-             honk.rs.",
-            stale.join("; "),
-        )
-        .into());
+    Ok(true)
+}
+
+fn entry_uses_unpinned_softed_constraints(entry: &Path, directory: &Path) -> Result<bool> {
+    let mut pending = vec![entry.to_path_buf()];
+    let mut seen = HashSet::new();
+    while let Some(path) = pending.pop() {
+        let canonical = path.canonicalize()?;
+        if !seen.insert(canonical) {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
+            return Ok(!softed_constraints_pins_match(&path, directory)?);
+        }
+        for import in pipeline::resolve_native_imports(&path, directory, ScopeMode::Standard)? {
+            if import.kind == NativeImportKind::Hoon {
+                pending.push(import.path);
+            }
+        }
     }
+    Ok(false)
+}
+
+async fn compile_entry_with_hoonc(
+    entry: &Path,
+    directory: &Path,
+    output: &Path,
+    mode: CompileMode,
+) -> Result<()> {
+    info!(
+        entry = %entry.display(),
+        "delegating build with unpinned softed constraints to hoonc"
+    );
+    let mut request = pipeline::CompileRequest::new(entry.to_path_buf(), directory.to_path_buf());
+    request.out_dir = Some(output.to_path_buf());
+    request.arbitrary = mode == CompileMode::Arbitrary;
+    request.dynock = mode == CompileMode::Dynock;
+    request.dynock_typed = mode == CompileMode::DynockTyped;
+    // Keep hoonc's state reusable across delegated batch entries. Forcing a
+    // fresh state here makes the first entry succeed and every later entry
+    // fail because the shared state directory is no longer empty. An absent
+    // state still initializes normally, while hoonc's dependency hashes make
+    // reuse safe for a changed source tree.
+    request.new = false;
+    let jam = pipeline::build_jam(request).await?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, jam)?;
     Ok(())
 }
 
@@ -3190,7 +3273,8 @@ fn swet_trap_payload_gun(trap: Noun, space: &NounSpace) -> Result<(Noun, Noun)> 
 }
 
 fn axis_formula(slab: &mut NounSlab<NockJammer>, axis: u64) -> Noun {
-    T(slab, &[D(0), D(axis)])
+    let axis = Atom::new(slab, axis).as_noun();
+    T(slab, &[D(0), axis])
 }
 
 fn constant_formula(slab: &mut NounSlab<NockJammer>, noun: Noun) -> Noun {
@@ -4058,6 +4142,17 @@ fn entry_path_for_hoon(entry: &Path, deps_dir: &Path) -> Result<String> {
         }
     }
 
+    // Same reproducibility concern as build_entry_wer: an absolute target
+    // key makes the dir-hash (and so the artifact) depend on where the
+    // repo happens to be checked out.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(canonical_cwd) = cwd.canonicalize() {
+            if let Ok(stripped) = entry_canonical.strip_prefix(&canonical_cwd) {
+                return Ok(hoon_path_from_relative(stripped));
+            }
+        }
+    }
+
     Ok(entry_canonical.to_string_lossy().into_owned())
 }
 
@@ -4108,7 +4203,13 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::{build_entry_wer, entry_path_for_hoon};
+    use nockapp::noun::slab::NounSlab;
+    use nockvm::noun::{NounAllocator, DIRECT_MAX};
+
+    use crate::{
+        axis_formula, build_entry_wer, entry_path_for_hoon, entry_uses_unpinned_softed_constraints,
+        softed_constraints_pins_match,
+    };
 
     fn temp_test_dir(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -4126,6 +4227,68 @@ mod tests {
         std::os::unix::fs::symlink(original, link).expect("symlink");
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(original, link).expect("symlink");
+    }
+
+    #[test]
+    fn axis_formula_allocates_atoms_above_the_direct_limit() {
+        let mut slab = NounSlab::new();
+        let axis = DIRECT_MAX + 1;
+        let formula = axis_formula(&mut slab, axis);
+        let space = slab.noun_space();
+        let formula = formula
+            .in_space(&space)
+            .as_cell()
+            .expect("slot formula must be a cell");
+        let encoded_axis = formula
+            .tail()
+            .as_atom()
+            .expect("slot formula axis must be an atom");
+
+        assert!(encoded_axis.is_indirect());
+        assert_eq!(encoded_axis.as_u64().expect("axis must fit u64"), axis);
+    }
+
+    #[test]
+    fn forked_softed_constraints_misses_the_pinned_fast_path() {
+        let temp_dir = temp_test_dir("forked-softed-constraints");
+        let jams_dir = temp_dir.join("jams");
+        fs::create_dir_all(&jams_dir).expect("jams dir");
+        let source = temp_dir.join("softed-constraints.hoon");
+        fs::write(&source, ":: forked source").expect("source");
+        fs::write(jams_dir.join("constraints-0-1.jam"), b"forked 0-1").expect("0-1 jam");
+        fs::write(jams_dir.join("constraints-2.jam"), b"forked 2").expect("2 jam");
+
+        assert!(
+            !softed_constraints_pins_match(&source, &temp_dir).expect("pin comparison"),
+            "changed content must not use the pinned result"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn entry_with_forked_softed_constraints_requires_reference_compilation() {
+        let temp_dir = temp_test_dir("forked-softed-constraints-entry");
+        fs::create_dir_all(temp_dir.join("common")).expect("common dir");
+        fs::create_dir_all(temp_dir.join("dat")).expect("dat dir");
+        fs::create_dir_all(temp_dir.join("jams")).expect("jams dir");
+        let entry = temp_dir.join("common/entry.hoon");
+        fs::write(&entry, "/#  softed-constraints\n0\n").expect("entry");
+        fs::write(
+            temp_dir.join("dat/softed-constraints.hoon"),
+            ":: forked source\n0\n",
+        )
+        .expect("forked source");
+        fs::write(temp_dir.join("jams/constraints-0-1.jam"), b"forked 0-1").expect("0-1 jam");
+        fs::write(temp_dir.join("jams/constraints-2.jam"), b"forked 2").expect("2 jam");
+
+        assert!(
+            entry_uses_unpinned_softed_constraints(&entry, &temp_dir)
+                .expect("dependency inspection"),
+            "an entry importing changed softed constraints must use hoonc"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 
     #[test]

@@ -8,13 +8,11 @@
 //! BOUNDARY vs TARGET: this form makes the type SKELETON native — recursive type
 //! children (`Cell` head/tail, `Core` payload, `Face` inner, `Hold` subject,
 //! `Hint` payload) are `Rc<Type>` — while carrying the complex / leaf
-//! sub-structures faithfully as provenanced [`Leaf`]s: the `%atom` aura+bits, the
-//! `%face` tool, the `%hint` `[inner note]` head, the `%hold` gene (AST), the
-//! `%core` coil (garb+context+battery seminoun), and the `%fork` mug-ordered
-//! treap. Phase 2 nativizes those carried parts (aura→symbol, coil→native Coil +
-//! lazy battery, treap→canonical set, gene→native AST) so they hash-cons — that
-//! is where the memory win lands. The carried leaves are exactly the Phase-2
-//! nativization targets (see `core.rs`/`intern.rs` for the target shapes).
+//! sub-structures faithfully as provenanced [`Leaf`]s: the `%atom` aura+bits,
+//! `%face` tool, `%hint` `[inner note]` head, `%hold` gene (AST), and `%core`
+//! battery seminoun. Reused `%fork` members materialize as native DAG children;
+//! its original mug-ordered treap remains the typed-Dynock serialization witness.
+//! Remaining carried leaves are later nativization targets.
 //!
 //! Normalization (RT-06: `ty_face(void)→void`, `ty_core(void)→void`,
 //! `ty_hint(void|noun)→…`) happens at CONSTRUCTION, so real type nouns are
@@ -23,15 +21,135 @@
 //! one.
 #![allow(dead_code)]
 
-use std::rc::Rc;
+use std::cell::{Cell, OnceCell};
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::ops::Deref;
+use std::ptr::NonNull;
 
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
+use smallvec::SmallVec;
 
 use super::leaf::Leaf;
 use crate::errors::{CompilerError, Result};
 use crate::native::noun::{atom_to_string, noun_pair, term_to_noun};
 use crate::native::ut::types::{Poly, Vair};
+
+/// Dense identity for a canonical native compiler type.
+///
+/// `TypeId` values are local to one [`super::intern::Context`]. Canonical type
+/// nodes are owned by that context's arena and keep this ID for their complete
+/// lifetime, so recursive type algebra can key directly on a compact integer
+/// instead of repeatedly materializing and hashing allocation addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct TypeId(pub(crate) u32);
+
+/// One arena allocation. The type table owns these boxes for the entire
+/// compiler context, making the address stable while handles remain live.
+#[repr(align(2))]
+pub(super) struct TypeSlot<T> {
+    pub(super) id: TypeId,
+    pub(super) value: T,
+}
+
+impl<T> TypeSlot<T> {
+    pub(super) fn new(id: TypeId, value: T) -> Self {
+        Self { id, value }
+    }
+}
+
+/// Context-owned native type handle. Every handle points into a `TypeTable`
+/// slot, so cloning is an unconditional word copy and dropping is a no-op.
+///
+/// This type is crate-private because its lifetime is bounded by the owning
+/// compiler `Context`; no arena handle may escape through Honk's public API.
+#[repr(transparent)]
+pub struct TypeRef<T> {
+    slot: NonNull<TypeSlot<T>>,
+}
+
+impl<T> TypeRef<T> {
+    pub(super) fn from_arena_slot(slot: &TypeSlot<T>) -> Self {
+        Self {
+            slot: NonNull::from(slot),
+        }
+    }
+
+    #[inline(always)]
+    pub fn identity(&self) -> usize {
+        self.arena_id().0 as usize
+    }
+
+    #[inline(always)]
+    pub fn arena_id(&self) -> TypeId {
+        // SAFETY: handles only come from slots retained by their compiler
+        // Context for the entire type-algebra scope.
+        unsafe { self.slot.as_ref().id }
+    }
+
+    #[inline(always)]
+    pub fn as_ptr(this: &Self) -> *const T {
+        // SAFETY: identical lifetime invariant to `arena_id`.
+        unsafe { &this.slot.as_ref().value as *const T }
+    }
+
+    #[inline(always)]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.slot == other.slot
+    }
+}
+
+impl<T> Copy for TypeRef<T> {}
+
+impl<T> Clone for TypeRef<T> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Deref for TypeRef<T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: the owning Context's TypeTable keeps this slot alive.
+        unsafe { &*Self::as_ptr(self) }
+    }
+}
+
+impl<T> AsRef<T> for TypeRef<T> {
+    #[inline(always)]
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for TypeRef<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+impl<T> PartialEq for TypeRef<T> {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        Self::ptr_eq(self, other)
+    }
+}
+
+impl<T> Eq for TypeRef<T> {}
+
+impl<T> Hash for TypeRef<T> {
+    #[inline(always)]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.identity().hash(state);
+    }
+}
+
+type Rc<T> = TypeRef<T>;
 
 /// A native `%core` garb — the head of a coil, `[nym poly vair]`.
 ///
@@ -196,10 +314,15 @@ pub enum Type {
         head: Leaf,
         payload: Rc<Type>,
     },
-    /// `[%fork set]` — the mug-ordered treap carried (Phase-2 nativizes to a
-    /// canonical set + treap re-emission, RT-07).
+    /// `[%fork set]` — adaptively retained native option children for type algebra
+    /// plus the original mug-ordered treap as an exact typed-Dynock serialization
+    /// witness (RT-07). One-shot forks avoid retaining a child vector; a repeated
+    /// traversal promotes the children into the native DAG. The witness is never
+    /// rebuilt at the output boundary, so output bytes cannot change.
     Fork {
         set: Leaf,
+        options: OnceCell<Vec<Rc<Type>>>,
+        options_seen: Cell<bool>,
     },
     /// `[%hold sut gen]` — sut native; gene (AST) carried.
     Hold {
@@ -260,7 +383,7 @@ impl Type {
                 let p = payload.to_noun(dst);
                 T(dst, &[D(tas("hint")), h, p])
             }
-            Type::Fork { set } => {
+            Type::Fork { set, .. } => {
                 let s = set.to_noun(dst);
                 T(dst, &[D(tas("fork")), s])
             }
@@ -271,15 +394,103 @@ impl Type {
             }
         }
     }
+}
 
-    pub fn from_noun(noun: Noun, space: &NounSpace) -> Result<Type> {
+/// Independently owned decoder form used only by the optional public
+/// round-trip oracle. Keeping it separate lets the live compiler's `TypeRef`
+/// remain an unconditional, branch-free arena handle.
+#[derive(Debug)]
+pub(super) enum BoundaryType {
+    Void,
+    Noun,
+    Atom {
+        aura: Leaf,
+        bits: Leaf,
+    },
+    Cell(Box<BoundaryType>, Box<BoundaryType>),
+    Core {
+        payload: Box<BoundaryType>,
+        garb: Garb,
+        context: Box<BoundaryType>,
+        rest: Leaf,
+    },
+    Face {
+        tool: Leaf,
+        inner: Box<BoundaryType>,
+    },
+    Hint {
+        head: Leaf,
+        payload: Box<BoundaryType>,
+    },
+    Fork {
+        set: Leaf,
+        options: Vec<BoundaryType>,
+    },
+    Hold {
+        subject: Box<BoundaryType>,
+        gene: Leaf,
+    },
+}
+
+impl BoundaryType {
+    pub(super) fn to_noun(&self, dst: &mut NounSlab) -> Noun {
+        match self {
+            BoundaryType::Void => D(tas("void")),
+            BoundaryType::Noun => D(tas("noun")),
+            BoundaryType::Atom { aura, bits } => {
+                let a = aura.to_noun(dst);
+                let b = bits.to_noun(dst);
+                T(dst, &[D(tas("atom")), a, b])
+            }
+            BoundaryType::Cell(h, t) => {
+                let hn = h.to_noun(dst);
+                let tn = t.to_noun(dst);
+                T(dst, &[D(tas("cell")), hn, tn])
+            }
+            BoundaryType::Core {
+                payload,
+                garb,
+                context,
+                rest,
+            } => {
+                let p = payload.to_noun(dst);
+                let g = garb.to_noun(dst);
+                let ctx = context.to_noun(dst);
+                let r = rest.to_noun(dst);
+                let tail = T(dst, &[ctx, r]);
+                let coil = T(dst, &[g, tail]);
+                T(dst, &[D(tas("core")), p, coil])
+            }
+            BoundaryType::Face { tool, inner } => {
+                let tl = tool.to_noun(dst);
+                let inn = inner.to_noun(dst);
+                T(dst, &[D(tas("face")), tl, inn])
+            }
+            BoundaryType::Hint { head, payload } => {
+                let h = head.to_noun(dst);
+                let p = payload.to_noun(dst);
+                T(dst, &[D(tas("hint")), h, p])
+            }
+            BoundaryType::Fork { set, .. } => {
+                let s = set.to_noun(dst);
+                T(dst, &[D(tas("fork")), s])
+            }
+            BoundaryType::Hold { subject, gene } => {
+                let s = subject.to_noun(dst);
+                let g = gene.to_noun(dst);
+                T(dst, &[D(tas("hold")), s, g])
+            }
+        }
+    }
+
+    pub(super) fn from_noun(noun: Noun, space: &NounSpace) -> Result<BoundaryType> {
         // %void / %noun are bare atom cords.
         if let Ok(atom) = noun.in_space(space).as_atom() {
             if atom.eq_bytes(b"void") {
-                return Ok(Type::Void);
+                return Ok(BoundaryType::Void);
             }
             if atom.eq_bytes(b"noun") {
-                return Ok(Type::Noun);
+                return Ok(BoundaryType::Noun);
             }
             return Err(CompilerError::Decode(
                 "native type IR: unknown atom type tag".into(),
@@ -298,47 +509,53 @@ impl Type {
         };
         Ok(if tag.eq_bytes(b"atom") {
             let (aura, bits) = pair(tail)?;
-            Type::Atom {
+            BoundaryType::Atom {
                 aura: Leaf::from_noun(aura, space),
                 bits: Leaf::from_noun(bits, space),
             }
         } else if tag.eq_bytes(b"cell") {
             let (h, t) = pair(tail)?;
-            Type::Cell(
-                rc(Type::from_noun(h, space)?),
-                rc(Type::from_noun(t, space)?),
+            BoundaryType::Cell(
+                Box::new(BoundaryType::from_noun(h, space)?),
+                Box::new(BoundaryType::from_noun(t, space)?),
             )
         } else if tag.eq_bytes(b"core") {
             let (payload, coil) = pair(tail)?;
             // coil = [garb [context rest]]
             let (garb, coil_tail) = pair(coil)?;
             let (context, rest) = pair(coil_tail)?;
-            Type::Core {
-                payload: rc(Type::from_noun(payload, space)?),
+            BoundaryType::Core {
+                payload: Box::new(BoundaryType::from_noun(payload, space)?),
                 garb: Garb::from_noun(garb, space)?,
-                context: rc(Type::from_noun(context, space)?),
+                context: Box::new(BoundaryType::from_noun(context, space)?),
                 rest: Leaf::from_noun(rest, space),
             }
         } else if tag.eq_bytes(b"face") {
             let (tool, inner) = pair(tail)?;
-            Type::Face {
+            BoundaryType::Face {
                 tool: Leaf::from_noun(tool, space),
-                inner: rc(Type::from_noun(inner, space)?),
+                inner: Box::new(BoundaryType::from_noun(inner, space)?),
             }
         } else if tag.eq_bytes(b"hint") {
             let (head, payload) = pair(tail)?;
-            Type::Hint {
+            BoundaryType::Hint {
                 head: Leaf::from_noun(head, space),
-                payload: rc(Type::from_noun(payload, space)?),
+                payload: Box::new(BoundaryType::from_noun(payload, space)?),
             }
         } else if tag.eq_bytes(b"fork") {
-            Type::Fork {
+            let mut options = Vec::new();
+            visit_fork_set_members(tail, space, |option| {
+                options.push(BoundaryType::from_noun(option, space)?);
+                Ok(())
+            })?;
+            BoundaryType::Fork {
                 set: Leaf::from_noun(tail, space),
+                options,
             }
         } else if tag.eq_bytes(b"hold") {
             let (subject, gene) = pair(tail)?;
-            Type::Hold {
-                subject: rc(Type::from_noun(subject, space)?),
+            BoundaryType::Hold {
+                subject: Box::new(BoundaryType::from_noun(subject, space)?),
                 gene: Leaf::from_noun(gene, space),
             }
         } else {
@@ -349,8 +566,51 @@ impl Type {
     }
 }
 
-fn rc(t: Type) -> Rc<Type> {
-    Rc::new(t)
+/// Decode the members of a Hoon `%set` treap in the same deterministic order as
+/// the compiler's historical `fork_set_options` helper. The exact tree remains
+/// separately retained in `Type::Fork`, so this walk is only for native DAG
+/// edges and never controls serialization.
+pub(crate) fn visit_fork_set_members(
+    noun: Noun,
+    space: &NounSpace,
+    mut visit: impl FnMut(Noun) -> Result<()>,
+) -> Result<()> {
+    let mut stack: SmallVec<[Noun; 8]> = SmallVec::new();
+    let mut current = noun;
+    let mut visited_nodes: usize = 0;
+    loop {
+        while !unsafe { current.raw_equals(&D(0)) } {
+            visited_nodes = visited_nodes.saturating_add(1);
+            if visited_nodes > 1_000_000 {
+                return Err(CompilerError::Decode(
+                    "fork set decode exceeded node budget".to_string(),
+                ));
+            }
+            let cell = current
+                .in_space(space)
+                .as_cell()
+                .map_err(|err| CompilerError::Decode(format!("fork set node not cell: {err}")))?;
+            let branches = cell.tail().as_cell().map_err(|err| {
+                CompilerError::Decode(format!("fork set node missing branches: {err}"))
+            })?;
+            stack.push(current);
+            current = branches.tail().noun();
+        }
+
+        let Some(node) = stack.pop() else {
+            break;
+        };
+        let cell = node
+            .in_space(space)
+            .as_cell()
+            .map_err(|err| CompilerError::Decode(format!("fork set node not cell: {err}")))?;
+        visit(cell.head().noun())?;
+        let branches = cell.tail().as_cell().map_err(|err| {
+            CompilerError::Decode(format!("fork set node missing branches: {err}"))
+        })?;
+        current = branches.head().noun();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -434,8 +694,15 @@ mod tests {
             let mut s: NounSlab = NounSlab::new();
             let orig = b(&mut s);
             let space = s.noun_space();
-            let t = Type::from_noun(orig, &space)
+            let t = BoundaryType::from_noun(orig, &space)
                 .unwrap_or_else(|e| panic!("type from_noun[{i}]: {e:?}"));
+            if i == builders.len() - 1 {
+                let BoundaryType::Fork { options, .. } = &t else {
+                    panic!("fork case did not decode to BoundaryType::Fork");
+                };
+                assert_eq!(options.len(), 1);
+                assert!(matches!(&options[0], BoundaryType::Atom { .. }));
+            }
             let mut a: NounSlab = NounSlab::new();
             a.copy_into(orig, &space);
             let ja = a.jam().to_vec();

@@ -79,6 +79,12 @@ build-kernel-assets-honk: build-honk honk-dumb-jam honk-wal-jam honk-miner-jam h
 build-honk:
     cargo build --release -p honk
 
+# Build honk with whole-dependency-graph Rust PGO. The instrumented compiler is
+# trained on Wallet and Dumbnet, then the optimized binary is written to
+# target/honk-pgo/honk after a byte-exact Dumbnet verification compile.
+build-honk-pgo:
+    scripts/build-honk-pgo.sh
+
 honk-dumb-jam:
     mkdir -p assets
     time target/release/honk --new --output assets/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
@@ -133,10 +139,9 @@ honk-parity:
 
 # Arbitrary-build parity for the hoon-138 prelude: honk's NATIVE mint
 # (HONK_NATIVE_PARITY=1, no embedded prelude) vs hoonc's arbitrary build,
-# byte-compared. NOTE: honk's native mint of the full prelude currently
-# exhausts memory before completing (~4GB/min, no plateau), so this reports the
-# blowup under an RSS guard; it becomes a real parity gate once native mint
-# memory is bounded. Build honk + hoonc first (`just build`).
+# byte-compared. The native self-mint completes with bounded memory; an RSS
+# guard remains in place as a regression ceiling. Build honk + hoonc first
+# (`just build`).
 honk-138-parity:
     crates/honk/test-assets/honk_138_native_parity.sh
 

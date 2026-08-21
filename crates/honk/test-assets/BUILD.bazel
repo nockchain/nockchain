@@ -63,6 +63,166 @@ sh_test(
     ],
 )
 
+# End-to-end byte parity for the minimized correctness regressions consolidated
+# by the Honk bug-fix stack. Both compilers see the same empty dependency tree
+# and the same workspace-relative source path, so `cmp` is an exact oracle
+# without directory-hash or source-spot waivers.
+CORRECTNESS_PARITY_FIXTURES = [
+    ("empty_core", "correctness/empty-core.hoon"),
+    ("non_ascii_cord", "correctness/non-ascii-cord.hoon"),
+    ("wide_tisfas", "correctness/wide-tisfas.hoon"),
+    ("wide_tuple_62", "axis-overflow/wide-tuple-62.hoon"),
+    ("wide_tuple_63", "axis-overflow/wide-tuple-63.hoon"),
+    ("wide_tuple_64", "axis-overflow/wide-tuple-64.hoon"),
+]
+
+# Wild imports are a graph-level regression: the second imported core must
+# remain searchable when its mold appears in a gate signature. Keep this out
+# of the empty-deps comprehension above so both compilers receive the same two
+# dependency leaves and dependency root.
+hoon_library(
+    name = "wild_import_ref",
+    src = "correctness/wild-import/entry.hoon",
+    arbitrary = True,
+    deps_dir = "crates/honk/test-assets/correctness/wild-import",
+    output = True,
+    deps = [
+        "correctness/wild-import/sur/first.hoon",
+        "correctness/wild-import/sur/second.hoon",
+    ],
+)
+
+honk_library(
+    name = "wild_import_native",
+    src = "correctness/wild-import/entry.hoon",
+    arbitrary = True,
+    deps_dir = "crates/honk/test-assets/correctness/wild-import",
+    deps = [
+        "correctness/wild-import/sur/first.hoon",
+        "correctness/wild-import/sur/second.hoon",
+    ],
+)
+
+sh_test(
+    name = "wild_import_acceptance_test",
+    size = "small",
+    srcs = ["native_artifact_test.sh"],
+    args = [
+        "$(rootpath :wild_import_ref)",
+        "$(rootpath :wild_import_native)",
+    ],
+    data = [
+        ":wild_import_native",
+        ":wild_import_ref",
+    ],
+)
+
+[
+    hoon_library(
+        name = "{}_ref".format(name),
+        src = src,
+        arbitrary = True,
+        output = True,
+        deps_dir = "_empty_honk_correctness_deps",
+    )
+    for name, src in CORRECTNESS_PARITY_FIXTURES
+]
+
+[
+    honk_library(
+        name = "{}_native".format(name),
+        src = src,
+        arbitrary = True,
+        deps_dir = "_empty_honk_correctness_deps",
+    )
+    for name, src in CORRECTNESS_PARITY_FIXTURES
+]
+
+[
+    sh_test(
+        name = "{}_parity_test".format(name),
+        size = "small",
+        srcs = ["//assets/native:kernel_parity_test.sh"],
+        args = [
+            "$(rootpath :{}_ref)".format(name),
+            "$(rootpath :{}_native)".format(name),
+        ],
+        data = [
+            ":{}_ref".format(name),
+            ":{}_native".format(name),
+        ],
+    )
+    for name, _ in CORRECTNESS_PARITY_FIXTURES
+]
+
+test_suite(
+    name = "correctness_regression_parity_test",
+    tests = [
+        "{}_parity_test".format(name)
+        for name, _ in CORRECTNESS_PARITY_FIXTURES
+    ] + [
+        ":forked_softed_constraints_batch_parity_test",
+        ":forked_softed_constraints_parity_test",
+        ":wild_import_acceptance_test",
+    ],
+)
+
+# A changed /dat/softed-constraints.hoon must be compiled for its current
+# contents rather than replaced by Honk's pinned canonical value. Honk
+# deliberately delegates this semantic special case to hoonc; this pairing
+# exercises that end-to-end fallback and compares the resulting artifact.
+hoon_library(
+    name = "forked_softed_constraints_ref",
+    src = "softed-fallback/common/entry.hoon",
+    arbitrary = True,
+    output = True,
+    deps = ["softed-fallback/dat/softed-constraints.hoon"],
+    deps_dir = "crates/honk/test-assets/softed-fallback",
+)
+
+honk_library(
+    name = "forked_softed_constraints_native",
+    src = "softed-fallback/common/entry.hoon",
+    arbitrary = True,
+    deps = ["softed-fallback/dat/softed-constraints.hoon"],
+    deps_dir = "crates/honk/test-assets/softed-fallback",
+)
+
+sh_test(
+    name = "forked_softed_constraints_parity_test",
+    size = "small",
+    srcs = ["//assets/native:kernel_parity_test.sh"],
+    args = [
+        "$(rootpath :forked_softed_constraints_ref)",
+        "$(rootpath :forked_softed_constraints_native)",
+    ],
+    data = [
+        ":forked_softed_constraints_ref",
+        ":forked_softed_constraints_native",
+    ],
+)
+
+sh_test(
+    name = "forked_softed_constraints_batch_parity_test",
+    size = "small",
+    srcs = ["softed-fallback/batch_parity_test.sh"],
+    args = [
+        "$(rootpath //crates/honk:honk)",
+        "$(rootpath //crates/hoonc:hoonc_bin)",
+        "$(rootpath //hoon/common:hoon.hoon)",
+        "$(rootpath :softed-fallback/common/entry.hoon)",
+        "$(rootpath :correctness/empty-core.hoon)",
+    ],
+    data = [
+        ":correctness/empty-core.hoon",
+        ":softed-fallback/common/entry.hoon",
+        ":softed-fallback/dat/softed-constraints.hoon",
+        "//crates/honk:honk",
+        "//crates/hoonc:hoonc_bin",
+        "//hoon/common:hoon.hoon",
+    ],
+)
+
 # Uncached compile benchmark for the hoon-138 arbitrary build: times hoonc's
 # arbitrary build vs honk's native self-mint (HONK_NATIVE_PARITY=1) from cold
 # state at TEST TIME (outside Bazel's action cache) and reports a comparison.

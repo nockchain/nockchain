@@ -1258,7 +1258,7 @@ async fn compile_representative_native_semantics() {
         ("atom", hoon_atom(42), Some("atom"), Expect::Atom(42)),
         (
             "subject-push",
-            Hoon::TisLus(Box::new(hoon_atom(42)), Box::new(Hoon::Axis(2))),
+            Hoon::TisLus(Box::new(hoon_atom(42)), Box::new(Hoon::Axis((2u64).into()))),
             None,
             Expect::Atom(42),
         ),
@@ -1335,7 +1335,7 @@ async fn compile_representative_native_semantics() {
 async fn compile_tsls_bardot_native_fast_repro() {
     let expr = Hoon::TisLus(
         Box::new(hoon_atom(42)),
-        Box::new(Hoon::BarDot(Box::new(Hoon::Axis(2)))),
+        Box::new(Hoon::BarDot(Box::new(Hoon::Axis((2u64).into())))),
     );
 
     let mut native = native_compiler().await;
@@ -1350,7 +1350,9 @@ async fn compile_tsls_bardot_native_fast_repro() {
 async fn compile_tsls_bardot_wing_native_fast_repro() {
     let expr = Hoon::TisLus(
         Box::new(hoon_atom(42)),
-        Box::new(Hoon::BarDot(Box::new(Hoon::Wing(vec![Limb::Axis(2)])))),
+        Box::new(Hoon::BarDot(Box::new(Hoon::Wing(vec![Limb::Axis(
+            (2u64).into(),
+        )])))),
     );
 
     let mut native = native_compiler().await;
@@ -1391,10 +1393,13 @@ async fn compile_tsls_cnts_hotspot_native_fast_repro() {
         Box::new(Hoon::Pair(Box::new(hoon_atom(2)), Box::new(hoon_atom(3)))),
     );
     let update = Hoon::CenTis(
-        vec![Limb::Parent(0, None), Limb::Axis(2)],
+        vec![Limb::Parent(0, None), Limb::Axis((2u64).into())],
         vec![(
-            vec![Limb::Axis(2)],
-            Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(Hoon::Axis(6))),
+            vec![Limb::Axis((2u64).into())],
+            Hoon::TisGar(
+                Box::new(Hoon::Axis((3u64).into())),
+                Box::new(Hoon::Axis((6u64).into())),
+            ),
         )],
     );
     let expr = set_subject(
@@ -1421,10 +1426,13 @@ async fn compile_tsls_cnts_axis3_hotspot_native_fast_repro() {
         Box::new(Hoon::Pair(Box::new(hoon_atom(2)), Box::new(hoon_atom(3)))),
     );
     let update = Hoon::CenTis(
-        vec![Limb::Axis(3)],
+        vec![Limb::Axis((3u64).into())],
         vec![(
-            vec![Limb::Axis(2)],
-            Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(Hoon::Axis(6))),
+            vec![Limb::Axis((2u64).into())],
+            Hoon::TisGar(
+                Box::new(Hoon::Axis((3u64).into())),
+                Box::new(Hoon::Axis((6u64).into())),
+            ),
         )],
     );
     let expr = set_subject(
@@ -1447,12 +1455,12 @@ async fn compile_tsls_cnts_wing_patch_hotspot_native_fast_repro() {
         Box::new(Hoon::Pair(Box::new(hoon_atom(2)), Box::new(hoon_atom(3)))),
     );
     let update = Hoon::CenTis(
-        vec![Limb::Parent(0, None), Limb::Axis(2)],
+        vec![Limb::Parent(0, None), Limb::Axis((2u64).into())],
         vec![(
-            vec![Limb::Axis(2)],
+            vec![Limb::Axis((2u64).into())],
             Hoon::TisGar(
-                Box::new(Hoon::Axis(3)),
-                Box::new(Hoon::Wing(vec![Limb::Axis(6)])),
+                Box::new(Hoon::Axis((3u64).into())),
+                Box::new(Hoon::Wing(vec![Limb::Axis((6u64).into())])),
             ),
         )],
     );
@@ -1509,7 +1517,7 @@ async fn compile_parent_limb_comma_native_fast_repro() {
 
 #[tokio::test]
 async fn compile_fits_atom_native_fast_repro() {
-    let fits = Hoon::Fits(Box::new(hoon_atom(1)), vec![Limb::Axis(1)]);
+    let fits = Hoon::Fits(Box::new(hoon_atom(1)), vec![Limb::Axis((1u64).into())]);
     let expr = set_subject(hoon_atom(7), fits);
 
     let jam = compile_native_smoke(&expr).await;
@@ -1521,7 +1529,7 @@ async fn compile_fits_atom_native_fast_repro() {
 async fn compile_fits_cell_native_fast_repro() {
     let fits = Hoon::Fits(
         Box::new(Hoon::Pair(Box::new(hoon_atom(1)), Box::new(hoon_atom(2)))),
-        vec![Limb::Axis(1)],
+        vec![Limb::Axis((1u64).into())],
     );
     let subject = Hoon::Pair(Box::new(hoon_atom(7)), Box::new(hoon_atom(8)));
     let expr = set_subject(subject, fits);
@@ -1534,7 +1542,10 @@ async fn compile_fits_cell_native_fast_repro() {
 #[tokio::test]
 async fn compile_wthx_atom_native_fast_repro() {
     let skin = Skin::Base(BaseType::Atom("@".to_string()));
-    let expr = set_subject(hoon_atom(7), Hoon::WutHax(skin, vec![Limb::Axis(1)]));
+    let expr = set_subject(
+        hoon_atom(7),
+        Hoon::WutHax(skin, vec![Limb::Axis((1u64).into())]),
+    );
 
     let jam = compile_native_smoke(&expr).await;
     let got = eval_formula_atom(&jam);
@@ -1548,7 +1559,7 @@ async fn compile_wthx_cell_native_fast_repro() {
         Box::new(Skin::Base(BaseType::Atom("@".to_string()))),
     );
     let subject = Hoon::Pair(Box::new(hoon_atom(7)), Box::new(hoon_atom(8)));
-    let expr = set_subject(subject, Hoon::WutHax(skin, vec![Limb::Axis(1)]));
+    let expr = set_subject(subject, Hoon::WutHax(skin, vec![Limb::Axis((1u64).into())]));
 
     let jam = compile_native_smoke(&expr).await;
     let got = eval_formula_atom(&jam);
@@ -1572,6 +1583,7 @@ async fn compile_wthx_atom_and_cell_tests_on_noun_subject_are_dynamic_native() {
             .arm_map()
             .axis_for("$")
             .expect("gate $ arm axis missing");
+        let dollar_axis = u64::try_from(dollar_axis).expect("test arm axis exceeds u64");
 
         let mut runner = ArmRunner::new().expect("runner init failed");
         let atom = runner
@@ -1603,6 +1615,7 @@ async fn compile_wthx_flag_skin_parses_and_checks_dynamic_native() {
         .arm_map()
         .axis_for("$")
         .expect("gate $ arm axis missing");
+    let dollar_axis = u64::try_from(dollar_axis).expect("test arm axis exceeds u64");
 
     let mut runner = ArmRunner::new().expect("runner init failed");
     let cases = [
@@ -1655,10 +1668,12 @@ async fn arm_map_axes_run_arms() {
         .arm_map()
         .axis_for("foo")
         .expect("foo axis missing");
+    let foo_axis = u64::try_from(foo_axis).expect("test arm axis exceeds u64");
     let bar_axis = compiled
         .arm_map()
         .axis_for("bar")
         .expect("bar axis missing");
+    let bar_axis = u64::try_from(bar_axis).expect("test arm axis exceeds u64");
 
     let formula_jam = compiled.jam();
     let core_jam = eval_formula_jam(&formula_jam);
@@ -1681,6 +1696,49 @@ async fn arm_map_axes_run_arms() {
 
     assert_eq!(foo_val, 1);
     assert_eq!(bar_val, 2);
+}
+
+#[test]
+fn wide_tuple_axes_do_not_wrap_at_the_u64_boundary() {
+    std::thread::Builder::new()
+        .name("wide-axis-regression".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(async {
+                    let mut jams = Vec::new();
+                    let cases = [
+                        (
+                            62,
+                            include_str!("../test-assets/axis-overflow/wide-tuple-62.hoon"),
+                        ),
+                        (
+                            63,
+                            include_str!("../test-assets/axis-overflow/wide-tuple-63.hoon"),
+                        ),
+                        (
+                            64,
+                            include_str!("../test-assets/axis-overflow/wide-tuple-64.hoon"),
+                        ),
+                    ];
+                    for (slots, source) in cases {
+                        let expr = parse_expr(source);
+                        let mut compiler = native_compiler().await;
+                        let mut compiled = compiler
+                            .compile_expr(&expr)
+                            .unwrap_or_else(|err| panic!("{slots}-slot tuple failed: {err}"));
+                        jams.push(compiled.jam());
+                    }
+                    assert_ne!(jams[0], jams[1], "62 and 63 slots must not alias");
+                    assert_ne!(jams[1], jams[2], "63 and 64 slots must not alias");
+                });
+        })
+        .expect("spawn wide-axis regression")
+        .join()
+        .expect("wide-axis regression thread");
 }
 
 #[tokio::test]
@@ -1748,7 +1806,7 @@ async fn compile_siggar_native_fast_repro() {
 
 #[tokio::test]
 async fn compile_sigzap_native_fast_repro() {
-    let expr = Hoon::SigZap(Box::new(Hoon::Axis(1)), Box::new(hoon_atom(7)));
+    let expr = Hoon::SigZap(Box::new(Hoon::Axis((1u64).into())), Box::new(hoon_atom(7)));
     let mut native = native_compiler().await;
     let mut compiled = native.compile_expr(&expr).expect("compile failed");
 
@@ -1810,7 +1868,7 @@ async fn compile_zpts_native_fast_repro() {
 
 #[tokio::test]
 async fn compile_hand_native_fast_repro() {
-    let expr = Hoon::Hand(Box::new(Type::NounExpr), Nock::AxisSelect(1));
+    let expr = Hoon::Hand(Box::new(Type::NounExpr), Nock::AxisSelect((1u64).into()));
     let mut native = native_compiler().await;
     let mut compiled = native.compile_expr(&expr).expect("compile failed");
 

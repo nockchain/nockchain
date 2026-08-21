@@ -266,8 +266,10 @@ pub fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
                 }
             }
             // Postorder: push tail then head so head is compared first.
-            stack.push((left_cell.tail().noun(), right_cell.tail().noun()));
-            stack.push((left_cell.head().noun(), right_cell.head().noun()));
+            let (left_head, left_tail) = left_cell.head_tail();
+            let (right_head, right_tail) = right_cell.head_tail();
+            stack.push((left_tail.noun(), right_tail.noun()));
+            stack.push((left_head.noun(), right_head.noun()));
             continue;
         }
         return Ok(false);

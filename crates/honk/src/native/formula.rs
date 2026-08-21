@@ -1,4 +1,6 @@
+use nockvm::ext::AtomExt;
 use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D, T};
+use num_bigint::BigUint;
 
 use crate::errors::Result;
 use crate::native::noun::{noun_eq_direct, noun_pair};
@@ -19,12 +21,12 @@ pub fn comb<A: NounAllocator>(allocator: &mut A, mal: Noun, buz: Noun) -> Result
     //
     // Check 1: mal = [0 a] where a != 0
     if let Some(a) = axis_formula_value(mal, &space)? {
-        if a >= 1 {
+        if a.bits() > 0 {
             // Check 1a: buz = [0 b] where b != 0 → [0 peg(a, b)]
             if let Some(b) = axis_formula_value(buz, &space)? {
-                if b >= 1 {
-                    let composed = nock_peg(a, b);
-                    return Ok(slot_formula_axis(allocator, composed));
+                if b.bits() > 0 {
+                    let composed = nock_peg(&a, &b);
+                    return Ok(slot_formula_axis(allocator, &composed));
                 }
             }
             // Check 1b: buz = [2 [0 x] [0 y]] → [2 [0 peg(a,x)] [0 peg(a,y)]]
@@ -35,11 +37,11 @@ pub fn comb<A: NounAllocator>(allocator: &mut A, mal: Noun, buz: Noun) -> Result
                             axis_formula_value(buz_p, &space)?,
                             axis_formula_value(buz_q, &space)?,
                         ) {
-                            if x >= 1 && y >= 1 {
-                                let px = nock_peg(a, x);
-                                let py = nock_peg(a, y);
-                                let left = slot_formula_axis(allocator, px);
-                                let right = slot_formula_axis(allocator, py);
+                            if x.bits() > 0 && y.bits() > 0 {
+                                let px = nock_peg(&a, &x);
+                                let py = nock_peg(&a, &y);
+                                let left = slot_formula_axis(allocator, &px);
+                                let right = slot_formula_axis(allocator, &py);
                                 return Ok(T(allocator, &[D(2), left, right]));
                             }
                         }
@@ -65,33 +67,31 @@ pub fn comb<A: NounAllocator>(allocator: &mut A, mal: Noun, buz: Noun) -> Result
 
 /// Compute the nock axis composition: navigate to axis `a`, then axis `b` within.
 /// Equivalent to hoon-138 `++peg`.
-fn nock_peg(a: u64, b: u64) -> u64 {
-    if a == 1 {
-        return b;
-    }
+fn nock_peg(a: &BigUint, b: &BigUint) -> BigUint {
     // a has some path bits; b has some path bits; concatenate them.
     // a = 1_ppp (binary), b = 1_qqq (binary)
     // result = 1_ppp_qqq = a * 2^(width of b's path) + (b - 2^(width of b's path))
-    let b_path_width = 63 - b.leading_zeros() as u64; // number of path bits in b
-    (a << b_path_width) + (b - (1u64 << b_path_width))
+    let b_path_width = b.bits() - 1;
+    let b_prefix = BigUint::from(1u8) << b_path_width;
+    (a << b_path_width) + (b - b_prefix)
 }
 
-fn slot_formula_axis<A: NounAllocator>(allocator: &mut A, axis: u64) -> Noun {
-    let axis = Atom::new(allocator, axis).as_noun();
+fn slot_formula_axis<A: NounAllocator>(allocator: &mut A, axis: &BigUint) -> Noun {
+    let axis = Atom::from_bytes(allocator, &axis.to_bytes_le()).as_noun();
     T(allocator, &[D(0), axis])
 }
 
-fn axis_formula_value(formula: Noun, space: &NounSpace) -> Result<Option<u64>> {
+fn axis_formula_value(formula: Noun, space: &NounSpace) -> Result<Option<BigUint>> {
     let Ok((head, tail)) = noun_pair(formula, space) else {
         return Ok(None);
     };
     if !noun_eq_direct(head, 0, space) {
         return Ok(None);
     }
-    match tail.in_space(space).as_atom().and_then(|a| a.as_u64()) {
-        Ok(v) => Ok(Some(v)),
-        Err(_) => Ok(None),
-    }
+    let Ok(axis) = tail.in_space(space).as_atom() else {
+        return Ok(None);
+    };
+    Ok(Some(BigUint::from_bytes_le(axis.as_ne_bytes())))
 }
 
 pub fn cond<A: NounAllocator>(allocator: &mut A, pex: Noun, yom: Noun, woq: Noun) -> Result<Noun> {

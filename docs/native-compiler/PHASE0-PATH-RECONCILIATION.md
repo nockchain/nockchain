@@ -1,12 +1,15 @@
 # Phase 0: PATH/COMMAND RECONCILIATION (RT-18)
 
+**Status:** HISTORICAL RECONCILIATION RECORD; decisions and commands updated
+after implementation on 2026-08-06.
+
 ## Overview
 
 This document reconciles stale `open/` paths and outdated commands in the native-compiler documentation against the current repository checkout. The migration plan and supporting docs were written relative to an external `open/` tree; this checkout uses `crates/{honk,hatch,hoonc}`, `hoon/common/hoon.hoon`, and justfile recipes. All stale references have been catalogued with corrected in-repo equivalents.
 
 ---
 
-## Stale Path References
+## Historical Stale Path Inventory
 
 | Stale Reference | File:Line | In-Repo Equivalent | Type |
 |---|---|---|---|
@@ -27,14 +30,15 @@ This document reconciles stale `open/` paths and outdated commands in the native
 
 ---
 
-## Stale Bazel Targets
+## Corrected Bazel Targets
 
-| Stale Target | File:Line | In-Repo Equivalent | Status |
-|---|---|---|---|
-| `//open/crates/honk/test-assets:hoon_138_arbitrary_parity_test` | README.md:33, artifact-parity.md:20, source-spots.md:33 | See "Commands" section below | test script (Bazel target does NOT exist in this checkout) |
-| `//open/assets/native:kernel_parity_test` | README.md:34, artifact-parity.md:27 | See "Commands" section below | test script (Bazel target does NOT exist in this checkout) |
+| Historical stale target | Current target | Status |
+|---|---|---|
+| `//open/crates/honk/test-assets:hoon_138_arbitrary_parity_test` | `//crates/honk/test-assets:hoon_138_arbitrary_parity_test` | strict byte-parity target |
+| `//open/assets/native:kernel_parity_test` | `//assets/native:kernel_parity_test` | six strict byte-parity targets |
 
-**Important:** The referenced Bazel targets (`//open/crates/honk/test-assets:hoon_138_arbitrary_parity_test`, `//open/assets/native:kernel_parity_test`) do not exist in this checkout. They are referenced in the exported-tree documentation but the canonical test scripts are standalone bash scripts; see the "Commands" section for the correct invocation method.
+The current targets exist in this checkout and use `cmp`; there is no
+directory-hash waiver in either Bazel acceptance gate.
 
 ---
 
@@ -76,12 +80,18 @@ bazel build //crates/hoonc
 just honk-138-parity
 ```
 
+**Bazel:**
+```bash
+bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+```
+
 **What it does:**
 - Invokes `crates/honk/test-assets/honk_138_native_parity.sh`
 - Compiles `hoon/common/hoon.hoon` (= `crates/hoonc/hoon/hoon-138.hoon`) with both compilers
 - Compares artifacts with strict `cmp` (byte-exact)
 - Runs under RSS guard (75% physical RAM ceiling) to catch memory blowup safely
-- **Current status:** honk's native mint OOMs before completing; test reports memory blowup rather than parity result (as of 2026-06-14)
+- **Current status:** the native mint completes under the RSS guard and must be
+  byte-identical to hoonc; the pre-arena OOM recorded on 2026-06-14 is resolved
 
 **Reference command:**
 ```bash
@@ -117,17 +127,9 @@ just honk-kernel-jams
 just honk-parity
 ```
 
-**Bazel workflow:**
+**Authoritative Bazel gate:**
 ```bash
-# 1. Build everything and generate reference kernels
-just bazel build
-just bazel build-assets
-
-# 2. Build kernels natively with honk (Bazel-built binary)
-just bazel honk-kernel-jams
-
-# 3. Compare
-just bazel honk-parity
+bazel test //assets/native:kernel_parity_test
 ```
 
 **Kernels tested:**
@@ -138,9 +140,9 @@ just bazel honk-parity
 - bridge (Bridge kernel)
 - roswell (Roswell main app)
 
-**Comparison tool:** `jam-diff --kernel-parity` (in `crates/honk-tools`)
-
-**Gate semantics:** As of this reconciliation, `honk-parity` uses `jam-diff --kernel-parity` which permits a dir-hash-only difference (see RT-02 concern below). For strict byte-equality acceptance, use `cmp` directly on the `.jam` files.
+**Gate semantics:** each Bazel test uses `cmp` on artifacts built from identical
+declared dependency trees. `jam-diff --kernel-parity` remains a local diagnostic
+tool, not the acceptance oracle.
 
 ---
 
@@ -158,12 +160,6 @@ cargo test --release -p hatch --lib
 
 # hoonc canonical reference
 cargo build --release -p hoonc
-```
-
-**Bazel:**
-```bash
-bazel test //crates/honk:all
-bazel test //crates/hatch:all
 ```
 
 ---
@@ -190,7 +186,9 @@ echo "roswell native compile: ${elapsed}s"
 test "$elapsed" -lt 60 && echo "PASS" || echo "FAIL"
 ```
 
-**Gate status:** Currently ~71–76s (exceeds 60s); blocked on memory bounding and type interning (see TODOS-PERF.md).
+**Gate status:** an isolated post-rebase production build completed in 63.71 s
+on an Apple M5 Max. The historical 71–76 s result is obsolete, but the `<60s`
+target remains an open near miss.
 
 ---
 
@@ -216,11 +214,11 @@ test "$elapsed" -lt 60 && echo "PASS" || echo "FAIL"
 
 ---
 
-### Documents referencing Bazel targets that do not exist
+### Documents that historically referenced exported-tree targets
 
 1. **docs/native-compiler/NATIVE-TYPES-MIGRATION-RT.md** (section RT-18, line 117–119)
    - Finding: Acknowledges the stale `open/` reference problem explicitly
-   - Status: This very document is the Phase-0 resolution
+   - Status: this document records the Phase-0 resolution
 
 2. **docs/native-compiler/NATIVE-TYPES-MIGRATION.md** (section 9, lines 604–608)
    - Context: Branch hygiene section requiring reconciliation
@@ -232,52 +230,36 @@ test "$elapsed" -lt 60 && echo "PASS" || echo "FAIL"
 
 ---
 
-## Chunked Mint Classification (RT-18 decision required)
+## Chunked Mint Classification (RT-18 resolved)
 
-**Current status:** The chunked-prelude mint (splitting compilation by core) is ACTIVE, not obsolete.
+**Current status:** PRODUCTIZED for the `HONK_NATIVE_PARITY=1` self-mint route.
 
 - **Where:** `crates/honk/src/bin/honk.rs` lines 2603–2617 (canonical prelude routing when peeled root is `=<`)
-- **Issue:** Not byte-exact under `--dbug=true` (`honk.rs:2486–2500`)
-- **Gate impact:** It currently gates native-parity memory experiments because output consistency cannot be guaranteed
+- **Parity configuration:** the prelude is intentionally parsed with
+  `dbug=false`, and the whole hoon-138 artifact is byte-exact against hoonc.
+- **Remaining limitation:** a future caller enabling prelude `dbug` must
+  preserve the peeled `Dbug`/`Note` wrappers.
 
-**Phase 0 decision required:**
-1. **DELETE:** Remove chunked mint entirely; force sequential compilation
-2. **QUARANTINE:** Disable chunked behind a feature flag; do not use for parity evidence
-3. **PRODUCTIZE:** Fix dbug exactness; validate it byte-matches sequential path under all modes
-
-**Recommendation:** QUARANTINE pending Memory Thesis (Phase 3). The chunked path is a plausible optimization but is not byte-exact on the critical observables (dbug spots), so do not use its output as Phase-3 evidence that memory is bounded. Mark it clearly as "experimental, non-parity-checked" to prevent accidental misuse.
+The rejected delete/quarantine options remain documented in
+`PHASE0-CHUNKED-DECISION.md`; `NATIVE_HOON_NO_CHUNK=1` retains the monolithic
+diagnostic path.
 
 ---
 
-## RT-02 Decision: Parity Gate Strictness
+## RT-02 Decision: Parity Gate Strictness (resolved)
 
 **Finding:** `just honk-parity` currently passes byte equality OR a dir-hash-only difference, while the migration plan requires byte-for-byte artifact equality.
 
-**Current gate behavior:**
+**Current Bazel acceptance behavior:**
 ```bash
-# justfile honk-parity recipe uses:
-target/release/jam-diff --kernel-parity assets/dumb.jam assets/native/dumb.jam
-# which permits dir-hash-only diffs
+bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+bazel test //assets/native:kernel_parity_test
+# Both compare with cmp and reject every byte difference.
 ```
 
-**Phase 0 decision required:**
-
-1. **Acceptance gate (strict):** Use `cmp` for byte-equality, failing if any bit differs
-   ```bash
-   cmp -s assets/dumb.jam assets/native/dumb.jam
-   ```
-
-2. **Diagnostic gate (tolerant):** Use `jam-diff --kernel-parity` only for localizing differences
-   ```bash
-   jam-diff --kernel-parity assets/dumb.jam assets/native/dumb.jam
-   ```
-
-3. **Waiver:** Any kernel legitimately differing only by sandbox dir-hash is a named exception with a written waiver, not a silent pass
-
-**Recommendation:** Implement separate harnesses:
-- `honk-parity-strict` (acceptance, `cmp`-based)
-- `honk-parity-diagnostic` (localizing, `jam-diff`-based)
-- Keep `honk-parity` as the current behavior for backward compatibility during transition, but mark it explicitly as "tolerant; use honk-parity-strict for Phase 0 gates"
+`jam-diff --kernel-parity` is still useful for localizing a failure, but it does
+not decide acceptance. A legitimate environment-dependent difference would
+require a named waiver rather than a silent pass.
 
 ---
 
@@ -288,12 +270,12 @@ target/release/jam-diff --kernel-parity assets/dumb.jam assets/native/dumb.jam
 | **Build honk binary** | `cargo build --release -p honk` | `bazel build //crates/honk:honk` | canonical |
 | **Build hatch parser** | `cargo build --release -p hatch` | `bazel build //crates/hatch` | canonical |
 | **Build hoonc (reference)** | `cargo build --release -p hoonc` | `bazel build //crates/hoonc` | canonical |
-| **Arbitrary hoon-138 parity** | `just honk-138-parity` | (no Bazel target) | **OOMs; memory issue** |
-| **Kernel parity (dumb only)** | `cargo build --release -p honk` + `cargo run --release -p honk -- --new --output assets/native/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon` + `cmp assets/dumb.jam assets/native/dumb.jam` | `just bazel honk-kernel-jams` + `just bazel honk-parity` | canonical |
-| **All six kernel parity** | `just honk-kernel-jams` + `just honk-parity` | `just bazel honk-kernel-jams` + `just bazel honk-parity` | canonical |
-| **Roswell timing gate** | `just honk-roswell-timed` | (no Bazel target) | **~71–76s; exceeds 60s** |
-| **Unit tests (honk)** | `cargo test --release -p honk` | `bazel test //crates/honk:all` | canonical |
-| **Unit tests (hatch)** | `cargo test --release -p hatch --lib` | `bazel test //crates/hatch:all` | canonical |
+| **Arbitrary hoon-138 parity** | `just honk-138-parity` | `bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test` | strict byte parity; RSS ceiling in local script |
+| **Kernel parity (dumb only)** | direct native build + `cmp` | `bazel test //assets/native:dumb_parity_test` | strict byte parity |
+| **All six kernel parity** | local build + diagnostics | `bazel test //assets/native:kernel_parity_test` | strict byte parity |
+| **Roswell timing gate** | `just honk-roswell-timed` | `bazel test //assets/native:roswell_compile_bench` | manual benchmark; 63.71 s isolated post-rebase |
+| **Unit tests (honk)** | `cargo test --release -p honk` | — | canonical Cargo suite |
+| **Unit tests (hatch)** | `cargo test --release -p hatch --lib` | — | canonical Cargo suite |
 
 ---
 
@@ -315,29 +297,12 @@ target/release/jam-diff --kernel-parity assets/dumb.jam assets/native/dumb.jam
 
 ---
 
-## Recommendations for Documentation Updates
+## Documentation Update Outcome
 
-1. **Immediate (before Phase 0 execution):**
-   - Update all `open/` paths to in-repo equivalents in:
-     - `README.md` (lines 3–14, 28–34, 44)
-     - `artifact-parity.md` (lines 7–27)
-     - `source-spots.md` (lines 25, 33)
-     - `performance.md` (line 26)
-
-   - Replace Bazel target references with accurate script/command alternatives
-
-   - Mark sections 2.2 (RT-02 parity gate) and 9 (chunked mint) as "Phase 0 decision required"
-
-2. **Phase 0 deliverables (per NATIVE-TYPES-MIGRATION.md § 6):**
-   - Strict byte-equality harness + `just native-parity-dual` (dual-run, `cmp`)
-   - Diagnostic structural diff kept separate (§2.2 recommendation above)
-   - Chunked-mint classification (delete/quarantine/productize decision)
-   - Updated command registry with all canonical equivalents
-
-3. **Long-term (Phase 6, before retiring noun `ut`):**
-   - Remove all references to `open/` tree or mark explicitly as "exported-tree doc"
-   - Finalize parity gate semantics (strict acceptance criteria)
-   - Clean up deprecated/obsolete recipes
+The active README, parity, source-spot, and performance documents now use
+repository-relative paths and real Bazel targets. Strict acceptance and
+diagnostic structural comparison are separate, and the chunked self-mint is
+classified. The stale-path table above is retained only as review provenance.
 
 ---
 
@@ -348,7 +313,7 @@ target/release/jam-diff --kernel-parity assets/dumb.jam assets/native/dumb.jam
 - **NATIVE-TYPES-MIGRATION.md § 9:** Branch hygiene (RT-18, chunked decision)
 - **NATIVE-TYPES-MIGRATION-RT.md RT-18:** Stale docs/commands finding
 - **TODOS.md:** Resolved items section lists H0 kernel-parity harness
-- **TODOS-PERF.md:** Native prelude mint memory blowup + roswell <60s gate
+- **TODOS-PERF.md:** Current native compiler performance work
 - **justfile:** Canonical cargo recipes
 - **bazel.just:** Bazel equivalents
 - **artifact-parity.md:** Parity test policy and workflow

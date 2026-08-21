@@ -217,7 +217,29 @@ REJECTION_PROBES = [
     "skin_shape_mismatch",
     "test_not_flag",
     "tissig_empty",
+    "wet_slag_tail",
 ]
+
+# The divergent-bunt probe is intentionally native-only. Canonical hoonc also
+# fails to produce an artifact, but does so through runaway evaluation rather
+# than a bounded rejection, making it unsuitable for the ordinary
+# both-compilers rejection suite. This test pins honk's stronger requirement:
+# terminate promptly, report an error, and write no artifact.
+sh_test(
+    name = "reject_divergent_bunt_native_test",
+    size = "small",
+    srcs = ["native_rejection_test.sh"],
+    args = [
+        "$(rootpath //crates/honk:honk)",
+        "$(rootpath //hoon/common:hoon.hoon)",
+        "$(rootpath reject/divergent_bunt.hoon)",
+    ],
+    data = [
+        "reject/divergent_bunt.hoon",
+        "//crates/honk:honk",
+        "//hoon/common:hoon.hoon",
+    ],
+)
 
 [
     sh_test(
@@ -243,7 +265,7 @@ REJECTION_PROBES = [
 
 test_suite(
     name = "rejection_parity_test",
-    tests = [
+    tests = [":reject_divergent_bunt_native_test"] + [
         "reject_{}_test".format(name)
         for name in REJECTION_PROBES
         # explicitly listed suite members override the manual tag, so the

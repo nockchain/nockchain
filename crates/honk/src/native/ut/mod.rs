@@ -3,17 +3,21 @@
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
+use std::rc::Rc as SharedRc;
 use std::sync::Arc;
 
 use hatch::ast::hoon::{
-    Alas, BaseType, Beer, Block, Chum, Coil, Cord, FaceType, Garb, Gate, Hoon, Knot, Limb, Mane,
-    Manx, Marl, Mart, Marx, Nock, NockHint, Note, NounExpr, ParsedAtom, Path, Pint,
-    Poly as AstPoly, SemiNounExpr, Skin, Spec, Spot, Stencil, TermOrPair, TermOrTune, Tome, Tuna,
-    TunaTail, Tune, Type, Tyre, Vair as AstVair, WingType, Woof, ZpwtArg,
+    Alas, Axis as AstAxis, BaseType, Beer, Block, Chum, Coil, Cord, FaceType, Garb, Gate, Hoon,
+    Knot, Limb, Mane, Manx, Marl, Mart, Marx, Nock, NockHint, Note, NounExpr, ParsedAtom, Path,
+    Pint, Poly as AstPoly, SemiNounExpr, Skin, Spec, Spot, Stencil, TermOrPair, TermOrTune, Tome,
+    Tuna, TunaTail, Tune, Type, Tyre, Vair as AstVair, WingType, Woof, ZpwtArg,
 };
 use hatch::utils::{
-    chum_to_nounexpr, example, factory, grip, hoon_to_noun, noun_to_hoon, open, peg, reek,
-    string_to_atom,
+    chum_to_nounexpr, example, factory, grip, hoon_to_noun, hoon_to_noun_with_cache, noun_to_hoon,
+    open, reek, string_to_atom,
 };
 use nockapp::noun::slab::NounSlab;
 use nockapp::noun::NounAllocatorExt;
@@ -24,18 +28,24 @@ use nockvm::jets::cold::{Cold, Nounable};
 use nockvm::jets::math::util::lth_b;
 use nockvm::jets::warm::Warm;
 use nockvm::jets::JetDispatchMode;
-use nockvm::mem::NockStack;
+use nockvm::mem::{AllocationError, NockStack};
 use nockvm::mug::{get_mug, set_mug};
 use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, T};
 use num_bigint::BigUint;
+use smallvec::SmallVec;
 
 use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
-use crate::native::formula::{comb, cond, cons};
+use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
+use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
+use crate::native::ir::semi_dag::{SemiArena, SemiId, SemiNode};
+use crate::native::ir::value_dag::{ValueArena, ValueId};
 use crate::native::noun::{
-    atom_to_string, noun_eq_direct, noun_expr_to_noun, noun_pair, opt_from_noun, opt_to_noun,
-    parsed_atom_to_noun, tag, term_to_noun, vec_to_list,
+    atom_to_string, noun_expr_to_noun, opt_from_noun, opt_to_noun, parsed_atom_to_noun, tag,
+    term_to_noun, vec_to_list,
 };
+#[cfg(test)]
+use crate::native::noun::{noun_eq_direct, noun_pair};
 
 mod find;
 mod fire;
@@ -59,33 +69,10 @@ struct HoldRepoFanHoldIdEntry {
     id: u64,
 }
 
-#[derive(Clone, Copy)]
-struct MuskMackCacheEntry {
-    core: Noun,
-    result: Option<Noun>,
-}
-
-/// Seminoun mask tags, decoded by direct atom comparison: the
-/// `atom_to_string` route allocated a `String` per inspection on musk's
-/// hottest path.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SemiTag {
-    Full,
-    Half,
-    Lazy,
-    Other,
-}
-
 const SEMI_TAG_FULL: u64 = 1_819_047_270; // %full
 const SEMI_TAG_HALF: u64 = 1_718_378_856; // %half
 const SEMI_TAG_LAZY: u64 = 2_038_063_468; // %lazy
 
-#[derive(Clone, Copy)]
-struct KtsgFoldCacheEntry {
-    bran: Noun,
-    formula: Noun,
-    result: Option<Noun>,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct SemanticContextKey {
     vet_key: u8,
@@ -101,13 +88,16 @@ struct MemoContextKey {
 struct MuskRuntime {
     context: NockContext,
     cold_state: Option<&'static [u8]>,
+    // Dynamic subject/formula states on the current partial-evaluation stack.
+    araw_active: Vec<(SemiId, u64)>,
     // Copied interpreter-side cores keyed by the source core raw noun. These nouns live on the
     // runtime's long-lived eval stack, outside per-mack call frames, so repeated `^~` folds share
     // copied batteries/context instead of copying the same core tree for every arm invocation.
     mack_core_cache_raw: FastHashMap<u64, Noun>,
     mack_core_cache_context: Option<u64>,
-    mack_cache_raw: FastHashMap<(u64, u64), Option<Noun>>,
-    mack_cache: BucketMemo<(u32, u64), MuskMackCacheEntry>,
+    // Complete seminoun data is canonicalized by `ValueArena`, so equivalent
+    // cores share one exact identity even when their slab addresses differ.
+    mack_cache_by_value: FastHashMap<(ValueId, u64), Option<Noun>>,
 }
 
 impl MuskRuntime {
@@ -115,10 +105,10 @@ impl MuskRuntime {
         Self {
             context: create_musk_eval_context(),
             cold_state: None,
+            araw_active: Default::default(),
             mack_core_cache_raw: Default::default(),
             mack_core_cache_context: None,
-            mack_cache_raw: Default::default(),
-            mack_cache: Default::default(),
+            mack_cache_by_value: Default::default(),
         }
     }
 
@@ -140,8 +130,153 @@ struct CacheContextKey {
     memo: MemoContextKey,
 }
 
+/// Dense, scope-local identity for a parsed Hoon node.
+///
+/// IDs are valid only while the outermost `mint`/`play` call that registered
+/// the borrowed AST is active. Compiler sidecars use this index instead of
+/// independently hashing the same AST address for every property.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct HoonId(u32);
+
+#[derive(Default)]
+struct HoonArenaEntry {
+    source: Option<NonNull<Hoon>>,
+    signature: Option<u64>,
+    hot_children: Option<[HoonId; 2]>,
+    noun: Option<Noun>,
+    // `Some(None)` is a cached negative result: canonical `open` returned the
+    // node unchanged. `None` means the node has not been opened yet.
+    opened: Option<Option<Arc<Hoon>>>,
+}
+
+#[derive(Default)]
+struct HoonArena {
+    by_ptr: FastHashMap<usize, HoonId>,
+    entries: Vec<HoonArenaEntry>,
+}
+
+struct HoonArenaBuildNode {
+    ptr: usize,
+    signature: u64,
+    hot_children: Option<[usize; 2]>,
+}
+
+impl HoonArena {
+    fn clear(&mut self) {
+        self.by_ptr.clear();
+        self.entries.clear();
+    }
+
+    fn register(&mut self, nodes: Vec<HoonArenaBuildNode>) {
+        self.clear();
+        self.entries.reserve(nodes.len());
+        self.by_ptr.reserve(nodes.len());
+        for node in &nodes {
+            let id = HoonId(
+                u32::try_from(self.entries.len())
+                    .expect("one Hoon compiler scope cannot contain more than u32::MAX nodes"),
+            );
+            self.by_ptr.insert(node.ptr, id);
+            self.entries.push(HoonArenaEntry {
+                source: NonNull::new(node.ptr as *mut Hoon),
+                signature: Some(node.signature),
+                hot_children: None,
+                noun: None,
+                opened: None,
+            });
+        }
+        for (index, node) in nodes.into_iter().enumerate() {
+            self.entries[index].hot_children = node
+                .hot_children
+                .map(|[head, tail]| [self.by_ptr[&head], self.by_ptr[&tail]]);
+        }
+    }
+
+    fn register_unsigned_root(&mut self, ptr: usize) {
+        self.clear();
+        self.by_ptr.insert(ptr, HoonId(0));
+        self.entries.push(HoonArenaEntry {
+            source: NonNull::new(ptr as *mut Hoon),
+            ..HoonArenaEntry::default()
+        });
+    }
+
+    #[inline]
+    fn id_for(&self, hoon: &Hoon) -> Option<HoonId> {
+        self.by_ptr.get(&(hoon as *const Hoon as usize)).copied()
+    }
+
+    #[inline]
+    fn entry(&self, id: HoonId) -> &HoonArenaEntry {
+        &self.entries[id.0 as usize]
+    }
+
+    #[inline]
+    fn entry_mut(&mut self, id: HoonId) -> &mut HoonArenaEntry {
+        &mut self.entries[id.0 as usize]
+    }
+
+    #[inline]
+    fn source_ptr(&self, id: HoonId) -> *const Hoon {
+        self.entry(id)
+            .source
+            .expect("active HoonId must have a source node")
+            .as_ptr()
+    }
+
+    #[inline]
+    fn child(&self, id: HoonId, index: usize) -> HoonId {
+        self.entry(id)
+            .hot_children
+            .expect("arena child lookup is only valid for a hot binary gene")[index]
+    }
+
+    #[inline]
+    #[cfg(test)]
+    fn child_count(&self, id: HoonId) -> usize {
+        self.entry(id).hot_children.map_or(0, |_| 2)
+    }
+}
+
+struct HoonAstScope<'ut, 'slab, 'root> {
+    ut: &'ut mut Ut<'slab>,
+    pushed: bool,
+    root: HoonId,
+    // Keeps every raw source pointer in `hoon_arena` bounded by the borrow of
+    // the root whose descendants were registered.
+    _root: PhantomData<&'root Hoon>,
+}
+
+impl<'ut, 'slab, 'root> Deref for HoonAstScope<'ut, 'slab, 'root> {
+    type Target = Ut<'slab>;
+
+    fn deref(&self) -> &Self::Target {
+        self.ut
+    }
+}
+
+impl DerefMut for HoonAstScope<'_, '_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.ut
+    }
+}
+
+impl Drop for HoonAstScope<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.ut.leave_hoon_ast_scope(self.pushed);
+    }
+}
+
 pub struct Ut<'a> {
     pub slab: &'a mut NounSlab,
+    // Canonical Nock formula graph. Formula-producing compiler paths migrate to
+    // `FormulaId`; noun materialization is retained only at explicit semantic
+    // boundaries and at the final public output boundary.
+    formula_arena: FormulaArena,
+    // Canonical structural identities for complete values and abstract
+    // seminoun states used by Musk's native evaluator.
+    value_arena: ValueArena,
+    semi_arena: SemiArena,
     // Owned per-compile native-IR state (intern table + decode/encode memos +
     // boundary caches) -- the single home for what used to be module thread-locals.
     // A disjoint field from `slab`, so the ir free fns can borrow `&mut self.cx`
@@ -185,6 +320,16 @@ pub struct Ut<'a> {
     pub decoded_hold_hoon_cache_raw: HashMap<u64, Arc<Hoon>>,
     pub decoded_hold_hoon_cache_order: VecDeque<u64>,
     pub decoded_hold_hoon_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
+    // Arena IR for the borrowed top-level Hoon tree. Address lookup happens
+    // once at a compiler boundary; signatures, canonical nouns, and opened
+    // forms are then dense HoonId-indexed properties. Generated lowering
+    // temporaries get a nested arena for the duration of their shorter borrow.
+    hoon_ast_scope_depth: usize,
+    hoon_arena: HoonArena,
+    // Compiler-generated lowerings have shorter borrows than their parsed
+    // parent. They receive their own dense arena and suspend the parent here;
+    // LIFO scope guards restore the previous graph without pointer probing.
+    hoon_arena_stack: Vec<HoonArena>,
     pub hoon_ast_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
     pub hoon_ast_ptr_cache_order: VecDeque<usize>,
     pub hold_memo: HoldMemoSet,
@@ -248,12 +393,11 @@ pub struct Ut<'a> {
     /// fork member hoonc resolves away). Clearing on any epoch change keeps
     /// within-arm reuse (the perf case) while never reusing across state.
     miss_memo_persist: Option<((u8, u64, u64, u64), FastHashMap<(u64, u64, u8), bool>)>,
-    // `^~` fold outcomes keyed by (bran, formula). Folding is a pure
-    // function of these two nouns: arm resolution through the persistent
+    // `^~` fold outcomes keyed by exact native (bran, formula) identity. Folding is a pure
+    // function of these two values: arm resolution through the persistent
     // lazy resolvers is time-invariant, so both successes and failures are
     // safe to reuse for the lifetime of the Ut.
-    ktsg_fold_cache: BucketMemo<(u32, u32), KtsgFoldCacheEntry>,
-    semi_mask_full_empty: Option<Noun>,
+    ktsg_fold_cache: FastHashMap<(SemiId, FormulaId), Option<Noun>>,
     semi_root_blocked_set: Option<Noun>,
     semi_full_blocked_interned: Option<Noun>,
     // Cache for `hatch::utils::open()`. Keyed by `&Hoon` pointer, guarded by a structural
@@ -273,6 +417,14 @@ pub struct Ut<'a> {
 pub struct Sig64 {
     state: u64,
     include_dbug_spot: bool,
+    // A Hoon child contributes its completed structural digest to its parent.
+    // Besides avoiding quadratic subtree rescans, this records the digest for
+    // every native AST node reached through Spec/Tome/etc. in one traversal.
+    hoon_signatures: FastHashMap<usize, u64>,
+    // Completed nodes are emitted in post-order. Only the two canonical binary
+    // forms that recurse directly by ID carry child edges; every other form
+    // enters through the arena boundary without paying generic edge costs.
+    hoon_nodes: Vec<HoonArenaBuildNode>,
 }
 
 impl Sig64 {
@@ -285,6 +437,8 @@ impl Sig64 {
         Self {
             state: Self::OFFSET,
             include_dbug_spot,
+            hoon_signatures: Default::default(),
+            hoon_nodes: Vec::new(),
         }
     }
 
@@ -316,6 +470,13 @@ impl Sig64 {
     }
 
     #[inline]
+    fn write_axis(&mut self, axis: &AstAxis) {
+        let bytes = axis.as_biguint().to_bytes_le();
+        self.write_u64(bytes.len() as u64);
+        self.write_bytes(&bytes);
+    }
+
+    #[inline]
     fn write_str(&mut self, value: &str) {
         self.write_u64(value.len() as u64);
         self.write_bytes(value.as_bytes());
@@ -343,7 +504,19 @@ impl Sig64 {
     fn hoon_signature_spot_sensitive(hoon: &Hoon) -> Option<u64> {
         let mut sig = Self::new_with_dbug_spots(true);
         sig.write_hoon(hoon)?;
-        Some(sig.finish())
+        sig.hoon_signatures
+            .get(&(hoon as *const Hoon as usize))
+            .copied()
+    }
+
+    fn hoon_signatures_spot_sensitive(hoon: &Hoon) -> Option<(u64, Vec<HoonArenaBuildNode>)> {
+        let mut sig = Self::new_with_dbug_spots(true);
+        sig.write_hoon(hoon)?;
+        let root = sig
+            .hoon_signatures
+            .get(&(hoon as *const Hoon as usize))
+            .copied()?;
+        Some((root, sig.hoon_nodes))
     }
 
     fn spec_signature_spot_sensitive(spec: &Spec) -> Option<u64> {
@@ -955,7 +1128,7 @@ impl Sig64 {
             }
             Stencil::Lazy { fragment, resolve } => {
                 self.write_byte(0x03);
-                self.write_u64(*fragment);
+                self.write_axis(fragment);
                 let (a, b) = resolve;
                 self.write_spec(a)?;
                 self.write_spec(b)?;
@@ -1114,12 +1287,12 @@ impl Sig64 {
             }
             Nock::SelectArm(axis, nock) => {
                 self.write_byte(0x0a);
-                self.write_u64(*axis);
+                self.write_axis(axis);
                 self.write_nock(nock)?;
             }
             Nock::Edit((axis, nock), rest) => {
                 self.write_byte(0x0b);
-                self.write_u64(*axis);
+                self.write_axis(axis);
                 self.write_nock(nock)?;
                 self.write_nock(rest)?;
             }
@@ -1135,7 +1308,7 @@ impl Sig64 {
             }
             Nock::AxisSelect(axis) => {
                 self.write_byte(0x0e);
-                self.write_u64(*axis);
+                self.write_axis(axis);
             }
         }
         Some(())
@@ -1156,6 +1329,18 @@ impl Sig64 {
     }
 
     fn write_hoon(&mut self, hoon: &Hoon) -> Option<()> {
+        let ptr = hoon as *const Hoon as usize;
+        if let Some(signature) = self.hoon_signatures.get(&ptr).copied() {
+            self.write_byte(0xff);
+            self.write_u64(signature);
+            return Some(());
+        }
+
+        // Hash this node independently, then feed its digest into the enclosing
+        // Hoon/helper node. This makes the signature compositional: registering
+        // a root computes each descendant exactly once rather than hashing the
+        // same suffix again at every recursive mint/play/mull boundary.
+        let parent_state = std::mem::replace(&mut self.state, Self::OFFSET);
         match hoon {
             Hoon::Pair(a, b) => {
                 self.write_byte(0x01);
@@ -1165,7 +1350,7 @@ impl Sig64 {
             Hoon::ZapZap => self.write_byte(0x02),
             Hoon::Axis(axis) => {
                 self.write_byte(0x03);
-                self.write_u64(*axis);
+                self.write_axis(axis);
             }
             Hoon::Base(bt) => {
                 self.write_byte(0x04);
@@ -1847,6 +2032,22 @@ impl Sig64 {
                 self.write_hoon(q)?;
             }
         }
+        let signature = self.state;
+        let hot_children = match hoon {
+            Hoon::Pair(head, tail) | Hoon::TisGar(head, tail) => {
+                Some([head.as_ref() as *const Hoon as usize, tail.as_ref() as *const Hoon as usize])
+            }
+            _ => None,
+        };
+        self.hoon_signatures.insert(ptr, signature);
+        self.hoon_nodes.push(HoonArenaBuildNode {
+            ptr,
+            signature,
+            hot_children,
+        });
+        self.state = parent_state;
+        self.write_byte(0xff);
+        self.write_u64(signature);
         Some(())
     }
 }
@@ -1865,6 +2066,9 @@ impl<'a> Ut<'a> {
         // missing reset surfaced as decode errors.
         Self {
             slab,
+            formula_arena: FormulaArena::new(),
+            value_arena: ValueArena::new(),
+            semi_arena: SemiArena::new(),
             cx: Context::new(),
             vet: true,
             dbug_locations: Vec::new(),
@@ -1887,6 +2091,9 @@ impl<'a> Ut<'a> {
             decoded_hold_hoon_cache_raw: HashMap::new(),
             decoded_hold_hoon_cache_order: VecDeque::new(),
             decoded_hold_hoon_ptr_cache: HashMap::new(),
+            hoon_ast_scope_depth: 0,
+            hoon_arena: Default::default(),
+            hoon_arena_stack: Vec::new(),
             hoon_ast_ptr_cache: HashMap::new(),
             hoon_ast_ptr_cache_order: VecDeque::new(),
             hold_memo: Default::default(),
@@ -1918,7 +2125,6 @@ impl<'a> Ut<'a> {
             musk: MuskRuntime::new(),
             miss_memo_persist: None,
             ktsg_fold_cache: Default::default(),
-            semi_mask_full_empty: None,
             semi_root_blocked_set: None,
             semi_full_blocked_interned: None,
             open_cache: HashMap::new(),
@@ -1930,6 +2136,68 @@ impl<'a> Ut<'a> {
             #[cfg(test)]
             stack_guard_calls: 0,
         }
+    }
+
+    #[inline]
+    fn formula_import(&mut self, noun: Noun) -> Result<FormulaId> {
+        let space = self.slab.noun_space();
+        self.formula_arena.import(noun, &space)
+    }
+
+    #[inline]
+    fn formula_materialize(&mut self, formula: FormulaId) -> Noun {
+        self.formula_arena.materialize(formula, self.slab)
+    }
+
+    #[inline]
+    fn formula_slot_u64(&mut self, axis: u64) -> FormulaId {
+        self.formula_arena.slot_u64(axis)
+    }
+
+    #[inline]
+    fn formula_slot(&mut self, axis: BigUint) -> FormulaId {
+        self.formula_arena.slot(axis)
+    }
+
+    #[inline]
+    fn formula_quote(&mut self, noun: Noun) -> FormulaId {
+        let space = self.slab.noun_space();
+        self.formula_arena.quote(noun, &space)
+    }
+
+    #[inline]
+    fn formula_op(&mut self, code: u8, args: &[FormulaId]) -> FormulaId {
+        self.formula_arena.op(code, args)
+    }
+
+    #[inline]
+    fn formula_cons(&mut self, head: FormulaId, tail: FormulaId) -> FormulaId {
+        self.formula_arena.cons(self.slab, head, tail)
+    }
+
+    #[inline]
+    fn formula_comb(&mut self, left: FormulaId, right: FormulaId) -> FormulaId {
+        self.formula_arena.comb(left, right)
+    }
+
+    #[inline]
+    fn formula_cond(&mut self, test: FormulaId, yes: FormulaId, no: FormulaId) -> FormulaId {
+        self.formula_arena.cond(test, yes, no)
+    }
+
+    #[inline]
+    fn formula_flip(&mut self, formula: FormulaId) -> FormulaId {
+        self.formula_arena.flip(formula)
+    }
+
+    #[inline]
+    fn formula_flan(&mut self, left: FormulaId, right: FormulaId) -> FormulaId {
+        self.formula_arena.flan(left, right)
+    }
+
+    #[inline]
+    fn formula_flor(&mut self, left: FormulaId, right: FormulaId) -> FormulaId {
+        self.formula_arena.flor(left, right)
     }
 
     fn clear_musk_context_dependent_caches(&mut self) {
@@ -1969,21 +2237,40 @@ impl<'a> Ut<'a> {
         context: &mut NockContext,
         core: Noun,
         core_space: &NounSpace,
-    ) -> Noun {
+    ) -> Option<Noun> {
         self.ensure_musk_mack_core_cache_context(context);
         let raw = core.as_raw();
         if let Some(cached) = self.musk.mack_core_cache_raw.get(&raw).copied() {
-            return cached;
+            return Some(cached);
         }
-        // Fill the slab-side mug cache for the whole core before copying:
-        // the copy below propagates cached mugs onto the eval-stack nouns,
-        // which lets cold-state registration inside `interpret` short-circuit
-        // its unifying-equality checks on mug mismatch instead of walking
-        // whole battery structures per call.
-        self.noun_mug_cached(core);
-        let cached = self.copy_into_eval_stack_shared(context, core, core_space);
-        self.musk.mack_core_cache_raw.insert(raw, cached);
-        cached
+        let stack_checkpoint = context.stack.checkpoint();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Fill the slab-side mug cache for the whole core before copying:
+            // the copy below propagates cached mugs onto the eval-stack nouns,
+            // which lets cold-state registration inside `interpret` short-circuit
+            // its unifying-equality checks on mug mismatch instead of walking
+            // whole battery structures per call.
+            self.noun_mug_cached(core);
+            self.copy_into_eval_stack_shared(context, core, core_space)
+        }));
+        match outcome {
+            Ok(cached) => {
+                self.musk.mack_core_cache_raw.insert(raw, cached);
+                Some(cached)
+            }
+            Err(payload) => {
+                // Recursive copying populates the cache as it goes. Roll back
+                // its allocations and discard every pointer that may now refer
+                // into the released stack region before declining this fold.
+                unsafe { context.stack.restore_checkpoint(&stack_checkpoint) };
+                self.musk.clear_context_dependent_caches();
+                if payload.is::<AllocationError>() {
+                    None
+                } else {
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        }
     }
 
     /// Copy a slab noun onto the musk eval stack with structural sharing:
@@ -2095,7 +2382,6 @@ impl<'a> Ut<'a> {
         self.hold_repo_fan_context_id = 0;
         self.hold_repo_fan_subset_by_signature.clear();
         self.bran_semi_memo = Default::default();
-        self.musk.mack_cache_raw.clear();
     }
 
     const NEST_MUG_BUCKET_LIMIT: usize = 32;
@@ -2110,8 +2396,6 @@ impl<'a> Ut<'a> {
     const CORE_MINT_CACHE_BUCKET_LIMIT: usize = 8;
     const MINT_CACHE_BUCKET_LIMIT: usize = 4;
     const MINT_CACHE_KEY_LIMIT: usize = 16_384;
-    const MUSK_MACK_CACHE_KEY_LIMIT: usize = 16_384;
-    const MUSK_MACK_CACHE_BUCKET_LIMIT: usize = 8;
     const MULL_CACHE_BUCKET_LIMIT: usize = 4;
     const MULL_CACHE_KEY_LIMIT: usize = 16_384;
     const REDO_CACHE_BUCKET_LIMIT: usize = 8;
@@ -2313,7 +2597,7 @@ impl<'a> Ut<'a> {
     /// `reachable_legs` resolves a hold's leg-id O(1) amortized. Byte-neutral:
     /// returns the SAME id `redo_subject_hold_in_fan` would (same intern path).
     fn hold_repo_fan_leg_id_for_hold_native(&mut self, hold: &NRc<NTy>) -> Result<u64> {
-        let ptr = NRc::as_ptr(hold) as usize;
+        let ptr = native_type_id_usize(hold);
         if let Some(id) = self.hold_repo_fan_leg_id_by_ptr.get(&ptr).copied() {
             return Ok(id);
         }
@@ -2339,19 +2623,19 @@ impl<'a> Ut<'a> {
     /// visited at most once and the closure is O(1) amortized per node. See the
     /// linearity proof in the design memo. The `Fork` case decodes options once
     /// per fork ptr (also memoized) and unions their legsets.
-    fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<NRc<[u64]>> {
-        let ptr = NRc::as_ptr(t) as usize;
-        if let Some(legs) = legset_memo_lookup(&self.cx, ptr) {
+    fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[u64]>> {
+        let id = t.arena_id().0;
+        if let Some(legs) = legset_memo_lookup(&self.cx, id) {
             return Ok(legs);
         }
         let legs = self.with_stack_guard(|ut| ut.reachable_legs_node(t))?;
-        legset_memo_store(&mut self.cx, ptr, legs.clone());
+        legset_memo_store(&mut self.cx, id, legs.clone());
         Ok(legs)
     }
 
     /// One node of `reachable_legs`' memoized recursion (the `with_stack_guard`
     /// wraps each level for deep DAGs). See `reachable_legs`.
-    fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<NRc<[u64]>> {
+    fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[u64]>> {
         let legs: Vec<u64> = match &**t {
             NTy::Void | NTy::Noun | NTy::Atom { .. } => Vec::new(),
             NTy::Cell(h, tl) => {
@@ -2379,9 +2663,7 @@ impl<'a> Ut<'a> {
                 return self.reachable_legs(&payload);
             }
             NTy::Fork { .. } => {
-                // The fork's options are not Rc children; decode (memoized per
-                // fork ptr inside fork_options_native via native_of's mug memo)
-                // and union the option legsets.
+                // Fork options are native DAG children; union their legsets.
                 let options = self.fork_options_native(t)?;
                 let mut acc: Vec<u64> = Vec::new();
                 for opt in options {
@@ -2402,7 +2684,7 @@ impl<'a> Ut<'a> {
                 Self::merge_sorted_legs(&ls, std::slice::from_ref(&self_leg))
             }
         };
-        Ok(NRc::from(legs.into_boxed_slice()))
+        Ok(SharedRc::from(legs.into_boxed_slice()))
     }
 
     /// Sorted-merge-dedup union of two sorted leg-id slices (mirrors the
@@ -2640,8 +2922,10 @@ impl<'a> Ut<'a> {
                 Limb::Axis(axis) => {
                     hash ^= 0x02;
                     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-                    hash ^= *axis;
-                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                    for byte in axis.as_biguint().to_bytes_le() {
+                        hash ^= u64::from(byte);
+                        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
                 }
                 Limb::Parent(axis, name) => {
                     hash ^= 0x03;
@@ -2668,9 +2952,65 @@ impl<'a> Ut<'a> {
         hash
     }
 
-    fn mint_cache_signature(gen: &Hoon) -> Option<u64> {
-        // `mint` returns formula nouns with `%spot` hints, so cache keys must include debug spots.
+    fn enter_hoon_ast_scope(&mut self, gen: &Hoon) -> (bool, HoonId) {
+        let (pushed, root) = match self.hoon_arena.id_for(gen) {
+            Some(root) => (false, root),
+            None => {
+                let mut next = HoonArena::default();
+                if let Some((_root_signature, nodes)) = Sig64::hoon_signatures_spot_sensitive(gen) {
+                    next.register(nodes);
+                } else {
+                    next.register_unsigned_root(Self::hoon_ast_ptr_key(gen));
+                }
+                let root = next
+                    .id_for(gen)
+                    .expect("new Hoon arena must contain its root");
+                let previous = std::mem::replace(&mut self.hoon_arena, next);
+                self.hoon_arena_stack.push(previous);
+                (true, root)
+            }
+        };
+        self.hoon_ast_scope_depth += 1;
+        (pushed, root)
+    }
+
+    fn hoon_ast_scope<'ut, 'root>(&'ut mut self, gen: &'root Hoon) -> HoonAstScope<'ut, 'a, 'root> {
+        let (pushed, root) = self.enter_hoon_ast_scope(gen);
+        HoonAstScope {
+            ut: self,
+            pushed,
+            root,
+            _root: PhantomData,
+        }
+    }
+
+    fn leave_hoon_ast_scope(&mut self, pushed: bool) {
+        self.hoon_ast_scope_depth -= 1;
+        if pushed {
+            // The borrowed root may die or its address may be reused after this
+            // call. Drop its graph before restoring the longer-lived parent.
+            self.hoon_arena = self
+                .hoon_arena_stack
+                .pop()
+                .expect("every pushed Hoon arena must have a suspended parent");
+        }
+    }
+
+    fn mint_cache_signature_for(&mut self, gen: &Hoon, id: Option<HoonId>) -> Option<u64> {
+        // `mint` returns formulas with `%spot` hints, so cache keys must include debug spots.
+        if let Some(id) = id.or_else(|| self.hoon_arena.id_for(gen)) {
+            return self.hoon_arena.entry(id).signature;
+        }
         Sig64::hoon_signature_spot_sensitive(gen)
+    }
+
+    #[inline]
+    fn mint_cache_signature_id(&self, id: HoonId) -> Option<u64> {
+        self.hoon_arena.entry(id).signature
+    }
+
+    fn mint_cache_signature(&mut self, gen: &Hoon) -> Option<u64> {
+        self.mint_cache_signature_for(gen, None)
     }
 
     fn strip_dbug_wrapper_noun(mut hoon_noun: Noun, space: &NounSpace) -> Noun {
@@ -2820,7 +3160,7 @@ impl<'a> Ut<'a> {
     fn lower_tisdot(wing: &WingType, p: &Hoon, q: &Hoon) -> Hoon {
         Hoon::TisGar(
             Box::new(Hoon::CenCab(
-                vec![Limb::Axis(1)],
+                vec![Limb::Axis((1u64).into())],
                 vec![(wing.clone(), p.clone())],
             )),
             Box::new(q.clone()),
@@ -2832,14 +3172,18 @@ impl<'a> Ut<'a> {
         //   [%cnsg p q r] => [%cntr p q (compiled r with axe walk starting at 6)]
         // where each item gets wing [[%| 0 ~] [%& axe] ~], with recursive axe progression.
         let mut compiled = Vec::with_capacity(hoons.len());
-        let mut axe = 6u64;
+        let mut axe = BigUint::from(6u32);
         for (idx, hoon) in hoons.iter().enumerate() {
             let is_last = idx + 1 == hoons.len();
-            let wing_axe = if is_last { axe } else { peg_axis(axe, 2)? };
-            let target_wing = vec![Limb::Parent(0, None), Limb::Axis(wing_axe)];
+            let wing_axe = if is_last {
+                axe.clone()
+            } else {
+                peg_axis_big(axe.clone(), 2)?
+            };
+            let target_wing = vec![Limb::Parent(0, None), Limb::Axis(wing_axe.into())];
             compiled.push((target_wing, hoon.clone()));
             if !is_last {
-                axe = peg_axis(axe, 3)?;
+                axe = peg_axis_big(axe, 3)?;
             }
         }
         Ok(Hoon::CenTar(wing.clone(), Box::new(p.clone()), compiled))
@@ -2855,13 +3199,16 @@ impl<'a> Ut<'a> {
         }
 
         let mut extended_wing = wing.clone();
-        extended_wing.push(Limb::Axis(2));
+        extended_wing.push(Limb::Axis((2u64).into()));
         let wrapped_pairs = pairs
             .iter()
             .map(|(pair_wing, pair_hoon)| {
                 (
                     pair_wing.clone(),
-                    Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(pair_hoon.clone())),
+                    Hoon::TisGar(
+                        Box::new(Hoon::Axis((3u64).into())),
+                        Box::new(pair_hoon.clone()),
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -2968,7 +3315,7 @@ impl<'a> Ut<'a> {
             None => Hoon::BarDot(Box::new(Hoon::CenCol(
                 Box::new(Hoon::Limb("cain".to_string())),
                 vec![Hoon::ZapGar(Box::new(Hoon::TisGar(
-                    Box::new(Hoon::Axis(3)),
+                    Box::new(Hoon::Axis((3u64).into())),
                     Box::new(p.clone()),
                 )))],
             ))),
@@ -3011,10 +3358,13 @@ impl<'a> Ut<'a> {
                 [] => Hoon::Eror("open-mccl-empty".to_string()),
                 // hoon-138 `%mccl` open lowering terminal case:
                 //   [* ~]  [%tsgr [%$ 3] i.yex]
-                [h] => Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(h.clone())),
+                [h] => Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(h.clone())),
                 [h, t @ ..] => Hoon::CenCol(
-                    Box::new(Hoon::Axis(2)),
-                    vec![Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(h.clone())), loop_yex(t)],
+                    Box::new(Hoon::Axis((2u64).into())),
+                    vec![
+                        Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(h.clone())),
+                        loop_yex(t),
+                    ],
                 ),
             }
         }
@@ -3035,7 +3385,10 @@ impl<'a> Ut<'a> {
 
     fn lower_siggal(term_or_pair: &TermOrPair, q: &Hoon) -> Hoon {
         Hoon::TisGal(
-            Box::new(Hoon::SigGar(term_or_pair.clone(), Box::new(Hoon::Axis(1)))),
+            Box::new(Hoon::SigGar(
+                term_or_pair.clone(),
+                Box::new(Hoon::Axis((1u64).into())),
+            )),
             Box::new(q.clone()),
         )
     }
@@ -3043,7 +3396,7 @@ impl<'a> Ut<'a> {
     fn lower_sigfas(chum: &Chum, q: &Hoon) -> Hoon {
         Hoon::SigCen(
             chum.clone(),
-            Box::new(Hoon::Axis(7)),
+            Box::new(Hoon::Axis((7u64).into())),
             Vec::new(),
             Box::new(q.clone()),
         )
@@ -3094,7 +3447,7 @@ impl<'a> Ut<'a> {
                     Box::new(item.clone()),
                 )),
             );
-            let wing_parent_axis6 = vec![Limb::Parent(0, None), Limb::Axis(6)];
+            let wing_parent_axis6 = vec![Limb::Parent(0, None), Limb::Axis((6u64).into())];
             let c_bind = Hoon::KetTis(
                 Skin::Term("c".to_string()),
                 Box::new(Hoon::TisGal(
@@ -3126,7 +3479,7 @@ impl<'a> Ut<'a> {
         Hoon::TisGar(
             Box::new(Hoon::KetTis(
                 Skin::Term("v".to_string()),
-                Box::new(Hoon::Axis(1)),
+                Box::new(Hoon::Axis((1u64).into())),
             )),
             Box::new(acc),
         )
@@ -3190,7 +3543,7 @@ impl<'a> Ut<'a> {
         tomes_map: Noun,
         prefix: &Option<String>,
         poly: Poly,
-    ) -> Result<Option<(NRc<NTy>, Noun)>> {
+    ) -> Result<Option<(NRc<NTy>, FormulaId)>> {
         let context = self.cache_context_key();
         // `mint_core` validates the produced core against `gol` through
         // `nice`/`nest`, so `%hold` fan reachability is a property of the
@@ -3217,7 +3570,7 @@ impl<'a> Ut<'a> {
         prefix: &Option<String>,
         poly: Poly,
         core_type: NRc<NTy>,
-        formula: Noun,
+        formula: FormulaId,
     ) -> Result<()> {
         let context = self.cache_context_key();
         let fan = self.fan_context_key_scoped_pair(sut, gol)?;
@@ -3309,7 +3662,7 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
         gen_sig: u64,
-    ) -> Result<Option<(NRc<NTy>, Noun)>> {
+    ) -> Result<Option<(NRc<NTy>, FormulaId)>> {
         let context = self.cache_context_key();
         // `mint` cache hits bypass the fresh `nice(sut, gol, typ)` check; include
         // goal-reachable `%hold` legs in the scoped fan key so cached success is
@@ -3327,7 +3680,7 @@ impl<'a> Ut<'a> {
         gol: &NRc<NTy>,
         gen_sig: u64,
         ty: NRc<NTy>,
-        formula: Noun,
+        formula: FormulaId,
     ) -> Result<()> {
         let context = self.cache_context_key();
         let fan = self.fan_context_key_scoped_pair(sut, gol)?;
@@ -3433,14 +3786,13 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
         dox: &NRc<NTy>,
-        gen: Noun,
+        gen_sig: u64,
     ) -> Result<Option<(NRc<NTy>, NRc<NTy>)>> {
         let context = self.cache_context_key();
         // mull is dual-perspective (sut + dox). The active fan can be consulted
         // from EITHER perspective's %hold descent, so scope on the union of both
         // legsets (legset(sut) ∪ legset(dox)) to stay byte-safe.
         let fan = self.fan_context_key_scoped_pair(sut, dox)?;
-        let gen_sig = self.noun_mug_cached(gen) as u64;
         Ok(native_mull_cache_lookup(
             &self.cx, sut, gol, dox, context.semantic.vet_key, gen_sig, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key,
@@ -3453,13 +3805,12 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
         dox: &NRc<NTy>,
-        gen: Noun,
+        gen_sig: u64,
         p_ty: NRc<NTy>,
         q_ty: NRc<NTy>,
     ) -> Result<()> {
         let context = self.cache_context_key();
         let fan = self.fan_context_key_scoped_pair(sut, dox)?;
-        let gen_sig = self.noun_mug_cached(gen) as u64;
         native_mull_cache_store(
             &mut self.cx, sut, gol, dox, context.semantic.vet_key, gen_sig, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key, p_ty, q_ty,
@@ -3669,9 +4020,13 @@ impl<'a> Ut<'a> {
 
     /// C-final.4: native-re-keyed `fish` boundary cache. The TYPE component (sut)
     /// is keyed on interned `Rc` pointer identity; (axis, vet, fan) carried
-    /// VERBATIM from the old key. VALUE is the NOCK FORMULA (noun) — formula stays
-    /// a noun, no `live_to_noun` of the deepening type for the key.
-    fn fish_boundary_lookup(&mut self, sut: &NRc<NTy>, axis: u64) -> Result<Option<Noun>> {
+    /// VERBATIM from the old key. VALUE is the canonical formula ID; no
+    /// `live_to_noun` of the deepening type is needed for the key.
+    fn fish_boundary_lookup(
+        &mut self,
+        sut: &NRc<NTy>,
+        axis: &BigUint,
+    ) -> Result<Option<FormulaId>> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_fish_cache_lookup(
@@ -3679,7 +4034,12 @@ impl<'a> Ut<'a> {
         ))
     }
 
-    fn fish_boundary_store(&mut self, sut: &NRc<NTy>, axis: u64, result: Noun) -> Result<()> {
+    fn fish_boundary_store(
+        &mut self,
+        sut: &NRc<NTy>,
+        axis: &BigUint,
+        result: FormulaId,
+    ) -> Result<()> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         native_fish_cache_store(&mut self.cx, sut, axis, semantic.vet_key, fan, result);
@@ -3732,15 +4092,52 @@ impl<'a> Ut<'a> {
         bucket.push_back(NestCacheEntry { sut, ref_, result });
     }
 
-    pub fn mint(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
-        match self.mint_inner(sut, gol, gen) {
+    pub(crate) fn mint(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        gen: &Hoon,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
+        let mut scope = self.hoon_ast_scope(gen);
+        let root = scope.root;
+        let result = scope.mint_arena(sut, gol, root);
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => Err(scope.decorate_error(err)),
+        }
+    }
+
+    fn mint_arena(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        id: HoonId,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
+        let source = self.hoon_arena.source_ptr(id);
+        // SAFETY: the outermost mint/play scope holds the caller's root borrow
+        // until `leave_hoon_ast_scope`; registration visits only descendants of
+        // that root, and nested calls cannot clear the arena. The pointer is
+        // read-only, and the arena never mutates the borrowed AST.
+        let gen = unsafe { &*source };
+        self.mint_inner(sut, gol, gen, id)
+    }
+
+    fn mint_arena_child(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        parent: HoonId,
+        index: usize,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
+        let child = self.hoon_arena.child(parent, index);
+        match self.mint_arena(sut, gol, child) {
             Ok(value) => Ok(value),
             Err(err) => Err(self.decorate_error(err)),
         }
     }
 
-    /// Noun-bridged `mint` for not-yet-flipped callers (C-final.1a): lift sut/gol
-    /// to native, run native mint, lower the type slot (the formula stays noun).
+    /// Public noun boundary: lift sut/gol, run native mint, and materialize the
+    /// type and formula once for external consumers.
     /// CAUTION: this body's `self.mint(...)` is the NATIVE mint (do NOT rename to
     /// self.mint_noun — that would be infinite self-recursion).
     pub fn mint_noun(&mut self, sut: Noun, gol: Noun, gen: &Hoon) -> Result<(Noun, Noun)> {
@@ -3749,16 +4146,23 @@ impl<'a> Ut<'a> {
         let gol_n = native_of(&mut self.cx, gol, &space)?;
         let (ty, formula) = self.mint(sut_n, gol_n, gen)?;
         let ty_noun = live_to_noun(&mut self.cx, &ty, self.slab);
+        let formula = self.formula_materialize(formula);
         Ok((ty_noun, formula))
     }
 
-    fn mint_inner(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
-        // ATOMIC FLIP (C-final.1a): mint reads/returns the native enum (type slot;
-        // the formula slot stays Noun). C-final.1b: the mint boundary cache is now
+    fn mint_inner(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        gen: &Hoon,
+        gen_id: HoonId,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
+        // ATOMIC FLIP (C-final.1a): mint reads/returns native type and formula
+        // handles. C-final.1b: the mint boundary cache is now
         // native-re-keyed on the interned (sut, gol) `Rc` pointers, so we no
         // longer lower sut/gol just to compute the cache key. C-final.2: play now
         // takes a native subject too, so mint no longer lowers sut for play.
-        let cache_sig = Self::mint_cache_signature(gen);
+        let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
             if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
                 return Ok(cached);
@@ -3780,7 +4184,7 @@ impl<'a> Ut<'a> {
             if self.vet && !is_allowed_void {
                 return Err(CompilerError::Noun("mint-vain".to_string()));
             }
-            return Ok((cons_void(&mut self.cx), slot_formula_axis(self.slab, 0)));
+            return Ok((cons_void(&mut self.cx), self.formula_slot_u64(0)));
         }
 
         // Retain the native (sut, gol) `Rc`s for the post-match cache store; the
@@ -3789,33 +4193,33 @@ impl<'a> Ut<'a> {
         let cache_sut = sut.clone();
         let cache_gol = gol.clone();
         let result = match gen {
-            Hoon::Pair(p, q) => {
+            Hoon::Pair(_, _) => {
                 let gol_head = cons_noun(&mut self.cx);
-                let (t_head, f_head) = self.mint(sut.clone(), gol_head, p)?;
+                let (t_head, f_head) = self.mint_arena_child(sut.clone(), gol_head, gen_id, 0)?;
                 let gol_tail = cons_noun(&mut self.cx);
-                let (t_tail, f_tail) = self.mint(sut.clone(), gol_tail, q)?;
+                let (t_tail, f_tail) = self.mint_arena_child(sut.clone(), gol_tail, gen_id, 1)?;
                 let ty = cons_cell(&mut self.cx, t_head, t_tail);
                 let ty = self.nice(sut, gol, ty)?;
-                let formula = cons(self.slab, f_head, f_tail)?;
+                let formula = self.formula_cons(f_head, f_tail);
                 Ok((ty, formula))
             }
             Hoon::Rock(_, expr) | Hoon::Sand(_, expr) => {
                 let ty = self.play(sut.clone(), gen)?;
                 let ty = self.nice(sut, gol, ty)?;
                 let value = noun_expr_to_noun(self.slab, expr);
-                let formula = T(self.slab, &[D(1), value]);
+                let formula = self.formula_quote(value);
                 Ok((ty, formula))
             }
             Hoon::ZapZap | Hoon::Eror(_) => {
                 let ty = cons_void(&mut self.cx);
                 let ty = self.nice(sut, gol, ty)?;
-                let formula = crash_formula(self.slab);
+                let formula = self.formula_slot_u64(0);
                 Ok((ty, formula))
             }
             Hoon::Dbug(spot, inner) => self.mint_dbug(sut, gol, spot, inner),
             Hoon::Note(note, inner) => self.mint_note(sut, gol, note, inner),
             Hoon::Lost(_) => self.mint_lost(sut, gol),
-            Hoon::TisGar(p, q) => self.mint_tsgr(sut, gol, p, q),
+            Hoon::TisGar(_, _) => self.mint_tsgr_arena(sut, gol, gen_id),
             Hoon::TisGal(_, _) | Hoon::TisHep(_, _) | Hoon::TisLus(_, _) => {
                 self.mint_opened(sut, gol, gen)
             }
@@ -3961,7 +4365,7 @@ impl<'a> Ut<'a> {
             Hoon::TisSig(list) => match list.as_slice() {
                 [] => {
                     let ty = cons_void(&mut self.cx);
-                    let formula = T(self.slab, &[D(0), D(0)]);
+                    let formula = self.formula_slot_u64(0);
                     Ok((ty, formula))
                 }
                 [single] => self.mint(sut, gol, single),
@@ -3977,9 +4381,9 @@ impl<'a> Ut<'a> {
                 }
             },
             Hoon::Axis(axis) => {
-                let ty = self.peek(sut.clone(), Way::Free, *axis)?;
+                let ty = self.peek(sut.clone(), Way::Free, axis.as_biguint().clone())?;
                 let ty = self.nice(sut, gol, ty)?;
-                let formula = slot_formula_axis(self.slab, *axis);
+                let formula = self.formula_slot(axis.as_biguint().clone());
                 Ok((ty, formula))
             }
             Hoon::BarCen(prefix, tomes) => {
@@ -3999,14 +4403,19 @@ impl<'a> Ut<'a> {
         Ok(result)
     }
 
-    pub fn slot_axis(noun: Noun, mut axis: u64, space: &NounSpace) -> Option<Noun> {
-        if axis == 0 {
+    pub fn slot_axis<A: Into<BigUint>>(noun: Noun, axis: A, space: &NounSpace) -> Option<Noun> {
+        let mut axis = axis.into();
+        if axis == BigUint::from(0u8) {
             return None;
         }
         let mut node = noun;
         let mut steps = Vec::new();
-        while axis > 1 {
-            steps.push((axis & 1) as u8);
+        while axis > BigUint::from(1u8) {
+            steps.push(if (&axis & BigUint::from(1u8)) == BigUint::from(0u8) {
+                0
+            } else {
+                1
+            });
             axis >>= 1;
         }
         while let Some(step) = steps.pop() {
@@ -4069,13 +4478,33 @@ impl<'a> Ut<'a> {
         path.join("/")
     }
 
-    pub fn play(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
+    pub(crate) fn play(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
+        let mut scope = self.hoon_ast_scope(gen);
         // Canonical ++play runs with vet disabled for the entire evaluation
         // scope; restore it afterward (safe save/restore — see with_vet_off).
         // ATOMIC FLIP (C-final.2): play TAKES native sut and RETURNS native
         // Rc<Type>. No compile path lowers the deepening subject to a noun for
         // play anymore — the subject threads natively (the O(N^2)->O(N) win).
-        self.with_vet_off(|ut| ut.play_inner(sut, gen))
+        let root = scope.root;
+        scope.with_vet_off(|ut| ut.play_arena(sut, root))
+    }
+
+    fn play_arena(&mut self, sut: NRc<NTy>, id: HoonId) -> Result<NRc<NTy>> {
+        let source = self.hoon_arena.source_ptr(id);
+        // SAFETY: identical scope invariant to `mint_arena`; this is an
+        // immutable descendant pointer registered under the active root borrow.
+        let gen = unsafe { &*source };
+        self.play_inner(sut, gen, id)
+    }
+
+    fn play_arena_child(
+        &mut self,
+        sut: NRc<NTy>,
+        parent: HoonId,
+        index: usize,
+    ) -> Result<NRc<NTy>> {
+        let child = self.hoon_arena.child(parent, index);
+        self.play_arena(sut, child)
     }
 
     /// Noun-input/noun-output bridge for external callers that still hold a noun
@@ -4087,12 +4516,12 @@ impl<'a> Ut<'a> {
         Ok(live_to_noun(&mut self.cx, &r, self.slab))
     }
 
-    fn play_inner(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
+    fn play_inner(&mut self, sut: NRc<NTy>, gen: &Hoon, gen_id: HoonId) -> Result<NRc<NTy>> {
         let result = {
             match gen {
-                Hoon::Pair(p, q) => {
-                    let head = self.play(sut.clone(), p)?;
-                    let tail = self.play(sut, q)?;
+                Hoon::Pair(_, _) => {
+                    let head = self.play_arena_child(sut.clone(), gen_id, 0)?;
+                    let tail = self.play_arena_child(sut, gen_id, 1)?;
                     Ok(cons_cell(&mut self.cx, head, tail))
                 }
                 Hoon::Rock(aura, expr) => Ok(self.play_rock(aura, expr)),
@@ -4101,9 +4530,9 @@ impl<'a> Ut<'a> {
                 Hoon::Dbug(_, inner) => self.play_dbug(sut, inner),
                 Hoon::Note(note, inner) => self.play_note(sut, note, inner),
                 Hoon::Lost(_) => Ok(cons_void(&mut self.cx)),
-                Hoon::TisGar(p, q) => {
-                    let next = self.play(sut, p)?;
-                    self.play(next, q)
+                Hoon::TisGar(_, _) => {
+                    let next = self.play_arena_child(sut, gen_id, 0)?;
+                    self.play_arena_child(next, gen_id, 1)
                 }
                 Hoon::TisGal(_, _) | Hoon::TisHep(_, _) | Hoon::TisLus(_, _) => {
                     self.play_opened(sut, gen)
@@ -4346,7 +4775,7 @@ impl<'a> Ut<'a> {
                 },
                 Hoon::Axis(axis) => {
                     // peek is native (C2); thread the native subject directly.
-                    self.peek(sut, Way::Free, *axis)
+                    self.peek(sut, Way::Free, axis.as_biguint().clone())
                 }
                 Hoon::BarCen(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Dry),
                 Hoon::BarPat(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Wet),
@@ -4356,17 +4785,16 @@ impl<'a> Ut<'a> {
         result
     }
 
-    fn mint_tsgr(
+    fn mint_tsgr_arena(
         &mut self,
         sut: NRc<NTy>,
         gol: NRc<NTy>,
-        p: &Hoon,
-        q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+        id: HoonId,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let goal = cons_noun(&mut self.cx);
-        let (p_ty, p_formula) = self.mint(sut, goal, p)?;
-        let (q_ty, q_formula) = self.mint(p_ty, gol, q)?;
-        let formula = comb(self.slab, p_formula, q_formula)?;
+        let (p_ty, p_formula) = self.mint_arena_child(sut, goal, id, 0)?;
+        let (q_ty, q_formula) = self.mint_arena_child(p_ty, gol, id, 1)?;
+        let formula = self.formula_comb(p_formula, q_formula);
         Ok((q_ty, formula))
     }
 
@@ -4376,7 +4804,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         spec: &Spec,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let lowered = Self::lower_brtis(spec, q);
         self.mint(sut, gol, &lowered)
     }
@@ -4388,7 +4816,7 @@ impl<'a> Ut<'a> {
         spec: &Spec,
         alas: &Alas,
         tomes: &HashMap<String, Tome>,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let transformed = if alas.is_empty() {
             tomes.clone()
         } else {
@@ -4406,13 +4834,13 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         gol: NRc<NTy>,
         items: &[Hoon],
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         match items {
             [] => {
                 let zero = D(0);
                 let ty = ty_atom_n(&mut self.cx, self.slab, "n", Some(zero)).1;
                 let ty = self.nice(sut, gol, ty)?;
-                let formula = T(self.slab, &[D(1), zero]);
+                let formula = self.formula_quote(zero);
                 Ok((ty, formula))
             }
             [head, tail @ ..] => {
@@ -4421,7 +4849,7 @@ impl<'a> Ut<'a> {
                 let (tail_ty, tail_formula) = self.mint_colsig(sut.clone(), goal, tail)?;
                 let ty = cons_cell(&mut self.cx, head_ty, tail_ty);
                 let ty = self.nice(sut, gol, ty)?;
-                let formula = cons(self.slab, head_formula, tail_formula)?;
+                let formula = self.formula_cons(head_formula, tail_formula);
                 Ok((ty, formula))
             }
         }
@@ -4514,7 +4942,7 @@ impl<'a> Ut<'a> {
         p: &Hoon,
         q: &Hoon,
         r: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let (_cond_ty, cond_formula) = self.mint(sut.clone(), bool_ty, p)?;
         // gain/lose are native now (C6); thread the native subject directly.
@@ -4524,23 +4952,25 @@ impl<'a> Ut<'a> {
         let wux_void = matches!(&*wux, NTy::Void);
         let (ned, duy) = if fex_void && wux_void {
             // Canonical hoon-138 `%wtcl`: [%void %void] => [ned=0 duy=[%0 0]].
-            (false, slot_formula_axis(self.slab, 0))
+            (false, self.formula_slot_u64(0))
         } else if fex_void {
-            (true, const_bool_formula(self.slab, false))
+            (true, self.formula_quote(D(1)))
         } else if wux_void {
-            (true, const_bool_formula(self.slab, true))
+            (true, self.formula_quote(D(0)))
         } else {
             (false, cond_formula)
         };
         let (q_ty, q_formula) = self.mint(fex, gol.clone(), q)?;
         let (r_ty, r_formula) = self.mint(wux, gol, r)?;
-        let fol = cond(self.slab, duy, q_formula, r_formula)?;
+        let fol = self.formula_cond(duy, q_formula, r_formula);
         // Native fork build (RT-07 mug ordering preserved via cons_fork).
         let ty = self.cons_fork(vec![q_ty, r_ty])?;
         let formula = if ned {
             let toss_tag = term_to_noun(self.slab, "toss");
-            let toss = T(self.slab, &[toss_tag, cond_formula]);
-            T(self.slab, &[D(11), toss, fol])
+            let cond_noun = self.formula_materialize(cond_formula);
+            let toss = T(self.slab, &[toss_tag, cond_noun]);
+            let space = self.slab.noun_space();
+            self.formula_arena.hint(toss, fol, &space)
         } else {
             fol
         };
@@ -4553,7 +4983,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // busk is native now (C-final.2): the subject threads through as a shared
         // native Rc inside the new %face — no lowering.
         let busked = self.busk(sut, p);
@@ -4567,7 +4997,7 @@ impl<'a> Ut<'a> {
         self.cache_hoon_ast_for_node(gen);
         let pair = T(self.slab, &[gen_noun, D(0)]);
         let tool = T(self.slab, &[D(0), pair]);
-        let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+        let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         cons_face(&mut self.cx, tool_leaf, sut)
     }
 
@@ -4576,7 +5006,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         gol: NRc<NTy>,
         list: &[Hoon],
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let lowered = Self::lower_wtpm(list);
         self.mint(sut, gol, &lowered)
     }
@@ -4586,7 +5016,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         gol: NRc<NTy>,
         list: &[Hoon],
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let lowered = Self::lower_wtbr(list);
         self.mint(sut, gol, &lowered)
     }
@@ -4598,7 +5028,7 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         q: &Hoon,
         r: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let expanded = expand_wutpat(wing, q, r);
         self.mint(sut, gol, &expanded)
     }
@@ -4610,7 +5040,7 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         q: &Hoon,
         r: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let expanded = expand_wutsig(wing, q, r);
         self.mint(sut, gol, &expanded)
     }
@@ -4621,7 +5051,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Match hoon-138 open() lowering: wtgl -> wtcl(p, zpzp, q)
         let expanded = Hoon::WutCol(
             Box::new((*p).clone()),
@@ -4637,7 +5067,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Match hoon-138 open() lowering: wtgr -> wtcl(p, q, zpzp)
         let expanded = Hoon::WutCol(
             Box::new((*p).clone()),
@@ -4653,7 +5083,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         wing: &WingType,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // play + find are native (C-final.2 / C9). fish takes a native type directly.
         let ref_type = self.play(sut.clone(), p)?;
         let port = self.find(sut.clone(), Way::Read, wing)?;
@@ -4661,14 +5091,14 @@ impl<'a> Ut<'a> {
             // Match hoon-138 `%fits`: when `find` returns a leg, fish directly at that axis
             // rather than composing through `%7`.
             Port::Palo(palo) if matches!(palo.opal, Opal::Leg(_)) => {
-                let axis = tend(&palo.vein)?;
+                let axis = tend_big(&palo.vein)?;
                 self.type_test_formula_on_axis(ref_type.clone(), axis)?
             }
             _ => {
                 let (_ty, base_formula) = self.fine(&port)?;
-                let test = self.type_test_formula_on_axis(ref_type.clone(), 1)?;
+                let test = self.type_test_formula_on_axis(ref_type.clone(), 1u64)?;
                 // hoon-138 emits an explicit `%7` in this branch.
-                T(self.slab, &[D(7), base_formula, test])
+                self.formula_op(7, &[base_formula, test])
             }
         };
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
@@ -4682,14 +5112,14 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         skin: &Skin,
         wing: &WingType,
-    ) -> Result<(NRc<NTy>, Noun)> {
-        // fend is native (C9). skin_match_static + skin_test_formula stay noun
-        // (skin family): lower the hit type + the subject for them.
+    ) -> Result<(NRc<NTy>, FormulaId)> {
+        // fend is native (C9). The skin family still inspects noun-encoded
+        // types, but both static and dynamic tests produce formula handles.
         let (hit_ty, axis) = self.fend(sut.clone(), Way::Read, wing)?;
         let hit_ty = live_to_noun(&mut self.cx, &hit_ty, self.slab);
         let static_match = self.skin_match_static(hit_ty, skin)?;
         let formula = if let Some(matches) = static_match {
-            const_bool_formula(self.slab, matches)
+            self.formula_quote(D(if matches { 0 } else { 1 }))
         } else {
             let sut_noun = live_to_noun(&mut self.cx, &sut, self.slab);
             self.skin_test_formula(sut_noun, axis, skin)?
@@ -4761,8 +5191,8 @@ impl<'a> Ut<'a> {
         let cell_ty = ty_cell(self.slab, cell_head, cell_tail);
         let known_cell = self.nest_noun(cell_ty, ty)?;
 
-        let head_ty = self.peek_noun(ty, Way::Free, 2)?;
-        let tail_ty = self.peek_noun(ty, Way::Free, 3)?;
+        let head_ty = self.peek_noun(ty, Way::Free, 2u64)?;
+        let tail_ty = self.peek_noun(ty, Way::Free, 3u64)?;
         let head_match = self.skin_match_static(head_ty, head)?;
         let tail_match = self.skin_match_static(tail_ty, tail)?;
 
@@ -4809,90 +5239,99 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         spec: &Spec,
         wing: &WingType,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // hoon-138 mint expansion:
         //   [%wtts p=spec q=wing] => [%fits ~(example ax p) q]
         let example = self.spec_example_cached(spec);
         self.mint_fits(sut, gol, example.as_ref(), wing)
     }
 
-    fn base_test_formula(&mut self, base: &BaseType, slot: Noun) -> Result<Noun> {
+    fn base_test_formula(&mut self, base: &BaseType, slot: FormulaId) -> Result<FormulaId> {
         match base {
-            BaseType::NounExpr => Ok(const_bool_formula(self.slab, true)),
-            BaseType::Void => Ok(const_bool_formula(self.slab, false)),
-            BaseType::Cell => Ok(T(self.slab, &[D(3), slot])),
+            BaseType::NounExpr => Ok(self.formula_quote(D(0))),
+            BaseType::Void => Ok(self.formula_quote(D(1))),
+            BaseType::Cell => Ok(self.formula_op(3, &[slot])),
             BaseType::Atom(_) => {
-                let test = T(self.slab, &[D(3), slot]);
-                let false_formula = const_bool_formula(self.slab, false);
-                let true_formula = const_bool_formula(self.slab, true);
-                cond(self.slab, test, false_formula, true_formula)
+                let test = self.formula_op(3, &[slot]);
+                let false_formula = self.formula_quote(D(1));
+                let true_formula = self.formula_quote(D(0));
+                Ok(self.formula_cond(test, false_formula, true_formula))
             }
             BaseType::Null => {
-                let zero = T(self.slab, &[D(1), D(0)]);
-                Ok(T(self.slab, &[D(5), zero, slot]))
+                let zero = self.formula_quote(D(0));
+                Ok(self.formula_op(5, &[zero, slot]))
             }
             BaseType::Flag => {
-                let zero = T(self.slab, &[D(1), D(0)]);
-                let one = T(self.slab, &[D(1), D(1)]);
-                let eq_zero = T(self.slab, &[D(5), slot, zero]);
-                let eq_one = T(self.slab, &[D(5), slot, one]);
+                let zero = self.formula_quote(D(0));
+                let one = self.formula_quote(D(1));
+                let eq_zero = self.formula_op(5, &[slot, zero]);
+                let eq_one = self.formula_op(5, &[slot, one]);
                 let atom_test = self.base_test_formula(&BaseType::Atom("$".to_string()), slot)?;
-                let flag_value_test = flor_formula(self.slab, eq_zero, eq_one)?;
-                flan_formula(self.slab, atom_test, flag_value_test)
+                let flag_value_test = self.formula_flor(eq_zero, eq_one);
+                Ok(self.formula_flan(atom_test, flag_value_test))
             }
         }
     }
 
-    fn type_test_formula_on_axis(&mut self, typ: NRc<NTy>, axis: u64) -> Result<Noun> {
-        // ATOMIC FLIP (consumer C7): fish reads the native type enum. The RETURN
-        // is a NOCK FORMULA (noun), not a type. C-final.4: the fish boundary cache
+    fn type_test_formula_on_axis<A: Into<BigUint>>(
+        &mut self,
+        typ: NRc<NTy>,
+        axis: A,
+    ) -> Result<FormulaId> {
+        // ATOMIC FLIP (consumer C7): fish reads the native type enum. The return
+        // is a formula handle, not a type. C-final.4: the fish boundary cache
         // is native-re-keyed on the interned `Rc` pointer of `typ`, so the
         // deepening subject is no longer lowered to a noun here. Deepening children
         // stay native; leaf-carried parts (atom value, coil via repo) lowered.
-        if let Some(cached) = self.fish_boundary_lookup(&typ, axis)? {
+        let axis = axis.into();
+        if let Some(cached) = self.fish_boundary_lookup(&typ, &axis)? {
             return Ok(cached);
         }
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
-        let result = self.type_test_formula_on_axis_inner(typ.clone(), axis, &mut seen_holds)?;
-        self.fish_boundary_store(&typ, axis, result)?;
+        let result =
+            self.type_test_formula_on_axis_inner(typ.clone(), axis.clone(), &mut seen_holds)?;
+        self.fish_boundary_store(&typ, &axis, result)?;
         Ok(result)
     }
 
     fn type_test_formula_on_axis_inner(
         &mut self,
         typ: NRc<NTy>,
-        axis: u64,
+        axis: BigUint,
         seen_holds: &mut Vec<NRc<NTy>>,
-    ) -> Result<Noun> {
+    ) -> Result<FormulaId> {
         match &*typ {
-            NTy::Void => Ok(const_bool_formula(self.slab, false)),
-            NTy::Noun => Ok(const_bool_formula(self.slab, true)),
+            NTy::Void => Ok(self.formula_quote(D(1))),
+            NTy::Noun => Ok(self.formula_quote(D(0))),
             NTy::Atom { .. } => {
                 // The atom value is a (small) carried leaf; lower the whole type
                 // and decode via the existing noun helper.
                 let typ_noun = live_to_noun(&mut self.cx, &typ, self.slab);
                 let (_aura, value) = type_atom_parts(typ_noun, &self.slab.noun_space())?;
-                let slot = slot_formula_axis(self.slab, axis);
+                let slot = self.formula_slot(axis);
                 if let Some(value) = value {
-                    let const_value = T(self.slab, &[D(1), value]);
-                    Ok(T(self.slab, &[D(5), const_value, slot]))
+                    let const_value = self.formula_quote(value);
+                    Ok(self.formula_op(5, &[const_value, slot]))
                 } else {
                     // Canonical ++fish: unknown atom narrows via flip([3 [0 axis]]).
-                    let is_cell = T(self.slab, &[D(3), slot]);
-                    flip_formula(self.slab, is_cell)
+                    let is_cell = self.formula_op(3, &[slot]);
+                    Ok(self.formula_flip(is_cell))
                 }
             }
             NTy::Cell(head, tail) => {
                 let head = head.clone();
                 let tail = tail.clone();
-                let slot = slot_formula_axis(self.slab, axis);
-                let is_cell = T(self.slab, &[D(3), slot]);
-                let head_formula =
-                    self.type_test_formula_on_axis_inner(head, peg_axis(axis, 2)?, seen_holds)?;
+                let slot = self.formula_slot(axis.clone());
+                let is_cell = self.formula_op(3, &[slot]);
+                let head_formula = self.type_test_formula_on_axis_inner(
+                    head,
+                    peg_axis_big(axis.clone(), 2)?,
+                    seen_holds,
+                )?;
                 let tail_formula =
-                    self.type_test_formula_on_axis_inner(tail, peg_axis(axis, 3)?, seen_holds)?;
-                let both = flan_formula(self.slab, head_formula, tail_formula)?;
-                flan_formula(self.slab, is_cell, both)
+                    self.type_test_formula_on_axis_inner(tail, peg_axis_big(axis, 3)?, seen_holds)?;
+                let both = self.formula_flan(head_formula, tail_formula);
+                Ok(self.formula_flan(is_cell, both))
             }
             NTy::Core { .. } => Err(CompilerError::Noun("fish-core".to_string())),
             NTy::Face { inner, .. } => {
@@ -4922,50 +5361,50 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn skin_test_formula(&mut self, sut: Noun, axis: u64, skin: &Skin) -> Result<Noun> {
-        let ref_type = self.peek_noun(sut, Way::Free, axis)?;
+    fn skin_test_formula(&mut self, sut: Noun, axis: BigUint, skin: &Skin) -> Result<FormulaId> {
+        let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
         if let Some(matches) = self.skin_match_static(ref_type, skin)? {
-            return Ok(const_bool_formula(self.slab, matches));
+            return Ok(self.formula_quote(D(if matches { 0 } else { 1 })));
         }
 
-        let slot = slot_formula_axis(self.slab, axis);
+        let slot = self.formula_slot(axis.clone());
         match skin {
             Skin::Base(BaseType::Flag) => {
                 let atom_skin = Skin::Base(BaseType::Atom("$".to_string()));
-                let atom_test = self.skin_test_formula(sut, axis, &atom_skin)?;
-                let zero = T(self.slab, &[D(1), D(0)]);
-                let one = T(self.slab, &[D(1), D(1)]);
-                let eq_zero = T(self.slab, &[D(5), slot, zero]);
-                let eq_one = T(self.slab, &[D(5), slot, one]);
-                let flag_value_test = flor_formula(self.slab, eq_zero, eq_one)?;
-                flan_formula(self.slab, atom_test, flag_value_test)
+                let atom_test = self.skin_test_formula(sut, axis.clone(), &atom_skin)?;
+                let zero = self.formula_quote(D(0));
+                let one = self.formula_quote(D(1));
+                let eq_zero = self.formula_op(5, &[slot, zero]);
+                let eq_one = self.formula_op(5, &[slot, one]);
+                let flag_value_test = self.formula_flor(eq_zero, eq_one);
+                Ok(self.formula_flan(atom_test, flag_value_test))
             }
             Skin::Base(base) => self.base_test_formula(base, slot),
             Skin::Leaf(_aura, atom) => {
                 let value = parsed_atom_to_noun(self.slab, atom);
-                let const_val = T(self.slab, &[D(1), value]);
-                Ok(T(self.slab, &[D(5), const_val, slot]))
+                let const_val = self.formula_quote(value);
+                Ok(self.formula_op(5, &[const_val, slot]))
             }
             Skin::Cell(head, tail) => {
-                let is_cell = T(self.slab, &[D(3), slot]);
-                let head_axis = peg_axis(axis, 2)?;
-                let tail_axis = peg_axis(axis, 3)?;
+                let is_cell = self.formula_op(3, &[slot]);
+                let head_axis = peg_axis_big(axis.clone(), 2)?;
+                let tail_axis = peg_axis_big(axis, 3)?;
                 let head_test = self.skin_test_formula(sut, head_axis, head)?;
                 let tail_test = self.skin_test_formula(sut, tail_axis, tail)?;
-                let both = and_formula(self.slab, head_test, tail_test)?;
-                let false_formula = const_bool_formula(self.slab, false);
-                cond(self.slab, is_cell, both, false_formula)
+                let both = self.formula_arena.and(head_test, tail_test);
+                let false_formula = self.formula_quote(D(1));
+                Ok(self.formula_cond(is_cell, both, false_formula))
             }
             Skin::Dbug(_, inner) => self.skin_test_formula(sut, axis, inner),
             Skin::Help(_, inner) => self.skin_test_formula(sut, axis, inner),
             Skin::Name(_, inner) => self.skin_test_formula(sut, axis, inner),
             Skin::Over(wing, inner) => {
                 let rel_axis = self.resolve_wing_axis_noun(sut, wing)?;
-                let axis = peg_axis(axis, rel_axis)?;
+                let axis = peg_axis_big_pair(axis, &rel_axis)?;
                 self.skin_test_formula(sut, axis, inner)
             }
             Skin::Spec(spec, inner) => {
-                let ref_type = self.peek_noun(sut, Way::Free, axis)?;
+                let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
                 let example = self.spec_example_cached(spec);
                 let hit = self.play_noun(sut, example.as_ref())?;
                 if !self.nest_noun(hit, ref_type)? {
@@ -4973,7 +5412,7 @@ impl<'a> Ut<'a> {
                 }
                 self.skin_test_formula(sut, axis, inner)
             }
-            Skin::Wash(_) => Ok(const_bool_formula(self.slab, true)),
+            Skin::Wash(_) => Ok(self.formula_quote(D(0))),
             Skin::Term(name) => {
                 // Canonical `ar` treats an atomic skin as a `%spec` skin whose
                 // spec is a like-reference to that term and whose inner skin is
@@ -4993,15 +5432,16 @@ impl<'a> Ut<'a> {
     fn type_test_formula_on_axis_fork(
         &mut self,
         options: &[NRc<NTy>],
-        axis: u64,
+        axis: BigUint,
         seen_holds: &mut Vec<NRc<NTy>>,
-    ) -> Result<Noun> {
+    ) -> Result<FormulaId> {
         let Some((head, tail)) = options.split_first() else {
-            return Ok(const_bool_formula(self.slab, false));
+            return Ok(self.formula_quote(D(1)));
         };
-        let head_formula = self.type_test_formula_on_axis_inner(head.clone(), axis, seen_holds)?;
+        let head_formula =
+            self.type_test_formula_on_axis_inner(head.clone(), axis.clone(), seen_holds)?;
         let tail_formula = self.type_test_formula_on_axis_fork(tail, axis, seen_holds)?;
-        flor_formula(self.slab, head_formula, tail_formula)
+        Ok(self.formula_flor(head_formula, tail_formula))
     }
 
     fn mint_wtls(
@@ -5011,7 +5451,7 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         default: &Hoon,
         list: &[(Spec, Hoon)],
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Match hoon-138 open() lowering:
         //   [%wtls p=wing q=default r=list] => [%wthp p (weld r [[[%base %noun] q] ~])]
         let expanded = expand_wutlus(wing, default, list);
@@ -5025,7 +5465,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         wing: &WingType,
         list: &[(Spec, Hoon)],
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Match hoon-138 open() lowering:
         //   ?~ q.gen [%lost [%wing p.gen]] :^ %wtcl [%wtts p.i.q.gen p.gen] q.i.q.gen $(q.gen t.q.gen)
         let expanded = expand_wuthep(wing, list);
@@ -5038,7 +5478,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let played = self.play(sut.clone(), p)?;
         let hif = self.nice(sut.clone(), gol, played)?;
         let (_q_ty, q_formula) = self.mint(sut, hif.clone(), q)?;
@@ -5051,7 +5491,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         spec: &Spec,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Canonical hoon-138 open() lowering:
         //   [%kthp p q] => [%ktls ~(example ax p) q]
         let example = self.spec_example_cached(spec);
@@ -5061,23 +5501,43 @@ impl<'a> Ut<'a> {
         Ok((hif, q_formula))
     }
 
-    fn mint_kttr(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, spec: &Spec) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_kttr(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        spec: &Spec,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Canonical hoon-138 open() lowering:
         //   [%kttr p] => [%ktsg ~(example ax p)]
         let example = self.spec_example_cached(spec);
         self.mint_ktsg(sut, gol, example.as_ref())
     }
 
-    fn mint_ktcl(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, spec: &Spec) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_ktcl(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        spec: &Spec,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let opened = self.spec_factory_open_cached(spec);
         self.mint(sut, gol, opened.as_ref())
     }
 
-    fn mint_ktsg(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_ktsg(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         self.blow_ktsg(sut, gol, p)
     }
 
-    fn blow_ktsg(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn blow_ktsg(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        gen: &Hoon,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Canonical hoon-138:
         //   pro=(mint gol gen)
         //   jon=(apex:musk bran q.pro)
@@ -5087,91 +5547,48 @@ impl<'a> Ut<'a> {
         // bran_canonical_semi is native (Phase-2 tail): thread the native subject
         // directly — no `live_to_noun` of the deepening subject.
         let bran = self.bran_canonical_semi(sut)?;
-        let fold_key = (self.noun_mug_cached(bran), self.noun_mug_cached(formula));
-        if let Some(entries) = self.ktsg_fold_cache.get(&fold_key) {
-            let entries: Vec<KtsgFoldCacheEntry> = entries.iter().copied().collect();
-            for entry in entries.into_iter().rev() {
-                let space = self.slab.noun_space();
-                let hit = (unsafe { entry.bran.raw_equals(&bran) }
-                    || noun_eq(entry.bran, bran, &space)?)
-                    && (unsafe { entry.formula.raw_equals(&formula) }
-                        || noun_eq(entry.formula, formula, &space)?);
-                if hit {
-                    return Ok(match entry.result {
-                        Some(noun) => (ty, T(self.slab, &[D(1), noun])),
-                        None => (ty, formula),
-                    });
-                }
-            }
+        let fold_key = (bran, formula);
+        if let Some(cached) = self.ktsg_fold_cache.get(&fold_key).copied() {
+            return Ok(match cached {
+                Some(noun) => (ty, self.formula_quote(noun)),
+                None => (ty, formula),
+            });
         }
-        let jon = self.musk_apex_output(bran, formula)?;
+        let formula_noun = self.formula_materialize(formula);
+        let jon = self.musk_apex_output(bran, formula_noun)?;
         let collapsed = match jon {
             MuskOutput::Done(noun) => Some(noun),
             MuskOutput::Stop | MuskOutput::Wait => None,
         };
-        self.ktsg_fold_cache_store(fold_key, bran, formula, collapsed);
+        self.ktsg_fold_cache.insert(fold_key, collapsed);
         if let Some(noun) = collapsed {
-            return Ok((ty, T(self.slab, &[D(1), noun])));
+            return Ok((ty, self.formula_quote(noun)));
         }
         Ok((ty, formula))
     }
 
-    fn ktsg_fold_cache_store(
-        &mut self,
-        key: (u32, u32),
-        bran: Noun,
-        formula: Noun,
-        result: Option<Noun>,
-    ) {
-        let bucket = self
-            .ktsg_fold_cache
-            .ensure_key(key, Self::MUSK_MACK_CACHE_KEY_LIMIT);
-        if bucket.len() >= Self::MUSK_MACK_CACHE_BUCKET_LIMIT {
-            bucket.pop_front();
-        }
-        bucket.push_back(KtsgFoldCacheEntry {
-            bran,
-            formula,
-            result,
-        });
+    #[inline]
+    fn value_import(&mut self, noun: Noun) -> ValueId {
+        let space = self.slab.noun_space();
+        self.value_arena
+            .import(noun, &space)
+            .expect("compiler-generated seminoun data must be a valid noun")
     }
 
-    fn semi_mask_full(&mut self, blocks: Noun) -> Noun {
-        if noun_is_zero(blocks) {
-            return self.semi_mask_full_empty_interned();
-        }
-        T(self.slab, &[D(SEMI_TAG_FULL), blocks])
+    #[inline]
+    fn semi_full_complete(&mut self, data: Noun) -> SemiId {
+        let value = self.value_import(data);
+        self.semi_arena.complete(value)
     }
 
-    fn semi_mask_half(&mut self, left: Noun, right: Noun) -> Noun {
-        T(self.slab, &[D(SEMI_TAG_HALF), left, right])
+    #[inline]
+    fn semi_full_complete_with_id(&mut self, value: ValueId) -> SemiId {
+        self.semi_arena.complete(value)
     }
 
-    fn semi_mask_lazy(&mut self, fragment: u64, resolve: Noun) -> Noun {
-        let frag = noun_u64(self.slab, fragment);
-        T(self.slab, &[D(SEMI_TAG_LAZY), frag, resolve])
-    }
-
-    fn semi_make(&mut self, mask: Noun, data: Noun) -> Noun {
-        T(self.slab, &[mask, data])
-    }
-
-    /// The `[%full ~]` mask and the fully-blocked seminoun are by far the
-    /// most constructed nouns on musk's evaluation path; intern one copy of
-    /// each per Ut. Nouns are immutable, so sharing is sound, and the stable
-    /// identities improve raw-pointer memo hit rates.
-    fn semi_mask_full_empty_interned(&mut self) -> Noun {
-        if let Some(mask) = self.semi_mask_full_empty {
-            return mask;
-        }
-        let mask = T(self.slab, &[D(SEMI_TAG_FULL), D(0)]);
-        self.semi_mask_full_empty = Some(mask);
-        mask
-    }
-
-    fn semi_full_complete(&mut self, data: Noun) -> Noun {
-        let mask = self.semi_mask_full_empty_interned();
-        self.semi_make(mask, data)
+    #[inline]
+    fn semi_full_blocked(&mut self) -> SemiId {
+        self.semi_arena.blocked()
     }
 
     fn semi_blocks_root_blocked(&mut self) -> Noun {
@@ -5183,23 +5600,29 @@ impl<'a> Ut<'a> {
         blocks
     }
 
-    fn semi_full_blocked(&mut self) -> Noun {
+    fn semi_noun_blocked_encoded(&mut self) -> Noun {
         // hoon-138 `*seminoun` and `++complete` use the singleton root
         // block set `[~ ~ ~]` for a fully blocked noun.
         if let Some(semi) = self.semi_full_blocked_interned {
             return semi;
         }
         let blocks = self.semi_blocks_root_blocked();
-        let mask = self.semi_mask_full(blocks);
+        let mask = T(self.slab, &[D(SEMI_TAG_FULL), blocks]);
         let semi = self.semi_make(mask, D(0));
         self.semi_full_blocked_interned = Some(semi);
         semi
     }
 
-    fn semi_lazy_root(&mut self, resolver_id: u64) -> Noun {
+    fn semi_noun_lazy_root(&mut self, resolver_id: u64) -> Noun {
         let resolve = noun_u64(self.slab, resolver_id);
-        let mask = self.semi_mask_lazy(1, resolve);
+        let frag = noun_biguint(self.slab, BigUint::from(1u32));
+        let mask = T(self.slab, &[D(SEMI_TAG_LAZY), frag, resolve]);
         self.semi_make(mask, D(0))
+    }
+
+    #[inline]
+    fn semi_make(&mut self, mask: Noun, data: Noun) -> Noun {
+        T(self.slab, &[mask, data])
     }
 
     fn lazy_resolver_new_id(&mut self) -> u64 {
@@ -5232,7 +5655,7 @@ impl<'a> Ut<'a> {
             Poly::Dry => 0u8,
             Poly::Wet => 1u8,
         };
-        let key = (NRc::as_ptr(sut) as usize, tomes_sig, poly_key);
+        let key = (native_type_id_usize(sut), tomes_sig, poly_key);
         if let Some(&id) = self.lazy_resolver_canonical_ids.get(&key) {
             return id;
         }
@@ -5246,7 +5669,7 @@ impl<'a> Ut<'a> {
         resolver_id: u64,
         core_type: NRc<NTy>,
         poly: Poly,
-        arms_by_axis: HashMap<u64, LazyResolverArmEntry>,
+        arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
     ) {
         // Lazy resolvers live for the whole compile and are resolved on demand
         // (re-minting an arm against `core_type`), including CROSS-ARM: another
@@ -5268,19 +5691,19 @@ impl<'a> Ut<'a> {
     fn lazy_resolver_resolve_axis(
         &mut self,
         resolver_id: u64,
-        fragment: u64,
-    ) -> Result<Option<Noun>> {
+        fragment: &BigUint,
+    ) -> Result<Option<FormulaId>> {
         // hoon-138 `++laze`: the resolver answers exact arm axes only
         // (`(~(get by tal) axe)`); any other fragment — including 1, the
         // whole battery — produces `~` and the caller treats it as blocked.
         // Completed cores never reach here: `mint_core` stores a
         // materialized `[[%full ~] battery]` semi in the result type.
         if let Some(ctx) = self.lazy_resolvers.get(&resolver_id) {
-            if let Some(cached) = ctx.cached_formula_by_axis.get(&fragment) {
+            if let Some(cached) = ctx.cached_formula_by_axis.get(fragment) {
                 return Ok(Some(*cached));
             }
-            if ctx.arms_by_axis.contains_key(&fragment) {
-                return self.lazy_resolver_compile_arm(resolver_id, fragment);
+            if ctx.arms_by_axis.contains_key(fragment) {
+                return self.lazy_resolver_compile_arm(resolver_id, fragment.clone());
             }
         }
         Ok(None)
@@ -5289,8 +5712,8 @@ impl<'a> Ut<'a> {
     fn lazy_resolver_compile_arm(
         &mut self,
         resolver_id: u64,
-        fragment: u64,
-    ) -> Result<Option<Noun>> {
+        fragment: BigUint,
+    ) -> Result<Option<FormulaId>> {
         let Some((core_type, poly, arm_entry)) = ({
             let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) else {
                 return Ok(None);
@@ -5298,7 +5721,7 @@ impl<'a> Ut<'a> {
             if let Some(cached) = ctx.cached_formula_by_axis.get(&fragment) {
                 return Ok(Some(*cached));
             }
-            if !ctx.in_progress_axes.insert(fragment) {
+            if !ctx.in_progress_axes.insert(fragment.clone()) {
                 return Ok(None);
             }
             Some((
@@ -5370,417 +5793,346 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn semi_parts(&mut self, semi: Noun) -> Result<(Noun, Noun)> {
-        let space = self.slab.noun_space();
-        let cell = semi
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("seminoun not cell: {err}")))?;
-        Ok((cell.head().noun(), cell.tail().noun()))
-    }
-
-    fn semi_mask_tag(&mut self, mask: Noun) -> Result<SemiTag> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi mask not cell: {err}")))?;
-        let atom = cell
-            .head()
-            .as_atom()
-            .map_err(|err| CompilerError::Decode(format!("semi mask tag not atom: {err}")))?;
-        Ok(match atom.as_u64() {
-            Ok(SEMI_TAG_FULL) => SemiTag::Full,
-            Ok(SEMI_TAG_HALF) => SemiTag::Half,
-            Ok(SEMI_TAG_LAZY) => SemiTag::Lazy,
-            _ => SemiTag::Other,
-        })
-    }
-
-    fn semi_mask_full_blocks(&mut self, mask: Noun) -> Result<Noun> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi full mask not cell: {err}")))?;
-        Ok(cell.tail().noun())
-    }
-
-    fn semi_mask_half_parts(&mut self, mask: Noun) -> Result<(Noun, Noun)> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi half mask not cell: {err}")))?;
-        let tail = cell
-            .tail()
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi half mask tail not cell: {err}")))?;
-        Ok((tail.head().noun(), tail.tail().noun()))
-    }
-
-    fn semi_mask_lazy_parts(&mut self, mask: Noun) -> Result<(u64, Noun)> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy mask not cell: {err}")))?;
-        let tail = cell
-            .tail()
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy mask tail not cell: {err}")))?;
-        let fragment = tail
-            .head()
-            .as_atom()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy fragment not atom: {err}")))?;
-        let fragment = fragment
-            .as_u64()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy fragment decode: {err}")))?;
-        Ok((fragment, tail.tail().noun()))
-    }
-
-    fn semi_blocks_union_coarse(&mut self, left: Noun, right: Noun) -> Noun {
-        if noun_is_zero(left) && noun_is_zero(right) {
-            D(0)
-        } else {
-            self.semi_blocks_root_blocked()
+    fn semi_import_noun(&mut self, semi: Noun) -> Result<SemiId> {
+        let raw = unsafe { semi.as_raw() };
+        if let Some(id) = self.semi_arena.raw_lookup(raw) {
+            return Ok(id);
         }
+        let (mask, data) = {
+            let space = self.slab.noun_space();
+            let cell = semi
+                .in_space(&space)
+                .as_cell()
+                .map_err(|err| CompilerError::Decode(format!("seminoun not cell: {err}")))?;
+            (cell.head().noun(), cell.tail().noun())
+        };
+        let id = self.semi_import_parts(mask, data)?;
+        self.semi_arena.raw_register(raw, id);
+        Ok(id)
     }
 
-    fn semi_combine(&mut self, hed: Noun, tal: Noun) -> Result<Noun> {
-        let (hed_mask, hed_data) = self.semi_parts(hed)?;
-        let (tal_mask, tal_data) = self.semi_parts(tal)?;
-        let hed_tag = self.semi_mask_tag(hed_mask)?;
-        let tal_tag = self.semi_mask_tag(tal_mask)?;
-        if hed_tag == SemiTag::Full && tal_tag == SemiTag::Full {
-            let hed_blocks = self.semi_mask_full_blocks(hed_mask)?;
-            let tal_blocks = self.semi_mask_full_blocks(tal_mask)?;
-            let hed_empty = noun_is_zero(hed_blocks);
-            let tal_empty = noun_is_zero(tal_blocks);
-            if hed_empty == tal_empty {
-                if hed_empty {
-                    let data = T(self.slab, &[hed_data, tal_data]);
-                    return Ok(self.semi_full_complete(data));
+    fn semi_import_parts(&mut self, mask: Noun, data: Noun) -> Result<SemiId> {
+        let (tag, tail) = {
+            let space = self.slab.noun_space();
+            let mask_cell = mask
+                .in_space(&space)
+                .as_cell()
+                .map_err(|err| CompilerError::Decode(format!("semi mask not cell: {err}")))?;
+            let tag = mask_cell
+                .head()
+                .as_atom()
+                .ok()
+                .and_then(|atom| atom.as_u64().ok());
+            (tag, mask_cell.tail().noun())
+        };
+        match tag {
+            Some(SEMI_TAG_FULL) => {
+                if noun_is_zero(tail) {
+                    Ok(self.semi_full_complete(data))
+                } else {
+                    Ok(self.semi_full_blocked())
                 }
-                let blocks = self.semi_blocks_union_coarse(hed_blocks, tal_blocks);
-                let mask = self.semi_mask_full(blocks);
-                return Ok(self.semi_make(mask, D(0)));
             }
-        }
-        let mask = self.semi_mask_half(hed_mask, tal_mask);
-        let data = T(self.slab, &[hed_data, tal_data]);
-        Ok(self.semi_make(mask, data))
-    }
-
-    fn semi_squash_mask(&mut self, mask: Noun) -> Result<Noun> {
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Full => self.semi_mask_full_blocks(mask),
-            SemiTag::Half => {
-                let (left, right) = self.semi_mask_half_parts(mask)?;
-                let left_blocks = self.semi_squash_mask(left)?;
-                let right_blocks = self.semi_squash_mask(right)?;
-                Ok(self.semi_blocks_union_coarse(left_blocks, right_blocks))
-            }
-            SemiTag::Lazy => {
-                let lazy_bus = self.semi_make(mask, D(0));
-                let completed = self.semi_complete(lazy_bus)?;
-                let (next_mask, _next_data) = self.semi_parts(completed)?;
-                self.semi_squash_mask(next_mask)
-            }
-            _ => Ok(self.semi_blocks_root_blocked()),
-        }
-    }
-
-    fn semi_complete(&mut self, bus: Noun) -> Result<Noun> {
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Full => Ok(bus),
-            SemiTag::Lazy => {
-                let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                // hoon-138 `++complete`: "fragment 1 is the whole thing;
-                // blocked; we can't get fragment 1 while compiling it."
-                if fragment == 1 {
-                    return Ok(self.semi_full_blocked());
-                }
-                let resolver_id = {
+            Some(SEMI_TAG_HALF) => {
+                let (left_mask, right_mask, head_data, tail_data) = {
                     let space = self.slab.noun_space();
-                    match resolve
-                        .in_space(&space)
-                        .as_atom()
-                        .and_then(|atom| atom.as_u64())
-                    {
-                        Ok(id) => id,
-                        Err(_) => return Ok(self.semi_full_blocked()),
-                    }
+                    let masks = tail.in_space(&space).as_cell().map_err(|err| {
+                        CompilerError::Decode(format!("semi half mask tail not cell: {err}"))
+                    })?;
+                    let values = data.in_space(&space).as_cell().map_err(|err| {
+                        CompilerError::Decode(format!("semi half data not cell: {err}"))
+                    })?;
+                    (
+                        masks.head().noun(),
+                        masks.tail().noun(),
+                        values.head().noun(),
+                        values.tail().noun(),
+                    )
                 };
-                match self.lazy_resolver_resolve_axis(resolver_id, fragment)? {
-                    Some(value) => Ok(self.semi_full_complete(value)),
-                    None => Ok(self.semi_full_blocked()),
-                }
+                let head = self.semi_import_parts(left_mask, head_data)?;
+                let tail = self.semi_import_parts(right_mask, tail_data)?;
+                self.semi_combine(head, tail)
             }
-            SemiTag::Half => {
-                let (left_mask, right_mask) = self.semi_mask_half_parts(mask)?;
-                let (data_head, data_tail) = {
+            Some(SEMI_TAG_LAZY) => {
+                let (fragment, resolver_id) = {
                     let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(self.semi_full_blocked()),
-                    };
-                    (data_cell.head().noun(), data_cell.tail().noun())
+                    let parts = tail.in_space(&space).as_cell().map_err(|err| {
+                        CompilerError::Decode(format!("semi lazy mask tail not cell: {err}"))
+                    })?;
+                    let fragment = parts.head().as_atom().map_err(|err| {
+                        CompilerError::Decode(format!("semi lazy fragment not atom: {err}"))
+                    })?;
+                    let resolver = parts.tail().as_atom().map_err(|err| {
+                        CompilerError::Decode(format!("semi lazy resolver not atom: {err}"))
+                    })?;
+                    (
+                        noun_axis_atom_to_big(fragment),
+                        resolver.as_u64().map_err(|err| {
+                            CompilerError::Decode(format!("semi lazy resolver not u64: {err}"))
+                        })?,
+                    )
                 };
-                let left = self.semi_make(left_mask, data_head);
-                let right = self.semi_make(right_mask, data_tail);
-                let left = self.semi_complete(left)?;
-                let right = self.semi_complete(right)?;
-                self.semi_combine(left, right)
+                Ok(self.semi_arena.lazy(fragment, resolver_id))
             }
             _ => Ok(self.semi_full_blocked()),
         }
     }
 
-    fn semi_fragment(&mut self, axe: u64, bus: Noun) -> Result<Option<Noun>> {
-        if axe == 1 {
-            return Ok(Some(bus));
-        }
-        if axe == 0 {
-            return Ok(None);
-        }
-        let (now, lat) = axis_cap_mas(axe)?;
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Lazy => {
-                let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                let next_fragment = peg_axis(fragment, axe)?;
-                let next_mask = self.semi_mask_lazy(next_fragment, resolve);
-                Ok(Some(self.semi_make(next_mask, data)))
+    fn semi_combine(&mut self, head: SemiId, tail: SemiId) -> Result<SemiId> {
+        let head_node = self.semi_arena.node(head).clone();
+        let tail_node = self.semi_arena.node(tail).clone();
+        match (head_node, tail_node) {
+            (SemiNode::Complete(head_value), SemiNode::Complete(tail_value)) => {
+                let data = T(
+                    self.slab,
+                    &[self.value_arena.noun(head_value), self.value_arena.noun(tail_value)],
+                );
+                let value = self
+                    .value_arena
+                    .intern_cell_with_noun(data, head_value, tail_value);
+                Ok(self.semi_full_complete_with_id(value))
             }
-            SemiTag::Full => {
-                let blocks = self.semi_mask_full_blocks(mask)?;
-                if !noun_is_zero(blocks) {
-                    return Ok(Some(bus));
-                }
-                let next_data = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        data_cell.head().noun()
-                    } else {
-                        data_cell.tail().noun()
-                    }
-                };
-                let next = self.semi_full_complete(next_data);
-                self.semi_fragment(lat, next)
-            }
-            SemiTag::Half => {
-                let (left_mask, right_mask) = self.semi_mask_half_parts(mask)?;
-                let (next_mask, next_data) = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        (left_mask, data_cell.head().noun())
-                    } else {
-                        (right_mask, data_cell.tail().noun())
-                    }
-                };
-                let next = self.semi_make(next_mask, next_data);
-                self.semi_fragment(lat, next)
-            }
-            _ => Ok(None),
+            (SemiNode::Blocked, SemiNode::Blocked) => Ok(self.semi_full_blocked()),
+            _ => Ok(self.semi_arena.half(head, tail)),
         }
     }
 
-    fn semi_fragment_big(&mut self, axe: &BigUint, bus: Noun) -> Result<Option<Noun>> {
-        if let Ok(small) = u64::try_from(axe) {
+    fn semi_complete(&mut self, bus: SemiId) -> Result<SemiId> {
+        match self.semi_arena.node(bus).clone() {
+            SemiNode::Complete(_) | SemiNode::Blocked => Ok(bus),
+            SemiNode::Lazy {
+                fragment,
+                resolver_id,
+            } => {
+                // hoon-138 `++complete`: fragment 1 is the whole in-progress
+                // battery and therefore cannot be resolved while compiling it.
+                if fragment == BigUint::from(1u32) {
+                    return Ok(self.semi_full_blocked());
+                }
+                match self.lazy_resolver_resolve_axis(resolver_id, &fragment)? {
+                    Some(value) => {
+                        let value = self.formula_materialize(value);
+                        Ok(self.semi_full_complete(value))
+                    }
+                    None => Ok(self.semi_full_blocked()),
+                }
+            }
+            SemiNode::Half { head, tail } => {
+                let head = self.semi_complete(head)?;
+                let tail = self.semi_complete(tail)?;
+                self.semi_combine(head, tail)
+            }
+        }
+    }
+
+    fn semi_fragment(&mut self, axis: u64, bus: SemiId) -> Result<Option<SemiId>> {
+        if axis == 1 {
+            return Ok(Some(bus));
+        }
+        if axis == 0 {
+            return Ok(None);
+        }
+        let (cap, rest) = axis_cap_mas(axis)?;
+        match self.semi_arena.node(bus).clone() {
+            SemiNode::Complete(value) => {
+                let Some((head, tail)) = self.value_arena.children(value) else {
+                    return Ok(None);
+                };
+                let next = if cap == 2 { head } else { tail };
+                let next = self.semi_full_complete_with_id(next);
+                self.semi_fragment(rest, next)
+            }
+            SemiNode::Blocked => Ok(Some(bus)),
+            SemiNode::Half { head, tail } => {
+                self.semi_fragment(rest, if cap == 2 { head } else { tail })
+            }
+            SemiNode::Lazy {
+                fragment,
+                resolver_id,
+            } => {
+                let fragment = peg_axis_big_pair(fragment, &BigUint::from(axis))?;
+                Ok(Some(self.semi_arena.lazy(fragment, resolver_id)))
+            }
+        }
+    }
+
+    fn semi_fragment_big(&mut self, axis: &BigUint, bus: SemiId) -> Result<Option<SemiId>> {
+        if let Ok(small) = u64::try_from(axis) {
             return self.semi_fragment(small, bus);
         }
-        if axe == &BigUint::from(0u32) {
+        if axis == &BigUint::from(0u32) {
             return Ok(None);
         }
-        if axe == &BigUint::from(1u32) {
+        if axis == &BigUint::from(1u32) {
             return Ok(Some(bus));
         }
-        let (now, lat) = axis_big_cap_mas(axe)?;
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Lazy => {
-                let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                let next_fragment = peg_axis_big_pair(BigUint::from(fragment), axe)?;
-                if let Ok(next_fragment) = u64::try_from(&next_fragment) {
-                    let next_mask = self.semi_mask_lazy(next_fragment, resolve);
-                    Ok(Some(self.semi_make(next_mask, data)))
-                } else {
-                    // Canonical `++laze` maps only declared battery axes.  A
-                    // virtual fragment outside the native axis range cannot be
-                    // resolved by the native arm map, so preserve the partial
-                    // interpreter contract by treating it as blocked rather
-                    // than as a malformed formula.
-                    Ok(Some(self.semi_full_blocked()))
-                }
-            }
-            SemiTag::Full => {
-                let blocks = self.semi_mask_full_blocks(mask)?;
-                if !noun_is_zero(blocks) {
-                    return Ok(Some(bus));
-                }
-                let next_data = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        data_cell.head().noun()
-                    } else {
-                        data_cell.tail().noun()
-                    }
+        let (cap, rest) = axis_big_cap_mas(axis)?;
+        match self.semi_arena.node(bus).clone() {
+            SemiNode::Complete(value) => {
+                let Some((head, tail)) = self.value_arena.children(value) else {
+                    return Ok(None);
                 };
-                let next = self.semi_full_complete(next_data);
-                self.semi_fragment_big(&lat, next)
+                let next = if cap == 2 { head } else { tail };
+                let next = self.semi_full_complete_with_id(next);
+                self.semi_fragment_big(&rest, next)
             }
-            SemiTag::Half => {
-                let (left_mask, right_mask) = self.semi_mask_half_parts(mask)?;
-                let (next_mask, next_data) = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        (left_mask, data_cell.head().noun())
-                    } else {
-                        (right_mask, data_cell.tail().noun())
-                    }
-                };
-                let next = self.semi_make(next_mask, next_data);
-                self.semi_fragment_big(&lat, next)
+            SemiNode::Blocked => Ok(Some(bus)),
+            SemiNode::Half { head, tail } => {
+                self.semi_fragment_big(&rest, if cap == 2 { head } else { tail })
             }
-            _ => Ok(None),
+            SemiNode::Lazy {
+                fragment,
+                resolver_id,
+            } => {
+                let fragment = peg_axis_big_pair(fragment, axis)?;
+                Ok(Some(self.semi_arena.lazy(fragment, resolver_id)))
+            }
         }
     }
 
-    fn semi_mutate(&mut self, axe: u64, lit: Noun, big: Noun) -> Result<Option<Noun>> {
-        if axe == 0 {
+    fn semi_mutate(
+        &mut self,
+        axis: u64,
+        replacement: SemiId,
+        target: SemiId,
+    ) -> Result<Option<SemiId>> {
+        if axis == 0 {
             return Ok(None);
         }
-        if axe == 1 {
-            return Ok(Some(lit));
+        if axis == 1 {
+            return Ok(Some(replacement));
         }
-        if axe == 2 {
-            let Some(tal) = self.semi_fragment(3, big)? else {
+        if axis == 2 {
+            let Some(tail) = self.semi_fragment(3, target)? else {
                 return Ok(None);
             };
-            return self.semi_combine(lit, tal).map(Some);
+            return self.semi_combine(replacement, tail).map(Some);
         }
-        if axe == 3 {
-            let Some(hed) = self.semi_fragment(2, big)? else {
+        if axis == 3 {
+            let Some(head) = self.semi_fragment(2, target)? else {
                 return Ok(None);
             };
-            return self.semi_combine(hed, lit).map(Some);
+            return self.semi_combine(head, replacement).map(Some);
         }
-        let (cap, mor) = axis_cap_mas(axe)?;
-        let Some(hed) = self.semi_fragment(2, big)? else {
+        let (cap, rest) = axis_cap_mas(axis)?;
+        let Some(head) = self.semi_fragment(2, target)? else {
             return Ok(None);
         };
-        let Some(tal) = self.semi_fragment(3, big)? else {
+        let Some(tail) = self.semi_fragment(3, target)? else {
             return Ok(None);
         };
         if cap == 2 {
-            let Some(mutated) = self.semi_mutate(mor, lit, hed)? else {
+            let Some(mutated) = self.semi_mutate(rest, replacement, head)? else {
                 return Ok(None);
             };
-            return self.semi_combine(mutated, tal).map(Some);
+            return self.semi_combine(mutated, tail).map(Some);
         }
-        let Some(mutated) = self.semi_mutate(mor, lit, tal)? else {
+        let Some(mutated) = self.semi_mutate(rest, replacement, tail)? else {
             return Ok(None);
         };
-        self.semi_combine(hed, mutated).map(Some)
+        self.semi_combine(head, mutated).map(Some)
     }
 
-    fn semi_mutate_big(&mut self, axe: &BigUint, lit: Noun, big: Noun) -> Result<Option<Noun>> {
-        if let Ok(small) = u64::try_from(axe) {
-            return self.semi_mutate(small, lit, big);
+    fn semi_mutate_big(
+        &mut self,
+        axis: &BigUint,
+        replacement: SemiId,
+        target: SemiId,
+    ) -> Result<Option<SemiId>> {
+        if let Ok(small) = u64::try_from(axis) {
+            return self.semi_mutate(small, replacement, target);
         }
-        if axe == &BigUint::from(0u32) {
+        if axis == &BigUint::from(0u32) {
             return Ok(None);
         }
-        if axe == &BigUint::from(1u32) {
-            return Ok(Some(lit));
+        if axis == &BigUint::from(1u32) {
+            return Ok(Some(replacement));
         }
-        let (cap, mor) = axis_big_cap_mas(axe)?;
-        let Some(hed) = self.semi_fragment(2, big)? else {
+        let (cap, rest) = axis_big_cap_mas(axis)?;
+        let Some(head) = self.semi_fragment(2, target)? else {
             return Ok(None);
         };
-        let Some(tal) = self.semi_fragment(3, big)? else {
+        let Some(tail) = self.semi_fragment(3, target)? else {
             return Ok(None);
         };
         if cap == 2 {
-            let Some(mutated) = self.semi_mutate_big(&mor, lit, hed)? else {
+            let Some(mutated) = self.semi_mutate_big(&rest, replacement, head)? else {
                 return Ok(None);
             };
-            return self.semi_combine(mutated, tal).map(Some);
+            return self.semi_combine(mutated, tail).map(Some);
         }
-        let Some(mutated) = self.semi_mutate_big(&mor, lit, tal)? else {
+        let Some(mutated) = self.semi_mutate_big(&rest, replacement, tail)? else {
             return Ok(None);
         };
-        self.semi_combine(hed, mutated).map(Some)
+        self.semi_combine(head, mutated).map(Some)
     }
 
-    fn semi_require<F>(&mut self, noy: Option<Noun>, yen: F) -> Result<Option<Noun>>
+    fn semi_require<F>(&mut self, value: Option<SemiId>, then: F) -> Result<Option<SemiId>>
     where
-        F: FnOnce(&mut Self, Noun) -> Result<Option<Noun>>,
+        F: FnOnce(&mut Self, Noun) -> Result<Option<SemiId>>,
     {
-        let Some(noy) = noy else {
+        let Some(value) = value else {
             return Ok(None);
         };
-        let bus = self.semi_complete(noy)?;
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Half => {
-                let blocks = self.semi_squash_mask(mask)?;
-                let wait_mask = self.semi_mask_full(blocks);
-                Ok(Some(self.semi_make(wait_mask, D(0))))
+        let complete = self.semi_complete(value)?;
+        match self.semi_arena.node(complete).clone() {
+            SemiNode::Complete(value) => then(self, self.value_arena.noun(value)),
+            SemiNode::Blocked | SemiNode::Half { .. } | SemiNode::Lazy { .. } => {
+                Ok(Some(self.semi_full_blocked()))
             }
-            SemiTag::Full => {
-                let blocks = self.semi_mask_full_blocks(mask)?;
-                if !noun_is_zero(blocks) {
-                    return Ok(Some(self.semi_make(mask, D(0))));
-                }
-                yen(self, data)
-            }
-            SemiTag::Lazy => Ok(Some(self.semi_full_blocked())),
-            _ => Ok(None),
         }
     }
 
     fn musk_araw(
         &mut self,
-        bus: Noun,
+        bus: SemiId,
         fol: Noun,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
-        let key = unsafe { (bus.as_raw(), fol.as_raw()) };
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
+        let key = (bus, unsafe { fol.as_raw() });
         if let Some(cached) = memo.get(&key) {
             return Ok(Some(*cached));
         }
-        let result = self.musk_araw_uncached(bus, fol, memo)?;
+        let result = self.musk_araw_uncached(bus, fol, memo);
+        let result = result?;
         if let Some(noun) = result {
             memo.insert(key, noun);
         }
         Ok(result)
     }
 
+    fn musk_araw_dynamic(
+        &mut self,
+        bus: SemiId,
+        fol: Noun,
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
+        let key = (bus, unsafe { fol.as_raw() });
+        if let Some(cached) = memo.get(&key) {
+            return Ok(Some(*cached));
+        }
+        // Literal formula descent is acyclic because nouns cannot contain a
+        // reference to an ancestor. Only op 2 and partial op 9 jump to a
+        // formula obtained at run time, so guard those edges rather than
+        // checking every recursive step. Re-entering the same dynamic state
+        // cannot make progress; for a `^~` fold it must be a compiler error,
+        // not an excuse to leave a divergent assertion unfolded.
+        if self.musk.araw_active.contains(&key) {
+            return Err(CompilerError::Noun("musk-loop".to_string()));
+        }
+        self.musk.araw_active.push(key);
+        let result = self.musk_araw(bus, fol, memo);
+        let popped = self.musk.araw_active.pop();
+        debug_assert_eq!(popped, Some(key));
+        result
+    }
+
     fn musk_araw_uncached(
         &mut self,
-        bus: Noun,
+        bus: SemiId,
         fol: Noun,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
         let space = self.slab.noun_space();
         let (head, tail) = {
             let fol_cell = match fol.in_space(&space).as_cell() {
@@ -5836,7 +6188,7 @@ impl<'a> Ut<'a> {
                     let Some(lub) = ut.musk_araw(bus, b, memo)? else {
                         return Ok(None);
                     };
-                    ut.musk_araw(lub, ryf, memo)
+                    ut.musk_araw_dynamic(lub, ryf, memo)
                 })
             }
             3 => {
@@ -5966,9 +6318,9 @@ impl<'a> Ut<'a> {
                 // hoon-138 op-9 macks only when the raw core semi is already
                 // canonical-complete (`[[%full ~] *]`); partial cores take the
                 // fragment/require path below, like `++araw`.
-                if let Some(core) = self.semi_full_complete_data(one)? {
+                if let Some((core, core_id)) = self.semi_full_complete_data(one) {
                     if let Some(axis) = axis_small {
-                        let Some(value) = self.musk_mack_constant_core(core, axis)? else {
+                        let Some(value) = self.musk_mack_constant_core(core, core_id, axis)? else {
                             return self.musk_araw_arm_partial(one, axis, memo);
                         };
                         return Ok(Some(self.semi_full_complete(value)));
@@ -5992,7 +6344,8 @@ impl<'a> Ut<'a> {
                     };
                     self.semi_fragment_big(axis_big, one)?
                 };
-                let partial = self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo))?;
+                let partial =
+                    self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))?;
                 Ok(partial)
             }
             10 => {
@@ -6060,69 +6413,59 @@ impl<'a> Ut<'a> {
 
     fn musk_araw_arm_partial(
         &mut self,
-        one: Noun,
+        one: SemiId,
         axis: u64,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment(axis, one)?;
-        let partial = self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo))?;
+        let partial = self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))?;
         Ok(partial)
     }
 
     fn musk_araw_arm_partial_big(
         &mut self,
-        one: Noun,
+        one: SemiId,
         axis: &BigUint,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment_big(axis, one)?;
-        self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo))
+        self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))
     }
 
-    fn semi_full_complete_data(&mut self, semi: Noun) -> Result<Option<Noun>> {
-        let (mask, data) = self.semi_parts(semi)?;
-        if self.semi_mask_tag(mask)? != SemiTag::Full {
-            return Ok(None);
-        }
-        let blocks = self.semi_mask_full_blocks(mask)?;
-        if noun_is_zero(blocks) {
-            Ok(Some(data))
-        } else {
-            Ok(None)
+    #[cfg(test)]
+    fn semi_complete_value_id(&self, semi: SemiId) -> Result<ValueId> {
+        match self.semi_arena.node(semi) {
+            SemiNode::Complete(value) => Ok(*value),
+            _ => Err(CompilerError::Noun(
+                "value identity requested for incomplete seminoun".into(),
+            )),
         }
     }
 
-    fn musk_mack_constant_core(&mut self, core: Noun, axis: u64) -> Result<Option<Noun>> {
+    fn semi_full_complete_data(&self, semi: SemiId) -> Option<(Noun, ValueId)> {
+        match self.semi_arena.node(semi) {
+            SemiNode::Complete(value) => Some((self.value_arena.noun(*value), *value)),
+            _ => None,
+        }
+    }
+
+    fn musk_mack_constant_core(
+        &mut self,
+        core: Noun,
+        core_id: ValueId,
+        axis: u64,
+    ) -> Result<Option<Noun>> {
         if Self::slot_axis(core, axis, &self.slab.noun_space()).is_none() {
             return Ok(None);
         }
 
-        let raw_key = (unsafe { core.as_raw() }, axis);
-        if let Some(result) = self.musk.mack_cache_raw.get(&raw_key).copied() {
+        let key = (core_id, axis);
+        if let Some(result) = self.musk.mack_cache_by_value.get(&key).copied() {
             return Ok(result);
         }
 
-        let key = (self.noun_mug_cached(core), axis);
-        if let Some(entries) = self.musk.mack_cache.buckets.get(&key) {
-            let space = self.slab.noun_space();
-            for entry in entries.iter().rev() {
-                if unsafe { entry.core.raw_equals(&core) } || noun_eq(entry.core, core, &space)? {
-                    self.musk.mack_cache_raw.insert(raw_key, entry.result);
-                    return Ok(entry.result);
-                }
-            }
-        }
-
         let result = self.musk_interpret_mack(core, axis);
-        self.musk.mack_cache_raw.insert(raw_key, result);
-        let bucket = self
-            .musk
-            .mack_cache
-            .ensure_key(key, Self::MUSK_MACK_CACHE_KEY_LIMIT);
-        if bucket.len() >= Self::MUSK_MACK_CACHE_BUCKET_LIMIT {
-            bucket.pop_front();
-        }
-        bucket.push_back(MuskMackCacheEntry { core, result });
+        self.musk.mack_cache_by_value.insert(key, result);
         Ok(result)
     }
 
@@ -6132,7 +6475,7 @@ impl<'a> Ut<'a> {
         let context = &mut self.musk.context as *mut NockContext;
         unsafe {
             let context = &mut *context;
-            let core = self.musk_mack_cached_core_in_context(context, core, &slab_space);
+            let core = self.musk_mack_cached_core_in_context(context, core, &slab_space)?;
             Self::musk_interpret_mack_in_context(context, slab, core, axis)
         }
     }
@@ -6191,7 +6534,10 @@ impl<'a> Ut<'a> {
         let context = &mut self.musk.context as *mut NockContext;
         unsafe {
             let context = &mut *context;
-            let core = self.musk_mack_cached_core_in_context(context, core, &slab_space);
+            let Some(core) = self.musk_mack_cached_core_in_context(context, core, &slab_space)
+            else {
+                return Ok(None);
+            };
             Self::musk_interpret_mack_axis_noun_in_context(context, slab, core, axis, &slab_space)
         }
     }
@@ -6232,17 +6578,18 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn musk_apex_output(&mut self, bus: Noun, fol: Noun) -> Result<MuskOutput> {
-        let mut memo: FastHashMap<(u64, u64), Noun> = Default::default();
-        let Some(noy) = self.musk_araw(bus, fol, &mut memo)? else {
+    fn musk_apex_output(&mut self, bus: SemiId, fol: Noun) -> Result<MuskOutput> {
+        let mut memo: FastHashMap<(SemiId, u64), SemiId> = Default::default();
+        self.musk.araw_active.clear();
+        let result = self.musk_araw(bus, fol, &mut memo);
+        self.musk.araw_active.clear();
+        let Some(noy) = result? else {
             return Ok(MuskOutput::Stop);
         };
-        let (mask, data) = self.semi_parts(noy)?;
-        let blocks = self.semi_squash_mask(mask)?;
-        if noun_is_zero(blocks) {
-            Ok(MuskOutput::Done(data))
-        } else {
-            Ok(MuskOutput::Wait)
+        let complete = self.semi_complete(noy)?;
+        match self.semi_arena.node(complete) {
+            SemiNode::Complete(value) => Ok(MuskOutput::Done(self.value_arena.noun(*value))),
+            _ => Ok(MuskOutput::Wait),
         }
     }
 
@@ -6253,7 +6600,7 @@ impl<'a> Ut<'a> {
     // %hold cycle guard + raw-recursion guard key on the interned `Rc` pointer
     // (`NRc::as_ptr`), and the cache re-keys on that pointer (no mug of the
     // deepening subject). The OUTPUT stays a seminoun (semi_* algebra is noun).
-    fn bran_canonical_semi(&mut self, sut: NRc<NTy>) -> Result<Noun> {
+    fn bran_canonical_semi(&mut self, sut: NRc<NTy>) -> Result<SemiId> {
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
         self.bran_canonical_semi_inner(sut, &mut seen_holds)
     }
@@ -6262,7 +6609,7 @@ impl<'a> Ut<'a> {
         let mut sum = 0u64;
         let mut xor = 0u64;
         for hold in seen_holds {
-            let id = NRc::as_ptr(hold) as u64;
+            let id = native_type_id_u64(hold);
             let component = id.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             sum = sum.wrapping_add(component);
             xor ^= component.rotate_left((id as u32) & 31);
@@ -6274,7 +6621,7 @@ impl<'a> Ut<'a> {
         let semantic = self.semantic_context_key();
         let (seen_sum, seen_xor, seen_len) = Self::bran_seen_holds_signature(seen_holds);
         (
-            NRc::as_ptr(sut) as u64,
+            native_type_id_u64(sut),
             semantic.vet_key,
             semantic.fan_context_key,
             seen_sum,
@@ -6303,7 +6650,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: &NRc<NTy>,
         seen_holds: &[NRc<NTy>],
-    ) -> Result<Option<Noun>> {
+    ) -> Result<Option<SemiId>> {
         let key = self.bran_semi_cache_key(sut, seen_holds);
         let Some(entries) = self.bran_semi_memo.get(&key) else {
             return Ok(None);
@@ -6318,7 +6665,7 @@ impl<'a> Ut<'a> {
         Ok(None)
     }
 
-    fn bran_semi_cache_store(&mut self, sut: &NRc<NTy>, seen_holds: &[NRc<NTy>], semi: Noun) {
+    fn bran_semi_cache_store(&mut self, sut: &NRc<NTy>, seen_holds: &[NRc<NTy>], semi: SemiId) {
         let key = self.bran_semi_cache_key(sut, seen_holds);
         let bucket = self
             .bran_semi_memo
@@ -6337,7 +6684,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         seen_holds: &mut Vec<NRc<NTy>>,
-    ) -> Result<Noun> {
+    ) -> Result<SemiId> {
         // Matches hoon-138 `++bran` exactly: cycles are broken ONLY at `%hold`
         // (via `seen_holds` == hoon's `gil`); every other (shared, non-hold)
         // subtree is re-descended and the result memoized (`bran_semi_cache` ==
@@ -6367,7 +6714,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         seen_holds: &mut Vec<NRc<NTy>>,
-    ) -> Result<Noun> {
+    ) -> Result<SemiId> {
         match &*sut {
             NTy::Noun | NTy::Void => Ok(self.semi_full_blocked()),
             NTy::Atom { .. } => {
@@ -6399,7 +6746,7 @@ impl<'a> Ut<'a> {
                 })?;
                 let coil_semi = rest_cell.head().noun();
                 let payload_semi = self.bran_canonical_semi_inner(payload, seen_holds)?;
-                let _ = self.semi_parts(coil_semi)?;
+                let coil_semi = self.semi_import_noun(coil_semi)?;
                 self.semi_combine(coil_semi, payload_semi)
             }
             NTy::Face { .. } | NTy::Hint { .. } => match self.repo(sut.clone()) {
@@ -6428,7 +6775,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         vair: Vair,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let (p_ty, p_formula) = self.mint(sut.clone(), gol.clone(), p)?;
         let wrapped = self.wrap_type(p_ty, vair)?;
         let ty = self.nice(sut, gol, wrapped)?;
@@ -6441,7 +6788,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         spec: &Spec,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         const HOON_VERSION: u64 = 138;
         let (ty, _formula) = self.mint(sut.clone(), gol, &Hoon::KetTar(Box::new(spec.clone())))?;
         // The minted type is embedded in a nock %12 hint formula (noun): lower it.
@@ -6450,14 +6797,20 @@ impl<'a> Ut<'a> {
         let hint = T(self.slab, &[D(1), hint_inner]);
         let goal = cons_noun(&mut self.cx);
         let (_q_ty, q_formula) = self.mint(sut, goal, q)?;
-        let formula = T(self.slab, &[D(12), hint, q_formula]);
+        let hint = self.formula_import(hint)?;
+        let formula = self.formula_op(12, &[hint, q_formula]);
         Ok((ty, formula))
     }
 
-    fn mint_dtls(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_dtls(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let atom_ty = ty_atom_n(&mut self.cx, self.slab, "$", None).1;
         let (_p_ty, p_formula) = self.mint(sut.clone(), atom_ty.clone(), p)?;
-        let formula = T(self.slab, &[D(4), p_formula]);
+        let formula = self.formula_op(4, &[p_formula]);
         let ty = self.nice(sut, gol, atom_ty)?;
         Ok((ty, formula))
     }
@@ -6468,11 +6821,11 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let noun_ty = cons_noun(&mut self.cx);
         let (_p_ty, p_formula) = self.mint(sut.clone(), noun_ty.clone(), p)?;
         let (_q_ty, q_formula) = self.mint(sut.clone(), noun_ty.clone(), q)?;
-        let formula = T(self.slab, &[D(2), p_formula, q_formula]);
+        let formula = self.formula_arena.eval(p_formula, q_formula);
         let ty = self.nice(sut, gol, noun_ty)?;
         Ok((ty, formula))
     }
@@ -6483,20 +6836,25 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let noun_ty = cons_noun(&mut self.cx);
         let (_p_ty, p_formula) = self.mint(sut.clone(), noun_ty.clone(), p)?;
         let (_q_ty, q_formula) = self.mint(sut.clone(), noun_ty, q)?;
-        let formula = T(self.slab, &[D(5), p_formula, q_formula]);
+        let formula = self.formula_op(5, &[p_formula, q_formula]);
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let ty = self.nice(sut, gol, bool_ty)?;
         Ok((ty, formula))
     }
 
-    fn mint_dtwt(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_dtwt(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let noun_ty = cons_noun(&mut self.cx);
         let (_p_ty, p_formula) = self.mint(sut.clone(), noun_ty, p)?;
-        let formula = T(self.slab, &[D(3), p_formula]);
+        let formula = self.formula_op(3, &[p_formula]);
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let ty = self.nice(sut, gol, bool_ty)?;
         Ok((ty, formula))
@@ -6549,56 +6907,56 @@ impl<'a> Ut<'a> {
         self.epla(sut, wing, &[])
     }
 
-    fn axis_contains(container: u64, contained: u64) -> bool {
-        let container_bits = 64 - container.leading_zeros();
-        let contained_bits = 64 - contained.leading_zeros();
+    fn axis_contains(container: &BigUint, contained: &BigUint) -> bool {
+        let container_bits = container.bits();
+        let contained_bits = contained.bits();
         if contained_bits < container_bits {
             return false;
         }
         let shift = contained_bits - container_bits;
-        (contained >> shift) == container
+        (contained >> usize::try_from(shift).expect("axis bit length exceeds usize")) == *container
     }
 
-    fn axis_parent(axis: u64) -> u64 {
+    fn axis_parent(axis: &BigUint) -> BigUint {
         axis >> 1
     }
 
-    fn axis_sibling(axis: u64) -> u64 {
-        if axis & 1 == 0 {
-            axis + 1
+    fn axis_sibling(axis: &BigUint) -> BigUint {
+        if axis & BigUint::from(1u32) == BigUint::from(0u32) {
+            axis + BigUint::from(1u32)
         } else {
-            axis - 1
+            axis - BigUint::from(1u32)
         }
     }
 
     fn hike_insert(
         &mut self,
-        axe: u64,
-        fol: Noun,
-        rel: &mut std::collections::BTreeMap<u64, Noun>,
+        axe: BigUint,
+        fol: FormulaId,
+        rel: &mut std::collections::BTreeMap<BigUint, FormulaId>,
     ) -> Result<()> {
-        let mut probe = axe;
-        while probe != 1 {
+        let mut probe = axe.clone();
+        while probe != BigUint::from(1u32) {
             if rel.contains_key(&probe) {
                 return Ok(());
             }
-            probe = Self::axis_parent(probe);
+            probe = Self::axis_parent(&probe);
         }
 
-        let existing: Vec<u64> = rel.keys().copied().collect();
+        let existing: Vec<BigUint> = rel.keys().cloned().collect();
         for key in existing {
-            if Self::axis_contains(axe, key) {
+            if Self::axis_contains(&axe, &key) {
                 rel.remove(&key);
             }
         }
 
-        let sib = Self::axis_sibling(axe);
+        let sib = Self::axis_sibling(&axe);
         if let Some(sib_fol) = rel.remove(&sib) {
-            let parent = Self::axis_parent(sib);
+            let parent = Self::axis_parent(&sib);
             let merged = if sib > axe {
-                cons(self.slab, fol, sib_fol)?
+                self.formula_cons(fol, sib_fol)
             } else {
-                cons(self.slab, sib_fol, fol)?
+                self.formula_cons(sib_fol, fol)
             };
             self.hike_insert(parent, merged, rel)?;
         } else {
@@ -6607,26 +6965,28 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    fn hike_formula(&mut self, root_axis: BigUint, edits: &[(u64, Noun)]) -> Result<Noun> {
-        let mut rel: std::collections::BTreeMap<u64, Noun> = std::collections::BTreeMap::new();
+    fn hike_formula(
+        &mut self,
+        root_axis: BigUint,
+        edits: &[(BigUint, FormulaId)],
+    ) -> Result<FormulaId> {
+        let mut rel: std::collections::BTreeMap<BigUint, FormulaId> =
+            std::collections::BTreeMap::new();
         for (axis, formula) in edits {
-            self.hike_insert(*axis, *formula, &mut rel)?;
+            self.hike_insert(axis.clone(), *formula, &mut rel)?;
         }
-        let mut out = slot_formula_axis_big(self.slab, root_axis);
+        let mut out = self.formula_slot(root_axis);
         // hoon-138 `++hike` sorts with `gth` (descending) and recurses from head to tail:
         //   [%10 [hi ...] [%10 [lo ...] [%0 a]]]
         // To build the same tree iteratively, apply edits in ascending order so larger axes
         // wrap later and become outer nodes.
-        let keys: Vec<u64> = rel.keys().copied().collect();
+        let keys: Vec<BigUint> = rel.keys().cloned().collect();
         for axis in keys {
             let edit_formula = rel
                 .get(&axis)
                 .copied()
                 .ok_or_else(|| CompilerError::Noun("missing hike edit".to_string()))?;
-            let axis_noun = noun_u64(self.slab, axis);
-            let patch_cell = T(self.slab, &[axis_noun, edit_formula]);
-            let edit_cell = T(self.slab, &[patch_cell, out]);
-            out = T(self.slab, &[D(10), edit_cell]);
+            out = self.formula_arena.edit(axis, edit_formula, out);
         }
         Ok(out)
     }
@@ -6636,7 +6996,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         wing: &WingType,
         mur: NRc<NTy>,
-    ) -> Result<(u64, NRc<NTy>)> {
+    ) -> Result<(BigUint, NRc<NTy>)> {
         let port = self.find(sut.clone(), Way::Rite, wing)?;
         match port {
             Port::Palo(palo) => {
@@ -6653,13 +7013,13 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         mur: NRc<NTy>,
         arms: &[(NRc<NTy>, Noun)],
-    ) -> Result<(u64, Vec<(NRc<NTy>, Noun)>)> {
-        let mut axis_match: Option<u64> = None;
+    ) -> Result<(BigUint, Vec<(NRc<NTy>, Noun)>)> {
+        let mut axis_match: Option<BigUint> = None;
         let mut out = Vec::with_capacity(arms.len());
         for (typ, foot) in arms {
             let (axis, new_typ) = self.cnts_tack(typ.clone(), wing, mur.clone())?;
-            if let Some(existing) = axis_match {
-                if existing != axis {
+            if let Some(existing) = &axis_match {
+                if existing != &axis {
                     return Err(CompilerError::Noun("mate".to_string()));
                 }
             } else {
@@ -6673,7 +7033,12 @@ impl<'a> Ut<'a> {
 
     // HOON138:arm=ut:tack lines=10848-10853 map=direct status=partial reviewed=2026-03-06
     // HOON138_NOTE:native primary implementation for canonical `++tack`; full parity review is still in progress
-    fn tack(&mut self, sut: NRc<NTy>, hyp: &WingType, mur: NRc<NTy>) -> Result<(u64, NRc<NTy>)> {
+    fn tack(
+        &mut self,
+        sut: NRc<NTy>,
+        hyp: &WingType,
+        mur: NRc<NTy>,
+    ) -> Result<(BigUint, NRc<NTy>)> {
         self.cnts_tack(sut, hyp, mur)
     }
 
@@ -6684,7 +7049,7 @@ impl<'a> Ut<'a> {
         hyp: &WingType,
         mur: NRc<NTy>,
         men: &[(NRc<NTy>, Noun)],
-    ) -> Result<(u64, Vec<(NRc<NTy>, Noun)>)> {
+    ) -> Result<(BigUint, Vec<(NRc<NTy>, Noun)>)> {
         self.cnts_toss(hyp, mur, men)
     }
 
@@ -6752,18 +7117,19 @@ impl<'a> Ut<'a> {
         self.epla(sut, &wing, &[])
     }
 
-    fn mint_hand(&mut self, typ: &Type, nock: &Nock) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_hand(&mut self, typ: &Type, nock: &Nock) -> Result<(NRc<NTy>, FormulaId)> {
         let typ_noun = type_to_noun(self.slab, typ)?;
         let typ_native = native_of(&mut self.cx, typ_noun, &self.slab.noun_space())?;
         let nock_noun = nock_to_noun(self.slab, nock);
-        Ok((typ_native, nock_noun))
+        let formula = self.formula_import(nock_noun)?;
+        Ok((typ_native, formula))
     }
 
     fn play_tune(&mut self, sut: NRc<NTy>, tune: &TermOrTune) -> Result<NRc<NTy>> {
         // play_tune wraps the WHOLE subject in a %face; native now: the subject
         // threads through as a SHARED native Rc inside the new %face (no lowering).
         let tool = term_or_tune_to_noun(self.slab, tune)?;
-        let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+        let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         Ok(cons_face(&mut self.cx, tool_leaf, sut))
     }
 
@@ -6773,7 +7139,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         hint: &TermOrPair,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let (q_ty, q_formula) = self.mint(sut.clone(), gol, q)?;
         let hint_noun = match hint {
             TermOrPair::Term(name) => term_to_noun(self.slab, name),
@@ -6782,10 +7148,12 @@ impl<'a> Ut<'a> {
                 let noun_goal = cons_noun(&mut self.cx);
                 let (_ty, formula) = self.mint(sut, noun_goal, hoon)?;
                 let name_noun = term_to_noun(self.slab, name);
+                let formula = self.formula_materialize(formula);
                 T(self.slab, &[name_noun, formula])
             }
         };
-        let formula = T(self.slab, &[D(11), hint_noun, q_formula]);
+        let space = self.slab.noun_space();
+        let formula = self.formula_arena.hint(hint_noun, q_formula, &space);
         Ok((q_ty, formula))
     }
 
@@ -6795,7 +7163,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let _ = self.play(sut.clone(), p)?;
         self.mint(sut, gol, q)
     }
@@ -6806,11 +7174,11 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let ty = self.play(sut.clone(), p)?;
         let ty = self.nice(sut, gol, ty)?;
-        let q_noun = hoon_to_noun(self.slab, q);
-        let formula = T(self.slab, &[D(1), q_noun]);
+        let q_noun = self.hoon_noun_for_node(q);
+        let formula = self.formula_quote(q_noun);
         Ok((ty, formula))
     }
 
@@ -6820,7 +7188,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let goal = cons_noun(&mut self.cx);
         let (vos_ty, vos_formula) = self.mint(sut.clone(), goal.clone(), q)?;
         let (ref_ty, _ref_formula) = self.mint(sut.clone(), goal, p)?;
@@ -6829,8 +7197,8 @@ impl<'a> Ut<'a> {
         // burp_type takes/returns a noun: lower vos_ty.
         let vos_ty_noun = live_to_noun(&mut self.cx, &vos_ty, self.slab);
         let burped = self.burp_type(vos_ty_noun)?;
-        let head = T(self.slab, &[D(1), burped]);
-        let formula = cons(self.slab, head, vos_formula)?;
+        let head = self.formula_quote(burped);
+        let formula = self.formula_cons(head, vos_formula);
         Ok((ty, formula))
     }
 
@@ -6840,7 +7208,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         spec: &Spec,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let typ_expr = Hoon::KetTar(Box::new(spec.clone()));
         let typ = self.play(sut.clone(), &typ_expr)?;
         let typ = self.nice(sut.clone(), gol, typ)?;
@@ -6849,27 +7217,33 @@ impl<'a> Ut<'a> {
         // This keeps the compiled noun aligned with canonical dynock fixtures.
         let target_type = Hoon::TisGar(
             Box::new(Hoon::ZapGar(Box::new(Hoon::KetTar(Box::new(spec.clone()))))),
-            Box::new(Hoon::Axis(2)),
+            Box::new(Hoon::Axis((2u64).into())),
         );
-        let actual_type = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis(2)));
+        let actual_type = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis((2u64).into())));
         let cond = Hoon::CenCol(
             Box::new(Hoon::Limb("levi".to_string())),
             vec![target_type, actual_type],
         );
-        let yes = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis(3)));
+        let yes = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis((3u64).into())));
         let expanded = Hoon::WutCol(Box::new(cond), Box::new(yes), Box::new(Hoon::ZapZap));
         let goal = cons_noun(&mut self.cx);
         let (_val_ty, val_formula) = self.mint(sut, goal, &expanded)?;
         Ok((typ, val_formula))
     }
 
-    fn mint_zpts(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_zpts(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let noun_ty = cons_noun(&mut self.cx);
         let ty = self.nice(sut.clone(), gol, noun_ty.clone())?;
         // hoon-138: `%zpts` compiles inner with `gol=%noun` under `vet=|`.
         self.with_vet_off(|ut| {
             let (_p_ty, p_formula) = ut.mint(sut, noun_ty, p)?;
-            let formula = T(ut.slab, &[D(1), p_formula]);
+            let p_formula = ut.formula_materialize(p_formula);
+            let formula = ut.formula_quote(p_formula);
             Ok((ty, formula))
         })
     }
@@ -6881,7 +7255,7 @@ impl<'a> Ut<'a> {
         wings: &[WingType],
         q: &Hoon,
         r: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // feel is native (C9): thread the native subject directly.
         let found = self.feel(sut.clone(), wings)?;
         if found {
@@ -6897,7 +7271,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         spec: &Spec,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Canonical hoon-138 open() lowering:
         //   [%tsbr *] => [%tsls ~(example ax p.gen) q.gen]
         // This is NOT `=+ *spec ...`; using `%kttr` would inject `%ktsg` folding that the
@@ -6914,7 +7288,7 @@ impl<'a> Ut<'a> {
         skin: &Skin,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let expanded = Hoon::TisLus(
             Box::new(Hoon::KetTis(skin.clone(), Box::new(p.clone()))),
             Box::new(q.clone()),
@@ -6929,7 +7303,7 @@ impl<'a> Ut<'a> {
         skin: &Skin,
         p: &Hoon,
         q: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let expanded = Hoon::TisFas(skin.clone(), Box::new(q.clone()), Box::new(p.clone()));
         self.mint(sut, gol, &expanded)
     }
@@ -6939,7 +7313,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         gol: NRc<NTy>,
         wing: &WingType,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // find + fine are native (C9 / C-final): fine returns the typ directly.
         let port = self.find(sut.clone(), Way::Read, wing)?;
         let (ty, formula) = self.fine(&port)?;
@@ -7023,7 +7397,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         wing: &WingType,
         pairs: &[(WingType, Hoon)],
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // cnts_base_port + tack/toss are native (C9): thread the native subject.
         let port = self.cnts_base_port(sut.clone(), wing)?;
         let palo = match port {
@@ -7037,7 +7411,7 @@ impl<'a> Ut<'a> {
             }
         };
         let base_axis = tend_big(&palo.vein)?;
-        let mut edits: Vec<(u64, Noun)> = Vec::with_capacity(pairs.len());
+        let mut edits: Vec<(BigUint, FormulaId)> = Vec::with_capacity(pairs.len());
         match palo.opal {
             Opal::Leg(mut base_leg) => {
                 for (_idx, (sub_wing, expr)) in pairs.iter().enumerate() {
@@ -7073,8 +7447,7 @@ impl<'a> Ut<'a> {
                 edits.reverse();
 
                 let hike = self.hike_formula(base_axis, &edits)?;
-                let arm_axis_noun = noun_u64(self.slab, arm_axis);
-                let formula = T(self.slab, &[D(9), arm_axis_noun, hike]);
+                let formula = self.formula_arena.kick(arm_axis, hike);
                 // fire is native (C-final): arm cores are already `NRc<NTy>`.
                 let arm_ty = self.fire(&hag)?;
                 let ty = self.nice(sut, gol, arm_ty)?;
@@ -7089,11 +7462,16 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         hyp: &WingType,
         rig: &[(WingType, Hoon)],
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         self.mint_cnts(sut, gol, hyp, rig)
     }
 
-    fn mint_limb(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, name: &str) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_limb(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        name: &str,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Canonical hoon-138 open() lowering:
         //   [%limb p] => [%cnts [p ~] ~]
         let wing = vec![Limb::Term(name.to_string())];
@@ -7105,13 +7483,13 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         gol: NRc<NTy>,
         tune: &TermOrTune,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let tool = term_or_tune_to_noun(self.slab, tune)?;
         // %face over the native subject (collapse-aware cons_face).
-        let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+        let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         let ty = cons_face(&mut self.cx, tool_leaf, sut.clone());
         let ty = self.nice(sut, gol, ty)?;
-        let formula = T(self.slab, &[D(0), D(1)]);
+        let formula = self.formula_slot_u64(1);
         Ok((ty, formula))
     }
 
@@ -7142,7 +7520,7 @@ impl<'a> Ut<'a> {
             return;
         }
 
-        let hoon_noun = hoon_to_noun(self.slab, gen);
+        let hoon_noun = self.hoon_noun_for_node(gen);
         let hoon_raw = unsafe { hoon_noun.as_raw() };
         let hoon_mug = self.noun_mug_cached(hoon_noun);
         let ast = Arc::new(gen.clone());
@@ -7218,7 +7596,7 @@ impl<'a> Ut<'a> {
         let Some(sig) = Sig64::spec_signature_spot_sensitive(spec) else {
             return Arc::new(factory(
                 spec.clone(),
-                1,
+                1u64.into(),
                 Vec::new(),
                 HashMap::new(),
                 Vec::new(),
@@ -7236,7 +7614,7 @@ impl<'a> Ut<'a> {
 
         let expanded = Arc::new(factory(
             spec.clone(),
-            1,
+            1u64.into(),
             Vec::new(),
             HashMap::new(),
             Vec::new(),
@@ -7260,10 +7638,19 @@ impl<'a> Ut<'a> {
     }
 
     fn open_cached(&mut self, gen: &Hoon) -> Option<Arc<Hoon>> {
-        let Some(sig) = Self::mint_cache_signature(gen) else {
+        let Some(sig) = self.mint_cache_signature(gen) else {
             let opened = open(gen.clone());
             return (&opened != gen).then(|| Arc::new(opened));
         };
+        if let Some(id) = self.hoon_arena.id_for(gen) {
+            if let Some(cached) = &self.hoon_arena.entry(id).opened {
+                return cached.clone();
+            }
+            let opened = open(gen.clone());
+            let cached = (&opened != gen).then(|| Arc::new(opened));
+            self.hoon_arena.entry_mut(id).opened = Some(cached.clone());
+            return cached;
+        }
         let ptr = Self::hoon_ast_ptr_key(gen);
         if let Some((cached_sig, cached)) = self.open_cache.get(&ptr) {
             if *cached_sig == sig {
@@ -7311,7 +7698,7 @@ impl<'a> Ut<'a> {
         prefix: &Option<String>,
         tomes: &HashMap<String, Tome>,
         poly: Poly,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // Canonical layered-core construction keeps prior arms in payload/context ancestry.
         // New core tomes contain only the newly declared arms; inherited arms are resolved via
         // `%core` payload traversal in `fond`, not by copying old tomes into the new battery.
@@ -7330,7 +7717,7 @@ impl<'a> Ut<'a> {
         }
         let garb = garb_native(prefix.as_deref(), poly, Vair::Gold);
         // Match hoon-138/hoonc layered-core payload layout and formula shape.
-        let payload_formula = slot_formula_axis(self.slab, 1);
+        let payload_formula = self.formula_slot_u64(1);
         let goal_core_for_arms = self.goal_core_for_mine(gol_noun, tomes_map)?;
         let (goal_for_arms, expected_tomes_map) = match goal_core_for_arms {
             Some(goal_core) => {
@@ -7359,7 +7746,7 @@ impl<'a> Ut<'a> {
         let tomes_sig =
             (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
         let resolver_id = self.lazy_resolver_canonical_id(&sut, tomes_sig, poly);
-        let lazy_semi = self.semi_lazy_root(resolver_id);
+        let lazy_semi = self.semi_noun_lazy_root(resolver_id);
         let lazy_rest = T(self.slab, &[lazy_semi, tomes_map]);
         // PHASE 2: build the NATIVE lazy core (the deepening site) ONCE, native-only
         // (cons_core), with payload AND context = the SHARED native `sut`. No noun
@@ -7370,7 +7757,7 @@ impl<'a> Ut<'a> {
         // pointer identity.
         let core_native_lazy = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(lazy_rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, lazy_rest, &space);
             cons_core(
                 &mut self.cx,
                 sut.clone(),
@@ -7386,7 +7773,11 @@ impl<'a> Ut<'a> {
         // dropping the cross-arm formula cache and the in-progress guard.
         if !self.lazy_resolvers.contains_key(&resolver_id) {
             let mut lazy_arms = HashMap::new();
-            self.collect_lazy_resolver_arms_from_tomes_map(tomes_map, 1, &mut lazy_arms)?;
+            self.collect_lazy_resolver_arms_from_tomes_map(
+                tomes_map,
+                BigUint::from(1u32),
+                &mut lazy_arms,
+            )?;
             self.lazy_resolver_register_context(
                 resolver_id,
                 core_native_lazy.clone(),
@@ -7412,7 +7803,7 @@ impl<'a> Ut<'a> {
         // identity-on-success; the cache is native-keyed) and `sut` is never lowered.
         let core_native = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
             cons_core(
                 &mut self.cx,
                 sut.clone(),
@@ -7421,8 +7812,8 @@ impl<'a> Ut<'a> {
                 rest_leaf,
             )
         };
-        let battery_formula = T(self.slab, &[D(1), battery]);
-        let formula = cons(self.slab, battery_formula, payload_formula)?;
+        let battery_formula = self.formula_quote(battery);
+        let formula = self.formula_cons(battery_formula, payload_formula);
         // nice is native now (C-final.1a); validate the native core type.
         // nice is identity-on-success, so `ty` == `core_native`; cache the
         // validated native type directly (C-final.1b: no lowering to a noun).
@@ -7439,7 +7830,7 @@ impl<'a> Ut<'a> {
         nym: Option<&str>,
         hud: Poly,
         dom: &HashMap<String, Tome>,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         // ATOMIC FLIP (C-final.1a): mine TAKES native sut/gol. wrap_type/nice are
         // native now; thread directly.
         let prefix = nym.map(str::to_string);
@@ -7469,7 +7860,7 @@ impl<'a> Ut<'a> {
         let semi_noun = self.semi_noun_blocked();
         let rest = T(self.slab, &[semi_noun, tomes_map]);
         let space = self.slab.noun_space();
-        let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+        let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
         let native = cons_core(&mut self.cx, sut.clone(), garb, sut.clone(), rest_leaf);
         Ok(native)
     }
@@ -7663,8 +8054,8 @@ impl<'a> Ut<'a> {
     fn collect_lazy_resolver_arms_from_arms_map(
         &mut self,
         arms_map: Noun,
-        axis: u64,
-        out: &mut HashMap<u64, LazyResolverArmEntry>,
+        axis: BigUint,
+        out: &mut HashMap<BigUint, LazyResolverArmEntry>,
     ) -> Result<()> {
         let space = self.slab.noun_space();
         let Some((node, left, right)) = map_node(arms_map, &self.slab.noun_space())? else {
@@ -7680,9 +8071,9 @@ impl<'a> Ut<'a> {
         let left_empty = noun_is_zero(left);
         let right_empty = noun_is_zero(right);
         let arm_axis = if left_empty && right_empty {
-            axis
+            axis.clone()
         } else {
-            peg_axis(axis, 2)?
+            peg_axis_big(axis.clone(), 2)?
         };
         if out
             .insert(
@@ -7701,14 +8092,18 @@ impl<'a> Ut<'a> {
         match (left_empty, right_empty) {
             (true, true) => Ok(()),
             (true, false) => {
-                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis_big(axis, 3)?, out)
             }
             (false, true) => {
-                self.collect_lazy_resolver_arms_from_arms_map(left, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_arms_map(left, peg_axis_big(axis, 3)?, out)
             }
             (false, false) => {
-                self.collect_lazy_resolver_arms_from_arms_map(left, peg_axis(axis, 6)?, out)?;
-                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis(axis, 7)?, out)
+                self.collect_lazy_resolver_arms_from_arms_map(
+                    left,
+                    peg_axis_big(axis.clone(), 6)?,
+                    out,
+                )?;
+                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis_big(axis, 7)?, out)
             }
         }
     }
@@ -7716,8 +8111,8 @@ impl<'a> Ut<'a> {
     fn collect_lazy_resolver_arms_from_tomes_map(
         &mut self,
         tomes_map: Noun,
-        axis: u64,
-        out: &mut HashMap<u64, LazyResolverArmEntry>,
+        axis: BigUint,
+        out: &mut HashMap<BigUint, LazyResolverArmEntry>,
     ) -> Result<()> {
         let space = self.slab.noun_space();
         let Some((node, left, right)) = map_node(tomes_map, &self.slab.noun_space())? else {
@@ -7736,22 +8131,26 @@ impl<'a> Ut<'a> {
         let left_empty = noun_is_zero(left);
         let right_empty = noun_is_zero(right);
         let chapter_axis = if left_empty && right_empty {
-            axis
+            axis.clone()
         } else {
-            peg_axis(axis, 2)?
+            peg_axis_big(axis.clone(), 2)?
         };
         self.collect_lazy_resolver_arms_from_arms_map(arms_map, chapter_axis, out)?;
         match (left_empty, right_empty) {
             (true, true) => Ok(()),
             (true, false) => {
-                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis_big(axis, 3)?, out)
             }
             (false, true) => {
-                self.collect_lazy_resolver_arms_from_tomes_map(left, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_tomes_map(left, peg_axis_big(axis, 3)?, out)
             }
             (false, false) => {
-                self.collect_lazy_resolver_arms_from_tomes_map(left, peg_axis(axis, 6)?, out)?;
-                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis(axis, 7)?, out)
+                self.collect_lazy_resolver_arms_from_tomes_map(
+                    left,
+                    peg_axis_big(axis.clone(), 6)?,
+                    out,
+                )?;
+                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis_big(axis, 7)?, out)
             }
         }
     }
@@ -7843,7 +8242,7 @@ impl<'a> Ut<'a> {
         goal: NRc<NTy>,
         hoon: &Hoon,
         hoon_noun: Noun,
-    ) -> Result<Noun> {
+    ) -> Result<FormulaId> {
         fn with_arm_context(key: &str, err: CompilerError) -> CompilerError {
             match err {
                 CompilerError::UnsupportedExpr(s) => {
@@ -7873,7 +8272,7 @@ impl<'a> Ut<'a> {
 
         // The in-progress dedup id is the interned core Rc's pointer (one canonical
         // Rc per type via hash-cons), replacing the old noun as_raw() identity.
-        let core_type_id = NRc::as_ptr(&core_type) as u64;
+        let core_type_id = native_type_id_u64(&core_type);
         let in_progress_key = (Arc::clone(&key), core_type_id);
         let in_progress_entry = ArmInProgressEntry {
             key: Arc::clone(&key),
@@ -7894,16 +8293,16 @@ impl<'a> Ut<'a> {
         debug_assert_eq!(
             popped.map(|entry| (
                 entry.key,
-                NRc::as_ptr(&entry.core),
+                entry.core.arena_id(),
                 unsafe { entry.hoon.as_raw() },
-                NRc::as_ptr(&entry.goal),
+                entry.goal.arena_id(),
                 entry.vet,
             )),
             Some((
                 Arc::clone(&key),
-                NRc::as_ptr(&core_type),
+                core_type.arena_id(),
                 unsafe { hoon_noun.as_raw() },
-                NRc::as_ptr(&goal),
+                goal.arena_id(),
                 arm_vet,
             ))
         );
@@ -7961,6 +8360,7 @@ impl<'a> Ut<'a> {
             hoon_noun,
         )?;
 
+        let formula = self.formula_materialize(formula);
         let left_empty = noun_is_zero(left);
         let right_empty = noun_is_zero(right);
         if left_empty && right_empty {
@@ -8002,7 +8402,7 @@ impl<'a> Ut<'a> {
     }
 
     fn semi_noun_blocked(&mut self) -> Noun {
-        self.semi_full_blocked()
+        self.semi_noun_blocked_encoded()
     }
 
     fn mint_opened(
@@ -8010,7 +8410,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         gol: NRc<NTy>,
         gen: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let opened = self.open_cached(gen);
         if let Some(opened) = opened {
             return self.mint(sut, gol, opened.as_ref());
@@ -8026,7 +8426,7 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         spot: &Spot,
         inner: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let location = Self::location_from_spot(spot);
         self.dbug_locations.push(location);
         let result = self.mint(sut, gol, inner);
@@ -8036,7 +8436,8 @@ impl<'a> Ut<'a> {
         let hint_inner = T(self.slab, &[D(1), spot_noun]);
         let spot_tag = term_to_noun(self.slab, "spot");
         let hint = T(self.slab, &[spot_tag, hint_inner]);
-        let formula = T(self.slab, &[D(11), hint, formula]);
+        let space = self.slab.noun_space();
+        let formula = self.formula_arena.hint(hint, formula, &space);
         Ok((ty, formula))
     }
 
@@ -8046,20 +8447,20 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         note: &Note,
         inner: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let (payload_ty, formula) = self.mint(sut.clone(), gol, inner)?;
         let note_noun = note_to_noun(self.slab, note)?;
         let hinted = self.hint_type(sut, note_noun, payload_ty)?;
         Ok((hinted, formula))
     }
 
-    fn mint_lost(&mut self, sut: NRc<NTy>, gol: NRc<NTy>) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_lost(&mut self, sut: NRc<NTy>, gol: NRc<NTy>) -> Result<(NRc<NTy>, FormulaId)> {
         if self.vet {
             return Err(CompilerError::Noun("mint-lost".to_string()));
         }
         let ty = cons_void(&mut self.cx);
         let ty = self.nice(sut, gol, ty)?;
-        let formula = crash_formula(self.slab);
+        let formula = self.formula_slot_u64(0);
         Ok((ty, formula))
     }
 
@@ -8080,7 +8481,7 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         q: &Hoon,
         r: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let test = Hoon::WutTis(
             Box::new(Spec::Base(BaseType::Atom("$".to_string()))),
             wing.clone(),
@@ -8090,12 +8491,17 @@ impl<'a> Ut<'a> {
         self.mint(sut, gol, &expanded)
     }
 
-    fn mint_wtzp(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_wtzp(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+    ) -> Result<(NRc<NTy>, FormulaId)> {
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let (_p_ty, p_formula) = self.mint(sut.clone(), bool_ty.clone(), p)?;
-        let false_formula = const_bool_formula(self.slab, false);
-        let true_formula = const_bool_formula(self.slab, true);
-        let formula = cond(self.slab, p_formula, false_formula, true_formula)?;
+        let false_formula = self.formula_quote(D(1));
+        let true_formula = self.formula_quote(D(0));
+        let formula = self.formula_cond(p_formula, false_formula, true_formula);
         let ty = self.nice(sut, gol, bool_ty)?;
         Ok((ty, formula))
     }
@@ -8160,7 +8566,7 @@ impl<'a> Ut<'a> {
         }
         let inner_noun = live_to_noun(&mut self.cx, &inner, self.slab);
         let head = T(self.slab, &[inner_noun, note]);
-        let head_leaf = NLeaf::from_noun_raw(head, &self.slab.noun_space());
+        let head_leaf = live_leaf_from_noun(&mut self.cx, head, &self.slab.noun_space());
         Ok(cons_hint(&mut self.cx, head_leaf, payload))
     }
 
@@ -8246,16 +8652,25 @@ impl<'a> Ut<'a> {
     }
 
     fn hoon_noun_for_node(&mut self, gen: &Hoon) -> Noun {
+        let ptr = Self::hoon_ast_ptr_key(gen);
         if self.exact_hoon_ast_lookup_enabled {
-            if let Some((_raw, noun)) = self
-                .decoded_hold_hoon_ptr_cache
-                .get(&Self::hoon_ast_ptr_key(gen))
-                .copied()
-            {
+            if let Some((_raw, noun)) = self.decoded_hold_hoon_ptr_cache.get(&ptr).copied() {
                 return noun;
             }
         }
-        hoon_to_noun(self.slab, gen)
+        let Some(id) = self.hoon_arena.id_for(gen) else {
+            return hoon_to_noun(self.slab, gen);
+        };
+        if let Some(noun) = self.hoon_arena.entry(id).noun {
+            return noun;
+        }
+        let by_ptr = &self.hoon_arena.by_ptr;
+        let entries = &mut self.hoon_arena.entries;
+        hoon_to_noun_with_cache(self.slab, gen, |ptr, noun| {
+            if let Some(id) = by_ptr.get(&ptr) {
+                entries[id.0 as usize].noun = Some(noun);
+            }
+        })
     }
 
     fn prune_recursive_holds(&mut self, typ: Noun, hoon_noun: Noun) -> Result<Noun> {
@@ -8412,17 +8827,52 @@ impl<'a> Ut<'a> {
         self.nest(sut_n, ref_n)
     }
 
-    /// Decode a native `%fork` set into its native option types (C8): the fork set
-    /// is a carried leaf, so lower it and re-lift the options. Forks are small.
-    fn fork_options_native(&mut self, fork: &NRc<NTy>) -> Result<Vec<NRc<NTy>>> {
-        let fork_noun = live_to_noun(&mut self.cx, fork, self.slab);
+    /// Return the native children of a `%fork`. A one-shot traversal stays
+    /// transient; the second promotes the vector into the native DAG so every
+    /// later consumer is a direct slice walk. The exact Hoon set treap remains
+    /// attached as the byte-exact serialization witness.
+    fn fork_options_native<'fork>(
+        &mut self,
+        fork: &'fork NRc<NTy>,
+    ) -> Result<NativeForkOptions<'fork>> {
+        let set = match &**fork {
+            NTy::Fork { set, options, .. } => {
+                if let Some(options) = options.get() {
+                    return Ok(NativeForkOptions::Cached(options));
+                }
+                set.clone()
+            }
+            _ => {
+                return Err(CompilerError::Decode(
+                    "native fork options requested for non-fork type".to_string(),
+                ))
+            }
+        };
+
+        let set_noun = live_leaf_to_noun(&mut self.cx, &set, self.slab);
         let space = self.slab.noun_space();
-        let opts = type_fork_options(fork_noun, &space)?;
-        let mut out = Vec::with_capacity(opts.len());
-        for opt in opts {
-            out.push(native_of(&mut self.cx, opt, &space)?);
+        let mut native_members: SmallVec<[NRc<NTy>; 4]> = SmallVec::new();
+        visit_fork_set_members(set_noun, &space, |member| {
+            native_members.push(native_of(&mut self.cx, member, &space)?);
+            Ok(())
+        })?;
+        let NTy::Fork {
+            options,
+            options_seen,
+            ..
+        } = &**fork
+        else {
+            unreachable!()
+        };
+        if !options_seen.replace(true) {
+            return Ok(NativeForkOptions::Transient(native_members));
         }
-        Ok(out)
+        let _ = options.set(native_members.into_vec());
+        Ok(NativeForkOptions::Cached(
+            options
+                .get()
+                .expect("fork options populated after repeated traversal"),
+        ))
     }
 
     /// Native `core_dox` (C8): build the doppelganger context-core from a carried
@@ -8473,14 +8923,13 @@ impl<'a> Ut<'a> {
         memo: &mut FastHashMap<NestMemoKey, bool>,
     ) -> Result<bool> {
         let next_depth = depth.saturating_add(1);
-
         (|| -> Result<bool> {
             if NRc::ptr_eq(&sut, &ref_) {
                 return Ok(true);
             }
             let memo_key = NestMemoKey {
-                sut_id: NRc::as_ptr(&sut) as u64,
-                ref_id: NRc::as_ptr(&ref_) as u64,
+                sut_id: native_type_id_u64(&sut),
+                ref_id: native_type_id_u64(&ref_),
                 seg: seen_sut_holds.snapshot(),
                 reg: seen_ref_holds.snapshot(),
                 gil: gil.snapshot(),
@@ -8621,8 +9070,8 @@ impl<'a> Ut<'a> {
                     )
                 }
                 NTy::Hold { .. } => {
-                    let sut_id = NRc::as_ptr(&sut) as u64;
-                    let ref_id = NRc::as_ptr(&ref_) as u64;
+                    let sut_id = native_type_id_u64(&sut);
+                    let ref_id = native_type_id_u64(&ref_);
                     if !seen_sut_holds.insert_id(sut_id) {
                         return Ok(false);
                     }
@@ -8679,7 +9128,8 @@ impl<'a> Ut<'a> {
                 self.nest_inner(sut, inner, depth, seen_sut_holds, seen_ref_holds, gil, memo)
             }
             NTy::Fork { .. } => {
-                for option in self.fork_options_native(&ref_)? {
+                let options = self.fork_options_native(&ref_)?;
+                for option in options {
                     if !self.nest_inner(
                         sut.clone(),
                         option,
@@ -8699,8 +9149,8 @@ impl<'a> Ut<'a> {
                 self.nest_inner(sut, inner, depth, seen_sut_holds, seen_ref_holds, gil, memo)
             }
             NTy::Hold { .. } => {
-                let sut_id = NRc::as_ptr(&sut) as u64;
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let sut_id = native_type_id_u64(&sut);
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen_ref_holds.insert_id(ref_id) {
                     return Ok(true);
                 }
@@ -8824,8 +9274,8 @@ impl<'a> Ut<'a> {
             }
             return Ok(true);
         }
-        let sut_id = NRc::as_ptr(&sut) as u64;
-        let ref_id = NRc::as_ptr(&ref_) as u64;
+        let sut_id = native_type_id_u64(&sut);
+        let ref_id = native_type_id_u64(&ref_);
         if !gil.insert_id(sut_id, ref_id) {
             return Ok(true);
         }
@@ -8864,15 +9314,15 @@ impl<'a> Ut<'a> {
             ),
             Vair::Iron => {
                 // Bootstrap `+nest` compares `%iron` in this orientation.
-                let sut_peek = self.peek(ref_ctx, Way::Rite, 2)?;
-                let ref_peek = self.peek(sut_ctx, Way::Rite, 2)?;
+                let sut_peek = self.peek(ref_ctx, Way::Rite, 2u64)?;
+                let ref_peek = self.peek(sut_ctx, Way::Rite, 2u64)?;
                 self.nest_inner(
                     sut_peek, ref_peek, depth, seen_sut_holds, seen_ref_holds, gil, memo,
                 )
             }
             Vair::Zinc => {
-                let sut_peek = self.peek(sut_ctx, Way::Read, 2)?;
-                let ref_peek = self.peek(ref_ctx, Way::Read, 2)?;
+                let sut_peek = self.peek(sut_ctx, Way::Read, 2u64)?;
+                let ref_peek = self.peek(ref_ctx, Way::Read, 2u64)?;
                 self.nest_inner(
                     sut_peek, ref_peek, depth, seen_sut_holds, seen_ref_holds, gil, memo,
                 )
@@ -9096,13 +9546,11 @@ impl<'a> Ut<'a> {
                 let inner = self.wrap_type(inner, vair)?;
                 Ok(cons_face(&mut self.cx, tool, inner))
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&typ)?;
                 let mut wrapped = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    let w = self.wrap_type(opt, vair)?;
+                    let w = self.wrap_type(option, vair)?;
                     wrapped.push(w);
                 }
                 self.cons_fork(wrapped)
@@ -9279,35 +9727,31 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         vein: &[Option<BigUint>],
         duz: &F,
-    ) -> Result<(u64, NRc<NTy>)>
+    ) -> Result<(BigUint, NRc<NTy>)>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
     {
-        let axis = tend(vein)?;
-        let vit: Vec<Option<u64>> = vein
-            .iter()
-            .rev()
-            .map(|step| step.as_ref().map(axis_big_to_u64).transpose())
-            .collect::<Result<_>>()?;
+        let axis = tend_big(vein)?;
+        let vit: Vec<Option<BigUint>> = vein.iter().rev().cloned().collect();
         let ty = self.take_inner(sut, &vit, duz)?;
         Ok((axis, ty))
     }
 
-    fn take_inner<F>(&mut self, sut: NRc<NTy>, vit: &[Option<u64>], duz: &F) -> Result<NRc<NTy>>
+    fn take_inner<F>(&mut self, sut: NRc<NTy>, vit: &[Option<BigUint>], duz: &F) -> Result<NRc<NTy>>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
     {
         let Some((head, tail)) = vit.split_first() else {
             return duz(self, sut);
         };
-        self.take_inner_head_tail(sut, *head, tail, duz)
+        self.take_inner_head_tail(sut, head.clone(), tail, duz)
     }
 
     fn take_inner_head_tail<F>(
         &mut self,
         sut: NRc<NTy>,
-        head: Option<u64>,
-        tail: &[Option<u64>],
+        head: Option<BigUint>,
+        tail: &[Option<BigUint>],
         duz: &F,
     ) -> Result<NRc<NTy>>
     where
@@ -9352,18 +9796,18 @@ impl<'a> Ut<'a> {
     fn take_axis<F>(
         &mut self,
         sut: NRc<NTy>,
-        step: u64,
-        tail: &[Option<u64>],
+        step: BigUint,
+        tail: &[Option<BigUint>],
         duz: &F,
         vil: &mut HashSet<u64>,
     ) -> Result<NRc<NTy>>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
     {
-        if step == 1 {
+        if step == BigUint::from(1u32) {
             return self.take_inner(sut, tail, duz);
         }
-        let (cap, mas) = axis_cap_mas(step)?;
+        let (cap, mas) = axis_big_cap_mas(&step)?;
         match &*sut {
             NTy::Noun => {
                 let noun = cons_noun(&mut self.cx);
@@ -9411,7 +9855,7 @@ impl<'a> Ut<'a> {
                 let options = self.fork_options_native(&sut)?;
                 let mut out = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt_ty = self.take_axis(option, step, tail, duz, vil)?;
+                    let opt_ty = self.take_axis(option, step.clone(), tail, duz, vil)?;
                     out.push(opt_ty);
                 }
                 self.cons_fork(out)
@@ -9423,7 +9867,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, new_payload))
             }
             NTy::Hold { .. } => {
-                let sut_id = NRc::as_ptr(&sut) as u64;
+                let sut_id = native_type_id_u64(&sut);
                 if !vil.insert(sut_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -9607,13 +10051,15 @@ impl<'a> Ut<'a> {
                 // cons_hint preserves the void/noun collapse hint_type applies.
                 let sut_noun = live_to_noun(&mut self.cx, &sut, self.slab);
                 let head_noun = T(self.slab, &[sut_noun, note_noun]);
-                let head_leaf = NLeaf::from_noun_raw(head_noun, &self.slab.noun_space());
+                let head_leaf =
+                    live_leaf_from_noun(&mut self.cx, head_noun, &self.slab.noun_space());
                 Ok(cons_hint(&mut self.cx, head_leaf, payload))
             }
             Skin::Name(name, inner) => {
                 let inner_ty = self.gain_skin_inner(sut, ref_, inner, seen)?;
                 let tool_noun = term_to_noun(self.slab, name);
-                let tool_leaf = NLeaf::from_noun_raw(tool_noun, &self.slab.noun_space());
+                let tool_leaf =
+                    live_leaf_from_noun(&mut self.cx, tool_noun, &self.slab.noun_space());
                 Ok(cons_face(&mut self.cx, tool_leaf, inner_ty))
             }
             Skin::Over(wing, inner) => {
@@ -9694,7 +10140,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -9781,7 +10227,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, hd, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -9863,7 +10309,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -9986,7 +10432,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10076,7 +10522,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, hd, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10135,7 +10581,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10212,8 +10658,8 @@ impl<'a> Ut<'a> {
     #[inline]
     fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>) -> (u64, u64, u8) {
         (
-            NRc::as_ptr(sut) as u64,
-            NRc::as_ptr(ref_) as u64,
+            native_type_id_u64(sut),
+            native_type_id_u64(ref_),
             u8::from(self.vet),
         )
     }
@@ -10272,11 +10718,10 @@ impl<'a> Ut<'a> {
                 let cell = cons_cell(&mut self.cx, head, tail);
                 self.miss_sint(cell, ref_, seen, memo)
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                for option in fork_set_options(set_noun, &self.slab.noun_space())? {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    if !self.miss_dext(opt, ref_.clone(), seen, memo)? {
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&sut)?;
+                for option in options {
+                    if !self.miss_dext(option, ref_.clone(), seen, memo)? {
                         return Ok(false);
                     }
                 }
@@ -10291,8 +10736,8 @@ impl<'a> Ut<'a> {
                 self.miss_dext(payload, ref_, seen, memo)
             }
             NTy::Hold { .. } => {
-                let sp = NRc::as_ptr(&sut) as u64;
-                let rp = NRc::as_ptr(&ref_) as u64;
+                let sp = native_type_id_u64(&sut);
+                let rp = native_type_id_u64(&ref_);
                 for (a, b) in seen.iter() {
                     if (*a == sp && *b == rp) || (*a == rp && *b == sp) {
                         return Ok(true);
@@ -10411,13 +10856,11 @@ impl<'a> Ut<'a> {
                 let fused = self.fuse_inner(inner, ref_, seen)?;
                 Ok(cons_face(&mut self.cx, tool, fused))
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&sut)?;
                 let mut out = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    let f = self.fuse_inner(opt, ref_.clone(), seen)?;
+                    let f = self.fuse_inner(option, ref_.clone(), seen)?;
                     out.push(f);
                 }
                 self.cons_fork(out)
@@ -10429,7 +10872,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, fused))
             }
             NTy::Hold { .. } => {
-                let key = (NRc::as_ptr(&sut) as usize, NRc::as_ptr(&ref_) as usize);
+                let key = (native_type_id_usize(&sut), native_type_id_usize(&ref_));
                 if seen.contains(&key) {
                     return Err(CompilerError::UnsupportedExpr(
                         "native mint: fuse-loop".to_string(),
@@ -10532,13 +10975,11 @@ impl<'a> Ut<'a> {
                 let cropped = self.crop_inner(inner, ref_, seen)?;
                 Ok(cons_face(&mut self.cx, tool, cropped))
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&sut)?;
                 let mut out = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    let c = self.crop_inner(opt, ref_.clone(), seen)?;
+                    let c = self.crop_inner(option, ref_.clone(), seen)?;
                     out.push(c);
                 }
                 self.cons_fork(out)
@@ -10550,7 +10991,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, cropped))
             }
             NTy::Hold { .. } => {
-                let key = (NRc::as_ptr(&sut) as usize, NRc::as_ptr(&ref_) as usize);
+                let key = (native_type_id_usize(&sut), native_type_id_usize(&ref_));
                 if seen.contains(&key) {
                     return Err(CompilerError::UnsupportedExpr(
                         "native mint: crop-loop".to_string(),
@@ -10581,13 +11022,11 @@ impl<'a> Ut<'a> {
                 let inner = self.repo(ref_.clone())?;
                 self.crop_inner(sut, inner, seen)
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&ref_)?;
                 let mut acc = sut;
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    acc = self.crop_inner(acc, opt, seen)?;
+                    acc = self.crop_inner(acc, option, seen)?;
                 }
                 Ok(acc)
             }
@@ -10740,11 +11179,17 @@ impl<'a> Ut<'a> {
     /// come free from `fork_from_options`; the single result is content-keyed via
     /// `native_of_cached` so a structurally-equal fork reuses one interned `Rc`.
     fn cons_fork(&mut self, options: Vec<NRc<NTy>>) -> Result<NRc<NTy>> {
-        // Memo on the canonical option-pointer SET (sorted+deduped): a fork is
-        // mug-ordered and set-valued, so the interned option pointers fully
-        // determine the result. Skips the mug-treap rebuild + decode/jam for the
-        // forks that recur throughout the recursive-type elaboration. Byte-exact:
-        // a hit returns the same interned `Rc` the rebuild would.
+        // Native forms of the exact Hoon empty/singleton collapse avoid building,
+        // mugging, and decoding a treap for the overwhelmingly cheap cases.
+        match options.as_slice() {
+            [] => return Ok(cons_void(&mut self.cx)),
+            [only] if matches!(&**only, NTy::Void) => {
+                return Ok(cons_void(&mut self.cx));
+            }
+            [only] => return Ok(only.clone()),
+            _ => {}
+        }
+
         let mut noun_opts = Vec::with_capacity(options.len());
         for opt in &options {
             noun_opts.push(live_to_noun(&mut self.cx, opt, self.slab));
@@ -10780,42 +11225,42 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn peek(&mut self, sut: NRc<NTy>, way: Way, axis: u64) -> Result<NRc<NTy>> {
+    fn peek<A: Into<BigUint>>(&mut self, sut: NRc<NTy>, way: Way, axis: A) -> Result<NRc<NTy>> {
         // ATOMIC FLIP (consumer C2): peek reads the native enum directly. The
         // seen-hold dedup, the core coil, and the fork set stay noun-keyed in
         // Phase 1 (lowered via to_noun); repo is native (C1).
         fn seen_hold(
             ut: &mut Ut<'_>,
-            seen: &mut HashMap<u32, Vec<(Noun, u64)>>,
+            seen: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
             hold: Noun,
-            axis: u64,
+            axis: &BigUint,
         ) -> Result<bool> {
-            let axis_noun = noun_u64(ut.slab, axis);
+            let axis_noun = noun_biguint(ut.slab, axis.clone());
             let mug = ut.noun_mug_cached(hold) ^ slab_mug(axis_noun, &ut.slab.noun_space());
             if let Some(bucket) = seen.get(&mug) {
                 for (prior, prior_axis) in bucket {
-                    if *prior_axis == axis && noun_eq(*prior, hold, &ut.slab.noun_space())? {
+                    if prior_axis == axis && noun_eq(*prior, hold, &ut.slab.noun_space())? {
                         return Ok(true);
                     }
                 }
             }
-            seen.entry(mug).or_default().push((hold, axis));
+            seen.entry(mug).or_default().push((hold, axis.clone()));
             Ok(false)
         }
 
         fn unsee_hold(
             ut: &mut Ut<'_>,
-            seen: &mut HashMap<u32, Vec<(Noun, u64)>>,
+            seen: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
             hold: Noun,
-            axis: u64,
+            axis: &BigUint,
         ) -> Result<()> {
-            let axis_noun = noun_u64(ut.slab, axis);
+            let axis_noun = noun_biguint(ut.slab, axis.clone());
             let mug = ut.noun_mug_cached(hold) ^ slab_mug(axis_noun, &ut.slab.noun_space());
             if let Some(bucket) = seen.get_mut(&mug) {
                 let space = ut.slab.noun_space();
                 let mut idx = 0;
                 while idx < bucket.len() {
-                    if bucket[idx].1 == axis && noun_eq(bucket[idx].0, hold, &space)? {
+                    if &bucket[idx].1 == axis && noun_eq(bucket[idx].0, hold, &space)? {
                         bucket.swap_remove(idx);
                         break;
                     }
@@ -10832,10 +11277,10 @@ impl<'a> Ut<'a> {
             ut: &mut Ut<'_>,
             sut: NRc<NTy>,
             way: Way,
-            axis: u64,
-            seen_holds: &mut HashMap<u32, Vec<(Noun, u64)>>,
+            axis: BigUint,
+            seen_holds: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
         ) -> Result<NRc<NTy>> {
-            if axis == 1 {
+            if axis == BigUint::from(1u32) {
                 return Ok(sut);
             }
             match &*sut {
@@ -10843,12 +11288,12 @@ impl<'a> Ut<'a> {
                 NTy::Void => Ok(cons_void(&mut ut.cx)),
                 NTy::Atom { .. } => Ok(cons_void(&mut ut.cx)),
                 NTy::Cell(head, tail) => {
-                    let (cap, mas) = axis_cap_mas(axis)?;
+                    let (cap, mas) = axis_big_cap_mas(&axis)?;
                     let child = if cap == 2 { head.clone() } else { tail.clone() };
                     go(ut, child, way, mas, seen_holds)
                 }
                 NTy::Core { payload, garb, .. } => {
-                    let (cap, mas) = axis_cap_mas(axis)?;
+                    let (cap, mas) = axis_big_cap_mas(&axis)?;
                     if cap != 3 {
                         return Ok(cons_noun(&mut ut.cx));
                     }
@@ -10857,7 +11302,11 @@ impl<'a> Ut<'a> {
                     // subject) is not needed here.
                     let vair = garb.vair;
                     let (sam, con) = peel(way, vair);
-                    let tow = if mas == 1 { 1 } else { axis_cap_mas(mas)?.0 };
+                    let tow = if mas == BigUint::from(1u32) {
+                        1
+                    } else {
+                        axis_big_cap_mas(&mas)?.0
+                    };
                     if (sam && con) || (sam && tow == 2) || (con && tow == 3) {
                         return go(ut, payload, way, mas, seen_holds);
                     }
@@ -10865,12 +11314,12 @@ impl<'a> Ut<'a> {
                         return Err(CompilerError::Noun("payload-block".to_string()));
                     }
                     let sam_type = if sam {
-                        go(ut, payload.clone(), way, 2, seen_holds)?
+                        go(ut, payload.clone(), way, BigUint::from(2u32), seen_holds)?
                     } else {
                         cons_noun(&mut ut.cx)
                     };
                     let con_type = if con {
-                        go(ut, payload.clone(), way, 3, seen_holds)?
+                        go(ut, payload.clone(), way, BigUint::from(3u32), seen_holds)?
                     } else {
                         cons_noun(&mut ut.cx)
                     };
@@ -10887,39 +11336,32 @@ impl<'a> Ut<'a> {
                 }
                 NTy::Hold { .. } => {
                     let hold_noun = live_to_noun(&mut ut.cx, &sut, ut.slab);
-                    if seen_hold(ut, seen_holds, hold_noun, axis)? {
+                    if seen_hold(ut, seen_holds, hold_noun, &axis)? {
                         return Ok(cons_void(&mut ut.cx));
                     }
                     let expanded = ut.repo(sut.clone())?;
-                    let result = go(ut, expanded, way, axis, seen_holds);
-                    unsee_hold(ut, seen_holds, hold_noun, axis)?;
+                    let result = go(ut, expanded, way, axis.clone(), seen_holds);
+                    unsee_hold(ut, seen_holds, hold_noun, &axis)?;
                     result
                 }
-                NTy::Fork { set } => {
-                    let set_noun = live_leaf_to_noun(&mut ut.cx, set, ut.slab);
-                    let options = fork_set_options(set_noun, &ut.slab.noun_space())?;
+                NTy::Fork { .. } => {
+                    let options = ut.fork_options_native(&sut)?;
                     let mut peeks = Vec::with_capacity(options.len());
                     for option in options {
-                        let opt = native_of(&mut ut.cx, option, &ut.slab.noun_space())?;
-                        peeks.push(go(ut, opt, way, axis, seen_holds)?);
+                        peeks.push(go(ut, option, way, axis.clone(), seen_holds)?);
                     }
-                    let mut peek_nouns = Vec::with_capacity(peeks.len());
-                    for p in &peeks {
-                        peek_nouns.push(live_to_noun(&mut ut.cx, p, ut.slab));
-                    }
-                    let fork_noun = ut.fork_from_options(peek_nouns)?;
-                    native_of(&mut ut.cx, fork_noun, &ut.slab.noun_space())
+                    ut.cons_fork(peeks)
                 }
             }
         }
 
-        let mut seen_holds: HashMap<u32, Vec<(Noun, u64)>> = HashMap::new();
-        go(self, sut, way, axis, &mut seen_holds)
+        let mut seen_holds: HashMap<u32, Vec<(Noun, BigUint)>> = HashMap::new();
+        go(self, sut, way, axis.into(), &mut seen_holds)
     }
 
     /// Noun-bridged `peek` for not-yet-flipped callers (C2): lift sut, run native
     /// peek, lower the result. Drops as callers flip.
-    fn peek_noun(&mut self, sut: Noun, way: Way, axis: u64) -> Result<Noun> {
+    fn peek_noun<A: Into<BigUint>>(&mut self, sut: Noun, way: Way, axis: A) -> Result<Noun> {
         let native = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let r = self.peek(native, way, axis)?;
         Ok(live_to_noun(&mut self.cx, &r, self.slab))
@@ -10960,9 +11402,16 @@ impl<'a> Ut<'a> {
         // ATOMIC FLIP (consumer C7): mull reads/returns the native enum.
         // C-final.1b: the mull boundary cache is native-re-keyed on the interned
         // (sut, gol, dox) `Rc` pointers, so sut/gol/dox are no longer lowered to
-        // nouns to build the cache key. gen stays a noun (mug-keyed AST node).
-        let gen_noun = self.hoon_noun_for_node(gen);
-        if let Some(cached) = self.mull_cache_lookup(&sut, &gol, &dox, gen_noun)? {
+        // nouns to build the cache key. The retained native AST supplies the
+        // same spot-sensitive structural identity without noun materialization.
+        let gen_sig = match self.mint_cache_signature(gen) {
+            Some(signature) => signature,
+            None => {
+                let gen_noun = self.hoon_noun_for_node(gen);
+                self.noun_mug_cached(gen_noun) as u64
+            }
+        };
+        if let Some(cached) = self.mull_cache_lookup(&sut, &gol, &dox, gen_sig)? {
             return Ok(cached);
         }
         // hoon-138 pre-check: mull-none if sut is void
@@ -10978,7 +11427,7 @@ impl<'a> Ut<'a> {
             &sut,
             &gol,
             &dox,
-            gen_noun,
+            gen_sig,
             result.0.clone(),
             result.1.clone(),
         )?;
@@ -11029,7 +11478,7 @@ impl<'a> Ut<'a> {
                 Vair::Gold,
                 prefix.as_deref(),
                 Poly::Dry,
-                &Hoon::Axis(1),
+                &Hoon::Axis((1u64).into()),
                 tomes,
             ),
             // %brpt (|@ wet core)
@@ -11040,7 +11489,7 @@ impl<'a> Ut<'a> {
                 Vair::Gold,
                 prefix.as_deref(),
                 Poly::Wet,
-                &Hoon::Axis(1),
+                &Hoon::Axis((1u64).into()),
                 tomes,
             ),
 
@@ -11141,7 +11590,7 @@ impl<'a> Ut<'a> {
             // ---- Face: %tune ----
             Hoon::Tune(tune) => {
                 let tool = term_or_tune_to_noun(self.slab, tune)?;
-                let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+                let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
                 let p_ty = cons_face(&mut self.cx, tool_leaf.clone(), sut);
                 let q_ty = cons_face(&mut self.cx, tool_leaf, dox);
                 Ok((p_ty, q_ty))
@@ -11266,11 +11715,11 @@ impl<'a> Ut<'a> {
                 let syx_q = self.cove(dox_formula)?;
 
                 // Generate fish (runtime type test) from both
-                let pov_p = self.type_test_formula_on_axis(waz_p, syx_p)?;
-                let pov_q = self.type_test_formula_on_axis(waz_q, syx_q)?;
+                let pov_p = self.type_test_formula_on_axis(waz_p, syx_p.clone())?;
+                let pov_q = self.type_test_formula_on_axis(waz_q, syx_q.clone())?;
 
                 // Assert axes AND fish nock are identical (pov_* are FORMULAS).
-                if syx_p != syx_q || !noun_eq(pov_p, pov_q, &self.slab.noun_space())? {
+                if syx_p != syx_q || !self.formula_arena.equal(pov_p, pov_q) {
                     return Err(CompilerError::Noun("mull-bonk-a".to_string()));
                 }
                 let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
@@ -11375,7 +11824,7 @@ impl<'a> Ut<'a> {
             // TisLus (=+) lowers to TisGar => handled above
             Hoon::TisLus(p, q) => {
                 let lowered = Hoon::TisGar(
-                    Box::new(Hoon::Pair(p.clone(), Box::new(Hoon::Axis(1)))),
+                    Box::new(Hoon::Pair(p.clone(), Box::new(Hoon::Axis((1u64).into())))),
                     q.clone(),
                 );
                 self.mull(sut, gol, dox, &lowered)
@@ -11383,7 +11832,7 @@ impl<'a> Ut<'a> {
             // TisHep (=-) is TisLus with args reversed
             Hoon::TisHep(p, q) => {
                 let lowered = Hoon::TisGar(
-                    Box::new(Hoon::Pair(q.clone(), Box::new(Hoon::Axis(1)))),
+                    Box::new(Hoon::Pair(q.clone(), Box::new(Hoon::Axis((1u64).into())))),
                     p.clone(),
                 );
                 self.mull(sut, gol, dox, &lowered)
@@ -11438,40 +11887,8 @@ impl<'a> Ut<'a> {
     }
 
     /// cove: extract axis from a [0 N] nock formula (matches hoon-138 ++cove)
-    fn cove(&self, mut formula: Noun) -> Result<u64> {
-        // hoon-138 `++cove` extracts an axis from `[0 axis]`, skipping `%11` hints.
-        let space = self.slab.noun_space();
-        loop {
-            let cell = formula
-                .in_space(&space)
-                .as_cell()
-                .map_err(|_| CompilerError::Noun("cove: not a cell".to_string()))?;
-            let head = cell.head().noun();
-            let head_val = head
-                .as_direct()
-                .map_err(|_| CompilerError::Noun("cove: head not direct".to_string()))?;
-            match head_val.data() {
-                0 => {
-                    return cell
-                        .tail()
-                        .as_atom()
-                        .map_err(|_| CompilerError::Noun("cove: tail not atom".to_string()))?
-                        .as_u64()
-                        .map_err(|_| CompilerError::Noun("cove: axis too large".to_string()))
-                }
-                11 => {
-                    let tail = cell.tail().as_cell().map_err(|_| {
-                        CompilerError::Noun("cove: malformed hint formula".to_string())
-                    })?;
-                    formula = tail.tail().noun();
-                }
-                other => {
-                    return Err(CompilerError::Noun(format!(
-                        "cove: not a slot formula (head={other})"
-                    )));
-                }
-            }
-        }
+    fn cove(&self, formula: FormulaId) -> Result<BigUint> {
+        self.formula_arena.cove(formula)
     }
 
     /// mull_grow: Handle core construction (%brcn, %brpt) in mull.
@@ -11487,7 +11904,7 @@ impl<'a> Ut<'a> {
         ruf: &Hoon,
         tomes: &HashMap<String, Tome>,
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
-        // Mull the payload (ruf, typically Hoon::Axis(1))
+        // Mull the payload (ruf, typically Hoon::Axis((1u64).into()))
         let noun_gol = cons_noun(&mut self.cx);
         let dan = self.mull(sut.clone(), noun_gol, dox, ruf)?;
         // Construct both core types and validate arms
@@ -11529,7 +11946,7 @@ impl<'a> Ut<'a> {
         let rest = T(self.slab, &[semi_noun, tomes_map]);
         let yet = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
             cons_core(
                 &mut self.cx,
                 sut.clone(),
@@ -11543,7 +11960,7 @@ impl<'a> Ut<'a> {
         let garb_hum = garb_native(nym, hud, Vair::Gold);
         let hum = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
             cons_core(&mut self.cx, dox.clone(), garb_hum, dox.clone(), rest_leaf)
         };
 
@@ -11797,11 +12214,6 @@ fn create_musk_eval_context() -> NockContext {
 
 fn slot_formula_axis_noun(slab: &mut NounSlab, axis_noun: Noun) -> Noun {
     T(slab, &[D(0), axis_noun])
-}
-
-fn slot_formula_axis(slab: &mut NounSlab, axis: u64) -> Noun {
-    let axis_noun = noun_u64(slab, axis);
-    slot_formula_axis_noun(slab, axis_noun)
 }
 
 fn slot_formula_axis_big(slab: &mut NounSlab, axis: BigUint) -> Noun {
@@ -12466,7 +12878,7 @@ fn find_face_axis_skip(
     name: &str,
     skip: u64,
     space: &NounSpace,
-) -> Result<Option<u64>> {
+) -> Result<Option<BigUint>> {
     let (found, _skip) = find_face_axis_skip_inner(noun, name, skip, space)?;
     Ok(found)
 }
@@ -12477,14 +12889,14 @@ fn find_face_axis_skip_inner(
     name: &str,
     skip: u64,
     space: &NounSpace,
-) -> Result<(Option<u64>, u64)> {
+) -> Result<(Option<BigUint>, u64)> {
     let tag = type_tag(noun, space)?;
     match tag.as_str() {
         "face" => {
             let mut remaining = skip;
             if type_face_name_if_atom(noun, space)?.as_deref() == Some(name) {
                 if remaining == 0 {
-                    return Ok((Some(1), remaining));
+                    return Ok((Some(BigUint::from(1u32)), remaining));
                 }
                 remaining = remaining.saturating_sub(1);
             }
@@ -12495,11 +12907,17 @@ fn find_face_axis_skip_inner(
             let (head, tail) = type_cell_parts(noun, space)?;
             let (found_head, remaining) = find_face_axis_skip_inner(head, name, skip, space)?;
             if let Some(axis) = found_head {
-                return Ok((Some(peg_axis(2, axis)?), remaining));
+                return Ok((
+                    Some(peg_axis_big_pair(BigUint::from(2u32), &axis)?),
+                    remaining,
+                ));
             }
             let (found_tail, remaining) = find_face_axis_skip_inner(tail, name, remaining, space)?;
             if let Some(axis) = found_tail {
-                return Ok((Some(peg_axis(3, axis)?), remaining));
+                return Ok((
+                    Some(peg_axis_big_pair(BigUint::from(3u32), &axis)?),
+                    remaining,
+                ));
             }
             Ok((None, remaining))
         }
@@ -12516,24 +12934,24 @@ fn find_face_axis_skip_inner(
             let (_garb, context, _rest) = coil_parts(coil, space)?;
             let (found, rem) = find_face_axis_skip_inner(payload, name, skip, space)?;
             if let Some(axis) = found {
-                return Ok((Some(peg_axis(3, axis)?), rem));
+                return Ok((Some(peg_axis_big_pair(BigUint::from(3u32), &axis)?), rem));
             }
             let (found, rem) = find_face_axis_skip_inner(context, name, rem, space)?;
             if let Some(axis) = found {
-                return Ok((Some(peg_axis(7, axis)?), rem));
+                return Ok((Some(peg_axis_big_pair(BigUint::from(7u32), &axis)?), rem));
             }
             Ok((None, rem))
         }
         "fork" => {
             let options = type_fork_options(noun, space)?;
             let mut remaining = skip;
-            let mut found_axis: Option<u64> = None;
+            let mut found_axis: Option<BigUint> = None;
             for option in options {
                 let (found, rem) = find_face_axis_skip_inner(option, name, remaining, space)?;
                 remaining = rem;
                 if let Some(axis) = found {
-                    if let Some(existing) = found_axis {
-                        if existing != axis {
+                    if let Some(existing) = &found_axis {
+                        if existing != &axis {
                             return Ok((None, remaining));
                         }
                     } else {
@@ -12619,10 +13037,6 @@ fn peel(way: Way, met: Vair) -> (bool, bool) {
     }
 }
 
-fn peg_axis(a: u64, b: u64) -> Result<u64> {
-    peg(a, b).map_err(|err| CompilerError::Decode(format!("peg axis: {err}")))
-}
-
 fn peg_axis_big_pair(mut a: BigUint, b: &BigUint) -> Result<BigUint> {
     if b == &BigUint::from(0u32) {
         return Err(CompilerError::Decode(
@@ -12643,21 +13057,6 @@ fn peg_axis_big_pair(mut a: BigUint, b: &BigUint) -> Result<BigUint> {
 #[track_caller]
 fn peg_axis_big(a: BigUint, b: u64) -> Result<BigUint> {
     peg_axis_big_pair(a, &BigUint::from(b))
-}
-
-fn axis_big_to_u64(axis: &BigUint) -> Result<u64> {
-    let location = std::panic::Location::caller();
-    u64::try_from(axis).map_err(|_| {
-        CompilerError::Decode(format!(
-            "axis exceeds u64 at {}:{}: {axis}",
-            location.file(),
-            location.line()
-        ))
-    })
-}
-
-fn tend(vein: &[Option<BigUint>]) -> Result<u64> {
-    axis_big_to_u64(&tend_big(vein)?)
 }
 
 fn tend_big(vein: &[Option<BigUint>]) -> Result<BigUint> {
@@ -12836,7 +13235,71 @@ fn coil_from_parts(slab: &mut NounSlab, garb: Noun, context: Noun, rest: Noun) -
 // Additive: the noun-only `ty_*` call sites are untouched; callers migrate to
 // `_n` incrementally (INC2+). Validated per-node by `assert_native_eq`.
 // ---------------------------------------------------------------------------
-use std::rc::Rc as NRc;
+use crate::native::ir::ty::TypeRef as NRc;
+
+#[inline(always)]
+fn native_type_id_u64(ty: &NRc<NTy>) -> u64 {
+    u64::from(ty.arena_id().0)
+}
+
+#[inline(always)]
+fn native_type_id_usize(ty: &NRc<NTy>) -> usize {
+    ty.arena_id().0 as usize
+}
+
+enum NativeForkOptions<'a> {
+    Cached(&'a [NRc<NTy>]),
+    Transient(SmallVec<[NRc<NTy>; 4]>),
+}
+
+impl std::ops::Deref for NativeForkOptions<'_> {
+    type Target = [NRc<NTy>];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Cached(options) => options,
+            Self::Transient(options) => options,
+        }
+    }
+}
+
+enum NativeForkOptionIter<'a> {
+    Cached(std::slice::Iter<'a, NRc<NTy>>),
+    Transient(smallvec::IntoIter<[NRc<NTy>; 4]>),
+}
+
+impl Iterator for NativeForkOptionIter<'_> {
+    type Item = NRc<NTy>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Cached(options) => options.next().cloned(),
+            Self::Transient(options) => options.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = match self {
+            Self::Cached(options) => options.len(),
+            Self::Transient(options) => options.len(),
+        };
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for NativeForkOptionIter<'_> {}
+
+impl<'a> IntoIterator for NativeForkOptions<'a> {
+    type Item = NRc<NTy>;
+    type IntoIter = NativeForkOptionIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::Cached(options) => NativeForkOptionIter::Cached(options.iter()),
+            Self::Transient(options) => NativeForkOptionIter::Transient(options.into_iter()),
+        }
+    }
+}
 
 use crate::native::ir::intern::{
     cons_cell, cons_core, cons_face, cons_hint, cons_noun, cons_void,
@@ -12845,14 +13308,14 @@ use crate::native::ir::intern::{
     crop_cache_lookup as native_crop_cache_lookup, crop_cache_store as native_crop_cache_store,
     fish_cache_lookup as native_fish_cache_lookup, fish_cache_store as native_fish_cache_store,
     fuse_cache_lookup as native_fuse_cache_lookup, fuse_cache_store as native_fuse_cache_store,
-    legset_memo_lookup, legset_memo_store, live_intern, live_leaf_to_noun, live_to_noun,
-    mint_cache_lookup as native_mint_cache_lookup, mint_cache_store as native_mint_cache_store,
-    mull_cache_lookup as native_mull_cache_lookup, mull_cache_store as native_mull_cache_store,
-    native_of, native_of_mug_candidates, native_of_mug_insert, nest_cache_lookup, nest_cache_store,
-    Context,
+    legset_memo_lookup, legset_memo_store, live_intern, live_leaf_from_noun, live_leaf_to_noun,
+    live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
+    mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,
+    mull_cache_store as native_mull_cache_store, native_of, native_of_mug_candidates,
+    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
-use crate::native::ir::ty::{garb_native, Garb as NGarb, Type as NTy};
+use crate::native::ir::ty::{garb_native, visit_fork_set_members, Garb as NGarb, Type as NTy};
 
 #[allow(dead_code)]
 fn ty_noun_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
@@ -12900,7 +13363,7 @@ fn ty_face_tool_n(
     let native = match kind {
         Ok(TypeTagKind::Void) => live_intern(cx, NTy::Void),
         _ => {
-            let tool_leaf = NLeaf::from_noun_raw(tool, &slab.noun_space());
+            let tool_leaf = live_leaf_from_noun(cx, tool, &slab.noun_space());
             live_intern(
                 cx,
                 NTy::Face {
@@ -12946,7 +13409,7 @@ fn ty_hint_n(
                 .and_then(|c| c.tail().as_cell())
                 .map(|c| c.head().noun())
                 .expect("ty_hint_n: hint noun shape");
-            let head_leaf = NLeaf::from_noun_raw(head, &space);
+            let head_leaf = live_leaf_from_noun(cx, head, &space);
             live_intern(
                 cx,
                 NTy::Hint {
@@ -12967,7 +13430,7 @@ fn ty_hold_n(
     hoon: Noun,
 ) -> (Noun, NRc<NTy>) {
     let noun = ty_hold(slab, inner.0, hoon);
-    let gene = NLeaf::from_noun_raw(hoon, &slab.noun_space());
+    let gene = live_leaf_from_noun(cx, hoon, &slab.noun_space());
     let native = live_intern(
         cx,
         NTy::Hold {
@@ -12994,7 +13457,7 @@ fn ty_core_n(
         Ok(TypeTagKind::Void) => live_intern(cx, NTy::Void),
         _ => {
             let garb_native = NGarb::from_noun(garb, &slab.noun_space()).expect("ty_core_n garb");
-            let rest_leaf = NLeaf::from_noun_raw(rest, &slab.noun_space());
+            let rest_leaf = live_leaf_from_noun(cx, rest, &slab.noun_space());
             live_intern(
                 cx,
                 NTy::Core {
@@ -13190,6 +13653,51 @@ mod native_ctor_tests {
         Ok(())
     }
 
+    #[test]
+    fn cons_fork_native_collapses_and_multi_member_parity() {
+        let mut slab: NounSlab = NounSlab::new();
+        let mut ut = Ut::new(&mut slab);
+        let left_n = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(0)));
+        let right_n = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(1)));
+
+        let empty = ut.cons_fork(Vec::new()).unwrap();
+        assert!(matches!(&*empty, NTy::Void));
+        let singleton = ut.cons_fork(vec![left_n.1.clone()]).unwrap();
+        assert!(NRc::ptr_eq(&singleton, &left_n.1));
+
+        let fork = ut
+            .cons_fork(vec![left_n.1.clone(), right_n.1.clone()])
+            .unwrap();
+        let NTy::Fork { options, .. } = &*fork else {
+            panic!("two distinct members must produce a fork");
+        };
+        assert!(
+            options.get().is_none(),
+            "native fork edges must remain lazy until first traversal"
+        );
+        let transient = ut.fork_options_native(&fork).unwrap();
+        assert_eq!(transient.len(), 2);
+        let NTy::Fork { options, .. } = &*fork else {
+            unreachable!()
+        };
+        assert!(
+            options.get().is_none(),
+            "a one-shot fork must not retain its child vector"
+        );
+        drop(transient);
+        let materialized = ut.fork_options_native(&fork).unwrap();
+        assert!(std::ptr::eq::<[NRc<NTy>]>(
+            options.get().expect("fork edges populated").as_slice(),
+            &*materialized
+        ));
+        let historical = ut.fork_from_options(vec![left_n.0, right_n.0]).unwrap();
+        let emitted = live_to_noun(&mut ut.cx, &fork, ut.slab);
+        assert!(noun_eq(historical, emitted, &ut.slab.noun_space()).unwrap());
+
+        let singleton_fork = ut.cons_fork(vec![fork.clone()]).unwrap();
+        assert!(NRc::ptr_eq(&singleton_fork, &fork));
+    }
+
     // STEP 1 unit: reachable_legs of a Hold-over-Cell DAG returns exactly the
     // hold's leg-id; non-hold types return ∅; and the scoped-fan intersection is 0
     // when the active set is disjoint from the legset (collapses to the empty-fan
@@ -13304,7 +13812,7 @@ fn spec_example(spec: &Spec) -> Hoon {
     let bug = Vec::new();
     let nut = None;
     let def = None;
-    example(spec, 1, &hay, &cox, &bug, &nut, &def)
+    example(spec, 1u64.into(), &hay, &cox, &bug, &nut, &def)
 }
 
 fn term_or_tune_to_noun(slab: &mut NounSlab, tot: &TermOrTune) -> Result<Noun> {
@@ -13447,7 +13955,7 @@ fn wing_to_noun(slab: &mut NounSlab, wing: &WingType) -> Result<Noun> {
 fn limb_to_noun(slab: &mut NounSlab, limb: &Limb) -> Result<Noun> {
     match limb {
         Limb::Term(name) => Ok(term_to_noun(slab, name)),
-        Limb::Axis(axis) => Ok(slot_formula_axis(slab, *axis)),
+        Limb::Axis(axis) => Ok(slot_formula_axis_big(slab, axis.as_biguint().clone())),
         Limb::Parent(skip, opt) => {
             let opt_noun = match opt {
                 None => D(0),
@@ -13543,7 +14051,7 @@ fn stencil_to_noun(slab: &mut NounSlab, stencil: &Stencil) -> Result<Noun> {
         }
         Stencil::Lazy { fragment, resolve } => {
             let gate_noun = gate_to_noun(slab, resolve)?;
-            let fragment_noun = noun_u64(slab, *fragment);
+            let fragment_noun = noun_biguint(slab, fragment.as_biguint().clone());
             Ok(tagged2(slab, "lazy", fragment_noun, gate_noun))
         }
     }
@@ -13909,13 +14417,13 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
         }
         SelectArm(axis, core) => {
             let core_noun = nock_to_noun(slab, core);
-            let axis_noun = noun_u64(slab, *axis);
+            let axis_noun = noun_biguint(slab, axis.as_biguint().clone());
             T(slab, &[D(10), axis_noun, core_noun])
         }
         Edit((axis, new), core) => {
             let new_noun = nock_to_noun(slab, new);
             let core_noun = nock_to_noun(slab, core);
-            let axis_noun = noun_u64(slab, *axis);
+            let axis_noun = noun_biguint(slab, axis.as_biguint().clone());
             let axis_cell = T(slab, &[axis_noun, new_noun]);
             T(slab, &[D(11), axis_cell, core_noun])
         }
@@ -13929,7 +14437,7 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
             let path_noun = nock_to_noun(slab, path);
             T(slab, &[D(13), core_noun, path_noun])
         }
-        AxisSelect(axis) => noun_u64(slab, *axis),
+        AxisSelect(axis) => noun_biguint(slab, axis.as_biguint().clone()),
     }
 }
 
@@ -13944,97 +14452,17 @@ fn nock_hint_to_noun(slab: &mut NounSlab, hint: &NockHint) -> Noun {
     }
 }
 
-fn const_bool_formula(slab: &mut NounSlab, value: bool) -> Noun {
-    let atom = if value { 0 } else { 1 };
-    T(slab, &[D(1), D(atom)])
-}
-
+#[cfg(test)]
 fn is_const_bool_formula(formula: Noun, value: bool, space: &NounSpace) -> bool {
     let Ok((head, tail)) = noun_pair(formula, space) else {
         return false;
     };
-    if !noun_eq_direct(head, 1, space) {
-        return false;
-    }
     let expected = if value { 0 } else { 1 };
-    noun_eq_direct(tail, expected, space)
+    noun_eq_direct(head, 1, space) && noun_eq_direct(tail, expected, space)
 }
 
-fn is_crash_formula(formula: Noun, space: &NounSpace) -> bool {
-    let Ok((head, tail)) = noun_pair(formula, space) else {
-        return false;
-    };
-    noun_eq_direct(head, 0, space) && noun_eq_direct(tail, 0, space)
-}
-
-fn flip_formula(slab: &mut NounSlab, dyr: Noun) -> Result<Noun> {
-    let space = slab.noun_space();
-    if is_const_bool_formula(dyr, true, &space) {
-        return Ok(const_bool_formula(slab, false));
-    }
-    if is_const_bool_formula(dyr, false, &space) {
-        return Ok(const_bool_formula(slab, true));
-    }
-    if is_crash_formula(dyr, &space) {
-        return Ok(dyr);
-    }
-    let false_formula = const_bool_formula(slab, false);
-    let true_formula = const_bool_formula(slab, true);
-    Ok(T(slab, &[D(6), dyr, false_formula, true_formula]))
-}
-
-fn flan_formula(slab: &mut NounSlab, bos: Noun, nif: Noun) -> Result<Noun> {
-    let space = slab.noun_space();
-    if noun_eq(bos, nif, &space)?
-        || is_const_bool_formula(bos, false, &space)
-        || is_const_bool_formula(nif, true, &space)
-        || is_crash_formula(bos, &space)
-    {
-        return Ok(bos);
-    }
-    if is_const_bool_formula(bos, true, &space)
-        || is_const_bool_formula(nif, false, &space)
-        || is_crash_formula(nif, &space)
-    {
-        return Ok(nif);
-    }
-    let false_formula = const_bool_formula(slab, false);
-    Ok(T(slab, &[D(6), bos, nif, false_formula]))
-}
-
-fn flor_formula(slab: &mut NounSlab, bos: Noun, nif: Noun) -> Result<Noun> {
-    let space = slab.noun_space();
-    if noun_eq(bos, nif, &space)?
-        || is_const_bool_formula(bos, true, &space)
-        || is_const_bool_formula(nif, false, &space)
-        || is_crash_formula(bos, &space)
-    {
-        return Ok(bos);
-    }
-    if is_const_bool_formula(bos, false, &space)
-        || is_const_bool_formula(nif, true, &space)
-        || is_crash_formula(nif, &space)
-    {
-        return Ok(nif);
-    }
-    let true_formula = const_bool_formula(slab, true);
-    Ok(T(slab, &[D(6), bos, true_formula, nif]))
-}
-
-fn and_formula(slab: &mut NounSlab, left: Noun, right: Noun) -> Result<Noun> {
-    let false_formula = const_bool_formula(slab, false);
-    cond(slab, left, right, false_formula)
-}
-
-fn crash_formula(slab: &mut NounSlab) -> Noun {
-    T(slab, &[D(0), D(0)])
-}
-
+#[cfg(test)]
 fn cell_type(slab: &mut NounSlab, head: Noun, tail: Noun) -> Result<Noun> {
-    // Native-shadow (INC6, flag-gated): cells are the most common structural type
-    // and thread head/tail natives. Under the flag, build via cell_type_n (which
-    // mirrors the cell(void,_)/cell(_,void)->void collapse) and assert byte-exact;
-    // the shipping path is the unchanged noun-only logic below.
     if crate::native::ir::intern::live_enabled() {
         let space = slab.noun_space();
         let mut cx = Context::new();
@@ -14045,17 +14473,13 @@ fn cell_type(slab: &mut NounSlab, head: Noun, tail: Noun) -> Result<Noun> {
         return Ok(noun);
     }
     let space = slab.noun_space();
-    if type_tag(head, &space)? == "void" {
-        return Ok(ty_void(slab));
-    }
-    if type_tag(tail, &space)? == "void" {
+    if type_tag(head, &space)? == "void" || type_tag(tail, &space)? == "void" {
         return Ok(ty_void(slab));
     }
     Ok(ty_cell(slab, head, tail))
 }
 
-/// Native-shadow `cell_type` (INC2): mirrors the cell(void,_)/cell(_,void)->void
-/// collapse, returning the native Void in those cases and `ty_cell_n` otherwise.
+/// Native cell type constructor: collapse cell(void,_)/cell(_,void) to void.
 #[allow(dead_code)]
 fn cell_type_n(
     cx: &mut Context,
