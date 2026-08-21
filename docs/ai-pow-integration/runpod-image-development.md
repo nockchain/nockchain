@@ -146,8 +146,21 @@ After login, verify the allocated GPU and start the inference service:
 nvidia-smi
 MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
   ai-pow-inference-seed-model
-ai-pow-inference-run
+MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
+NOCKCHAIN_NODE_ADDR=http://<node-private-grpc-host>:5555 \
+NOCKCHAIN_MINING_PKH=<v1-mining-pkh> \
+  ai-pow-inference-run
 ```
+
+`NOCKCHAIN_NODE_ADDR` and `NOCKCHAIN_MINING_PKH` enable production candidate
+subscription, recursive proof construction, and node submission. Omit both
+only for a zero-target inference diagnostic. The OpenAI-compatible server
+listens on port 8000; keep it on the pod and use an SSH tunnel for remote
+clients.
+
+For RTX 5090, select a host with NVIDIA driver 580.126.09 or newer. The
+published image uses CUDA 13. The CUDA forward-compatibility package rejects
+GeForce on driver 570 with status 804.
 
 Run `ai-pow-inference-seed-model` only when the model volume does not contain the required weights.
 

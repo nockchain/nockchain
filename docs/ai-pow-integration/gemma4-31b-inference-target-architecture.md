@@ -170,11 +170,15 @@ layers use an inference-only INT8 GEMM and do not create work notifications.
 The inference process owns tokenization, transformer state, KV cache, scales,
 activation quantization, activation functions, and model scheduling. It loads
 the native kernel in-process and passes contiguous tensor pointers on the
-current PyTorch CUDA stream. Device matrices never enter protobuf messages.
+current PyTorch CUDA stream. A no-hit inference call sends only bounded
+lifecycle metadata over gRPC. No activation, weight, or output tensor leaves
+the device on the normal path.
 
 The miner service owns the Nockchain candidate, target, scheduler generation,
-scalar winner validation, proof, and submission. The local control channel
-carries bounded candidate and lifecycle metadata.
+scalar winner validation, proof, and submission. A target hit copies the
+opened INT7 activation and fused weight matrices to host memory and streams
+them in bounded chunks. This rare proof handoff does not affect no-hit
+inference or mining throughput.
 
 An immutable operand generation contains:
 
@@ -188,6 +192,46 @@ An immutable operand generation contains:
 
 Candidate replacement and operand replacement are independent generations.
 Existing stale-candidate checks remain authoritative for block submission.
+
+## Candidate, proof, and submission path
+
+The production bridge connects to the node's private gRPC endpoint:
+
+1. Set the reward public-key hash.
+2. Subscribe to `%mine-ai` before mining is enabled.
+3. Decode the version-4 candidate commitment, target, and `pow-len`.
+4. Publish a new candidate generation and its canonical dense Pearl header to
+   vLLM.
+5. Invalidate the generation and install a zero target if the candidate stream
+   disconnects.
+
+vLLM adjusts the raw node target by the Pearl shape work factor before the
+device comparison. A winner submission contains the candidate generation,
+header extranonce, opened row and column tile, rank-128 noise seeds, and the
+full INT7 `A` and `Bᵀ` matrices. The bridge requires:
+
+- `m` to be a nonzero multiple of 256 and no greater than 4,096;
+- `k=5,376`, `n=43,008`, `r=128`, and a 16 × 16 contiguous tile;
+- exact tensor byte counts and values in `[-64, 63]`;
+- no routing tensor;
+- a current candidate generation and a registered runtime.
+
+The proof worker reconstructs the canonical header from the active Nockchain
+commitment and submitted extranonce. It recomputes the complete scalar
+transcript, both noise seeds, the selected tile, jackpot, and adjusted target
+check. It then builds the compact recursive certificate and canonical
+`[%command %pow %ai-pow ...]` noun. The node submission result controls the
+gRPC response: `accepted=true` means that the node acknowledged the prepared
+poke.
+
+Only one recursive inference-winner proof can run at a time. Candidate
+replacement does not interrupt a recursive prover. The completed result is
+discarded unless its generation is still current. This prevents stale block
+submission without detaching an unbounded proof task.
+
+The idle CUDA session uses the same node job. It varies the canonical header
+timestamp as an extranonce, applies the same shape-adjusted target, and sends a
+winning witness through the same scalar, recursive, and submission path.
 
 ## RTX 5090 tensor parallelism
 
@@ -295,6 +339,32 @@ At temperature zero, H100, RTX PRO 6000, and dual RTX 5090 return identical
 responses across repeated exact-string, arithmetic, and factual OpenAI chat
 requests.
 
+## Production proof-flow evidence
+
+The forced-hit bridge KAT starts a private mock NockApp node and the real
+inference gRPC service. It publishes a version-4 `%mine-ai` candidate, runs the
+native production-shape search, streams the 256 × 5,376 activation and
+43,008 × 5,376 fused weight, reconstructs the scalar winner, builds the compact
+recursive certificate, and requires a node-acknowledged canonical poke.
+
+| Host | CUDA build | End-to-end KAT |
+|---|---:|---:|
+| H100 SXM | 13.0, `sm_90a` | 31.39 s |
+| RTX PRO 6000 Blackwell | 13.0, `sm_120a` | 31.20 s |
+| Dual RTX 5090 host, rank-zero full-matrix path | 12.8, `sm_120a` | 20.65 s |
+
+The same source builds one CUDA 13 test binary with exact `sm_90a` and
+`sm_120a` code objects. CUDA 12.8 recompilation confirms the RTX 5090 path on
+driver 570.195.03. The CUDA 13 runtime requires a native CUDA 13 GeForce driver;
+the CUDA forward-compatibility package does not support GeForce and returns
+status 804 on driver 570. Use driver 580.126.09 or newer for the published CUDA
+13 image on RTX 5090.
+
+`compute-sanitizer --tool memcheck` reports zero errors for the complete source
+transcript differential on H100 and RTX PRO 6000. The H100 full-grid
+mining-only regression measures 262.028 complete-ticket TMAC/s, within 0.6% of
+the 263.558 TMAC/s reference measurement.
+
 ## Failure behavior
 
 - A checkpoint mismatch fails before CUDA allocation.
@@ -302,7 +372,8 @@ requests.
 - An unsupported device or geometry fails without CPU fallback.
 - A transcript, tile-state, jackpot, or winner mismatch disables the Gemma
   backend.
-- A new candidate cancels and drains stale work before proof construction.
+- A candidate replacement rejects stale witnesses and discards an in-flight
+  proof result before node submission.
 - A recursive certificate is built only after a scalar-validated target hit.
 
 ## Hardware validation gate

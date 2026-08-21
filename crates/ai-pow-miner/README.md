@@ -96,6 +96,26 @@ MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
 ai-pow-inference-run
 ```
 
+Production mining also requires the node's private gRPC address and one reward
+public-key hash:
+
+```sh
+MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
+NOCKCHAIN_NODE_ADDR=http://node.example:5555 \
+NOCKCHAIN_MINING_PKH=<v1-mining-pkh> \
+  ai-pow-inference-run
+```
+
+`NOCKCHAIN_AI_POW_ENDPOINT` is the loopback endpoint between vLLM and the Rust
+bridge. It is not the node endpoint. If `NOCKCHAIN_NODE_ADDR` is absent, the
+OpenAI inference API remains available, but the bridge uses a zero-target
+diagnostic job and cannot submit mining rewards.
+
+The bridge subscribes to real `%mine-ai` candidates. A native winner is
+streamed once, scalar-rechecked against the active generation, proved with the
+compact recursive prover, encoded as the canonical `%ai-pow` noun, and
+submitted to the node. No-hit inference sends no tensor data over gRPC.
+
 The `AI-PoW inference image` GitHub workflow publishes commit and branch tags to
 `ghcr.io/nockchain/nockchain-ai-pow-inference`. Rebuilding uses registry-independent
 GitHub Actions caches for the Python, Rust, and CUDA dependency layers.
@@ -117,6 +137,10 @@ runpodctl pod create \
 The launcher uses the visible GPU count as its tensor-parallel size and defaults
 GPU memory utilization to `0.62`. Override either value only for a measured
 deployment-specific reason.
+
+The CUDA 13 image requires NVIDIA driver 580.126.09 or newer on RTX 5090.
+Driver 570 can run a CUDA 12.8 build, but the CUDA forward-compatibility package
+does not support GeForce devices.
 
 Keep each HTTP server on loopback and use SSH port forwarding from the laptop.
 `scripts/compare-gemma4-openai.py` sends the same greedy request to each local
