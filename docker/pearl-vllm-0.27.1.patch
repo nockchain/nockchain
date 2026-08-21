@@ -1,6 +1,6 @@
 --- a/pyproject.toml
 +++ b/pyproject.toml
-@@ -9,13 +9,18 @@
+@@ -9,13 +9,19 @@
  url = "https://download.pytorch.org/whl/cu130"
  explicit = true
  
@@ -17,6 +17,7 @@
 +  "torchaudio==2.11.0",
 +  "torchvision==0.28.0",
 +  "vllm==0.27.1",
++  "xgrammar==0.2.3",
  ]
  
  # Workspace sources - these apply globally to all members
