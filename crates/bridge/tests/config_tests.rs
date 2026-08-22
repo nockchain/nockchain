@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use alloy::primitives::Address;
 use bridge::shared::config::{
-    BridgeConfigToml, SequencerConfigToml, CANONICAL_TESTING_BRIDGE_LOCK_ROOT_B58,
+    BridgeConfigToml, NodeInfoToml, SequencerConfigToml, CANONICAL_TESTING_BRIDGE_LOCK_ROOT_B58,
     CANONICAL_TESTING_BRIDGE_NODE_PKHS_B58,
 };
 use nockchain_math::belt::{Belt, PRIME};
@@ -83,6 +83,27 @@ fn derive_runtime_signer_pkh_b58(sk: &bridge::shared::types::SchnorrSecretKey) -
     let scalar: BigUint = sk.to_big_uint();
     let pubkey = SchnorrPubkey::from_secret_scalar_biguint(&scalar).expect("derive signer pubkey");
     pubkey.pkh_hash().expect("hash signer pubkey").to_base58()
+}
+
+#[test]
+fn withdrawal_processing_defaults_to_paused() {
+    let config_without_gate = include_str!("../bridge-conf.example.toml")
+        .replacen("withdrawal_processing_enabled = false\n", "", 1);
+    let config: BridgeConfigToml =
+        toml::from_str(&config_without_gate).expect("parse config without withdrawal gate");
+
+    assert!(!config.withdrawal_processing_enabled);
+}
+
+#[test]
+fn withdrawal_processing_requires_explicit_enable() {
+    let enabled_config = include_str!("../bridge-conf.example.toml").replacen(
+        "withdrawal_processing_enabled = false", "withdrawal_processing_enabled = true", 1,
+    );
+    let config: BridgeConfigToml =
+        toml::from_str(&enabled_config).expect("parse config with withdrawals enabled");
+
+    assert!(config.withdrawal_processing_enabled);
 }
 
 #[test]
@@ -449,6 +470,51 @@ nockchain_start_height = 1
             "parsed my_nock_key for node {node_id} should derive the configured node PKH"
         );
     }
+}
+
+#[test]
+fn node_config_requires_matching_nock_signer_before_enabling_withdrawals() {
+    let mut config = BridgeConfigToml {
+        node_id: 1,
+        base_ws_url: "wss://example.invalid".to_string(),
+        bridge_lock_root: CANONICAL_TESTING_BRIDGE_LOCK_ROOT_B58.to_string(),
+        inbox_contract_address: None,
+        nock_contract_address: None,
+        my_eth_key: "0x6c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36231a"
+            .to_string(),
+        my_nock_key: "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8T".to_string(),
+        grpc_address: "http://127.0.0.1:5002".to_string(),
+        nockchain_sequencer_api_address: None,
+        base_confirmation_depth: 0,
+        nockchain_confirmation_depth: 0,
+        deposit_nonce_epoch_base: None,
+        deposit_nonce_epoch_start_height: None,
+        deposit_nonce_epoch_start_tx_id_base58: None,
+        withdrawal_processing_enabled: false,
+        withdrawal_activation_nock_next_height: Some(1),
+        ingress_listen_address: None,
+        nodes: CANONICAL_TESTING_BRIDGE_NODE_PKHS_B58
+            .iter()
+            .enumerate()
+            .map(|(index, pkh)| NodeInfoToml {
+                ip: format!("127.0.0.1:{}", 8_001 + index),
+                eth_pubkey: format!("0x{:040x}", index + 1),
+                nock_pkh: (*pkh).to_string(),
+            })
+            .collect(),
+        constants: None,
+    };
+
+    config
+        .to_node_config()
+        .expect("paused withdrawals must not require a usable withdrawal signer");
+    config.withdrawal_processing_enabled = true;
+
+    let error = config
+        .to_node_config()
+        .expect_err("node 1 must not accept node 0's nock signer key");
+    assert!(error.to_string().contains("my_nock_key"));
+    assert!(error.to_string().contains("node_id 1"));
 }
 
 #[test]

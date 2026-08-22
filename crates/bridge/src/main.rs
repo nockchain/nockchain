@@ -1331,6 +1331,7 @@ mod tests {
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
+            withdrawal_processing_enabled: false,
             withdrawal_activation_nock_next_height: Some(200),
             ingress_listen_address: None,
             nodes: vec![

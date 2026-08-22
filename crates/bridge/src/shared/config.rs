@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use alloy::primitives::Address;
 use nockchain_math::belt::{Belt, PRIME};
-use nockchain_types::tx_engine::common::Hash as NockPkh;
+use nockchain_types::tx_engine::common::{Hash as NockPkh, SchnorrPubkey};
 use nockchain_types::v1::{Lock, LockPrimitive, Pkh, SpendCondition};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,11 @@ pub struct BridgeConfigToml {
     /// Required when deposit_nonce_epoch_base is non-zero.
     #[serde(default, alias = "nonce_epoch_start_tx_id_base58")]
     pub deposit_nonce_epoch_start_tx_id_base58: Option<String>,
+    /// Enables withdrawal proposal assembly, signing, peer exchange, and submission.
+    ///
+    /// Base withdrawal events remain tracked while this is false.
+    #[serde(default)]
+    pub withdrawal_processing_enabled: bool,
     /// Nock hashchain next height that must be reached before withdrawal
     /// processing activates.
     #[serde(default)]
@@ -393,12 +398,47 @@ impl BridgeConfigToml {
             }
         }
 
+        let local_node_index = usize::try_from(self.node_id).map_err(|_| {
+            BridgeError::Config(format!("node_id {} does not fit in usize", self.node_id))
+        })?;
+        let local_node = nodes.get(local_node_index).ok_or_else(|| {
+            BridgeError::Config(format!(
+                "node_id {} does not identify one of the {} configured nodes",
+                self.node_id,
+                nodes.len()
+            ))
+        })?;
+        let my_nock_key = SchnorrSecretKey::from(my_nock_key_limbs);
+        if self.withdrawal_processing_enabled {
+            let signer_pubkey = SchnorrPubkey::from_secret_scalar_biguint(
+                &my_nock_key.to_big_uint(),
+            )
+            .map_err(|err| {
+                BridgeError::Config(format!(
+                    "failed to derive nockchain public key from my_nock_key: {err}"
+                ))
+            })?;
+            let signer_pkh = signer_pubkey.pkh_hash().map_err(|err| {
+                BridgeError::Config(format!(
+                    "failed to derive nockchain pkh from my_nock_key: {err}"
+                ))
+            })?;
+            if signer_pkh != local_node.nock_pkh {
+                return Err(BridgeError::Config(format!(
+                    "my_nock_key does not derive the configured nock_pkh for node_id {}: derived {}, configured {}",
+                    self.node_id,
+                    signer_pkh.to_base58(),
+                    local_node.nock_pkh.to_base58()
+                )));
+            }
+        }
+
         Ok(NodeConfig {
             node_id: self.node_id,
             nodes,
             bridge_lock_root,
             my_eth_key: AtomBytes::from(my_eth_key),
-            my_nock_key: SchnorrSecretKey::from(my_nock_key_limbs),
+            my_nock_key,
         })
     }
 

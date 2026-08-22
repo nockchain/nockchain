@@ -49,6 +49,10 @@ deposit_nonce_epoch_start_height = 50009
 # Set it to the tx_id corresponding to the last successful deposit
 deposit_nonce_epoch_start_tx_id_base58 = "2uYre9HXRP8X6BD7w3GvgfUAU47RSmZDGkz9uJgJmD9CxN7JA69k6MF"
 
+# Withdrawal processing is fail-closed. Base withdrawal events remain tracked,
+# but nodes do not assemble, sign, exchange, or submit proposals while false.
+withdrawal_processing_enabled = false
+
 # Withdrawal activation cutoff.
 # This is a bridge-kernel Nock next height, not an RPC chain tip. Fresh
 # withdrawal projections wait until this frontier is reached, then initialize at
