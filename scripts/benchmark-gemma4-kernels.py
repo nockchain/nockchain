@@ -176,8 +176,8 @@ def _fp8_case(
             out_dtype=torch.bfloat16,
         )
 
-    cutlass()
-    return {
+    cutlass_output = cutlass()
+    result: dict[str, Any] = {
         "mode": "fp8",
         "shape": name,
         "m": m,
@@ -185,6 +185,30 @@ def _fp8_case(
         "k": k,
         "cutlass": _measure(cutlass, warmup, iterations),
     }
+    try:
+        from b12x.gemm import blockscaled
+
+        if not blockscaled.is_supported():
+            raise RuntimeError("B12X block FP8 is not supported on this device")
+
+        def b12x() -> torch.Tensor:
+            return blockscaled.mm_block_fp8(
+                activation,
+                activation_scale,
+                weight,
+                weight_scale,
+                out_dtype=torch.bfloat16,
+            )
+
+        b12x_output = b12x()
+        result["b12x_comparison"] = _comparison(cutlass_output, b12x_output)
+        result["b12x"] = _measure(b12x, warmup, iterations)
+        result["b12x_speedup"] = (
+            result["cutlass"]["median_ms"] / result["b12x"]["median_ms"]
+        )
+    except (ImportError, RuntimeError) as error:
+        result["b12x_error"] = str(error)
+    return result
 
 
 def _parse_positive_list(value: str) -> list[int]:
