@@ -100,16 +100,24 @@ def test_apply_weights_mining_disabled(m, n, k, async_manager):
     assert output.shape == (m, n)
     assert output.dtype == torch.bfloat16  # Output should be bfloat16
 
-    # Compare with our own int8 quantization (same as kernel uses)
+    # Compare with the same INT8 accumulator and scaling contract.
     x_quantized_ref, x_s, _ = quant_8bit(x)
-    ref_output = vllm_ops.cutlass_scaled_mm(
-        x_quantized_ref,
-        layer.weight_q.T,
-        scale_a=x_s,
-        scale_b=layer.weight_s,
-        out_dtype=torch.bfloat16,
-        bias=None,
-    )
+    if kernel._weight_transposed:
+        assert layer.weight_q.shape == (k, n)
+        assert layer.weight_q.is_contiguous()
+        accumulator = torch._int_mm(x_quantized_ref, layer.weight_q)
+        ref_output = (
+            accumulator.float() * x_s.reshape(-1, 1) * layer.weight_s.reshape(1, -1)
+        ).to(torch.bfloat16)
+    else:
+        ref_output = vllm_ops.cutlass_scaled_mm(
+            x_quantized_ref,
+            layer.weight_q.T,
+            scale_a=x_s,
+            scale_b=layer.weight_s,
+            out_dtype=torch.bfloat16,
+            bias=None,
+        )
 
     # Check that outputs are close
     assert torch.allclose(output, ref_output, atol=1.25e-1, rtol=1e-2), (
@@ -119,8 +127,6 @@ def test_apply_weights_mining_disabled(m, n, k, async_manager):
 
     # Verify mining is disabled
     assert not kernel.is_mining_enabled(), "Mining should be disabled for this kernel"
-
-
 
 
 def test_kernel_default_is_mining_enabled():
@@ -152,23 +158,22 @@ def test_apply_weights_with_smooth_quant_scale(mining_enabled, async_manager):
         mining_enabled=mining_enabled,
     )
 
-    # Create layer WITH smooth_quant_scale
+    # Create matching layers before weight processing, which can change the
+    # device-specific inference layout.
     layer_with_smooth = create_mock_layer(n, k)
-    # Add smooth_quant_scale attribute (per-column scale, shape [k])
     smooth_scale = torch.randn(k, dtype=torch.float32, device="cuda").abs() + 0.5
     layer_with_smooth.smooth_quant_scale = smooth_scale
-    kernel.process_weights_after_loading(layer_with_smooth)
 
-    # Create layer WITHOUT smooth_quant_scale (same weights)
     layer_without_smooth = create_mock_layer(n, k)
-    layer_without_smooth.weight_q.data = layer_with_smooth.weight_q.data.clone()
-    layer_without_smooth.weight_s.data = layer_with_smooth.weight_s.data.clone()
+    layer_without_smooth.weight_q.data.copy_(layer_with_smooth.weight_q.data)
+    layer_without_smooth.weight_s.data.copy_(layer_with_smooth.weight_s.data)
 
     kernel_no_smooth = PearlKernel(
         DEFAULT_QUANT_CONFIG,
         DEFAULT_LAYER_PARAM_NAMES,
         mining_enabled=mining_enabled,
     )
+    kernel.process_weights_after_loading(layer_with_smooth)
     kernel_no_smooth.process_weights_after_loading(layer_without_smooth)
 
     # Same input tensor
