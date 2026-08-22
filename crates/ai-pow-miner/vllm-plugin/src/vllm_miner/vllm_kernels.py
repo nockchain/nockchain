@@ -68,6 +68,7 @@ class PearlKernel(Int8ScaledMMLinearKernel):
         self._native_full_weight: torch.Tensor | None = None
         self._native_full_scale: torch.Tensor | None = None
         self._native_full_weight_key: tuple[int, int] | None = None
+        self._weight_transposed = False
         self.w_q_name = layer_param_names[0]
         self.w_s_name = layer_param_names[1]
         self.i_s_name = layer_param_names[2]
@@ -119,13 +120,23 @@ class PearlKernel(Int8ScaledMMLinearKernel):
 
         :param layer: Neural network layer containing weights to process
         """
-        # WEIGHT
-        # Pearl GEMM kernels expect non-transposed weights
+        # SM12x torch._int_mm consumes a contiguous (K, N) weight. Cache that
+        # layout for non-mining layers; recreating it during every decode step
+        # copies up to 231 MB per projection.
         weight = getattr(layer, self.w_q_name)
+        if (
+            not self.mining_enabled
+            and weight.is_cuda
+            and torch.cuda.get_device_capability(weight.device)[0] == 12
+        ):
+            weight_data = weight.T.contiguous()
+            self._weight_transposed = True
+        else:
+            weight_data = weight.data
         replace_parameter(
             layer,
             self.w_q_name,
-            torch.nn.Parameter(weight.data, requires_grad=False),
+            torch.nn.Parameter(weight_data, requires_grad=False),
         )
 
         # WEIGHT SCALE
@@ -450,4 +461,5 @@ class PearlKernel(Int8ScaledMMLinearKernel):
             scale_a=x_s.squeeze(-1),
             scale_b=w_s.squeeze(-1),
             out_dtype=x.dtype,
+            weight_transposed=self._weight_transposed,
         )

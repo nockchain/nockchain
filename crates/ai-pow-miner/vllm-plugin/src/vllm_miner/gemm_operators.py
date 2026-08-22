@@ -31,6 +31,8 @@ def pearl_gemm_vanilla(
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
     out_dtype: torch.dtype,
+    *,
+    weight_transposed: bool = False,
 ) -> torch.Tensor:
     """
     Performs standard quantized matrix multiplication without mining operations.
@@ -38,21 +40,23 @@ def pearl_gemm_vanilla(
     Computes C = A @ B.T using optimized CUDA kernels for int8 quantized inputs.
 
     :param A: Input matrix A (int8, quantized)
-    :param B: Input matrix B (int8, quantized)
+    :param B: Input matrix B, or its cached transpose when weight_transposed is true
     :param scale_a: Quantization scale factors for matrix A
     :param scale_b: Quantization scale factors for matrix B
     :param out_dtype: Output data type (bfloat16 or float16)
+    :param weight_transposed: Whether B already has (K, N) layout
     :return: Result matrix C
     """
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
-    if torch.cuda.get_device_capability(A.device) == (12, 0):
+    if torch.cuda.get_device_capability(A.device)[0] == 12:
         logical_m = A.shape[0]
+        weight_for_mm = B if weight_transposed else B.T.contiguous()
         if logical_m <= 16:
             padded = torch.zeros((32, A.shape[1]), device=A.device, dtype=A.dtype)
             padded[:logical_m].copy_(A)
-            accumulator = torch._int_mm(padded, B.T.contiguous())[:logical_m]
+            accumulator = torch._int_mm(padded, weight_for_mm)[:logical_m]
         else:
-            accumulator = torch._int_mm(A, B.T.contiguous())
+            accumulator = torch._int_mm(A, weight_for_mm)
         return (
             accumulator.to(torch.float32)
             * scale_a.reshape(-1, 1)
