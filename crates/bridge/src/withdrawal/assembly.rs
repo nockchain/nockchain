@@ -220,6 +220,17 @@ fn classify_withdrawal_execution_effect(
     }
 }
 
+fn should_process_withdrawal_execution_effect(
+    processing_enabled: bool,
+    effect: WithdrawalExecutionEffect,
+) -> bool {
+    processing_enabled
+        || matches!(
+            effect,
+            WithdrawalExecutionEffect::BaseBlockWithdrawalsPending
+        )
+}
+
 /// Orders withdrawal requests deterministically by the canonical Base request
 /// ordering used for local nonce assignment.
 fn sort_withdrawal_requests(requests: &mut [NockWithdrawalRequestKernelData]) {
@@ -532,6 +543,7 @@ pub struct WithdrawalExecutionDriverContext {
     pub stop_controller: StopController,
     pub bridge_status: BridgeStatus,
     pub stop: StopHandle,
+    pub processing_enabled: bool,
     pub proposal_registry: Arc<WithdrawalProposalRegistry>,
     pub withdrawal_transport: Arc<WithdrawalProposalTransport>,
     pub peers: Vec<PeerEndpoint>,
@@ -551,6 +563,7 @@ pub fn create_withdrawal_execution_driver(
         let stop_controller = context.stop_controller.clone();
         let bridge_status = context.bridge_status.clone();
         let stop = context.stop.clone();
+        let processing_enabled = context.processing_enabled;
         let proposal_registry = context.proposal_registry.clone();
         let withdrawal_transport = context.withdrawal_transport.clone();
         let peers = context.peers.clone();
@@ -580,8 +593,23 @@ pub fn create_withdrawal_execution_driver(
                     }
                 };
 
-                let outcome = match classify_withdrawal_execution_effect(&bridge_effect.variant) {
-                    Some(WithdrawalExecutionEffect::BaseBlockWithdrawalsPending) => {
+                let Some(execution_effect) =
+                    classify_withdrawal_execution_effect(&bridge_effect.variant)
+                else {
+                    continue;
+                };
+                if !should_process_withdrawal_execution_effect(processing_enabled, execution_effect)
+                {
+                    warn!(
+                        target: "bridge.withdrawal",
+                        effect = ?execution_effect,
+                        "ignored withdrawal lifecycle effect while processing is paused",
+                    );
+                    continue;
+                }
+
+                let outcome = match execution_effect {
+                    WithdrawalExecutionEffect::BaseBlockWithdrawalsPending => {
                         let BridgeEffectVariant::BaseBlockWithdrawalsPending(pending) =
                             bridge_effect.variant
                         else {
@@ -606,7 +634,7 @@ pub fn create_withdrawal_execution_driver(
                             );
                         })
                     }
-                    Some(WithdrawalExecutionEffect::WithdrawalProposalBuilt) => {
+                    WithdrawalExecutionEffect::WithdrawalProposalBuilt => {
                         let BridgeEffectVariant::WithdrawalProposalBuilt(proposal) =
                             bridge_effect.variant
                         else {
@@ -682,7 +710,7 @@ pub fn create_withdrawal_execution_driver(
                             },
                         }
                     }
-                    Some(WithdrawalExecutionEffect::WithdrawalTxSigned) => {
+                    WithdrawalExecutionEffect::WithdrawalTxSigned => {
                         let BridgeEffectVariant::WithdrawalTxSigned(proposal) =
                             bridge_effect.variant
                         else {
@@ -765,7 +793,6 @@ pub fn create_withdrawal_execution_driver(
                             }
                         }
                     }
-                    None => continue,
                 };
 
                 if let Err(err) = outcome {
@@ -2371,6 +2398,30 @@ mod tests {
             ),
             Some(WithdrawalExecutionEffect::BaseBlockWithdrawalsPending)
         );
+    }
+
+    #[test]
+    fn paused_execution_only_tracks_base_withdrawal_events() {
+        assert!(should_process_withdrawal_execution_effect(
+            false,
+            WithdrawalExecutionEffect::BaseBlockWithdrawalsPending
+        ));
+        assert!(!should_process_withdrawal_execution_effect(
+            false,
+            WithdrawalExecutionEffect::WithdrawalProposalBuilt
+        ));
+        assert!(!should_process_withdrawal_execution_effect(
+            false,
+            WithdrawalExecutionEffect::WithdrawalTxSigned
+        ));
+
+        for effect in [
+            WithdrawalExecutionEffect::BaseBlockWithdrawalsPending,
+            WithdrawalExecutionEffect::WithdrawalProposalBuilt,
+            WithdrawalExecutionEffect::WithdrawalTxSigned,
+        ] {
+            assert!(should_process_withdrawal_execution_effect(true, effect));
+        }
     }
 
     fn sample_name(seed: u64) -> Name {
