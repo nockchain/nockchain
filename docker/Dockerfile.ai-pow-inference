@@ -87,6 +87,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
       -o /usr/local/lib/libai_pow_gemma4.so
 
 FROM python-builder AS development
+COPY docker/patch-vllm-piecewise-getitem.py /tmp/patch-vllm-piecewise-getitem.py
+RUN python3 /tmp/patch-vllm-piecewise-getitem.py \
+    && rm /tmp/patch-vllm-piecewise-getitem.py
 COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
 COPY --from=rust-builder /usr/local/bin/ai-pow-gemma4-bench /usr/local/bin/
 COPY --from=rust-builder /usr/local/lib/libai_pow_gemma4.so /usr/local/lib/
@@ -147,6 +150,9 @@ RUN uv pip install --system --no-deps \
       protobuf==6.33.5 \
       transformers==5.5.4 \
     && rm -rf /wheelhouse /root/.cache/uv
+COPY docker/patch-vllm-piecewise-getitem.py /tmp/patch-vllm-piecewise-getitem.py
+RUN python3 /tmp/patch-vllm-piecewise-getitem.py \
+    && rm /tmp/patch-vllm-piecewise-getitem.py
 
 COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
 COPY --from=rust-builder /usr/local/bin/ai-pow-gemma4-bench /usr/local/bin/
