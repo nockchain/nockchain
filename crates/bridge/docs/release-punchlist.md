@@ -28,8 +28,10 @@ when moving from fakenet to mainnet.
    - Mainnet Base must be chain id `8453`.
    - Fakenet / VNET / Base Sepolia configs must not be accepted as mainnet.
 5. Confirm withdrawal launch toggles.
-   - `withdrawalsEnabled()` may be false pre-launch.
-   - Production readiness validation should fail until withdrawals are enabled.
+   - `MessageInbox.withdrawalsEnabled()` controls whether Base accepts new burns.
+   - `withdrawal_processing_enabled` controls whether bridge nodes assemble,
+     sign, exchange, and submit withdrawal proposals.
+   - Production readiness requires both controls to be enabled.
 
 ## Rendered Production Config
 
@@ -42,6 +44,7 @@ when moving from fakenet to mainnet.
    - `nock_contract_address`
    - `base_confirmation_depth`
    - `nockchain_confirmation_depth`
+   - `withdrawal_processing_enabled`
    - `withdrawal_activation_nock_next_height`
    - all five `[[nodes]]` entries
 3. Confirm production values are not inherited from fakenet / bridge-dev.
