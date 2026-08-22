@@ -8,7 +8,7 @@ Unified kernel supporting two modes:
 Both modes use pearl GEMM kernels and support smooth_quant_scale.
 """
 
-from typing import override
+from typing import Any, override
 
 import torch
 from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .config import config
 from .gemm_operators import pearl_gemm_vanilla
@@ -36,6 +37,40 @@ from .native_gemma4 import NativeGemma4Session
 from .quantization_operators import NO_HADAMARD_BLOCK_SIZE, quant_7bit, quant_8bit
 
 _LOGGER = get_logger("vllm.pearl_miner")
+_MINING_KERNELS: dict[int, Any] = {}
+
+
+def _pearl_mining_gemm_impl(
+    kernel_id: int,
+    layer_idx: int,
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w_q: torch.Tensor,
+    w_s: torch.Tensor,
+) -> torch.Tensor:
+    kernel = _MINING_KERNELS[kernel_id]
+    return kernel._apply_native_gemma4_impl(layer_idx, x_q, x_s, w_q, w_s)
+
+
+def _pearl_mining_gemm_fake(
+    kernel_id: int,
+    layer_idx: int,
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    w_q: torch.Tensor,
+    w_s: torch.Tensor,
+) -> torch.Tensor:
+    del kernel_id, layer_idx, x_s, w_s
+    return torch.empty(
+        (x_q.shape[0], w_q.shape[0]), dtype=torch.bfloat16, device=x_q.device
+    )
+
+
+direct_register_custom_op(
+    "pearl_mining_gemm",
+    _pearl_mining_gemm_impl,
+    fake_impl=_pearl_mining_gemm_fake,
+)
 
 
 class PearlKernel(Int8ScaledMMLinearKernel):
@@ -63,12 +98,17 @@ class PearlKernel(Int8ScaledMMLinearKernel):
                 f"PearlKernel input_num_bits must be 7 or 8, got {input_num_bits}"
             )
         self.input_num_bits = input_num_bits
-        self._native_session: NativeGemma4Session | None = None
-        self._native_session_key: tuple[int, int, int, int] | None = None
+        # Work submitted for one batch shape can outlive the Python call. Keep
+        # each shape's CUDA session until model teardown instead of destroying
+        # a session while its graph or stream still references its allocations.
+        self._native_sessions: dict[tuple[int, int, int, int], NativeGemma4Session] = {}
         self._native_full_weight: torch.Tensor | None = None
         self._native_full_scale: torch.Tensor | None = None
         self._native_full_weight_key: tuple[int, int] | None = None
         self._weight_transposed = False
+        self._mining_kernel_id = id(self)
+        if mining_enabled:
+            _MINING_KERNELS[self._mining_kernel_id] = self
         self.w_q_name = layer_param_names[0]
         self.w_s_name = layer_param_names[1]
         self.i_s_name = layer_param_names[2]
@@ -230,14 +270,13 @@ class PearlKernel(Int8ScaledMMLinearKernel):
         if device_index is None:
             device_index = torch.cuda.current_device()
         key = (device_index, a.shape[0], b.shape[0], b.data_ptr())
-        if self._native_session is None or self._native_session_key != key:
-            if self._native_session is not None:
-                self._native_session.close()
-            self._native_session = NativeGemma4Session(a, b)
-            self._native_session_key = key
+        session = self._native_sessions.get(key)
+        if session is None:
+            session = NativeGemma4Session(a, b)
+            self._native_sessions[key] = session
         else:
-            self._native_session.bind(a, b)
-        return self._native_session
+            session.bind(a, b)
+        return session
 
     @staticmethod
     def _submit_native_winner(
@@ -337,6 +376,23 @@ class PearlKernel(Int8ScaledMMLinearKernel):
             raise ValueError("native Gemma mining supports at most 8192 logical tokens")
         if bias is not None:
             raise ValueError("native Gemma gate/up does not support bias")
+        return torch.ops.vllm.pearl_mining_gemm(
+            self._mining_kernel_id,
+            int(getattr(layer, "layer_idx", 0)),
+            x_q,
+            x_s,
+            w_q,
+            w_s,
+        )
+
+    def _apply_native_gemma4_impl(
+        self,
+        layer_idx: int,
+        x_q: torch.Tensor,
+        x_s: torch.Tensor,
+        w_q: torch.Tensor,
+        w_s: torch.Tensor,
+    ) -> torch.Tensor:
         full_weight, full_scale, tp_rank, _local_n = self._full_tp_weight(w_q, w_s)
         tp_world = get_tensor_model_parallel_world_size()
         manager = get_async_manager()
@@ -369,7 +425,7 @@ class PearlKernel(Int8ScaledMMLinearKernel):
             )
             work_id = (
                 manager.notify_work_started(
-                    layer=int(getattr(layer, "layer_idx", 0)),
+                    layer=layer_idx,
                     token_count=logical_m,
                     common_dim=5376,
                     output_dim=43008,

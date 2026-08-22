@@ -441,6 +441,30 @@ def test_native_tp_gate_up_reordering_is_canonical():
     assert local.tolist() == [[11, 21]]
 
 
+def test_native_sessions_remain_live_across_batch_shapes():
+    kernel = object.__new__(PearlKernel)
+    kernel._native_sessions = {}
+    a_256 = torch.empty((256, 2), dtype=torch.int8)
+    a_512 = torch.empty((512, 2), dtype=torch.int8)
+    weight = torch.empty((4, 2), dtype=torch.int8)
+    session_256 = MagicMock()
+    session_512 = MagicMock()
+    with (
+        patch("vllm_miner.vllm_kernels.torch.cuda.current_device", return_value=0),
+        patch(
+            "vllm_miner.vllm_kernels.NativeGemma4Session",
+            side_effect=[session_256, session_512],
+        ) as create,
+    ):
+        assert kernel._native_session_for(a_256, weight) is session_256
+        assert kernel._native_session_for(a_256, weight) is session_256
+        assert kernel._native_session_for(a_512, weight) is session_512
+        assert kernel._native_session_for(a_256, weight) is session_256
+    assert create.call_count == 2
+    assert session_256.bind.call_count == 2
+    session_512.bind.assert_not_called()
+
+
 def test_native_tp_weight_uses_rank_order_and_caches_full_matrix():
     kernel = object.__new__(PearlKernel)
     kernel._native_full_weight = None

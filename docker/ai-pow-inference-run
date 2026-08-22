@@ -13,8 +13,11 @@ set -euo pipefail
 : "${VLLM_SERVED_MODEL_NAME:=gemma-4-31b-it-pearl}"
 : "${VLLM_MAX_MODEL_LEN:=8192}"
 : "${VLLM_GPU_MEMORY_UTILIZATION:=0.64}"
-: "${VLLM_ENFORCE_EAGER:=1}"
+: "${VLLM_ENFORCE_EAGER:=0}"
 : "${VLLM_ALLOW_UNAUTHENTICATED:=0}"
+if [[ -z "${VLLM_COMPILATION_CONFIG+x}" ]]; then
+  VLLM_COMPILATION_CONFIG='{"cudagraph_mode":1,"splitting_ops":["vllm::unified_attention_with_output","vllm::pearl_mining_gemm"]}'
+fi
 
 if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
   mapfile -t visible_gpus < <(nvidia-smi --list-gpus)
@@ -140,6 +143,8 @@ vllm_args=(
 )
 if [[ "${VLLM_ENFORCE_EAGER}" == "1" ]]; then
   vllm_args+=(--enforce-eager)
+else
+  vllm_args+=(--compilation-config "${VLLM_COMPILATION_CONFIG}")
 fi
 if [[ -n "${VLLM_MAX_NUM_SEQS:-}" ]]; then
   vllm_args+=(--max-num-seqs "${VLLM_MAX_NUM_SEQS}")
@@ -157,6 +162,7 @@ vllm_environment=(
   -u VLLM_GPU_MEMORY_UTILIZATION
   -u VLLM_ENFORCE_EAGER
   -u VLLM_ALLOW_UNAUTHENTICATED
+  -u VLLM_COMPILATION_CONFIG
   -u VLLM_MAX_NUM_SEQS
   -u VLLM_MAX_NUM_BATCHED_TOKENS
 )
