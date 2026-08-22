@@ -14,8 +14,8 @@ Use one of these GPU layouts:
 | One RTX PRO 6000 Blackwell | 1 | 96 GB |
 | Two RTX 5090 | 2 | 32 GB per GPU |
 
-The CUDA 12.9 image runs on supported CUDA 12 drivers, including the driver 570
-series used by many RTX 5090 hosts.
+RTX 5090 requires an NVIDIA driver from the 580 series for the CUDA 12.9 image.
+Driver 570 cannot use the CUDA forward-compatibility package on GeForce.
 
 ## Runtime architecture
 
@@ -290,7 +290,7 @@ Give the container a termination grace period of at least 180 seconds.
 | `VLLM_SERVED_MODEL_NAME` | `gemma-4-31b-it-pearl` | Stable API model identifier |
 | `VLLM_TENSOR_PARALLEL_SIZE` | visible GPU count | Set only for an intentional topology |
 | `VLLM_MAX_MODEL_LEN` | `8192` | Maximum context length |
-| `VLLM_GPU_MEMORY_UTILIZATION` | `0.62` | Validated universal memory fraction |
+| `VLLM_GPU_MEMORY_UTILIZATION` | `0.64` | Validated universal memory fraction |
 | `VLLM_ENFORCE_EAGER` | `1` | Validated plugin execution mode |
 | `VLLM_MAX_NUM_SEQS` | unset | Optional vLLM scheduler limit |
 | `VLLM_MAX_NUM_BATCHED_TOKENS` | unset | Optional vLLM scheduler token limit |
@@ -344,6 +344,26 @@ This reports launch time, tickets per second, and complete-ticket TMAC/s. The
 OpenAI benchmark measures normal coexistence because idle mining runs whenever
 no selected inference work is active.
 
+## Validated production measurements
+
+The image at `sha-7abc138c768024ae161011b339b597e461441943` produced these
+measurements. The interactive profile used three measured streaming requests,
+one warmup request, concurrency 1, and 64 output tokens. The throughput profile
+used 16 measured requests, two warmup requests, concurrency 8, varied prompts,
+and 64 output tokens.
+
+| GPU layout / memory fraction | Driver | Interactive p50 TTFT | Interactive output tokens/s | Concurrency-8 output tokens/s | Concurrency-8 total tokens/s | Isolated mining TMAC/s |
+|---|---:|---:|---:|---:|---:|---:|
+| H100 / `0.62` | 580.126.09 | 0.133 s | 15.501 | 34.863 | 57.401 | 258.970 |
+| RTX PRO 6000 / `0.62` | 580.159.04 | 0.477 s | 3.662 | 27.800 | 45.773 | 345.884 |
+| Two RTX 5090 / `0.64` | 580.65.06 | 0.170 s | 6.096 | 45.333 | 74.640 | 310.812 / 318.821 |
+
+The OpenAI measurements include scheduler coexistence with idle mining. The
+mining measurements use 100 warmup launches and 200 measured launches without
+vLLM. The two RTX 5090 mining values are per device and must not be added:
+tensor-parallel inference requires both devices to execute the same global
+ticket work for their local output shards.
+
 ## Security checklist
 
 - Use an immutable image digest.
@@ -370,8 +390,8 @@ no selected inference work is active.
   application.
 
 CUDA status 804 on RTX 5090
-: Use the CUDA 12.9 production image. CUDA 13 forward compatibility does not
-  support GeForce driver 570.
+: Select a host with an NVIDIA driver from the 580 series. CUDA forward
+  compatibility does not support GeForce driver 570.
 
 Container is unhealthy during startup
 : Model loading can take several minutes. Inspect container logs and confirm

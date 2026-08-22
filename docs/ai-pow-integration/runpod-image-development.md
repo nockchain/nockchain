@@ -137,7 +137,7 @@ runpodctl pod create \
 ```
 
 The launcher uses the visible GPU count as its tensor-parallel size and defaults
-GPU memory utilization to `0.62`. Thus H100 and RTX PRO 6000 use one rank, and a
+GPU memory utilization to `0.64`. Thus H100 and RTX PRO 6000 use one rank, and a
 two-device RTX 5090 pod uses two ranks.
 
 The complete image is large. For GraphQL deployments, set `minDownload` to at
@@ -179,8 +179,8 @@ only for a zero-target inference diagnostic. The OpenAI-compatible server
 listens on port 8000; keep it on the pod and use an SSH tunnel for remote
 clients.
 
-The published CUDA 12.9 image supports the driver 570 series used by many RTX
-5090 hosts. It does not depend on the CUDA forward-compatibility package.
+For RTX 5090, select a host with an NVIDIA driver from the 580 series. The CUDA
+forward-compatibility package rejects GeForce driver 570 with status 804.
 
 Run `ai-pow-inference-seed-model` only when the model volume does not contain the required weights.
 

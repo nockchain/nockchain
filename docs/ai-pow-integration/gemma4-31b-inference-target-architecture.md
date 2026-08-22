@@ -354,10 +354,9 @@ recursive certificate, and requires a node-acknowledged canonical poke.
 | Dual RTX 5090 host, rank-zero full-matrix path | 12.8, `sm_120a` | 20.65 s |
 
 The production image builds the same source with CUDA 12.9 and exact `sm_90a`
-and `sm_120a` code objects. This stays within CUDA 12 minor-version
-compatibility on driver 570 hosts. A CUDA 13 binary returns status 804 on
-GeForce driver 570 because the CUDA forward-compatibility package does not
-support GeForce devices.
+and `sm_120a` code objects. RTX 5090 requires a native driver compatible with
+this toolkit; driver 570 returns status 804. The CUDA forward-compatibility
+package does not support GeForce devices.
 
 `compute-sanitizer --tool memcheck` reports zero errors for the complete source
 transcript differential on H100 and RTX PRO 6000. The H100 full-grid

@@ -140,11 +140,11 @@ runpodctl pod create \
 ```
 
 The launcher uses the visible GPU count as its tensor-parallel size and defaults
-GPU memory utilization to `0.62`. Override either value only for a measured
+GPU memory utilization to `0.64`. Override either value only for a measured
 deployment-specific reason.
 
-The CUDA 12.9 image runs on supported CUDA 12 drivers, including the driver 570
-series used by many RTX 5090 hosts.
+The CUDA 12.9 image requires an NVIDIA driver from the 580 series on RTX 5090.
+Driver 570 cannot use the CUDA forward-compatibility package on GeForce.
 
 Keep each HTTP server on loopback and use SSH port forwarding from the laptop.
 `scripts/compare-gemma4-openai.py` sends the same greedy request to each local
