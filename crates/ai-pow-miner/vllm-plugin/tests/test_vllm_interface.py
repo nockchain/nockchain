@@ -441,6 +441,62 @@ def test_native_tp_gate_up_reordering_is_canonical():
     assert local.tolist() == [[11, 21]]
 
 
+def test_native_tp_follower_reuses_local_sm120_weight_layout():
+    kernel = object.__new__(PearlKernel)
+    kernel._tp_follower_weight_transposed = None
+    kernel._tp_follower_weight_key = None
+    x_q = torch.empty((2, 3), dtype=torch.int8)
+    x_s = torch.empty((2, 1), dtype=torch.float32)
+    w_q = torch.empty((4, 3), dtype=torch.int8)
+    w_s = torch.empty((4, 1), dtype=torch.float32)
+    expected = torch.empty((2, 4), dtype=torch.bfloat16)
+    with (
+        patch(
+            "vllm_miner.vllm_kernels.torch.cuda.get_device_capability",
+            return_value=(12, 0),
+        ),
+        patch(
+            "vllm_miner.vllm_kernels.pearl_gemm_vanilla",
+            return_value=expected,
+        ) as gemm,
+    ):
+        assert kernel._apply_tp_follower_gemma4(x_q, x_s, w_q, w_s) is expected
+        assert kernel._apply_tp_follower_gemma4(x_q, x_s, w_q, w_s) is expected
+
+    first_weight = gemm.call_args_list[0].args[1]
+    second_weight = gemm.call_args_list[1].args[1]
+    assert first_weight.shape == (3, 4)
+    assert first_weight.is_contiguous()
+    assert second_weight.data_ptr() == first_weight.data_ptr()
+    assert all(call.kwargs["weight_transposed"] for call in gemm.call_args_list)
+
+
+def test_native_tp_follower_does_not_run_mining():
+    kernel = object.__new__(PearlKernel)
+    x_q = torch.empty((2, 3), dtype=torch.int8)
+    x_s = torch.empty((2, 1), dtype=torch.float32)
+    w_q = torch.empty((4, 3), dtype=torch.int8)
+    w_s = torch.empty((4, 1), dtype=torch.float32)
+    full_weight = torch.empty((8, 3), dtype=torch.int8)
+    full_scale = torch.empty((8, 1), dtype=torch.float32)
+    expected = torch.empty((2, 4), dtype=torch.bfloat16)
+    kernel._full_tp_weight = MagicMock(return_value=(full_weight, full_scale, 1, 4))
+    kernel._apply_tp_follower_gemma4 = MagicMock(return_value=expected)
+
+    with (
+        patch(
+            "vllm_miner.vllm_kernels.get_tensor_model_parallel_world_size",
+            return_value=2,
+        ),
+        patch("vllm_miner.vllm_kernels.get_async_manager") as manager,
+    ):
+        result = kernel._apply_native_gemma4_impl(0, x_q, x_s, w_q, w_s)
+
+    assert result is expected
+    kernel._apply_tp_follower_gemma4.assert_called_once_with(x_q, x_s, w_q, w_s)
+    manager.assert_not_called()
+
+
 def test_native_sessions_remain_live_across_batch_shapes():
     kernel = object.__new__(PearlKernel)
     kernel._native_sessions = {}
