@@ -9,7 +9,6 @@ use bridge::core::loop_policy::BaseObserverLoopPolicy;
 use clap::Parser;
 use nockapp::kernel::boot;
 use tracing::{error, info};
-use zkvm_jetpack::hot::produce_prover_hot_state;
 
 type SequencerJournalHandle = bridge::withdrawal::sequencer::journal::SequencerJournalHandle;
 type SequencerJournalRecoveryReport =
@@ -47,8 +46,8 @@ fn withdrawal_sequencer_data_dir() -> PathBuf {
     nockapp::system_data_dir().join("nockchain")
 }
 
-// When enabled, use jemalloc for more stable memory allocation.
-#[cfg(all(feature = "jemalloc", not(feature = "tracing-heap")))]
+// The verifier setup releases multi-gigabyte contexts through jemalloc.
+#[cfg(not(feature = "tracing-heap"))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -430,10 +429,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let base_height_tracker =
         Arc::new(bridge::withdrawal::sequencer::base_height::SequencerBaseHeightTracker::default());
-    let nockchain_cli = cli.nockchain.clone();
+    let mut nockchain_cli = cli.nockchain.clone();
     let public_addr = nockchain_cli
         .bind_public_grpc_addr
         .ok_or("nockchain-bridge-sequencer requires --bind-public-grpc-addr to be set")?;
+    let prover_hot_state = nockchain::consensus::prepare_consensus_runtime(&mut nockchain_cli)?;
 
     let base_ws_url = cli.base_ws_url.clone();
     let verifier_base_ws_url = base_ws_url.clone();
@@ -532,7 +532,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await?;
 
     let api_config = nockchain::NockchainAPIConfig::EnablePublicServer(public_addr);
-    let prover_hot_state = produce_prover_hot_state();
     let nockchain_app =
         nockchain::run_nockchain_app(nockchain_cli, prover_hot_state.as_slice(), api_config);
     tokio::pin!(nockchain_app);

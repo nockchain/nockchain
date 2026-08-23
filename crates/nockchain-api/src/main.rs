@@ -4,7 +4,6 @@ use chaff::Chaff;
 use kernels_open_dumb::KERNEL;
 use nockapp::kernel::boot;
 use nockchain::NockchainAPIConfig;
-use zkvm_jetpack::hot::produce_prover_hot_state;
 
 // Disable jemalloc when we're running Miri
 #[cfg(all(not(miri), not(feature = "tracing-heap"), not(feature = "malloc")))]
@@ -29,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     cli.nockapp_cli.color = clap::ColorChoice::Never;
     boot::init_default_tracing(&cli.nockapp_cli);
 
-    let prover_hot_state = produce_prover_hot_state();
+    let prover_hot_state = nockchain::consensus::prepare_consensus_runtime(&mut cli)?;
 
     let api_config = if let Some(addr) = cli.bind_public_grpc_addr {
         NockchainAPIConfig::EnablePublicServer(addr)

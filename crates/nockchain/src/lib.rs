@@ -10,6 +10,7 @@
 
 pub mod backbone;
 pub mod config;
+pub mod consensus;
 pub mod setup;
 pub mod traces;
 
