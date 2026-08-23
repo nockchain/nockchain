@@ -235,20 +235,25 @@ winning witness through the same scalar, recursive, and submission path.
 
 ## RTX 5090 tensor parallelism
 
-Two RTX 5090 devices hold contiguous output-column shards. Each rank computes
-its local BF16 output and searches only its global column interval.
+Two RTX 5090 devices hold contiguous output-channel shards. Each rank computes
+its local BF16 output. Only rank zero executes the complete mineable
+projection.
 
-Both ranks derive one canonical work statement:
+The ranks establish one canonical work statement:
 
-1. Hash local contiguous `B` chunks with their global BLAKE3 chunk counters.
-2. Merge the ordered chunk chaining values into the canonical full-`B` root.
-3. Broadcast the full commitments and derive one pair of noise seeds with
-   global `n=43008`.
-4. Generate `E_BR` with the rank's global output-column offset.
-5. Convert local winners to global row-major ordinals.
-6. Reduce the lowest global winner across ranks before scalar validation.
+1. All ranks contribute their local fused gate/up weight and scale shards.
+2. The runtime restores canonical `[gate, up]` row order and caches the full
+   matrix after the collective.
+3. Rank zero derives the full-matrix commitments and noise, searches every
+   global ticket, and converts a winner to its canonical row-major ordinal.
+4. Rank zero returns its local gate/up output slice from the clean full-matrix
+   result.
+5. Each follower rank uses its cached local `(K, N)` weight layout for an
+   inference-only INT8 GEMM.
 
-No rank-local commitment, local `n`, or local ordinal can enter a certificate.
+Follower ranks do not emit work notifications, derive mining state, search
+tickets, or submit winners. No rank-local commitment, local `n`, or local
+ordinal can enter a certificate.
 
 ## Mining-performance rule
 
@@ -325,10 +330,10 @@ device-output path produces:
 | RTX 5090 | 4,096 | 44.763 ms | 2.920 ms | 39.005 ms |
 
 H100 and RTX PRO 6000 serve the model on one GPU. Two RTX 5090 devices gather
-the selected gate/up weight shards in rank order, restore canonical
-`[gate, up]` row order, derive one full-matrix commitment, execute the same
-global work on both ranks, and return each rank's local gate/up output shard.
-Only rank zero reports lifecycle work and submits a winner.
+the selected gate/up weight shards in rank order and restore canonical
+`[gate, up]` row order. Rank zero executes the full mining statement and
+returns its local output shard. The follower executes only its local
+inference projection.
 
 Each device class passes the 1,000-ticket scalar differential, the complete
 source-session transcript differential, and exact clean-output comparison.
