@@ -290,8 +290,9 @@ Give the container a termination grace period of at least 180 seconds.
 | `VLLM_SERVED_MODEL_NAME` | `gemma-4-31b-it-pearl` | Stable API model identifier |
 | `VLLM_TENSOR_PARALLEL_SIZE` | visible GPU count | Set only for an intentional topology |
 | `VLLM_MAX_MODEL_LEN` | `8192` | Maximum context length |
-| `VLLM_GPU_MEMORY_UTILIZATION` | `0.64` | Validated universal memory fraction |
-| `VLLM_ENFORCE_EAGER` | `1` | Validated plugin execution mode |
+| `VLLM_GPU_MEMORY_UTILIZATION` | `0.66` | Validated universal memory fraction |
+| `VLLM_ENFORCE_EAGER` | `0` | Set to `1` only for the eager diagnostic fallback |
+| `VLLM_COMPILATION_CONFIG` | compile with CUDA graph replay disabled | Keep `cudagraph_mode` at `0`; replay does not preserve inference output with the mineable operation |
 | `VLLM_MAX_NUM_SEQS` | unset | Optional vLLM scheduler limit |
 | `VLLM_MAX_NUM_BATCHED_TOKENS` | unset | Optional vLLM scheduler token limit |
 | `VLLM_DISABLED_KERNELS` | selected by compute capability | Validated FP8 kernel exclusions; override only after device testing |

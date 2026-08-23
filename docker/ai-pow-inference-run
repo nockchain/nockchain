@@ -16,7 +16,7 @@ set -euo pipefail
 : "${VLLM_ENFORCE_EAGER:=0}"
 : "${VLLM_ALLOW_UNAUTHENTICATED:=0}"
 if [[ -z "${VLLM_COMPILATION_CONFIG+x}" ]]; then
-  VLLM_COMPILATION_CONFIG='{"cudagraph_mode":1,"splitting_ops":["vllm::unified_attention_with_output","vllm::pearl_mining_gemm"]}'
+  VLLM_COMPILATION_CONFIG='{"cudagraph_mode":0,"splitting_ops":["vllm::unified_attention_with_output","vllm::pearl_mining_gemm"]}'
 fi
 
 if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
