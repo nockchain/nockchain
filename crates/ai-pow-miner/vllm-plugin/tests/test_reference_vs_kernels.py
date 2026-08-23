@@ -43,7 +43,9 @@ def _offsets_hash_cuda(routing_offsets: list[int], key: bytes) -> bytes:
         dtype=torch.uint8,
         device="cuda",
     )
-    pearl_gemm.tensor_hash(offsets_bytes.reshape(1, -1), key_tensor, offsets_hash, scratchpad)
+    pearl_gemm.tensor_hash(
+        offsets_bytes.reshape(1, -1), key_tensor, offsets_hash, scratchpad
+    )
     torch.cuda.synchronize()
     return offsets_hash.cpu().numpy().tobytes()
 
@@ -98,13 +100,17 @@ class TestMatrixMerkleTreeVsTensorHash:
             device="cuda",
             dtype=torch.uint8,
         )
-        pearl_gemm.tensor_hash(matrix_uint8, key_tensor, cuda_result, tensor_hash_scratchpad)
+        pearl_gemm.tensor_hash(
+            matrix_uint8, key_tensor, cuda_result, tensor_hash_scratchpad
+        )
         torch.cuda.synchronize()
 
         # Convert CUDA result back to bytes for comparison
         cuda_root = cuda_result.cpu().numpy().tobytes()
 
-        blake3_result = blake3(matrix_int8.cpu().numpy().tobytes(), key=test_noise_seed_A).digest()
+        blake3_result = blake3(
+            matrix_int8.cpu().numpy().tobytes(), key=test_noise_seed_A
+        ).digest()
 
         assert python_root == blake3_result, (
             f"Hash mismatch for shape {m, n}: MatrixMerkleTree root doesn't match blake3 result"
@@ -136,8 +142,12 @@ class TestMatrixMerkleTreeVsTensorHash:
         )
 
         # Compute commitment hash using CUDA implementation
-        cuda_commitment_A_tensor = torch.empty(blake3.digest_size, device="cuda", dtype=torch.uint8)
-        cuda_commitment_B_tensor = torch.empty(blake3.digest_size, device="cuda", dtype=torch.uint8)
+        cuda_commitment_A_tensor = torch.empty(
+            blake3.digest_size, device="cuda", dtype=torch.uint8
+        )
+        cuda_commitment_B_tensor = torch.empty(
+            blake3.digest_size, device="cuda", dtype=torch.uint8
+        )
         pearl_gemm.commitment_hash_from_merkle_roots(
             A_merkle_root_tensor,
             B_merkle_root_tensor,
@@ -161,7 +171,9 @@ class TestMatrixMerkleTreeVsTensorHash:
         )
 
     @pytest.mark.parametrize("salted_dims", [None, SALTED_DIMS])
-    def test_commitment_hash_moe_reference_vs_cuda(self, test_noise_seed_A, salted_dims):
+    def test_commitment_hash_moe_reference_vs_cuda(
+        self, test_noise_seed_A, salted_dims
+    ):
         """MoE folding: kernel routing_root/offsets_hash path matches CommitmentHasher."""
         # Cumulative exclusive ends per expert; last == m * top_k.
         routing_offsets = [3, 5, 9, 12]
@@ -184,8 +196,12 @@ class TestMatrixMerkleTreeVsTensorHash:
             salted_dims=salted_dims,
         )
 
-        cuda_commitment_A_tensor = torch.empty(blake3.digest_size, device="cuda", dtype=torch.uint8)
-        cuda_commitment_B_tensor = torch.empty(blake3.digest_size, device="cuda", dtype=torch.uint8)
+        cuda_commitment_A_tensor = torch.empty(
+            blake3.digest_size, device="cuda", dtype=torch.uint8
+        )
+        cuda_commitment_B_tensor = torch.empty(
+            blake3.digest_size, device="cuda", dtype=torch.uint8
+        )
         pearl_gemm.commitment_hash_from_merkle_roots(
             _to_cuda_u8(A_merkle_root),
             _to_cuda_u8(B_merkle_root),
@@ -214,7 +230,9 @@ class TestMatrixMerkleTreeVsTensorHash:
         routing_offsets = [7, 7, 19, 32]
 
         gpu_offsets_hash = _offsets_hash_cuda(routing_offsets, test_noise_seed_A)
-        reference = CommitmentHasher.get_offsets_hash(routing_offsets, test_noise_seed_A)
+        reference = CommitmentHasher.get_offsets_hash(
+            routing_offsets, test_noise_seed_A
+        )
 
         assert gpu_offsets_hash == reference, (
             "Offsets hash mismatch: GPU tensor_hash doesn't match CommitmentHasher reference"
@@ -241,7 +259,11 @@ class TestNoiseGeneration:
         noise_range = 128
         noise_generator = NoiseGenerator(noise_rank=noise_rank, noise_range=noise_range)
         ref_AL, ref_AR, ref_BL, ref_BR = noise_generator.generate_noise_metrices(
-            key_A=test_noise_seed_A, key_B=test_noise_seed_B, A_rows=m, common_dim=k, B_cols=n
+            key_A=test_noise_seed_A,
+            key_B=test_noise_seed_B,
+            A_rows=m,
+            common_dim=k,
+            B_cols=n,
         )
         noise_seed_A_tensor = torch.frombuffer(
             bytearray(test_noise_seed_A), dtype=torch.uint8
@@ -337,7 +359,7 @@ class TestInnerHash:
 
         # Get test tensors
         test_tensors = self.create_test_tensors()
-        tensor_uint32, tensor_int32, name = test_tensors[tensor_idx]
+        tensor_uint32, tensor_int32, _name = test_tensors[tensor_idx]
 
         # Run CUDA implementation
         cuda_result = inner_hash_cuda(tensor_uint32[:size])

@@ -24,7 +24,11 @@ class NockchainAsyncLoopManager(AsyncLoopManager):
         self._nockchain_client = client
 
     def start(self) -> None:
-        if self._thread is not None or self._pool is not None or self._client is not None:
+        if (
+            self._thread is not None
+            or self._pool is not None
+            or self._client is not None
+        ):
             raise RuntimeError("Already started?")
         self._pool = ThreadPoolExecutor()
         self._client = self._nockchain_client
@@ -42,7 +46,9 @@ class NockchainAsyncLoopManager(AsyncLoopManager):
             output_dim=output_dim,
         )
 
-    def notify_work_finished(self, work_id: int | None, *, failed: str | None = None) -> None:
+    def notify_work_finished(
+        self, work_id: int | None, *, failed: str | None = None
+    ) -> None:
         if work_id is not None:
             self._nockchain_client.notify_work_finished(work_id, failed=failed)
 

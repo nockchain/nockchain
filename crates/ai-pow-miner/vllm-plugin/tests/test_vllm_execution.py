@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Tests for vLLM execution with PearlMiner mining control.
 
@@ -177,7 +176,9 @@ def cleanup_llm(llm):
         llm.llm_engine.engine_core.shutdown()
 
 
-def _create_llm_instance(tmp_path_factory, model_config: ModelTestConfig, no_mining: bool):
+def _create_llm_instance(
+    tmp_path_factory, model_config: ModelTestConfig, no_mining: bool
+):
     """Create an LLM instance for ``model_config`` with the given mining configuration."""
     # Set environment variables BEFORE creating LLM
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -192,7 +193,9 @@ def _create_llm_instance(tmp_path_factory, model_config: ModelTestConfig, no_min
     log_dir = tmp_path_factory.mktemp(f"vllm_logs_{model_config.id}_{mode_tag}")
     log_file = log_dir / "vllm_init.log"
 
-    print(f"\n🚀 Creating LLM instance [{model_config.id}] with MINER_NO_MINING={no_mining}")
+    print(
+        f"\n🚀 Creating LLM instance [{model_config.id}] with MINER_NO_MINING={no_mining}"
+    )
     print(f"   Logging to {log_file}")
 
     # Redirect file descriptors at OS level to capture subprocess output
@@ -249,7 +252,9 @@ def get_llm_instance(tmp_path_factory):
     created_llms = []
 
     def _factory(model_config: ModelTestConfig, is_mining_enabled: bool):
-        llm = _create_llm_instance(tmp_path_factory, model_config, no_mining=not is_mining_enabled)
+        llm = _create_llm_instance(
+            tmp_path_factory, model_config, no_mining=not is_mining_enabled
+        )
         created_llms.append(llm)
         return llm
 
@@ -259,7 +264,7 @@ def get_llm_instance(tmp_path_factory):
     for llm in created_llms:
         try:
             cleanup_llm(llm)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - cleanup must continue for every instance
             print(f"Warning: Error during automatic cleanup: {e}")
 
 
@@ -284,7 +289,7 @@ def manage_mining_state(pearl_gateway_process):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def pearl_gateway_process(sample_block_template, mining_address):  # noqa: C901
+def pearl_gateway_process(sample_block_template, mining_address):
     """
     Start pearl-gateway programmatically once per test session.
 
@@ -435,11 +440,15 @@ def test_no_mining_generates_text(
     text = llm.generate(model_config.prompt, deterministic_params)[0].outputs[0].text
 
     assert len(text) > 0, "Generated text should not be empty"
-    reference_outputs.validate_or_record(_reference_key(model_config, "no_mining"), text)
+    reference_outputs.validate_or_record(
+        _reference_key(model_config, "no_mining"), text
+    )
 
 
 @_model_param
-def test_consistency(model_config, deterministic_params, reference_outputs, get_llm_instance):
+def test_consistency(
+    model_config, deterministic_params, reference_outputs, get_llm_instance
+):
     """Both mining modes produce deterministic output on the same prompt."""
     manager = get_async_manager()
 
@@ -447,7 +456,9 @@ def test_consistency(model_config, deterministic_params, reference_outputs, get_
     print(f"\n📝 [{model_config.id}] Phase 1: mining ENABLED")
     llm_on = get_llm_instance(model_config, is_mining_enabled=True)
     text_on = (
-        llm_on.generate(model_config.consistency_prompt, deterministic_params)[0].outputs[0].text
+        llm_on.generate(model_config.consistency_prompt, deterministic_params)[0]
+        .outputs[0]
+        .text
     )
     manager.wait_until_done_submitting_blocks()
 
@@ -463,7 +474,9 @@ def test_consistency(model_config, deterministic_params, reference_outputs, get_
     print(f"\n📝 [{model_config.id}] Phase 2: mining DISABLED")
     llm_off = get_llm_instance(model_config, is_mining_enabled=False)
     text_off = (
-        llm_off.generate(model_config.consistency_prompt, deterministic_params)[0].outputs[0].text
+        llm_off.generate(model_config.consistency_prompt, deterministic_params)[0]
+        .outputs[0]
+        .text
     )
     manager.wait_until_done_submitting_blocks()
 

@@ -5,7 +5,11 @@ import torch
 from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
 from miner_base.settings import MinerSettings
 from miner_utils import get_logger
-from pearl_gemm import get_host_signal_header_size, get_host_signal_sync_size, noisy_gemm
+from pearl_gemm import (
+    get_host_signal_header_size,
+    get_host_signal_sync_size,
+    noisy_gemm,
+)
 from vllm_miner.gemm_operators import (
     make_pow_target_tensor,
     pearl_gemm_noisy,
@@ -92,7 +96,7 @@ def test_pearl_gemm_noisy_with_zero_noise(make_random_test_matrices):
     a, b, scale_a, scale_b, out_dtype, _ = make_random_test_matrices(1024, 1024, 1024)
 
     # Test noisy GEMM with zero noise matrices
-    output_with_zero_noise, ApEA, BpEB = pearl_gemm_noisy_with_zero_noise(
+    _output_with_zero_noise, ApEA, BpEB = pearl_gemm_noisy_with_zero_noise(
         a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype
     )
 
@@ -115,13 +119,15 @@ def test_pearl_gemm_noisy_with_real_noise(make_random_test_matrices):
 
     # Test with zero noise (our custom function)
     print("Testing with zero noise...")
-    output_with_zero_noise, ApEA_zero, BpEB_zero = pearl_gemm_noisy_with_zero_noise(
+    output_with_zero_noise, _apea_zero, _bpeb_zero = pearl_gemm_noisy_with_zero_noise(
         a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype
     )
 
     # Test with real noise using the actual pearl_gemm_noisy function
     print("Testing with real noise...")
-    output_with_real_noise = pearl_gemm_noisy(a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype)
+    output_with_real_noise = pearl_gemm_noisy(
+        a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype
+    )
 
     # Basic validation
     assert output_with_zero_noise.shape == (m, n)
@@ -146,22 +152,32 @@ def test_pearl_gemm_noisy_with_real_noise(make_random_test_matrices):
 
     # Check if real noise output is constant (this would indicate a bug)
     if output_with_real_noise.std().item() < 1e-6:
-        print(f"❌ ERROR: Real noise output is constant: {output_with_real_noise[0, 0].item()}")
+        print(
+            f"❌ ERROR: Real noise output is constant: {output_with_real_noise[0, 0].item()}"
+        )
         print("This indicates a bug in the pearl_gemm_noisy function")
         raise AssertionError("Real noise should not produce constant output")
 
     # Check if zero noise output is constant (this would also indicate a bug)
     if output_with_zero_noise.std().item() < 1e-6:
-        print(f"❌ ERROR: Zero noise output is constant: {output_with_zero_noise[0, 0].item()}")
+        print(
+            f"❌ ERROR: Zero noise output is constant: {output_with_zero_noise[0, 0].item()}"
+        )
         print("This indicates a bug in the zero noise implementation")
         raise AssertionError("Zero noise should not produce constant output")
 
     # Compare with vanilla GEMM (all should match vanilla)
     print("\nComparing with vanilla GEMM:")
-    vanilla_output = pearl_gemm_vanilla(a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype)
+    vanilla_output = pearl_gemm_vanilla(
+        a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype
+    )
 
-    zero_vs_vanilla_diff = torch.abs(output_with_zero_noise - vanilla_output).max().item()
-    real_vs_vanilla_diff = torch.abs(output_with_real_noise - vanilla_output).max().item()
+    zero_vs_vanilla_diff = (
+        torch.abs(output_with_zero_noise - vanilla_output).max().item()
+    )
+    real_vs_vanilla_diff = (
+        torch.abs(output_with_real_noise - vanilla_output).max().item()
+    )
 
     print(f"Zero noise vs vanilla max diff: {zero_vs_vanilla_diff:.6f}")
     print(f"Real noise vs vanilla max diff: {real_vs_vanilla_diff:.6f}")
@@ -242,7 +258,9 @@ def pearl_gemm_noisy_with_zero_noise(a, b, scale_a, scale_b, out_dtype):
         (host_signal_header_size,), dtype=torch.int8, device="cuda"
     )
     host_signal_sync_size = get_host_signal_sync_size()
-    host_signal_sync = torch.zeros((host_signal_sync_size,), dtype=torch.int8, device="cuda")
+    host_signal_sync = torch.zeros(
+        (host_signal_sync_size,), dtype=torch.int8, device="cuda"
+    )
 
     # First, call noise_B
     # torch.ops.pearl_gemm.noise_B(
@@ -279,7 +297,9 @@ def pearl_gemm_noisy_with_zero_noise(a, b, scale_a, scale_b, out_dtype):
         host_signal_header_pinned=host_signal_header_pinned,
         host_signal_sync=host_signal_sync,
         pow_target=make_pow_target_tensor(0),
-        pow_key=torch.randint(0, 255, (32,), dtype=torch.uint8, device="cuda").view(torch.uint32),
+        pow_key=torch.randint(0, 255, (32,), dtype=torch.uint8, device="cuda").view(
+            torch.uint32
+        ),
         tile_size_m=128,  # tile_size_m
         tile_size_n=256,  # tile_size_n
         tile_size_k=128,  # tile_size_k
@@ -317,13 +337,15 @@ def test_pearl_gemm_noisy_with_controlled_noise(make_random_test_matrices):
 
     # Test with zero noise (our custom function)
     print("Testing with zero noise...")
-    output_with_zero_noise, ApEA_zero, BpEB_zero = pearl_gemm_noisy_with_zero_noise(
+    output_with_zero_noise, _apea_zero, _bpeb_zero = pearl_gemm_noisy_with_zero_noise(
         a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype
     )
 
     # Test with real noise using the actual pearl_gemm_noisy function
     print("Testing with real noise...")
-    output_with_real_noise = pearl_gemm_noisy(a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype)
+    output_with_real_noise = pearl_gemm_noisy(
+        a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype
+    )
 
     # Basic validation
     assert output_with_zero_noise.shape == (m, n)
@@ -350,22 +372,32 @@ def test_pearl_gemm_noisy_with_controlled_noise(make_random_test_matrices):
 
     # Check if real noise output is constant (this would indicate a bug)
     if output_with_real_noise.std().item() < 1e-6:
-        print(f"❌ ERROR: Real noise output is constant: {output_with_real_noise[0, 0].item()}")
+        print(
+            f"❌ ERROR: Real noise output is constant: {output_with_real_noise[0, 0].item()}"
+        )
         print("This indicates a bug in the pearl_gemm_noisy function")
         raise AssertionError("Real noise should not produce constant output")
 
     # Check if zero noise output is constant (this would also indicate a bug)
     if output_with_zero_noise.std().item() < 1e-6:
-        print(f"❌ ERROR: Zero noise output is constant: {output_with_zero_noise[0, 0].item()}")
+        print(
+            f"❌ ERROR: Zero noise output is constant: {output_with_zero_noise[0, 0].item()}"
+        )
         print("This indicates a bug in the zero noise implementation")
         raise AssertionError("Zero noise should not produce constant output")
 
     # Compare with vanilla GEMM (all should match vanilla)
     print("\nComparing with vanilla GEMM:")
-    vanilla_output = pearl_gemm_vanilla(a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype)
+    vanilla_output = pearl_gemm_vanilla(
+        a, b, scale_a.squeeze(), scale_b.squeeze(), out_dtype
+    )
 
-    zero_vs_vanilla_diff = torch.abs(output_with_zero_noise - vanilla_output).max().item()
-    real_vs_vanilla_diff = torch.abs(output_with_real_noise - vanilla_output).max().item()
+    zero_vs_vanilla_diff = (
+        torch.abs(output_with_zero_noise - vanilla_output).max().item()
+    )
+    real_vs_vanilla_diff = (
+        torch.abs(output_with_real_noise - vanilla_output).max().item()
+    )
 
     print(
         f"Zero noise vs vanilla max,mean diff: "

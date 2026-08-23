@@ -38,8 +38,12 @@ class TestQuantWithSmoothScale:
         xq_no_smooth, scale_no_smooth, _ = quant_func(x)
         xq_with_smooth, scale_with_smooth, _ = quant_func(x, smooth_scale=smooth_scale)
 
-        assert not torch.equal(xq_no_smooth, xq_with_smooth), "Quantized values should differ"
-        assert not torch.equal(scale_no_smooth, scale_with_smooth), "Scales should differ"
+        assert not torch.equal(xq_no_smooth, xq_with_smooth), (
+            "Quantized values should differ"
+        )
+        assert not torch.equal(scale_no_smooth, scale_with_smooth), (
+            "Scales should differ"
+        )
 
     @pytest.mark.parametrize("quant_func,max_val", QUANT_FUNCS)
     def test_per_token_scales(self, quant_func, max_val):
@@ -122,7 +126,7 @@ def async_manager_for_kernel_tests():
         init_async_manager(MinerSettings(debug=True, no_gateway=True, no_mining=True))
         init_pinned_pool()
         yield get_async_manager()
-    except Exception:
+    except Exception:  # noqa: BLE001 - the optional plugin fixture can be unavailable
         yield None
 
 
@@ -168,4 +172,6 @@ class TestPearlKernelModeComparison:
         correlation = torch.corrcoef(
             torch.stack([output_mining.flatten(), output_non_mining.flatten()])
         )[0, 1]
-        assert correlation > 0.9, f"Outputs should be highly correlated, got {correlation}"
+        assert correlation > 0.9, (
+            f"Outputs should be highly correlated, got {correlation}"
+        )

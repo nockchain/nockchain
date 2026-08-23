@@ -92,7 +92,9 @@ def _to_gpu_u8(b: bytes, device: torch.device) -> torch.Tensor:
     return torch.frombuffer(bytearray(b), dtype=torch.uint8).to(device)
 
 
-def _hash_2d(data_u8: torch.Tensor, key_tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+def _hash_2d(
+    data_u8: torch.Tensor, key_tensor: torch.Tensor, device: torch.device
+) -> torch.Tensor:
     out = torch.empty(blake3.digest_size, device=device, dtype=torch.uint8)
     scratchpad = torch.empty(
         get_required_scratchpad_bytes(data_u8.numel()), dtype=torch.uint8, device=device
@@ -127,7 +129,9 @@ def prepare_moe_noising(
     device = A_q.device
     num_tokens, hidden_size = A_q.shape
     if A_scales.shape != (num_tokens, 1):
-        raise ValueError(f"A_scales must have shape ({num_tokens}, 1); got {tuple(A_scales.shape)}")
+        raise ValueError(
+            f"A_scales must have shape ({num_tokens}, 1); got {tuple(A_scales.shape)}"
+        )
     num_stacked_weight_rows = B_stacked.shape[0]
     noise_rank = config.settings.noise_rank
     top_k = topk_ids.shape[1]
@@ -181,8 +185,12 @@ def prepare_moe_noising(
     routing_hash = _routing_hash(routing_data, key_tensor, device)
 
     offsets_hash = _offsets_hash(routing_offsets, key_tensor, device)
-    commitment_hash_A = torch.empty(blake3.digest_size, device=device, dtype=torch.uint8)
-    commitment_hash_B = torch.empty(blake3.digest_size, device=device, dtype=torch.uint8)
+    commitment_hash_A = torch.empty(
+        blake3.digest_size, device=device, dtype=torch.uint8
+    )
+    commitment_hash_B = torch.empty(
+        blake3.digest_size, device=device, dtype=torch.uint8
+    )
     commitment_hash_from_merkle_roots(
         A_hash,
         B_hash,

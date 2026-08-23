@@ -20,18 +20,24 @@ class RoutingSkew(Enum):
     ALL_TO_ONE = auto()
 
 
-def reference_routing_layout(topk_ids: torch.Tensor, num_experts: int) -> MoERoutingLayout:
+def reference_routing_layout(
+    topk_ids: torch.Tensor, num_experts: int
+) -> MoERoutingLayout:
     """Reference layout via stable argsort."""
     num_tokens, top_k = topk_ids.shape
     total_slots = num_tokens * top_k
     flat_experts = topk_ids.reshape(-1)
-    flat_slot_indices = torch.arange(total_slots, device=topk_ids.device, dtype=torch.int64)
+    flat_slot_indices = torch.arange(
+        total_slots, device=topk_ids.device, dtype=torch.int64
+    )
     sort_key = flat_experts.to(torch.int64) * total_slots + flat_slot_indices
     sort_order = torch.argsort(sort_key, stable=True)
 
     slot_indices = sort_order.to(torch.int32)
     token_indices = (sort_order // top_k).to(torch.int32)
-    routing_offsets = torch.bincount(flat_experts, minlength=num_experts).cumsum(0).to(torch.int32)
+    routing_offsets = (
+        torch.bincount(flat_experts, minlength=num_experts).cumsum(0).to(torch.int32)
+    )
 
     return MoERoutingLayout.from_kernel_outputs(
         routing_data=token_indices,
@@ -73,9 +79,9 @@ def make_routing_distribution(
     if skew is RoutingSkew.ZIPF:
         weights = 1.0 / torch.arange(1, num_experts + 1, dtype=torch.float32)
         probs = weights / weights.sum()
-        sampled_expert_ids = torch.multinomial(probs, num_tokens * top_k, replacement=True).to(
-            torch.int32
-        )
+        sampled_expert_ids = torch.multinomial(
+            probs, num_tokens * top_k, replacement=True
+        ).to(torch.int32)
         return sampled_expert_ids.view(num_tokens, top_k).to(device)
 
     if skew is RoutingSkew.ALL_TO_ONE:
@@ -143,13 +149,20 @@ def make_moe_tensors(
     n_tiles = (hidden_dim + block - 1) // block
     k_tiles = (intermediate_size + block - 1) // block
     w2_weight = (
-        torch.randn(num_experts, hidden_dim, intermediate_size, device=device) * weight_scale
+        torch.randn(num_experts, hidden_dim, intermediate_size, device=device)
+        * weight_scale
     ).to(_MOE_TEST_W2_DTYPE)
-    w2_weight_scale = torch.ones(num_experts, n_tiles, k_tiles, dtype=torch.float32, device=device)
+    w2_weight_scale = torch.ones(
+        num_experts, n_tiles, k_tiles, dtype=torch.float32, device=device
+    )
 
-    hidden_states = torch.randn(num_tokens, hidden_dim, dtype=torch.bfloat16, device=device)
+    hidden_states = torch.randn(
+        num_tokens, hidden_dim, dtype=torch.bfloat16, device=device
+    )
 
-    topk_ids = make_routing_distribution(num_tokens, num_experts, top_k, skew=skew, device=device)
+    topk_ids = make_routing_distribution(
+        num_tokens, num_experts, top_k, skew=skew, device=device
+    )
 
     raw_weights = torch.rand(num_tokens, top_k, dtype=torch.float32, device=device)
     topk_weights = raw_weights / raw_weights.sum(dim=1, keepdim=True)

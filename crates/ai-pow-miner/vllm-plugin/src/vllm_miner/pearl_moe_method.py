@@ -187,7 +187,9 @@ class PearlMoEMethod(FusedMoEMethodBase):
         self._warn_if_backend_overridden()
 
         # Cache the shared gate/up Hadamard block size
-        self.hadamard_block_size = int(layer.w13_hadamard_block_size.reshape(-1)[0].item())
+        self.hadamard_block_size = int(
+            layer.w13_hadamard_block_size.reshape(-1)[0].item()
+        )
 
         num_experts = layer.w13_weight.shape[0]
         ensure_pinned_pool_at_least(num_experts * MOE_POW_HEADER_POOL_DEPTH)
@@ -205,7 +207,10 @@ class PearlMoEMethod(FusedMoEMethodBase):
             envs.is_set("VLLM_MOE_USE_DEEP_GEMM") and envs.VLLM_MOE_USE_DEEP_GEMM
         ):
             self._warn_backend_ignored("deep_gemm")
-        elif envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8") and envs.VLLM_USE_FLASHINFER_MOE_FP8:
+        elif (
+            envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8")
+            and envs.VLLM_USE_FLASHINFER_MOE_FP8
+        ):
             self._warn_backend_ignored("flashinfer")
 
     @staticmethod
@@ -218,7 +223,9 @@ class PearlMoEMethod(FusedMoEMethodBase):
             requested,
         )
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
         return FusedMoEQuantConfig.make(
             quant_dtype=None,
             per_act_token_quant=True,
@@ -249,7 +256,9 @@ class PearlMoEMethod(FusedMoEMethodBase):
             _LOGGER.info("Using PearlMoEExperts for MoE layer")
         except Exception:
             # Leave moe_kernel unset; layer may initialise via maybe_init_modular_kernel.
-            _LOGGER.exception("Failed to set up PearlMoE kernel; will rely on lazy init")
+            _LOGGER.exception(
+                "Failed to set up PearlMoE kernel; will rely on lazy init"
+            )
 
     def apply(
         self,
@@ -280,7 +289,10 @@ class PearlMoEMethod(FusedMoEMethodBase):
         prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEExpertsModular:
-        if prepare_finalize.activation_format == FusedMoEActivationFormat.BatchedExperts:
+        if (
+            prepare_finalize.activation_format
+            == FusedMoEActivationFormat.BatchedExperts
+        ):
             raise NotImplementedError(
                 "BatchedExperts activation format is not supported for PearlMoE"
             )

@@ -20,8 +20,8 @@ _PLUGIN = (
 )
 sys.path.insert(0, str(_PLUGIN))
 
-from proto import inference_mining_pb2 as pb  # noqa: E402
-from proto import inference_mining_pb2_grpc as pb_grpc  # noqa: E402
+from proto import inference_mining_pb2 as pb
+from proto import inference_mining_pb2_grpc as pb_grpc
 
 
 def main() -> None:

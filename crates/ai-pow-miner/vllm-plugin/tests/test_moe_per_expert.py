@@ -26,7 +26,9 @@ _NOISE_RANK = 16
 class TestPermuteASideToExpertOrder:
     @pytest.fixture
     def routing_layout(self) -> MoERoutingLayout:
-        flat_expert_ids = torch.arange(_NUM_TOKENS * _TOP_K, device="cuda") % _NUM_EXPERTS
+        flat_expert_ids = (
+            torch.arange(_NUM_TOKENS * _TOP_K, device="cuda") % _NUM_EXPERTS
+        )
         topk_ids = flat_expert_ids.reshape(_NUM_TOKENS, _TOP_K).to(torch.int32)
         return reference_routing_layout(topk_ids, _NUM_EXPERTS)
 
@@ -34,14 +36,16 @@ class TestPermuteASideToExpertOrder:
     def a_side_tensors(self) -> dict[str, torch.Tensor]:
         device = "cuda"
         return {
-            "A_q": torch.randn(_NUM_TOKENS, _HIDDEN_SIZE, dtype=torch.float32, device=device).to(
-                torch.int8
-            ),
+            "A_q": torch.randn(
+                _NUM_TOKENS, _HIDDEN_SIZE, dtype=torch.float32, device=device
+            ).to(torch.int8),
             "A_scales": torch.rand(_NUM_TOKENS, 1, dtype=torch.float32, device=device),
-            "EAL": torch.randn(_NUM_TOKENS, _NOISE_RANK, dtype=torch.float32, device=device).to(
-                torch.int8
+            "EAL": torch.randn(
+                _NUM_TOKENS, _NOISE_RANK, dtype=torch.float32, device=device
+            ).to(torch.int8),
+            "EAL_fp16": torch.randn(
+                _NUM_TOKENS, _NOISE_RANK, dtype=torch.float16, device=device
             ),
-            "EAL_fp16": torch.randn(_NUM_TOKENS, _NOISE_RANK, dtype=torch.float16, device=device),
         }
 
     def test_output_shapes_and_contiguity(

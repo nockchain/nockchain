@@ -20,7 +20,9 @@ CUDA_DEVICE = "cuda"
 TOKEN_COUNTS = [1, 16, 128, 1024]
 TOP_K_VALUES = [1, 2, 4, 8]
 EXPERT_COUNTS = [8, 128]
-_ROUTING_SHAPE_CASES = list(itertools.product(TOKEN_COUNTS, TOP_K_VALUES, EXPERT_COUNTS))
+_ROUTING_SHAPE_CASES = list(
+    itertools.product(TOKEN_COUNTS, TOP_K_VALUES, EXPERT_COUNTS)
+)
 
 
 def _run_build_routing_data(
@@ -29,7 +31,9 @@ def _run_build_routing_data(
     numel = topk_ids.numel()
     routing_data = torch.empty(numel, dtype=torch.int32, device=topk_ids.device)
     slot_indices = torch.empty(numel, dtype=torch.int32, device=topk_ids.device)
-    routing_offsets = torch.empty(num_experts, dtype=torch.int32, device=topk_ids.device)
+    routing_offsets = torch.empty(
+        num_experts, dtype=torch.int32, device=topk_ids.device
+    )
     scratchpad = torch.empty(
         get_build_routing_data_scratchpad_bytes(numel),
         dtype=torch.uint8,
@@ -46,12 +50,16 @@ def _reference_slot_indices(topk_ids: torch.Tensor) -> torch.Tensor:
     num_tokens, top_k = topk_ids.shape
     total_slots = num_tokens * top_k
     flat_experts = topk_ids.reshape(-1)
-    flat_slot_indices = torch.arange(total_slots, device=topk_ids.device, dtype=torch.int64)
+    flat_slot_indices = torch.arange(
+        total_slots, device=topk_ids.device, dtype=torch.int64
+    )
     sort_key = flat_experts.to(torch.int64) * total_slots + flat_slot_indices
     return torch.argsort(sort_key, stable=True).to(torch.int32)
 
 
-def _reference_routing_offsets(topk_ids: torch.Tensor, num_experts: int) -> torch.Tensor:
+def _reference_routing_offsets(
+    topk_ids: torch.Tensor, num_experts: int
+) -> torch.Tensor:
     expert_counts = torch.bincount(topk_ids.reshape(-1), minlength=num_experts)
     return expert_counts.cumsum(0).to(torch.int32)
 
@@ -131,7 +139,9 @@ class TestBuildRoutingDataBasic:
             t for group in _SMALL_PER_EXPERT_TOKEN_GROUPS for t in group
         )
 
-        topk_ids = torch.tensor(_SMALL_FIXED_TOPK_IDS, dtype=torch.int32, device=CUDA_DEVICE)
+        topk_ids = torch.tensor(
+            _SMALL_FIXED_TOPK_IDS, dtype=torch.int32, device=CUDA_DEVICE
+        )
         expected = torch.tensor(
             _SMALL_KNOWN_GOOD_TOKEN_ORDER, dtype=torch.int32, device=CUDA_DEVICE
         )
@@ -146,7 +156,9 @@ class TestBuildRoutingDataBasic:
         topk_ids = make_routing_distribution(
             num_tokens, num_experts, top_k, device=CUDA_DEVICE, skew=skew
         )
-        _assert_matches_reference(topk_ids, num_experts, expected_shape=(num_tokens * top_k,))
+        _assert_matches_reference(
+            topk_ids, num_experts, expected_shape=(num_tokens * top_k,)
+        )
 
 
 class TestBuildRoutingDataEdgeCases:
@@ -169,12 +181,16 @@ class TestBuildRoutingDataEdgeCases:
     @pytest.mark.parametrize("num_experts", EXPERT_COUNTS)
     def test_single_token(self, top_k, num_experts):
         """m=1 must work correctly."""
-        topk_ids = torch.randint(0, num_experts, (1, top_k), dtype=torch.int32, device=CUDA_DEVICE)
+        topk_ids = torch.randint(
+            0, num_experts, (1, top_k), dtype=torch.int32, device=CUDA_DEVICE
+        )
         _assert_matches_reference(topk_ids, num_experts, expected_shape=(top_k,))
 
 
 def _kernel_layout(topk_ids: torch.Tensor, num_experts: int) -> MoERoutingLayout:
-    routing_data, slot_indices, routing_offsets = _run_build_routing_data(topk_ids, num_experts)
+    routing_data, slot_indices, routing_offsets = _run_build_routing_data(
+        topk_ids, num_experts
+    )
     return MoERoutingLayout.from_kernel_outputs(
         routing_data, slot_indices, routing_offsets, num_experts, topk_ids.shape[1]
     )
@@ -207,8 +223,12 @@ def _assert_layouts_equal(
         assert kernel_slice == reference_layout.expert_slice(expert_index)
         start, count = kernel_slice
         assert count >= 0, "segment count must be non-negative"
-        assert start == next_expected_start, "segments must be contiguous (no gaps/overlaps)"
-        assert start + count <= total_routed_slots, "segment must stay within the routing range"
+        assert start == next_expected_start, (
+            "segments must be contiguous (no gaps/overlaps)"
+        )
+        assert start + count <= total_routed_slots, (
+            "segment must stay within the routing range"
+        )
         next_expected_start = start + count
     assert next_expected_start == total_routed_slots, (
         "segments must cover every routed slot exactly once"
