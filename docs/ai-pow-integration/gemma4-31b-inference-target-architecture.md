@@ -61,8 +61,8 @@ fused matrix bytes.
 
 ## Consensus boundary
 
-The profile is `MatmulParams::GEMMA_4_31B_GATE_UP_FUSED`. It passes the production
-parameter envelope:
+The miner-owned profile is `ai_pow_miner::gemma4::GEMMA4_NATIVE_PARAMS`. It
+passes the unchanged production parameter envelope:
 
 - `128 | 5376`;
 - `16·128 ≤ 5376 ≤ 4·128²`;

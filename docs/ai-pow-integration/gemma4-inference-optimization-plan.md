@@ -15,7 +15,7 @@ Do not change consensus parameters to improve an inference benchmark.
 
 This work must not change:
 
-- `MatmulParams::GEMMA_4_31B_GATE_UP_FUSED`;
+- `ai_pow_miner::gemma4::GEMMA4_NATIVE_PARAMS`;
 - the logical work limit `m <= 4096`;
 - `k = 5376`, `n = 43008`, rank `128`, and tile size `16`;
 - INT7 matrix range checks;

@@ -175,21 +175,6 @@ impl MatmulParams {
         difficulty_bits: 0,
     };
 
-    /// Gemma 4 31B fused MLP gate + up matmul. Both INT7 projections consume
-    /// the same activations, so their output channels form one `n = 2·21504`
-    /// matrix without padding. The maximum 16-by-16 ticket amortizes jackpot
-    /// hashing, and `spot_checks = 1` is the compact recursive-certificate
-    /// contract used by block submission.
-    pub const GEMMA_4_31B_GATE_UP_FUSED: Self = Self {
-        m: 4096,
-        k: 5376,
-        n: 43008,
-        noise_rank: 128,
-        tile: 16,
-        spot_checks: 1,
-        difficulty_bits: 0,
-    };
-
     /// Qwen 3.6 27B FFN gate / up matmul: `(B=4096, hidden=5120, intermediate=17408)`.
     pub const QWEN_3_6_27B_FFN: Self = Self {
         m: 4096,
@@ -646,7 +631,6 @@ mod tests {
         MatmulParams::TEST_SMALL.validate().unwrap();
         MatmulParams::PROD.validate().unwrap();
         MatmulParams::GEMMA_4_31B_FFN.validate().unwrap();
-        MatmulParams::GEMMA_4_31B_GATE_UP_FUSED.validate().unwrap();
         MatmulParams::QWEN_3_6_27B_FFN.validate().unwrap();
     }
 
@@ -836,16 +820,6 @@ mod tests {
     }
 
     #[test]
-    fn fused_gemma_profile_has_complete_native_tiles() {
-        let p = MatmulParams::GEMMA_4_31B_GATE_UP_FUSED;
-        assert_eq!(p.row_tiles(), 256);
-        assert_eq!(p.col_tiles(), 2_688);
-        assert_eq!(p.num_tiles(), 688_128);
-        assert_eq!(p.num_stripes(), 42);
-        assert_eq!(p.tile * p.tile, PEARL_HW_MAX as u32);
-    }
-
-    #[test]
     fn num_stripes_matches_k_over_r() {
         let p = MatmulParams::TEST_SMALL;
         assert_eq!(p.num_stripes(), p.k / p.noise_rank);
@@ -861,7 +835,6 @@ mod tests {
         for p in [
             MatmulParams::PROD,
             MatmulParams::GEMMA_4_31B_FFN,
-            MatmulParams::GEMMA_4_31B_GATE_UP_FUSED,
             MatmulParams::QWEN_3_6_27B_FFN,
             MatmulParams::llm_ffn(4096, 11008, 4096),
             // Real shipped Pearl-certified model (the production
@@ -1038,7 +1011,6 @@ mod tests {
         for p in [
             MatmulParams::PROD,
             MatmulParams::GEMMA_4_31B_FFN,
-            MatmulParams::GEMMA_4_31B_GATE_UP_FUSED,
             MatmulParams::QWEN_3_6_27B_FFN,
         ] {
             assert!(p.validate_prod_envelope().is_ok());

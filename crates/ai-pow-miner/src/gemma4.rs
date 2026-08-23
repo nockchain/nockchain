@@ -28,8 +28,16 @@ pub const GEMMA4_HIDDEN_SIZE: usize = 5_376;
 pub const GEMMA4_PROJECTION_SIZE: usize = 21_504;
 /// Output width of the fused gate + up projection.
 pub const GEMMA4_FUSED_OUTPUT_SIZE: usize = 2 * GEMMA4_PROJECTION_SIZE;
-/// Consensus-admitted native fused gate/up mining profile.
-pub const GEMMA4_NATIVE_PARAMS: MatmulParams = MatmulParams::GEMMA_4_31B_GATE_UP_FUSED;
+/// Miner-owned fused gate/up profile admitted by the unchanged consensus envelope.
+pub const GEMMA4_NATIVE_PARAMS: MatmulParams = MatmulParams {
+    m: 4_096,
+    k: 5_376,
+    n: 43_008,
+    noise_rank: 128,
+    tile: 16,
+    spot_checks: 1,
+    difficulty_bits: 0,
+};
 /// Maximum token rows carried by one native fused work matrix.
 pub const GEMMA4_MAX_TOKENS: usize = GEMMA4_NATIVE_PARAMS.m as usize;
 /// Number of rank-128 transcript cadences in one native Gemma dot product.
@@ -811,6 +819,12 @@ mod tests {
         assert_eq!(GEMMA4_NATIVE_PARAMS.n, 43_008);
         assert_eq!(GEMMA4_NATIVE_PARAMS.noise_rank, 128);
         assert_eq!(GEMMA4_NATIVE_PARAMS.tile, 16);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.spot_checks, 1);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.difficulty_bits, 0);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.row_tiles(), 256);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.col_tiles(), 2_688);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.num_tiles(), 688_128);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.num_stripes(), 42);
         assert_eq!(GEMMA4_FUSED_OUTPUT_SIZE, 2 * GEMMA4_PROJECTION_SIZE);
         GEMMA4_NATIVE_PARAMS
             .validate_prod_envelope()
