@@ -348,9 +348,9 @@ no selected inference work is active.
 ## Validated production measurements
 
 Use image
-`ghcr.io/nockchain/nockchain-ai-pow-inference:sha-149545171beaaa1d80a39e8de21874342d8ddfce`.
+`ghcr.io/nockchain/nockchain-ai-pow-inference:sha-724ce0f8b69a9f6823b437ffb47fc0328d332177`.
 Its manifest digest is
-`sha256:f6d7b6944b9489aa1cb51ca9d0448b83473e2bcbbbc74e0af5292b19a765c731`.
+`sha256:633a2e0b07523a32d27007ca3b638ddec12acf9806b4eadedf0a5c5098ec7e58`.
 
 The OpenAI benchmark used varied short prompts, 128 output tokens, a warm
 server, and the production mineable layer. The table reports output tokens per
