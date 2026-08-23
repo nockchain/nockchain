@@ -88,7 +88,7 @@ def quantize_kernel(
     """Symmetric per-token quantization with optional smooth scaling.
 
     The custom-operation boundary keeps CuTe compilation and cache lookup out
-    of the Torch graph while CUDA graph capture records the compiled kernel.
+    of the Torch graph.
     """
     x_q, x_s = torch.ops.vllm.pearl_quantize_symmetric(
         x, smooth_scale, max_val, block_size
