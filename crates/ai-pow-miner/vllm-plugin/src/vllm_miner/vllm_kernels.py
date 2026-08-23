@@ -106,6 +106,8 @@ class PearlKernel(Int8ScaledMMLinearKernel):
         self._native_full_weight: torch.Tensor | None = None
         self._native_full_scale: torch.Tensor | None = None
         self._native_full_weight_key: tuple[int, int] | None = None
+        self._tp_follower_weight_transposed: torch.Tensor | None = None
+        self._tp_follower_weight_key: int | None = None
         self._weight_transposed = False
         self._mining_kernel_id = _DENSE_MINING_KERNEL_KEY
         if mining_enabled:
@@ -386,6 +388,34 @@ class PearlKernel(Int8ScaledMMLinearKernel):
             w_s,
         )
 
+    def _apply_tp_follower_gemma4(
+        self,
+        x_q: torch.Tensor,
+        x_s: torch.Tensor,
+        w_q: torch.Tensor,
+        w_s: torch.Tensor,
+    ) -> torch.Tensor:
+        weight = w_q
+        weight_transposed = False
+        if torch.cuda.get_device_capability(w_q.device)[0] == 12:
+            key = w_q.data_ptr()
+            if (
+                self._tp_follower_weight_transposed is None
+                or self._tp_follower_weight_key != key
+            ):
+                self._tp_follower_weight_transposed = w_q.T.contiguous()
+                self._tp_follower_weight_key = key
+            weight = self._tp_follower_weight_transposed
+            weight_transposed = True
+        return pearl_gemm_vanilla(
+            x_q,
+            weight,
+            x_s,
+            w_s,
+            torch.bfloat16,
+            weight_transposed=weight_transposed,
+        )
+
     def _apply_native_gemma4_impl(
         self,
         layer_idx: int,
@@ -396,6 +426,8 @@ class PearlKernel(Int8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         full_weight, full_scale, tp_rank, _local_n = self._full_tp_weight(w_q, w_s)
         tp_world = get_tensor_model_parallel_world_size()
+        if tp_rank != 0:
+            return self._apply_tp_follower_gemma4(x_q, x_s, w_q, w_s)
         manager = get_async_manager()
         mining_job = manager.get_mining_job()
         matmul_config = GPUMatmulConfigFactory.create(
