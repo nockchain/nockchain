@@ -12,7 +12,7 @@ set -euo pipefail
 : "${VLLM_PORT:=8000}"
 : "${VLLM_SERVED_MODEL_NAME:=gemma-4-31b-it-pearl}"
 : "${VLLM_MAX_MODEL_LEN:=8192}"
-: "${VLLM_GPU_MEMORY_UTILIZATION:=0.64}"
+: "${VLLM_GPU_MEMORY_UTILIZATION:=0.66}"
 : "${VLLM_ENFORCE_EAGER:=0}"
 : "${VLLM_ALLOW_UNAUTHENTICATED:=0}"
 if [[ -z "${VLLM_COMPILATION_CONFIG+x}" ]]; then
@@ -23,6 +23,7 @@ if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
   mapfile -t visible_gpus < <(nvidia-smi --list-gpus)
   VLLM_TENSOR_PARALLEL_SIZE="${#visible_gpus[@]}"
 fi
+
 if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" -le 0 ]]; then
   echo "no visible CUDA devices" >&2
   exit 1

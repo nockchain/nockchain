@@ -38,6 +38,7 @@ from .quantization_operators import NO_HADAMARD_BLOCK_SIZE, quant_7bit, quant_8b
 
 _LOGGER = get_logger("vllm.pearl_miner")
 _MINING_KERNELS: dict[int, Any] = {}
+_DENSE_MINING_KERNEL_KEY = 0
 
 
 def _pearl_mining_gemm_impl(
@@ -106,9 +107,9 @@ class PearlKernel(Int8ScaledMMLinearKernel):
         self._native_full_scale: torch.Tensor | None = None
         self._native_full_weight_key: tuple[int, int] | None = None
         self._weight_transposed = False
-        self._mining_kernel_id = id(self)
+        self._mining_kernel_id = _DENSE_MINING_KERNEL_KEY
         if mining_enabled:
-            _MINING_KERNELS[self._mining_kernel_id] = self
+            _MINING_KERNELS[_DENSE_MINING_KERNEL_KEY] = self
         self.w_q_name = layer_param_names[0]
         self.w_s_name = layer_param_names[1]
         self.i_s_name = layer_param_names[2]
