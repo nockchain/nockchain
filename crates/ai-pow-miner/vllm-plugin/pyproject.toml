@@ -57,5 +57,3 @@ classifiers = [
 
 [project.entry-points."vllm.general_plugins"]
 register_nockchain_mining_plugin = "vllm_miner:register_pearl_miner_layer"
-
-

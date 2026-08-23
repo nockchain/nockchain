@@ -42,7 +42,7 @@ To run the test suite, use `pytest`:
 
 ```bash
 pytest
-``` 
+```
 
 ## Building the Docker Image
 
@@ -72,4 +72,4 @@ To build and push a multi-platform image to a container registry, you can use `d
 docker buildx build ../../ -f Dockerfile --tag <your-registry>/vllm_miner:latest --push
 ```
 
-Replace `<your-registry>` with your container registry's URL. 
+Replace `<your-registry>` with your container registry's URL.
