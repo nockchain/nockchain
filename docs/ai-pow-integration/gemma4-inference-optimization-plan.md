@@ -248,7 +248,7 @@ Every production candidate must pass:
 
 ## Validated production result
 
-Revision `724ce0f8` uses this execution policy:
+Revision `6fd3db13` uses this execution policy:
 
 - Torch compilation is enabled.
 - CUDA graph replay is disabled.
