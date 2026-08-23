@@ -90,7 +90,9 @@ class PearlMoEExperts(mk.FusedMoEExpertsModular):
     def _supports_current_device() -> bool:
         if not current_platform.is_cuda_alike():
             return False
-        return current_platform.get_device_capability()[0] >= _MIN_COMPUTE_CAPABILITY_MAJOR
+        return (
+            current_platform.get_device_capability()[0] >= _MIN_COMPUTE_CAPABILITY_MAJOR
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -158,7 +160,9 @@ class PearlMoEExperts(mk.FusedMoEExpertsModular):
         """Quantize activations with the shared gate/up smooth scale and Hadamard."""
         w13_smooth = self._get_smooth_scale("w13_smooth_quant_scale")
         smooth = w13_smooth[:K] if w13_smooth is not None else None
-        return quant_7bit(hidden_states, smooth_scale=smooth, block_size=self._hadamard_block_size)
+        return quant_7bit(
+            hidden_states, smooth_scale=smooth, block_size=self._hadamard_block_size
+        )
 
     def apply(
         self,
@@ -181,7 +185,9 @@ class PearlMoEExperts(mk.FusedMoEExpertsModular):
         assert hidden_states.is_contiguous()
         assert hidden_states.dim() == 2
 
-        E, num_tokens, N, K, top_k_num = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
+        E, num_tokens, N, K, top_k_num = self.moe_problem_size(
+            hidden_states, w1, w2, topk_ids
+        )
         if global_num_experts == GLOBAL_NUM_EXPERTS_INFER_FROM_WEIGHTS:
             global_num_experts = E
 
@@ -193,10 +199,14 @@ class PearlMoEExperts(mk.FusedMoEExpertsModular):
 
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
         cache2_dim = self.adjust_N_for_activation(N, activation)
-        intermediate_cache2 = _resize_cache(workspace13, (num_tokens * top_k_num, cache2_dim))
+        intermediate_cache2 = _resize_cache(
+            workspace13, (num_tokens * top_k_num, cache2_dim)
+        )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
-        triton_config = try_get_optimal_moe_config(w1.shape, w2.shape, top_k_num, None, num_tokens)
+        triton_config = try_get_optimal_moe_config(
+            w1.shape, w2.shape, top_k_num, None, num_tokens
+        )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids,
@@ -240,7 +250,9 @@ class PearlMoEExperts(mk.FusedMoEExpertsModular):
                 **self._int8_w8a8_triton_kwargs(),
             )
 
-        self.activation(activation, intermediate_cache2, intermediate_cache1.view(-1, N))
+        self.activation(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+        )
 
         # GEMM2 (down projection): not mined, kept in the original fp8 block
         self._gemm2_triton(
@@ -290,7 +302,9 @@ class PearlMoEExperts(mk.FusedMoEExpertsModular):
         cache_flat = intermediate_cache1.view(-1, N)
         out_dtype = cache_flat.dtype
         num_routed_slots = num_tokens * top_k_num
-        gemm1_output_by_slot = torch.empty((num_routed_slots, N), dtype=out_dtype, device=w1.device)
+        gemm1_output_by_slot = torch.empty(
+            (num_routed_slots, N), dtype=out_dtype, device=w1.device
+        )
         host_signal_sync = torch.zeros(
             get_host_signal_sync_size(), dtype=torch.int8, device=w1.device
         )
@@ -312,13 +326,17 @@ class PearlMoEExperts(mk.FusedMoEExpertsModular):
                 expert_output = gemm1_output_by_slot[:expert_slot_count]
 
                 pearl_moe_expert_gemm(
-                    A_q_e=A_q_by_expert[routing_start : routing_start + expert_slot_count],
+                    A_q_e=A_q_by_expert[
+                        routing_start : routing_start + expert_slot_count
+                    ],
                     B_e=B_stacked[expert_weight_start:expert_weight_end],
                     A_scales_e=A_scales_by_expert[
                         routing_start : routing_start + expert_slot_count
                     ],
                     B_scales_e=self.w1_scale[expert_index],
-                    EAL_e=EAL_by_expert[routing_start : routing_start + expert_slot_count],
+                    EAL_e=EAL_by_expert[
+                        routing_start : routing_start + expert_slot_count
+                    ],
                     EAL_fp16_e=EAL_fp16_by_expert[
                         routing_start : routing_start + expert_slot_count
                     ],

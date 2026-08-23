@@ -30,7 +30,9 @@ def init_async_manager(miner_settings: MinerSettings | None = None) -> None:
     global _async_manager
 
     if _async_manager is None or _async_manager._pool is None:
-        miner_settings = miner_settings if miner_settings is not None else MinerSettings()
+        miner_settings = (
+            miner_settings if miner_settings is not None else MinerSettings()
+        )
         miner_settings.enable_async_cuda_event_processing = True
 
         endpoint = os.getenv("NOCKCHAIN_AI_POW_ENDPOINT")
@@ -51,7 +53,6 @@ def init_async_manager(miner_settings: MinerSettings | None = None) -> None:
 
 
 def get_pinned_pool() -> HostSignalHeaderPinnedPool:
-    global _pinned_pool
 
     if _pinned_pool is None:
         raise AssertionError("Pinned pool has not been initialized yet")

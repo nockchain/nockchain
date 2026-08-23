@@ -109,11 +109,10 @@ class MoEStatusCheckCallback:
                 expert_weight_col_offset = expert_index * self.n_per_expert
 
                 _LOGGER.info(
-                    "MoE block found! expert={}, inner_rows={}, outer_indices={}, b_cols={}",
-                    expert_index,
-                    indices.A_row_indices,
-                    outer_indices,
-                    indices.B_column_indices,
+                    f"MoE block found! expert={expert_index}, "
+                    f"inner_rows={indices.A_row_indices}, "
+                    f"outer_indices={outer_indices}, "
+                    f"b_cols={indices.B_column_indices}"
                 )
 
                 commitment_hash = CommitmentHash(

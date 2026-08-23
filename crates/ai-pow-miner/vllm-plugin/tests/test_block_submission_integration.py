@@ -33,7 +33,9 @@ def async_manager_real(real_gateway):
 
     # Monkey patch the config's gateway_socket_path to use the real gateway's socket
     original_socket_path = config_module.config._config.get("gateway_socket_path")
-    config_module.config._config["gateway_socket_path"] = real_gateway.config.miner_rpc.socket_path
+    config_module.config._config["gateway_socket_path"] = (
+        real_gateway.config.miner_rpc.socket_path
+    )
 
     miner_settings = MinerSettings(debug=True, no_gateway=False)
     init_async_manager(miner_settings)
@@ -100,7 +102,9 @@ def test_block_submission(real_gateway, async_manager_real, make_random_test_mat
         assert get_async_manager()._loop is not None
 
         # Perform noisy GEMM (this triggers mining)
-        _ = pearl_gemm_noisy(A, B, scale_a.squeeze(), scale_b.squeeze(), out_dtype, bias)
+        _ = pearl_gemm_noisy(
+            A, B, scale_a.squeeze(), scale_b.squeeze(), out_dtype, bias
+        )
         matmul_count += 1
         async_manager.wait_until_done_submitting_blocks()
 
@@ -112,7 +116,9 @@ def test_block_submission(real_gateway, async_manager_real, make_random_test_mat
     # Wait for proof generation and block submission
     proof_timeout = 120
     proof_start = time.time()
-    while (submission_service.accepted_blocks + submission_service.rejected_blocks) == 0:
+    while (
+        submission_service.accepted_blocks + submission_service.rejected_blocks
+    ) == 0:
         elapsed = time.time() - proof_start
         if elapsed > proof_timeout:
             pytest.fail(f"Timeout ({proof_timeout}s) waiting for proof generation")

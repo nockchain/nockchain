@@ -27,7 +27,7 @@ def _is_vllm_worker() -> bool:
     # v1 engine: worker processes show up as "EngineCore_DP{rank}"
     # In multi-gpu setups, "VllmWorker-{number}" is used (has a different name in logs)
     name = multiprocessing.current_process().name or ""
-    return name.startswith("EngineCore") or name.startswith("VllmWorker")
+    return name.startswith(("EngineCore", "VllmWorker"))
 
 
 def register_pearl_miner_layer() -> None:

@@ -6,9 +6,8 @@ from miner_base.settings import MinerSettings
 
 
 class Config:
-    _config: dict = {}
-
     def __init__(self) -> None:
+        self._config: dict[str, Any] = {}
         self._load_config()
         self.settings = MinerSettings()
 

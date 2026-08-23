@@ -185,7 +185,9 @@ class NockchainMiningClient:
         self.close()
 
 
-def _tensor_parts(tensor_kind: int, tensor: torch.Tensor) -> Iterator[pb.OpenedBlockPart]:
+def _tensor_parts(
+    tensor_kind: int, tensor: torch.Tensor
+) -> Iterator[pb.OpenedBlockPart]:
     data = tensor.view(torch.uint8).numpy().tobytes()
     for offset in range(0, len(data), _CHUNK_BYTES):
         yield pb.OpenedBlockPart(

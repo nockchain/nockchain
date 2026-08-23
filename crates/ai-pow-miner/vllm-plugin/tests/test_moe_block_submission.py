@@ -15,7 +15,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.v1.worker.workspace import init_workspace_manager, is_workspace_manager_initialized
+from vllm.v1.worker.workspace import (
+    init_workspace_manager,
+    is_workspace_manager_initialized,
+)
 from vllm_miner import config as config_module
 from vllm_miner.mining_state import (
     delete_state,
@@ -135,7 +138,9 @@ def test_block_found_and_proof_verifies(pearl_moe_layer, get_mining_job, async_m
     matmul_config = GPUMatmulConfigFactory.create(
         k=k, noise_rank=noise_rank, moe=MoEConfig(e=_NUM_EXPERTS, top_k=_TOP_K)
     )
-    mining_job = get_mining_job(mining_config=matmul_config.mining_config, target=_EASY_TARGET)
+    mining_job = get_mining_job(
+        mining_config=matmul_config.mining_config, target=_EASY_TARGET
+    )
 
     with patch.object(am, "_client") as mock_mining_client:
         mock_mining_client.get_mining_info.return_value = mining_job
@@ -157,7 +162,9 @@ def test_block_found_and_proof_verifies(pearl_moe_layer, get_mining_job, async_m
 def async_manager_real(real_gateway):
     """Async manager connected to the real gateway (mirrors the dense integration test)."""
     original_socket_path = config_module.config._config.get("gateway_socket_path")
-    config_module.config._config["gateway_socket_path"] = real_gateway.config.miner_rpc.socket_path
+    config_module.config._config["gateway_socket_path"] = (
+        real_gateway.config.miner_rpc.socket_path
+    )
 
     init_async_manager(MinerSettings(debug=True, no_gateway=False))
     init_pinned_pool()
@@ -202,7 +209,9 @@ class TestBlockSubmissionIntegration:
             hidden_states = torch.randn(
                 _NUM_TOKENS, _HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
             )
-            moe_method.apply(layer, hidden_states, tensors.topk_weights, tensors.topk_ids, None)
+            moe_method.apply(
+                layer, hidden_states, tensors.topk_weights, tensors.topk_ids, None
+            )
             forward_count += 1
             async_manager.wait_until_done_submitting_blocks()
 
@@ -213,9 +222,13 @@ class TestBlockSubmissionIntegration:
         )
 
         proof_start = time.time()
-        while (submission_service.accepted_blocks + submission_service.rejected_blocks) == 0:
+        while (
+            submission_service.accepted_blocks + submission_service.rejected_blocks
+        ) == 0:
             if time.time() - proof_start > _PROOF_TIMEOUT_SECONDS:
-                pytest.fail(f"Timeout ({_PROOF_TIMEOUT_SECONDS}s) waiting for proof generation")
+                pytest.fail(
+                    f"Timeout ({_PROOF_TIMEOUT_SECONDS}s) waiting for proof generation"
+                )
             time.sleep(_PROOF_POLL_INTERVAL_SECONDS)
 
         logger.info(
