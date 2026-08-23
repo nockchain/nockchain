@@ -837,10 +837,7 @@ mod tests {
     fn dense_production_profiles_use_installed_setup_buckets() {
         let expected_keys: Vec<(&str, VerifierSetupShapeKey)> = [
             ("peak", ai_pow_miner::PEAK_PRODUCTION_PARAMS),
-            (
-                "fused Gemma",
-                ai_pow::params::MatmulParams::GEMMA_4_31B_GATE_UP_FUSED,
-            ),
+            ("fused Gemma", ai_pow_miner::gemma4::GEMMA4_NATIVE_PARAMS),
         ]
         .into_iter()
         .map(|(label, params)| {
