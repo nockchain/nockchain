@@ -40,9 +40,9 @@ The current non-mining INT7 path uses Pearl's large-tile GEMM on H100. It uses
 rows. The path applies scales in separate operations. The selected mining layer
 pads a logical batch below 256 tokens to 256 rows.
 
-The production launcher uses eager execution because the CuTeDSL INT7 quantizer
-and the mining callback path are not safe for Torch compilation or CUDA graph
-replay.
+The production launcher uses Torch compilation without CUDA graph replay.
+INT7 quantization and the mining calculation use explicit custom-operation
+boundaries. The mining calculation remains outside compiled regions.
 
 Gemma 4 has 50 sliding-attention layers with head dimension 256 and 10
 full-attention layers with head dimension 512. Stable vLLM selects Triton for a
@@ -245,6 +245,85 @@ Every production candidate must pass:
 8. canonical `%ai-pow` submission to a private mock NockApp node;
 9. node acknowledgement before reporting acceptance;
 10. applicable CUDA memory, race, initialization, and synchronization checks.
+
+## Validated production result
+
+Revision `14954517` uses this execution policy:
+
+- Torch compilation is enabled.
+- CUDA graph replay is disabled.
+- Triton supplies attention.
+- H100 uses DeepGEMM for supported block-FP8 projections.
+- SM120 uses CUTLASS for block-FP8 projections.
+- SM120 INT7 projections use a cached `(K, N)` weight layout.
+- Tensor-parallel rank zero owns the complete mineable projection.
+- Tensor-parallel follower ranks calculate only their local inference
+  projection.
+- Text-only loading excludes the vision tower.
+
+CUDA graph replay is not a production option. Piecewise replay generated
+invalid greedy text on H100. For the fixed prompt used in validation, replay
+returned repeated `our` tokens while eager and compile-only execution returned
+a valid sentence. Compile-only execution also gave higher throughput at large
+batch sizes.
+
+The benchmark used 128 generated tokens, varied short prompts, a warm server,
+and the production mineable layer. The request count was twice the concurrency,
+except that concurrency 1 used eight requests. The table reports output tokens
+per second.
+
+| Hardware | Driver | c1 | c8 | c32 | c64 | c128 | c256 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| H100 80 GB | 580.126.09 | 21.8 | 171.1 | 642.6 | 1201.0 | 1392.1 | 1537.7 |
+| RTX PRO 6000 Blackwell 96 GB | 595.91.07 | 14.3 | 109.4 | 428.8 | 798.8 | 1337.5 | 1426.8 |
+| two RTX 5090 32 GB, tensor parallel | 580.142 | 18.6 | 144.0 | 570.4 | 880.4 | 1100.3 | 1131.9 |
+
+Greedy compile-only output for the fixed validation prompt was identical on
+all three hardware layouts. The RTX 5090 follower path increased throughput
+from 713.9 to 880.4 output tokens per second at concurrency 64 and from 941.4
+to 1100.3 at concurrency 128.
+
+The isolated production mining calculation retained the fixed
+`4096 x 5376` by `43008 x 5376` statement. These results include noise,
+jackpot search, and output conversion:
+
+| Hardware | Kernel median | Wall median | Complete-ticket throughput |
+|---|---:|---:|---:|
+| H100 80 GB | 5.957 ms | 8.130 ms | 159.0 TMAC/s |
+| RTX PRO 6000 Blackwell 96 GB | 4.242 ms | 5.642 ms | 223.2 TMAC/s |
+| RTX 5090 32 GB | 2.587 ms | 2.601 ms | 366.0 TMAC/s |
+
+The RTX 5090 native output was bit-equal to `torch._int_mm` for the device KAT.
+Session rebinding changed the output when the input allocation changed. These
+checks cover the pointer-cache boundary used by the serving process.
+
+Use these serving profiles:
+
+- Use concurrency 1 for minimum request latency.
+- Use concurrency 64 for bounded latency and high throughput.
+- Use concurrency 256 for maximum aggregate throughput.
+- Use one H100 when latency or absolute throughput is primary.
+- Use one RTX PRO 6000 when cost-adjusted throughput is primary and one-device
+  operation is required.
+- Use two RTX 5090 devices with tensor parallelism when Runpod cost is primary.
+
+The measured Runpod prices were USD 3.29 per hour for H100, USD 2.09 per hour
+for RTX PRO 6000, and USD 1.38 per hour for two RTX 5090 devices. These prices
+are allocation observations, not stable deployment properties.
+
+## Rejected production paths
+
+- Pipeline parallelism does not fit this checkpoint on two 32 GB devices.
+  Model construction allocated 29.67 GiB on rank zero and then failed an
+  84 MiB allocation, even with a 2048-token context and a 0.95 memory fraction.
+- B12X block-FP8 reached 0.31 to 0.97 times CUTLASS throughput across the Gemma
+  projection matrix. No measured shape was faster.
+- FlashInfer XQA did not give an end-to-end gain over Triton for this model.
+- The available FA4 path did not execute the 512-wide full-attention layers on
+  the validated H100 software stack.
+- A hybrid NVFP4 artifact requires the original precision checkpoint and
+  calibration data. The Pearl INT7/block-FP8 artifact is not a sound conversion
+  source.
 
 ## Commit and release gates
 

@@ -347,23 +347,25 @@ no selected inference work is active.
 
 ## Validated production measurements
 
-The image at `sha-7abc138c768024ae161011b339b597e461441943` produced these
-measurements. The interactive profile used three measured streaming requests,
-one warmup request, concurrency 1, and 64 output tokens. The throughput profile
-used 16 measured requests, two warmup requests, concurrency 8, varied prompts,
-and 64 output tokens.
+Use image
+`ghcr.io/nockchain/nockchain-ai-pow-inference:sha-149545171beaaa1d80a39e8de21874342d8ddfce`.
+Its manifest digest is
+`sha256:f6d7b6944b9489aa1cb51ca9d0448b83473e2bcbbbc74e0af5292b19a765c731`.
 
-| GPU layout / memory fraction | Driver | Interactive p50 TTFT | Interactive output tokens/s | Concurrency-8 output tokens/s | Concurrency-8 total tokens/s | Isolated mining TMAC/s |
-|---|---:|---:|---:|---:|---:|---:|
-| H100 / `0.62` | 580.126.09 | 0.133 s | 15.501 | 34.863 | 57.401 | 258.970 |
-| RTX PRO 6000 / `0.62` | 580.159.04 | 0.477 s | 3.662 | 27.800 | 45.773 | 345.884 |
-| Two RTX 5090 / `0.64` | 580.65.06 | 0.170 s | 6.096 | 45.333 | 74.640 | 310.812 / 318.821 |
+The OpenAI benchmark used varied short prompts, 128 output tokens, a warm
+server, and the production mineable layer. The table reports output tokens per
+second. The isolated mining benchmark used 10 warmup launches and 30 measured
+launches.
 
-The OpenAI measurements include scheduler coexistence with idle mining. The
-mining measurements use 100 warmup launches and 200 measured launches without
-vLLM. The two RTX 5090 mining values are per device and must not be added:
-tensor-parallel inference requires both devices to execute the same global
-ticket work for their local output shards.
+| GPU layout | Driver | c1 | c64 | c256 | Isolated mining |
+|---|---:|---:|---:|---:|---:|
+| H100 80 GB | 580.126.09 | 21.8 | 1201.0 | 1537.7 | 159.0 TMAC/s |
+| RTX PRO 6000 Blackwell 96 GB | 595.91.07 | 14.3 | 798.8 | 1426.8 | 223.2 TMAC/s |
+| Two RTX 5090 32 GB | 580.142 | 18.6 | 880.4 | 1131.9 | 366.0 TMAC/s |
+
+The RTX 5090 mining value is for tensor-parallel rank zero. The follower rank
+calculates only its local inference projection. Do not add device throughput
+values.
 
 ## Security checklist
 
