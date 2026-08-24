@@ -1,12 +1,12 @@
 # The AI Compute Network
 
-**The AI Compute Network is how Nockchain incentivizes a decentralized cloud for AI inference. Independent providers serve AI customers and use the same compute to compete for NOCK block rewards. Together, those providers can form a decentralized AI hyperscaler.**
+**Nockchain uses the AI Compute Network to support a decentralized cloud for AI inference. Independent providers serve AI customers. They use the same compute to compete for NOCK block rewards. Together, these providers can form a decentralized AI hyperscaler.**
 
-A decentralized AI hyperscaler is a large AI cloud operated by many independent providers instead of one company. Nockchain does not own the GPUs or serve the customer requests. It provides the shared incentive and consensus protocol. Successful block producers earn NOCK, Nockchain’s fair digital gold.
+Many independent providers operate a decentralized AI hyperscaler. No single company controls the large AI cloud. Nockchain does not own the GPUs or serve customer requests. Nockchain provides the shared incentive and consensus protocol. Successful block producers earn NOCK, Nockchain’s fair digital gold.
 
 ## The Product Vision
 
-AI inference is the service that produces answers from trained AI models. Today, a small number of large cloud companies control much of the hardware and infrastructure for this service.
+AI inference produces answers from AI models. Today, a small number of large cloud companies control much of the hardware and infrastructure for this service.
 
 The AI Compute Network creates a different model:
 
@@ -15,7 +15,7 @@ The AI Compute Network creates a different model:
 - Aggregators route requests across available providers.
 - Nockchain rewards providers when their inference work produces valid blocks.
 
-An **inference miner** is a provider that serves AI requests and uses the same compute for Nockchain mining. Customers can use a normal AI API through an aggregator. They do not need to understand mining or interact with Nockchain.
+**Inference miners** serve AI requests and use the same compute for Nockchain mining. Customers use a normal AI API through an aggregator. They do not need to understand mining or interact with Nockchain.
 
 Nockchain gives inference miners an additional reason to offer AI capacity. An inference miner can earn customer revenue and compete for NOCK rewards with the same compute.
 
@@ -28,14 +28,14 @@ The process is simple:
 1. A customer sends an inference request to an aggregator.
 2. The aggregator selects an independent inference miner.
 3. The inference miner runs the AI model and performs the matrix multiplication needed for the response.
-4. The inference miner uses that same work as a mining attempt tied to the current Nockchain block.
+4. The inference miner uses that same work as a mining attempt and ties it to the current Nockchain block.
 5. The customer receives the AI response whether or not the mining attempt wins.
 6. If the attempt meets the mining target, the inference miner creates a compact proof and submits a block to Nockchain.
 7. If Nockchain accepts the block, the inference miner receives NOCK and transaction fees.
 
 Most attempts do not produce a block. They still produce useful AI responses. Nockchain does not pay a fixed amount for every request. It pays the inference miner that produces an accepted block.
 
-The important point is that the inference miner does not perform useful inference and then run an unrelated mining task. The useful matrix computation is the mining work.
+The inference miner uses the useful matrix computation as mining work. The miner does not run an unrelated mining task after the inference.
 
 ## Why Inference Miners Participate
 
@@ -56,42 +56,42 @@ Nockchain provides the common incentive. Inference miners and aggregators provid
 
 Many independent inference miners can join the same AI Compute Network. They can operate different hardware, models, and locations. No single company needs to own the full compute supply.
 
-As more inference miners join, the network gains more capacity, more geographic coverage, and more customer choice. The combined capacity can grow to cloud scale while remaining independently operated.
+As more inference miners join, the network gains capacity, geographic coverage, and customer choice. Independent operators keep control as the combined capacity grows to cloud scale.
 
-That is the decentralized AI hyperscaler: a large inference cloud connected by an open economic protocol rather than controlled by one cloud company.
+An open economic protocol connects this large inference cloud. One cloud company does not control it. This structure creates the decentralized AI hyperscaler.
 
 ## The Inference Aggregator Layer
 
 Users should not need to find and integrate with every inference miner separately. We intend to unify access through a small number of competing **inference aggregators**.
 
-An aggregator can provide:
+An aggregator can:
 
-- One API for many inference miners.
-- One catalog of available models.
-- Request routing by model, price, location, speed, or availability.
-- Load balancing and failover when a provider is busy or offline.
-- One customer account and billing system.
-- Common monitoring for response speed and service uptime.
+- Give users one API for many inference miners.
+- List available models in one catalog.
+- Route requests by model, price, location, speed, or availability.
+- Balance traffic and find another miner when one becomes busy or goes offline.
+- Give customers one account and billing system.
+- Monitor response speed and service uptime.
 
 Inference miners can connect their capacity to one or more aggregators. A customer or NockApp chooses an aggregator and sends requests to one endpoint. The aggregator selects an available inference miner, returns the response, and handles the customer-facing service.
 
 We intend to have a few aggregators rather than one required aggregator. This gives users a simple interface without creating one central gatekeeper. Aggregators can compete on price, routing, model access, reliability, and customer experience. Inference miners can work with several aggregators, and customers can switch between them.
 
-The aggregators unify the product experience. The underlying GPUs and model servers remain independently operated.
+The aggregators unify the product experience. Independent operators continue to control the GPUs and model servers.
 
 ## What Nockchain Provides
 
-Nockchain provides the AI Proof of Useful Work puzzle, block candidates, mining targets, proof verification, and NOCK rewards. These are the shared rules that let independent inference providers contribute to the same consensus system.
+Nockchain provides the AI Proof of Useful Work puzzle, block candidates, and mining targets. It verifies winning proofs and pays NOCK rewards. These shared rules let independent inference miners contribute to the same consensus system.
 
 Nockchain does not provide one central inference API. It does not route requests, bill customers, or guarantee model quality and uptime. Inference aggregators provide those customer-facing services.
 
-This separation allows a few easy-to-use aggregators to compete while many independent inference miners use the same Nockchain incentive.
+A few easy-to-use aggregators can compete for customers. Many independent inference miners can use the same Nockchain incentive.
 
 ## How It Fits Into Nockchain
 
-The AI Compute Network is one of Nockchain’s Compute Networks. A Compute Network is a Proof of Useful Work puzzle that can produce Nockchain blocks.
+Nockchain uses the AI Compute Network as one of its Compute Networks. Each Compute Network defines a Proof of Useful Work puzzle that can produce Nockchain blocks.
 
-The AI Compute Network runs beside the ZK Compute Network. Both can produce blocks for the same chain. Nockchain measures both kinds of work and accepts the valid chain with the most total work.
+The AI Compute Network produces blocks for Nockchain. Nockchain converts work from every active Compute Network into a common measure. It accepts the valid chain with the most total work.
 
 This connects the AI product to the rest of Nockchain:
 
@@ -106,11 +106,11 @@ More inference demand produces more useful mining work. More inference miners in
 ## Where Participants Fit
 
 - **AI customers** buy inference through an aggregator’s API.
-- **Inference miners** operate models and GPUs, serve routed requests, and compete for blocks.
+- **Inference miners** operate models and GPUs, serve requests from aggregators, and compete for blocks.
 - **Inference aggregators** unify model access, routing, billing, and reliability across many miners.
 - **NockApp developers** use an aggregator to add decentralized inference to their products.
 - **Node operators** verify AI Compute Network proofs and blocks.
-- **NOCK holders** hold an asset secured in part by useful AI computation.
+- **NOCK holders** own an asset that useful AI computation helps secure.
 
 ## How It Fits Together
 
@@ -122,7 +122,7 @@ flowchart TB
     P["Independent inference miners"] --> G["Useful AI inference<br/>response and mining attempt"]
   end
 
-  A -->|"routed request"| P
+  A -->|"request"| P
   G -->|"AI response"| A
   A -->|"AI response"| C
   G -->|"winning attempt"| N["Nockchain<br/>proof verification and consensus"]
