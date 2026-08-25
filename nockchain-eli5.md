@@ -1,11 +1,11 @@
 # Nockchain
 
-**Nockchain is a protocol for programmable money powered by Compute Networks. NOCK is programmable gold, soon-to-be private. NockApps give the economy private, programmable rules. Compute Networks turn computation into the work that secures the chain.**
+**Nockchain is a protocol for programmable money powered by Compute Networks. NOCK is programmable gold, soon-to-be private. NockApps give the Nockchain economy private, programmable applications. Compute Networks turn computation into the work that secures the chain.**
 
 The design has three parts:
 
 1. **Money.** NOCK is the native money of Nockchain.
-2. **NockApps.** NockApps define what the money and other onchain assets can do.
+2. **NockApps.** NockApps are private, programmable applications for the Nockchain economy.
 3. **Compute Networks.** Compute Networks coordinate independent providers and use their computation for consensus.
 
 A block must pass both consensus and transaction validation before nodes accept it. Compute Networks provide the consensus work. The transaction engine enforces transfers and, in the proposed NockApp design, verifies proven program results.
@@ -16,20 +16,20 @@ NOCK is the common asset that connects users, applications, miners, and compute 
 
 Users can hold and transfer NOCK. Nockchain issues block rewards in NOCK. A miner earns a reward when its Compute Network work produces an accepted block.
 
-NOCK is programmable gold, soon-to-be private. NockApps can use it inside rules written as Nock programs.
+NOCK is programmable gold, soon-to-be private. NockApps can use NOCK in applications written as Nock programs.
 
-The monetary asset stays simple. NockApps provide the programmable behavior around it.
+The monetary asset stays simple. NockApps provide the application layer.
 
 ## NockApps
 
-A NockApp defines its rules as a Nock program. The proposed NockApp system runs that program in the Nock ZKVM and produces a zero-knowledge proof, or ZKP, of the result.
+A NockApp is an application written as a Nock program. The proposed NockApp system runs that program in the Nock ZKVM and produces a zero-knowledge proof, or ZKP, of the result.
 
 The NockApp includes the proof in a transaction. The transaction engine verifies the proof without running the full program again. It can then accept the proven state change.
 
 This design gives programmable money two important properties:
 
-- **General rules.** A NockApp can use any rules that can be written as a Nock program. The transaction engine does not need a new built-in rule for each application.
-- **Private inputs.** A NockApp can keep selected inputs outside the public transaction. Nodes receive the proof and any public result, but they do not need the private inputs to verify the rules.
+- **Programmable applications.** Developers can write any application that can be expressed as a Nock program. The transaction engine does not need a new built-in feature for each application.
+- **Private inputs.** A NockApp can keep selected inputs outside the public transaction. Nodes receive the proof and any public result, but they do not need the private inputs to verify the application’s state change.
 
 The current transaction engine does not yet verify general NockApp proofs. Nockchain plans to add this verification with the general-purpose Nock ZKVM.
 
@@ -81,7 +81,7 @@ This is how Nockchain can coordinate decentralized hyperscalers without making t
 ## Where Participants Fit
 
 - **Users** hold and transfer NOCK, use NockApps, and buy services.
-- **NockApp developers** write private, programmable rules as Nock programs.
+- **NockApp developers** build private, programmable applications as Nock programs.
 - **AI providers** serve inference and use the same matrix work for mining attempts.
 - **ZK provers** produce proofs and use the same proving work for mining attempts.
 - **Aggregators and marketplaces** connect customers with independent compute providers.
@@ -92,7 +92,7 @@ This is how Nockchain can coordinate decentralized hyperscalers without making t
 ```mermaid
 flowchart TB
   U["Users"] --> M["NOCK<br/>programmable gold<br/>soon-to-be private"]
-  U --> A["NockApps<br/>private, programmable rules"]
+  U --> A["NockApps<br/>private, programmable applications"]
   M --> A
 
   A -->|"useful proof requests"| ZK["ZK Compute Network"]

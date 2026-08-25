@@ -109,4 +109,4 @@ flowchart TB
   end
 ```
 
-Today, NOCK rewards miners for proving one fixed program. The proposed design lets customer proofs enforce NockApps’ programmable rules and uses the same proving work to power consensus.
+Today, NOCK rewards miners for proving one fixed program. The proposed design lets customer proofs verify NockApp state changes and uses the same proving work to power consensus.
