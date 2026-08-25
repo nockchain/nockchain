@@ -1,8 +1,8 @@
 # The AI Compute Network
 
-**The AI Compute Network helps independent AI providers form a decentralized inference cloud. A few competing aggregators give customers one API for their combined capacity. The providers earn customer payments and can earn NOCK with the same inference work.**
+**The AI Compute Network lets useful AI inference power Nockchain’s programmable money. Independent AI providers serve customers through a few competing aggregators. The providers earn customer payments and can earn NOCK with the same inference work.**
 
-This model creates a decentralized AI hyperscaler. Many independent operators supply the GPUs and models. Nockchain provides the shared incentive and consensus protocol.
+This model creates a decentralized AI hyperscaler. Many independent operators supply the GPUs and models. Nockchain turns their useful computation into consensus work.
 
 ## The Product
 
@@ -47,7 +47,7 @@ This incentive attracts independent operators. More operators give aggregators m
 
 ## How It Fits Into Nockchain
 
-The AI Compute Network is one of Nockchain’s Compute Networks. Each Compute Network defines a Proof of Useful Work puzzle that can produce Nockchain blocks.
+The AI Compute Network is one part of the power behind Nockchain’s programmable money. Each Compute Network defines a Proof of Useful Work puzzle that can produce Nockchain blocks.
 
 Nockchain provides block candidates, mining targets, proof verification, and NOCK rewards. Inference aggregators provide the customer-facing cloud service.
 
@@ -61,7 +61,7 @@ This separation gives each part a clear role:
 
 More inference demand produces more useful mining work. More inference miners increase the cloud capacity available through each aggregator.
 
-The AI Compute Network shows how Nockchain supports decentralized hyperscalers. An open protocol connects independent providers, customer demand, and consensus rewards.
+The AI Compute Network connects independent providers and customer demand to Nockchain consensus. Their combined capacity can grow to cloud scale, while NOCK and NockApps remain the monetary and programmable layers.
 
 ## How It Fits Together
 
@@ -80,4 +80,4 @@ flowchart TB
   N -->|"NOCK reward"| P
 ```
 
-Aggregators give users one interface to many inference miners. Customer payments support AI service. NOCK rewards pay miners for using the same compute to secure Nockchain.
+Aggregators give users one interface to many inference miners. Customer payments support AI service. NOCK rewards pay miners for using the same compute to power and secure programmable money.

@@ -1,8 +1,8 @@
 # The ZK Compute Network
 
-**Today, the ZK Compute Network secures Nockchain with a fixed ZK puzzle. The proposed future replaces that fixed work with useful proofs requested by NockApps and other customers. Independent ZK miners can then earn customer payments and compete for NOCK block rewards with the same proving work.**
+**The ZK Compute Network makes zero-knowledge proving part of the power behind Nockchain’s programmable money. Today, miners secure the chain with a fixed ZK puzzle. The proposed future lets customer-requested proofs serve NockApps and act as mining attempts.**
 
-This change has not happened yet. The current puzzle tests whether ZK proofs can secure Proof-of-Work consensus. The proposed design turns that proving capacity into a decentralized ZK hyperscaler.
+This change has not happened yet. Today’s puzzle tests whether ZK proofs can secure Proof-of-Work consensus. The proposed design turns useful proving capacity into a decentralized ZK hyperscaler.
 
 ## How It Works Today
 
@@ -73,7 +73,7 @@ Their combined capacity can grow to cloud scale without placing all proving hard
 
 ## How It Fits Into Nockchain
 
-The ZK Compute Network is one of Nockchain’s Compute Networks. Each Compute Network defines work that can produce Nockchain blocks.
+The ZK Compute Network is one part of the power behind Nockchain’s programmable money. Each Compute Network defines work that can produce Nockchain blocks.
 
 Today, the ZK Compute Network uses one fixed program only for consensus mining.
 
@@ -82,7 +82,7 @@ The proposed design will use the same Nock proof format in two places:
 - The ZK Compute Network will use it for consensus mining.
 - The transaction engine will use it to verify NockApp state changes.
 
-This shared format will connect NockApps directly to consensus. More NockApp activity will create more demand for useful proofs. More proof demand will create more consensus work.
+This shared format will connect Nockchain’s programs directly to the compute that powers consensus. More NockApp activity will create more demand for useful proofs. More proof demand will create more consensus work.
 
 Nockchain will provide block candidates, mining targets, proof verification, and NOCK rewards. Proof marketplaces and NockApps will provide the customer-facing products.
 
@@ -109,4 +109,4 @@ flowchart TB
   end
 ```
 
-Today, NOCK rewards miners for proving one fixed program. The proposed design adds customer payments for useful proofs and uses the same proofs for NockApps and consensus.
+Today, NOCK rewards miners for proving one fixed program. The proposed design lets customer proofs enforce NockApps’ programmable rules and uses the same proving work to power consensus.
