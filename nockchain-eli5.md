@@ -5,12 +5,12 @@
 The design has three parts:
 
 1. **Money.** NOCK is the native money of Nockchain.
-2. **Programs.** NockApps define what the money and other onchain assets can do.
-3. **Power.** Compute Networks coordinate independent providers and use their computation for consensus.
+2. **NockApps.** NockApps define what the money and other onchain assets can do.
+3. **Compute Networks.** Compute Networks coordinate independent providers and use their computation for consensus.
 
 A block must pass both consensus and transaction validation before nodes accept it. Compute Networks provide the consensus work. The transaction engine enforces transfers and, in the proposed NockApp design, verifies proven program results.
 
-## The Money: NOCK
+## Money
 
 NOCK is the common asset that connects users, applications, miners, and compute providers.
 
@@ -20,7 +20,7 @@ NOCK is programmable gold. NockApps can use it inside rules written as Nock prog
 
 The monetary asset stays simple. NockApps provide the programmable behavior around it.
 
-## The Programs: NockApps
+## NockApps
 
 A NockApp defines its rules as a Nock program. The proposed NockApp system runs that program in the Nock ZKVM and produces a zero-knowledge proof, or ZKP, of the result.
 
@@ -33,7 +33,7 @@ This design gives programmable money two important properties:
 
 The current transaction engine does not yet verify general NockApp proofs. Nockchain plans to add this verification with the general-purpose Nock ZKVM.
 
-## The Power: Compute Networks
+## Compute Networks
 
 A Compute Network defines a compute puzzle that can produce valid Nockchain blocks. Miners perform the task and check whether the result meets the network’s difficulty target. A winning miner submits a block and proof. Other nodes verify the proof.
 
