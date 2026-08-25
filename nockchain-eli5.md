@@ -1,6 +1,6 @@
 # Nockchain
 
-**Nockchain is programmable money powered by Compute Networks. NOCK is programmable gold. NockApps give the economy private, programmable rules. Compute Networks turn computation into the work that secures the chain.**
+**Nockchain is a protocol for programmable money powered by Compute Networks. NOCK is programmable gold. NockApps give the economy private, programmable rules. Compute Networks turn computation into the work that secures the chain.**
 
 The design has three parts:
 
