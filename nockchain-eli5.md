@@ -1,6 +1,6 @@
 # Nockchain
 
-**Nockchain is a protocol for programmable money powered by Compute Networks. NOCK is programmable gold. NockApps give the economy private, programmable rules. Compute Networks turn computation into the work that secures the chain.**
+**Nockchain is a protocol for programmable money powered by Compute Networks. NOCK is programmable gold, soon-to-be private. NockApps give the economy private, programmable rules. Compute Networks turn computation into the work that secures the chain.**
 
 The design has three parts:
 
@@ -16,7 +16,7 @@ NOCK is the common asset that connects users, applications, miners, and compute 
 
 Users can hold and transfer NOCK. Nockchain issues block rewards in NOCK. A miner earns a reward when its Compute Network work produces an accepted block.
 
-NOCK is programmable gold. NockApps can use it inside rules written as Nock programs.
+NOCK is programmable gold, soon-to-be private. NockApps can use it inside rules written as Nock programs.
 
 The monetary asset stays simple. NockApps provide the programmable behavior around it.
 
@@ -91,7 +91,7 @@ This is how Nockchain can coordinate decentralized hyperscalers without making t
 
 ```mermaid
 flowchart TB
-  U["Users"] --> M["NOCK<br/>programmable gold"]
+  U["Users"] --> M["NOCK<br/>programmable gold<br/>soon-to-be private"]
   U --> A["NockApps<br/>private, programmable rules"]
   M --> A
 
