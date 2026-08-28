@@ -350,6 +350,19 @@ This reports launch time, tickets per second, and complete-ticket TMAC/s. The
 OpenAI benchmark measures normal coexistence because idle mining runs whenever
 no selected inference work is active.
 
+## Image promotion gate
+
+The image workflow resolves every base image and tool image by digest and uses
+the checked-in Python lock. It publishes a candidate digest only after the Rust
+suite and the Python-to-gRPC-to-Rust KAT pass. Separate H100, RTX PRO 6000
+Blackwell, and dual RTX 5090 runners must then pass the native scalar
+differential and varied-batch VRAM KAT.
+
+Release tags are created from the tested digest. The digest carries maximum
+BuildKit provenance and an SBOM and has a keyless Sigstore signature. Failed or
+missing GPU jobs leave only the `candidate-<commit>` tag and cannot update a
+branch, commit, or `latest` release tag.
+
 ## Validated production measurements
 
 Use image

@@ -27,10 +27,10 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Date: 2026-08-24 15:30:04 UTC
 - Location: `crates/ai-pow-miner/vllm-plugin/src/vllm_miner/vllm_kernels.py:105`
 - Source: [discussion_r3844965258](https://github.com/nockchain/nockchain/pull/164#discussion_r3844965258)
-- Triage status: Pending
-- Disposition:
+- Triage status: Implemented
+- Disposition: Accept
 - Owner:
-- Notes:
+- Notes: A caller-locked one-slot cache closes the completed native session before allocating a different shape. The 17-shape RTX PRO 6000 Blackwell KAT retained one session and 0.314 GiB after returning to 256 rows; peak active-workspace delta was 3.750 GiB.
 
 > **Blocker — this cache can retain roughly 13 GiB of native VRAM.** The key includes padded `m`, and the padding logic permits 16 shapes from 256 through 4096. Every retained session owns another full `B` workspace plus `m×n` INT32/BF16 buffers. Static allocation accounting is about 1.27 GiB for `m=4096` and 12.8 GiB across all shapes, before retained PyTorch tensors and normal output. Please use a bounded LRU with stream synchronization or a safely resizable workspace, and add a varied-batch steady-state VRAM test.
 
@@ -66,10 +66,10 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Date: 2026-08-24 15:30:08 UTC
 - Location: `.github/workflows/ai-pow-inference-image.yml:95`
 - Source: [discussion_r3844965759](https://github.com/nockchain/nockchain/pull/164#discussion_r3844965759)
-- Triage status: Pending
-- Disposition:
+- Triage status: Implemented
+- Disposition: Accept
 - Owner:
-- Notes:
+- Notes: Base, tool, frontend, action, Pearl, Rust, model, and Python dependency inputs are pinned. Candidate images carry maximum provenance and an SBOM. Release tags require Rust and cross-language tests plus H100, RTX PRO 6000 Blackwell, and dual RTX 5090 acceptance, then receive and verify a keyless Sigstore signature.
 
 > **Image promotion needs reproducible inputs and an encoded acceptance gate.** This workflow publishes with provenance disabled and runs no GPU or cross-language correctness tests. The Docker build also uses mutable base/tool tags, installs Rust through a live script, and resolves `uv lock` at build time without a checked-in lock; the tested image cited in the PR predates this head. Please pin image/tool digests and the dependency lock, enable provenance/SBOM and signing, and gate published tags on the cross-language KAT plus target-GPU tests.
 
