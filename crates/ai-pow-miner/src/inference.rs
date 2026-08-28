@@ -11,6 +11,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use ai_pow::params::{PEARL_K_MAX, PEARL_MN_MAX};
+use ai_pow::pearl_compat::{
+    PearlMiningConfig, PEARL_INCOMPLETE_BLOCK_HEADER_SIZE, PEARL_MINING_CONFIG_SIZE,
+};
 use anyhow::{bail, Result};
 use nockapp_grpc_proto::pb::ai_pow::v1::inference_mining_service_server::{
     InferenceMiningService, InferenceMiningServiceServer,
@@ -24,7 +27,10 @@ use nockapp_grpc_proto::pb::ai_pow::v1::{
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
-const PROTOCOL_VERSION: u32 = 1;
+use crate::canonical::canonical_dense_mining_config;
+use crate::gemma4::GEMMA4_NATIVE_PARAMS;
+
+const PROTOCOL_VERSION: u32 = 2;
 const RUNTIME_ID_BYTES: usize = 16;
 const DIGEST_BYTES: usize = 32;
 const CUDA_DEVICE_UUID_BYTES: usize = 16;
@@ -663,6 +669,34 @@ fn bytes_into_i8(mut bytes: Vec<u8>) -> Vec<i8> {
     unsafe { Vec::from_raw_parts(pointer, length, capacity) }
 }
 
+/// Build the fixed Gemma 4 mining statement sent to the inference runtime.
+pub fn build_gemma4_mining_job(
+    candidate_generation: u64,
+    incomplete_header: [u8; PEARL_INCOMPLETE_BLOCK_HEADER_SIZE],
+    nockchain_target: [u8; TARGET_BYTES],
+    certificate_version: u32,
+) -> Result<MiningJob> {
+    let config = canonical_dense_mining_config(&GEMMA4_NATIVE_PARAMS)?;
+    let mining_config = config
+        .to_bytes()
+        .map_err(|error| anyhow::anyhow!("encode Gemma mining config: {error:?}"))?;
+    let work_factor = config
+        .shape_work_factor()
+        .map_err(|error| anyhow::anyhow!("derive Gemma work factor: {error:?}"))?;
+    let effective_target =
+        ai_pow::difficulty::effective_jackpot_threshold(&nockchain_target, work_factor)
+            .map_err(|error| anyhow::anyhow!("adjust Gemma target: {error:?}"))?;
+    let job = MiningJob {
+        candidate_generation,
+        incomplete_header: incomplete_header.to_vec(),
+        effective_target_le: effective_target.to_vec(),
+        certificate_version,
+        mining_config: mining_config.to_vec(),
+    };
+    validate_mining_job(&job)?;
+    Ok(job)
+}
+
 fn validate_mining_job(job: &MiningJob) -> Result<()> {
     if job.candidate_generation == 0 {
         bail!("candidate_generation must be nonzero");
@@ -670,11 +704,20 @@ fn validate_mining_job(job: &MiningJob) -> Result<()> {
     if job.incomplete_header.len() != HEADER_BYTES {
         bail!("incomplete_header must be {HEADER_BYTES} bytes");
     }
-    if job.target_le.len() != TARGET_BYTES {
-        bail!("target_le must be {TARGET_BYTES} bytes");
+    if job.effective_target_le.len() != TARGET_BYTES {
+        bail!("effective_target_le must be {TARGET_BYTES} bytes");
     }
     if job.certificate_version == 0 {
         bail!("certificate_version must be nonzero");
+    }
+    if job.mining_config.len() != PEARL_MINING_CONFIG_SIZE {
+        bail!("mining_config must be {PEARL_MINING_CONFIG_SIZE} bytes");
+    }
+    let config = PearlMiningConfig::from_bytes(&job.mining_config)
+        .map_err(|error| anyhow::anyhow!("invalid mining_config: {error:?}"))?;
+    let expected = canonical_dense_mining_config(&GEMMA4_NATIVE_PARAMS)?;
+    if config != expected {
+        bail!("mining_config does not match the canonical Gemma 4 profile");
     }
     Ok(())
 }
@@ -701,12 +744,29 @@ mod tests {
     use super::*;
 
     fn mining_job() -> MiningJob {
-        MiningJob {
-            candidate_generation: 1,
-            incomplete_header: vec![0x11; HEADER_BYTES],
-            target_le: vec![0x22; TARGET_BYTES],
-            certificate_version: 3,
-        }
+        let mut target = [0u8; TARGET_BYTES];
+        target[0] = 1;
+        build_gemma4_mining_job(1, [0x11; HEADER_BYTES], target, 3).expect("canonical mining job")
+    }
+
+    #[test]
+    fn gemma4_mining_job_bytes_are_canonical() {
+        let job = mining_job();
+        assert_eq!(
+            hex::encode(job.mining_config),
+            "0015000080000000000f00000000000f000000000000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            hex::encode(job.effective_target_le),
+            "0000150000000000000000000000000000000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn gemma4_mining_job_rejects_unrepresentable_effective_target() {
+        let error = build_gemma4_mining_job(1, [0x11; HEADER_BYTES], [u8::MAX; TARGET_BYTES], 3)
+            .expect_err("over-band target must fail closed");
+        assert!(error.to_string().contains("adjust Gemma target"));
     }
 
     fn runtime_request() -> RegisterRuntimeRequest {
@@ -858,9 +918,16 @@ mod tests {
         let mut malformed = runtime_request();
         malformed.checkpoint_layout_digest.pop();
         assert!(state.register_runtime(malformed).is_err());
+
         let mut job = mining_job();
-        job.target_le.pop();
+        job.effective_target_le.pop();
         assert!(InferenceMiningRpc::new(Arc::new(state), job).is_err());
+
+        let mut job = mining_job();
+        job.mining_config[9] = 7;
+        assert!(
+            InferenceMiningRpc::new(Arc::new(InferenceSchedulerState::default()), job).is_err()
+        );
     }
 
     fn opened_metadata(output_dim: u32) -> OpenedBlockMetadata {

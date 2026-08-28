@@ -13,15 +13,14 @@ use ai_pow_miner::gemma4::GEMMA4_NATIVE_PARAMS;
 #[cfg(feature = "gpu")]
 use ai_pow_miner::gemma4_cuda::Gemma4CudaSession;
 use ai_pow_miner::inference::{
-    IdleMiningBackend, IdleMiningWorker, InferenceMiningRpc, InferenceProofSender,
-    InferenceSchedulerState,
+    build_gemma4_mining_job, IdleMiningBackend, IdleMiningWorker, InferenceMiningRpc,
+    InferenceProofSender, InferenceSchedulerState,
 };
 #[cfg(feature = "gpu")]
 use ai_pow_miner::inference::{InferenceProofRequest, OpenedDenseWitness};
 use ai_pow_miner::run::{inference_proof_channel, run_inference_node, InferenceNodeConfig};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use nockapp_grpc_proto::pb::ai_pow::v1::MiningJob;
 use nockchain_mining_common::MiningPkhConfig;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
@@ -123,15 +122,14 @@ impl IdleMiningBackend for BridgeIdleBackend {
                 let mut header =
                     PearlIncompleteBlockHeader::from_bytes(&mining_job.incomplete_header)?;
                 header.timestamp = header.timestamp.wrapping_add(state.extranonce);
-                let preparation = state.session.prepare(&header.to_bytes(), prepared.mu())?;
-                let raw_target: [u8; 32] = mining_job
-                    .target_le
+                let preparation = state
+                    .session
+                    .prepare(&header.to_bytes(), &mining_job.mining_config)?;
+                let target: [u8; 32] = mining_job
+                    .effective_target_le
                     .as_slice()
                     .try_into()
-                    .map_err(|_| anyhow::anyhow!("node target must be 32 bytes"))?;
-                let factor = prepared.config().shape_work_factor()?;
-                let target = ai_pow::difficulty::effective_jackpot_threshold(&raw_target, factor)
-                    .map_err(|error| anyhow::anyhow!("adjust idle target: {error:?}"))?;
+                    .map_err(|_| anyhow::anyhow!("effective target must be 32 bytes"))?;
                 let total_tickets = state.session.total_tickets();
                 let result = state.session.search(0, total_tickets, &target)?;
                 let Some(ordinal) = result.winner else {
@@ -182,17 +180,17 @@ impl IdleMiningBackend for BridgeIdleBackend {
     }
 }
 
-fn timed_backend(args: &Args) -> (BridgeIdleBackend, Vec<u8>) {
+fn timed_backend(args: &Args) -> (BridgeIdleBackend, [u8; 76]) {
     (
         BridgeIdleBackend::Timed {
             duration: Duration::from_millis(args.mock_idle_batch_ms),
         },
-        vec![0; 76],
+        [0; 76],
     )
 }
 
 #[cfg(feature = "gpu")]
-fn cuda_backend(device: usize) -> Result<(BridgeIdleBackend, Vec<u8>)> {
+fn cuda_backend(device: usize) -> Result<(BridgeIdleBackend, [u8; 76])> {
     let params = GEMMA4_NATIVE_PARAMS;
     let (a, b) = ai_pow::synth::synth_matrices(b"nockchain-gemma4-idle-v1", &params);
     let a = Arc::new(a);
@@ -213,11 +211,11 @@ fn cuda_backend(device: usize) -> Result<(BridgeIdleBackend, Vec<u8>)> {
             rpc: None,
             proof_sender: None,
         })),
-        first.sigma().to_vec(),
+        *first.sigma(),
     ))
 }
 
-fn build_backend(args: &Args) -> Result<(BridgeIdleBackend, Vec<u8>)> {
+fn build_backend(args: &Args) -> Result<(BridgeIdleBackend, [u8; 76])> {
     match args.cuda_device {
         Some(device) => {
             #[cfg(feature = "gpu")]
@@ -264,13 +262,11 @@ async fn main() -> Result<()> {
     let node_config = node_config(&args)?;
     let state = Arc::new(InferenceSchedulerState::default());
     let (mut backend, incomplete_header) = build_backend(&args)?;
-    let mining_job = MiningJob {
-        candidate_generation: args.candidate_generation,
-        incomplete_header,
+    let mining_job = build_gemma4_mining_job(
+        args.candidate_generation, incomplete_header,
         // A zero target keeps standalone integration runs deterministic and hit-free.
-        target_le: vec![0; 32],
-        certificate_version: args.certificate_version,
-    };
+        [0; 32], args.certificate_version,
+    )?;
     let (proof_sender, proof_requests) = inference_proof_channel();
     let rpc = InferenceMiningRpc::new(Arc::clone(&state), mining_job)?;
     let rpc = if node_config.is_some() {

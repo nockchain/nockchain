@@ -20,8 +20,13 @@ _PLUGIN = (
 )
 sys.path.insert(0, str(_PLUGIN))
 
-from proto import inference_mining_pb2 as pb
-from proto import inference_mining_pb2_grpc as pb_grpc
+from proto import inference_mining_pb2 as pb  # noqa: E402
+from proto import inference_mining_pb2_grpc as pb_grpc  # noqa: E402
+
+_PROTOCOL_VERSION = 2
+_CANONICAL_GEMMA4_MU = bytes.fromhex(
+    "0015000080000000000f00000000000f00000000" + "00" * 32
+)
 
 
 def main() -> None:
@@ -33,7 +38,7 @@ def main() -> None:
     stub = pb_grpc.InferenceMiningServiceStub(channel)
     runtime = stub.RegisterRuntime(
         pb.RegisterRuntimeRequest(
-            protocol_version=1,
+            protocol_version=_PROTOCOL_VERSION,
             checkpoint_layout_digest=bytes([0x33]) * 32,
             cuda_device_uuid=bytes([0x44]) * 16,
             process_id=7,
@@ -41,12 +46,14 @@ def main() -> None:
         timeout=5,
     )
     assert len(runtime.runtime_id) == 16
+    assert runtime.protocol_version == _PROTOCOL_VERSION
     job = stub.GetMiningJob(
         pb.GetMiningJobRequest(runtime_id=runtime.runtime_id), timeout=5
     )
     assert job.candidate_generation == 1
     assert len(job.incomplete_header) == 76
-    assert len(job.target_le) == 32
+    assert job.effective_target_le == bytes(32)
+    assert job.mining_config == _CANONICAL_GEMMA4_MU
 
     before = stub.GetStatus(pb.GetStatusRequest(), timeout=5)
     assert before.mode == pb.SCHEDULER_MODE_IDLE_MINING

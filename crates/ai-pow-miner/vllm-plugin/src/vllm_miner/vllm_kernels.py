@@ -33,6 +33,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from .config import config
 from .gemm_operators import pearl_gemm_vanilla
 from .mining_state import get_async_manager
+from .nockchain_manager import NockchainAsyncLoopManager
 from .native_gemma4 import NativeGemma4Session
 from .quantization_operators import NO_HADAMARD_BLOCK_SIZE, quant_7bit, quant_8bit
 
@@ -64,6 +65,21 @@ def _pearl_mining_gemm_fake(
     del kernel_id, layer_idx, x_s, w_s
     return torch.empty(
         (x_q.shape[0], w_q.shape[0]), dtype=torch.bfloat16, device=x_q.device
+    )
+
+
+def _gemma4_mining_transcript(manager: Any, mining_job: Any) -> tuple[bytes, bytes]:
+    if isinstance(manager, NockchainAsyncLoopManager):
+        return manager.get_mining_transcript(mining_job)
+    matmul_config = GPUMatmulConfigFactory.create(
+        k=5376, noise_rank=config.settings.noise_rank
+    )
+    adjusted_target = mining_job.adjust_target(
+        mining_config=matmul_config.mining_config
+    )
+    return (
+        bytes(matmul_config.mining_config.to_bytes()),
+        adjusted_target.to_bytes(32, "little"),
     )
 
 
@@ -430,15 +446,8 @@ class PearlKernel(Int8ScaledMMLinearKernel):
             return self._apply_tp_follower_gemma4(x_q, x_s, w_q, w_s)
         manager = get_async_manager()
         mining_job = manager.get_mining_job()
-        matmul_config = GPUMatmulConfigFactory.create(
-            k=5376, noise_rank=config.settings.noise_rank
-        )
-        adjusted_target = mining_job.adjust_target(
-            mining_config=matmul_config.mining_config
-        )
+        mu, target = _gemma4_mining_transcript(manager, mining_job)
         sigma = mining_job.incomplete_header_bytes
-        mu = bytes(matmul_config.mining_config.to_bytes())
-        target = adjusted_target.to_bytes(32, "little") if tp_rank == 0 else bytes(32)
         scale_a = x_s.squeeze(-1).to(torch.float32).contiguous()
         scale_b = full_scale.squeeze(-1).to(torch.float32).contiguous()
         outputs = []

@@ -503,6 +503,31 @@ impl PreparedCanonicalMoeTemplate {
     }
 }
 
+/// Build the dense mining configuration carried by the statement and search job.
+pub fn canonical_dense_mining_config(
+    params: &MatmulParams,
+) -> Result<PearlMiningConfig, CanonicalProveError> {
+    params
+        .validate_prod_envelope()
+        .map_err(err("dense canonical parameter envelope"))?;
+    if params.spot_checks != 1 || params.difficulty_bits != 0 {
+        return Err(CanonicalProveError(
+            "dense canonical proof requires spot_checks=1 and difficulty_bits=0".to_string(),
+        ));
+    }
+    let config = PearlMiningConfig {
+        common_dim: params.k,
+        rank: u16::try_from(params.noise_rank)
+            .map_err(|_| CanonicalProveError("dense rank does not fit u16".to_string()))?,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: setup_pattern(params.tile),
+        cols_pattern: setup_pattern(params.tile),
+        reserved: [0; PEARL_MINING_CONFIG_RESERVED_SIZE],
+    };
+    config.to_bytes().map_err(err("dense mining config"))?;
+    Ok(config)
+}
+
 impl PreparedCanonicalDenseTemplate {
     pub fn new(
         params: &MatmulParams,
@@ -510,14 +535,7 @@ impl PreparedCanonicalDenseTemplate {
         a: Arc<Vec<i8>>,
         b: Arc<Vec<i8>>,
     ) -> Result<Self, CanonicalProveError> {
-        params
-            .validate_prod_envelope()
-            .map_err(err("dense canonical parameter envelope"))?;
-        if params.spot_checks != 1 || params.difficulty_bits != 0 {
-            return Err(CanonicalProveError(
-                "dense canonical proof requires spot_checks=1 and difficulty_bits=0".to_string(),
-            ));
-        }
+        let config = canonical_dense_mining_config(params)?;
         let expected_a = usize::try_from(params.m)
             .ok()
             .and_then(|m| m.checked_mul(params.k as usize))
@@ -533,16 +551,6 @@ impl PreparedCanonicalDenseTemplate {
                 b.len()
             )));
         }
-        let config = PearlMiningConfig {
-            common_dim: params.k,
-            rank: u16::try_from(params.noise_rank)
-                .map_err(|_| CanonicalProveError("dense rank does not fit u16".to_string()))?,
-            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
-            rows_pattern: setup_pattern(params.tile),
-            cols_pattern: setup_pattern(params.tile),
-            reserved: [0; PEARL_MINING_CONFIG_RESERVED_SIZE],
-        };
-        config.to_bytes().map_err(err("dense mining config"))?;
         let aux = setup_aux(nock_commit);
         let aux_commitment = aux.commitment().map_err(err("dense aux commitment"))?;
         let (header, aux_inclusion) = setup_aux_inclusion(&aux_commitment, 0);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import os
 from collections.abc import Iterator
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
 
@@ -16,7 +17,7 @@ from .proto import inference_mining_pb2 as pb
 from .proto import inference_mining_pb2_grpc as pb_grpc
 
 _LOGGER = get_logger("vllm.nockchain_ai_pow")
-_PROTOCOL_VERSION = 1
+_PROTOCOL_VERSION = 2
 _CHUNK_BYTES = 1024 * 1024
 
 
@@ -28,6 +29,14 @@ def _fixed_hex_env(name: str, length: int) -> bytes:
     if len(decoded) != length:
         raise ValueError(f"{name} must decode to {length} bytes")
     return decoded
+
+
+@dataclass(frozen=True, slots=True)
+class _TrackedMiningJob:
+    job: MiningJob
+    candidate_generation: int
+    mining_config: bytes
+    effective_target_le: bytes
 
 
 class NockchainMiningClient:
@@ -63,24 +72,39 @@ class NockchainMiningClient:
         self._runtime_id = registered.runtime_id
         self._work_ids = itertools.count(1)
         self._work_shapes: dict[int, tuple[int, int, int, int]] = {}
-        self._job_generations: dict[int, tuple[MiningJob, int]] = {}
+        self._job_generations: dict[int, _TrackedMiningJob] = {}
         _LOGGER.info(f"Connected to Nockchain AI-PoW service at {endpoint}")
 
     def get_mining_info(self) -> MiningJob:
         value = self._stub.GetMiningJob(
             pb.GetMiningJobRequest(runtime_id=self._runtime_id), timeout=10
         )
-        if len(value.incomplete_header) != 76 or len(value.target_le) != 32:
+        if (
+            len(value.incomplete_header) != 76
+            or len(value.effective_target_le) != 32
+            or len(value.mining_config) != 52
+        ):
             raise RuntimeError("Nockchain mining job has invalid fixed-width fields")
         job = MiningJob(
             incomplete_header_bytes=value.incomplete_header,
-            target=int.from_bytes(value.target_le, "little"),
+            target=int.from_bytes(value.effective_target_le, "little"),
             cert_version=CertificateVersion(value.certificate_version),
         )
-        self._job_generations[id(job)] = (job, value.candidate_generation)
+        self._job_generations[id(job)] = _TrackedMiningJob(
+            job=job,
+            candidate_generation=value.candidate_generation,
+            mining_config=bytes(value.mining_config),
+            effective_target_le=bytes(value.effective_target_le),
+        )
         if len(self._job_generations) > 128:
             self._job_generations.pop(next(iter(self._job_generations)))
         return job
+
+    def get_mining_transcript(self, mining_job: MiningJob) -> tuple[bytes, bytes]:
+        tracked = self._job_generations.get(id(mining_job))
+        if tracked is None or tracked.job is not mining_job:
+            raise ValueError("mining transcript requires a tracked mining job")
+        return tracked.mining_config, tracked.effective_target_le
 
     def notify_work_started(
         self, *, layer: int, token_count: int, common_dim: int, output_dim: int
@@ -134,9 +158,9 @@ class NockchainMiningClient:
         if opened_block_info.commitment_hash is None:
             raise ValueError("opened block submission requires commitment hashes")
         tracked_job = self._job_generations.get(id(mining_job))
-        if tracked_job is None or tracked_job[0] is not mining_job:
+        if tracked_job is None or tracked_job.job is not mining_job:
             raise ValueError("opened block submission has an untracked mining job")
-        candidate_generation = tracked_job[1]
+        candidate_generation = tracked_job.candidate_generation
         a = opened_block_info.A.detach().cpu().contiguous()
         b_t = opened_block_info.B_t.detach().cpu().contiguous()
         if a.dtype is not torch.int8 or b_t.dtype is not torch.int8:

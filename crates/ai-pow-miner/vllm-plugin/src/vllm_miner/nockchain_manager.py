@@ -52,6 +52,9 @@ class NockchainAsyncLoopManager(AsyncLoopManager):
         if work_id is not None:
             self._nockchain_client.notify_work_finished(work_id, failed=failed)
 
+    def get_mining_transcript(self, mining_job: MiningJob) -> tuple[bytes, bytes]:
+        return self._nockchain_client.get_mining_transcript(mining_job)
+
     def handle_submit_block(
         self, opened_block_info: OpenedBlockInfo, mining_job: MiningJob
     ) -> None:
