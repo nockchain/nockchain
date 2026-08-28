@@ -56,7 +56,7 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Triage status: Implemented
 - Disposition: Accept
 - Owner:
-- Notes: The parity workflow again runs on pushes and pull requests to `master` and `nightly` when compiler, Hoon, Rust, Bazel, or parity-workflow inputs change.
+- Notes: The parity workflow runs on pushes and pull requests to `master` and `nightly` only when `crates/honk/src`, `crates/honk/build.rs`, or `crates/honk/Cargo.toml` changes.
 
 > **Please restore the automatic parity triggers.** This changes the repository-wide compiler parity gate from push/PR execution to manual-only, which is unrelated to inference mining and removes protection for future changes across the tree. If runtime or cost is the concern, narrow the path filters or schedule the expensive jobs in a separate PR rather than disabling the gate here.
 
