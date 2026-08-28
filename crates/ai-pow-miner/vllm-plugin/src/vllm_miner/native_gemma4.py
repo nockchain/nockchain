@@ -275,3 +275,35 @@ class NativeGemma4Session:
         if raw:
             _library().raw.ai_pow_cuda_gemma4_session_destroy(raw)
             self._raw = ctypes.c_void_p()
+
+
+class NativeGemma4SessionCache:
+    """One synchronized caller-owned native session slot."""
+
+    def __init__(self) -> None:
+        self._entry: tuple[tuple[int, int, int, int], NativeGemma4Session] | None = None
+
+    def __len__(self) -> int:
+        return int(self._entry is not None)
+
+    def get(self, a: torch.Tensor, b: torch.Tensor) -> NativeGemma4Session:
+        device_index = a.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        key = (device_index, a.shape[0], b.shape[0], b.data_ptr())
+        if self._entry is not None:
+            cached_key, cached = self._entry
+            if cached_key == key:
+                cached.bind(a, b)
+                return cached
+            cached.close()
+            self._entry = None
+        session = NativeGemma4Session(a, b)
+        self._entry = (key, session)
+        return session
+
+    def close(self) -> None:
+        if self._entry is not None:
+            _, session = self._entry
+            session.close()
+            self._entry = None

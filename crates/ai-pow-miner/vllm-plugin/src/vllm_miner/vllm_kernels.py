@@ -8,6 +8,7 @@ Unified kernel supporting two modes:
 Both modes use pearl GEMM kernels and support smooth_quant_scale.
 """
 
+from threading import Lock
 from typing import Any, override
 
 import torch
@@ -34,7 +35,7 @@ from .config import config
 from .gemm_operators import pearl_gemm_vanilla
 from .mining_state import get_async_manager
 from .nockchain_manager import NockchainAsyncLoopManager
-from .native_gemma4 import NativeGemma4Session
+from .native_gemma4 import NativeGemma4Session, NativeGemma4SessionCache
 from .quantization_operators import NO_HADAMARD_BLOCK_SIZE, quant_7bit, quant_8bit
 
 _LOGGER = get_logger("vllm.pearl_miner")
@@ -115,10 +116,10 @@ class PearlKernel(Int8ScaledMMLinearKernel):
                 f"PearlKernel input_num_bits must be 7 or 8, got {input_num_bits}"
             )
         self.input_num_bits = input_num_bits
-        # Work submitted for one batch shape can outlive the Python call. Keep
-        # each shape's CUDA session until model teardown instead of destroying
-        # a session while its graph or stream still references its allocations.
-        self._native_sessions: dict[tuple[int, int, int, int], NativeGemma4Session] = {}
+        # Native calls synchronize their completion events before returning.
+        # Keep one shape and close it before allocating another full workspace.
+        self._native_sessions = NativeGemma4SessionCache()
+        self._native_session_lock = Lock()
         self._native_full_weight: torch.Tensor | None = None
         self._native_full_scale: torch.Tensor | None = None
         self._native_full_weight_key: tuple[int, int] | None = None
@@ -285,17 +286,7 @@ class PearlKernel(Int8ScaledMMLinearKernel):
     def _native_session_for(
         self, a: torch.Tensor, b: torch.Tensor
     ) -> NativeGemma4Session:
-        device_index = a.device.index
-        if device_index is None:
-            device_index = torch.cuda.current_device()
-        key = (device_index, a.shape[0], b.shape[0], b.data_ptr())
-        session = self._native_sessions.get(key)
-        if session is None:
-            session = NativeGemma4Session(a, b)
-            self._native_sessions[key] = session
-        else:
-            session.bind(a, b)
-        return session
+        return self._native_sessions.get(a, b)
 
     @staticmethod
     def _submit_native_winner(
@@ -481,24 +472,25 @@ class PearlKernel(Int8ScaledMMLinearKernel):
                 else None
             )
             try:
-                session = self._native_session_for(padded, full_weight)
-                preparation = session.prepare(sigma, mu)
-                inference = session.infer(
-                    logical_m=logical_m,
-                    a_scales=scale_a[start : start + logical_m],
-                    b_scales=scale_b,
-                    target=target,
-                    output=output,
-                )
-                if inference.winner_ordinal is not None and tp_rank == 0:
-                    self._submit_native_winner(
-                        manager,
-                        mining_job,
-                        preparation,
-                        inference.winner_ordinal,
-                        padded,
-                        full_weight,
+                with self._native_session_lock:
+                    session = self._native_session_for(padded, full_weight)
+                    preparation = session.prepare(sigma, mu)
+                    inference = session.infer(
+                        logical_m=logical_m,
+                        a_scales=scale_a[start : start + logical_m],
+                        b_scales=scale_b,
+                        target=target,
+                        output=output,
                     )
+                    if inference.winner_ordinal is not None and tp_rank == 0:
+                        self._submit_native_winner(
+                            manager,
+                            mining_job,
+                            preparation,
+                            inference.winner_ordinal,
+                            padded,
+                            full_weight,
+                        )
             except Exception as error:
                 if work_id is not None:
                     manager.notify_work_finished(work_id, failed=str(error))

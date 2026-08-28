@@ -4,6 +4,7 @@ Tests for PearlKernel vLLM interface.
 Tests both mining_enabled=True and mining_enabled=False modes.
 """
 
+from threading import Lock
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +20,7 @@ from vllm_miner import PearlKernel
 from vllm_miner.config import config as pearl_config
 from vllm_miner.nockchain_manager import NockchainAsyncLoopManager
 from vllm_miner.nockchain_client import NockchainMiningClient
+from vllm_miner.native_gemma4 import NativeGemma4SessionCache
 from vllm_miner.vllm_kernels import _gemma4_mining_transcript
 from vllm_miner.quantization_operators import quant_8bit
 from vllm_miner.vllm_config import PearlConfig
@@ -95,6 +97,75 @@ def test_lost_finish_rpc_is_removed_from_next_heartbeat():
     client._heartbeat()
     heartbeat = client._stub.HeartbeatRuntime.call_args.args[0]
     assert list(heartbeat.active_work_ids) == []
+
+
+def test_native_session_cache_evicts_and_closes_old_shape():
+    kernel = object.__new__(PearlKernel)
+    kernel._native_sessions = NativeGemma4SessionCache()
+    first_a = MagicMock()
+    first_a.device.index = 0
+    first_a.shape = (256, 5376)
+    first_b = MagicMock()
+    first_b.shape = (43008, 5376)
+    first_b.data_ptr.return_value = 11
+    second_a = MagicMock()
+    second_a.device.index = 0
+    second_a.shape = (4096, 5376)
+    second_b = MagicMock()
+    second_b.shape = (43008, 5376)
+    second_b.data_ptr.return_value = 11
+    first_session = MagicMock()
+    second_session = MagicMock()
+
+    with patch(
+        "vllm_miner.native_gemma4.NativeGemma4Session",
+        side_effect=[first_session, second_session],
+    ):
+        assert kernel._native_session_for(first_a, first_b) is first_session
+        assert kernel._native_session_for(second_a, second_b) is second_session
+
+    assert len(kernel._native_sessions) == 1
+    first_session.close.assert_called_once_with()
+    second_session.close.assert_not_called()
+
+
+@pytest.mark.gpu
+def test_native_session_cache_varied_batch_vram_is_bounded():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    device = torch.device("cuda")
+    b = torch.zeros((43008, 5376), dtype=torch.int8, device=device)
+    b_scales = torch.ones(43008, dtype=torch.float32, device=device)
+    torch.cuda.synchronize()
+    baseline_free, _ = torch.cuda.mem_get_info()
+    kernel = object.__new__(PearlKernel)
+    kernel._native_sessions = NativeGemma4SessionCache()
+    kernel._native_session_lock = Lock()
+    mu = bytes.fromhex("0015000080000000000f00000000000f00000000" + "00" * 32)
+
+    for rows in [*range(256, 4097, 256), 256]:
+        a = torch.zeros((rows, 5376), dtype=torch.int8, device=device)
+        a_scales = torch.ones(rows, dtype=torch.float32, device=device)
+        output = torch.empty((rows, 43008), dtype=torch.bfloat16, device=device)
+        with kernel._native_session_lock:
+            session = kernel._native_session_for(a, b)
+            session.prepare(bytes(76), mu)
+            session.infer(
+                logical_m=rows,
+                a_scales=a_scales,
+                b_scales=b_scales,
+                target=bytes(32),
+                output=output,
+            )
+        del a, a_scales, output
+
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    final_free, _ = torch.cuda.mem_get_info()
+    assert len(kernel._native_sessions) == 1
+    assert baseline_free - final_free < 2 * 1024**3
+
+    kernel._native_sessions.close()
 
 
 @pytest.mark.parametrize("m, n, k", [(1024, 4096, 128)])

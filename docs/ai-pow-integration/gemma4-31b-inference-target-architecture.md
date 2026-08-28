@@ -115,6 +115,12 @@ resident. Each candidate-bound transcript rebuilds `kappa`, commitments, noise,
 noised matrices, and ticket states. A header change never reuses attempt-bound
 state.
 
+The inference adapter keeps one native session. Native calls synchronize their
+completion event before returning, and a shape change closes that session
+before allocating the next workspace. The 17-shape Blackwell KAT retained
+0.314 GiB after returning to 256 rows; the largest active workspace used a
+3.750 GiB delta.
+
 ## Noising and clean-output contract
 
 Let `A` contain token rows and let `B` contain output-channel rows. Pearl noise
