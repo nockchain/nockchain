@@ -59,6 +59,20 @@ use crate::withdrawal::types::{BaseWithdrawalEntry, Withdrawal};
 /// The bridge kernel assumes blocks it receives are final; this is enforced by the Rust driver.
 pub const DEFAULT_BASE_CONFIRMATION_DEPTH: u64 = 300;
 
+/// Hard cap on automatic rewinds of already-confirmed Base headers.
+///
+/// The effective deployment limit is the smaller of this cap and the configured
+/// confirmation depth. Crossing activation/policy boundaries is never automatic.
+pub const BASE_MAX_AUTOMATIC_REORG_REWIND_BLOCKS: u64 = 64;
+
+pub const fn base_automatic_reorg_rewind_depth(confirmation_depth: u64) -> u64 {
+    if confirmation_depth < BASE_MAX_AUTOMATIC_REORG_REWIND_BLOCKS {
+        confirmation_depth
+    } else {
+        BASE_MAX_AUTOMATIC_REORG_REWIND_BLOCKS
+    }
+}
+
 // In Bazel builds, contract JSON paths are provided via rustc_env.
 // In Cargo builds, they're relative to CARGO_MANIFEST_DIR.
 #[cfg(feature = "bazel_build")]
@@ -1957,6 +1971,17 @@ mod tests {
             BurnForWithdrawalDecodeError::CommitmentMismatch { .. } => "commitment_mismatch",
             BurnForWithdrawalDecodeError::InvalidLockRoot { .. } => "invalid_lock_root",
         }
+    }
+
+    #[test]
+    fn automatic_reorg_rewind_depth_is_confirmation_bounded_and_hard_capped() {
+        assert_eq!(base_automatic_reorg_rewind_depth(0), 0);
+        assert_eq!(base_automatic_reorg_rewind_depth(1), 1);
+        assert_eq!(base_automatic_reorg_rewind_depth(64), 64);
+        assert_eq!(
+            base_automatic_reorg_rewind_depth(DEFAULT_BASE_CONFIRMATION_DEPTH),
+            BASE_MAX_AUTOMATIC_REORG_REWIND_BLOCKS
+        );
     }
 
     #[test]

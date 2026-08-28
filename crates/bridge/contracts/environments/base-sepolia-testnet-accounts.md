@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-02-20
+Last Reviewed: 2026-08-25
 Canonical/Legacy: Legacy (operational reference for Base Sepolia bridge contracts and script accounts)
 
 Bridge contracts deployed to real Base Sepolia network through Tenderly Node RPC.
@@ -81,17 +81,47 @@ cd crates/bridge
 
 ## Live Deployment (2025-12-17)
 
-| Contract                      | Address                                      | Basescan                                                                             |
-| ----------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------ |
-| MessageInbox (Proxy)          | `0x9b1becA13c39b9Be10dB616F1bE10C3CeF9Dfb36` | https://sepolia.basescan.org/address/0x9b1becA13c39b9Be10dB616F1bE10C3CeF9Dfb36#code |
-| MessageInbox (Implementation) | `0x7627Db3A99596668c9d42693efa352Ca69F089e3` | https://sepolia.basescan.org/address/0x7627Db3A99596668c9d42693efa352Ca69F089e3#code |
-| Nock Token                    | `0xA9cd4087D9B050D8B35727AAf810296CA957c7B3` | https://sepolia.basescan.org/address/0xA9cd4087D9B050D8B35727AAf810296CA957c7B3#code |
+The canonical public deployment identity is
+[`../../e2e/environments/base-sepolia.json`](../../e2e/environments/base-sepolia.json).
+It records the pinned finalized block, proxy and implementation distinction,
+runtime code hashes, deployment receipts, pristine ownership and signer state,
+reciprocal pairing, verified compiler artifacts, ABI hashes, and withdrawal
+protocol/policy identifiers.
 
-Tenderly dashboard: https://dashboard.tenderly.co/nockchain/bridge/contracts
+Read the current values without duplicating them:
+
+```bash
+MANIFEST=../../e2e/environments/base-sepolia.json
+jq '.source_chain.fork_block' "$MANIFEST"
+jq '.contracts' "$MANIFEST"
+jq '.pristine_state' "$MANIFEST"
+```
+
+## Refresh Procedure
+
+1. Select a Base Sepolia block reported as `finalized`; never certify `latest`.
+2. Record the exact block number, hash, and timestamp.
+3. At that block, read the ERC-1967 implementation slot, all runtime bytecode,
+   both owners, five bridge nodes, threshold, withdrawal gate, and reciprocal
+   contract pairing.
+4. Repeat every read through a second independent RPC provider. Stop on any
+   disagreement or empty runtime bytecode.
+5. Compute Keccak-256 over the exact runtime bytecode returned for the proxy,
+   implementation, and Nock token.
+6. Confirm deployment transaction hashes, block numbers, block hashes, status,
+   and created addresses from chain receipts and an independent explorer.
+7. Fetch the explorer-verified compiler artifacts and ABIs. Recompute hashes
+   using the manifest's declared canonicalization and SHA-256 scheme.
+8. Update all manifest facts together, run
+   `cargo test -p bridge --test base_sepolia_manifest`, and review every block,
+   address, state, artifact, ABI, and code-hash change before committing.
+
+RPC endpoints and credentials remain external inputs and must not be added to
+the manifest.
 
 ## Verification
 
-Preferred path for this repo:
+Preferred contract validation path:
 
 ```bash
 cd crates/bridge/contracts

@@ -39,6 +39,20 @@ pub const BLOCKCHAIN_CONSTANTS_PATH: &str = "blockchain-constants";
 /// The bridge kernel assumes blocks it receives are final; this is enforced by the Rust driver.
 pub const DEFAULT_NOCKCHAIN_CONFIRMATION_DEPTH: u64 = 400;
 
+pub const NOCKCHAIN_MAX_AUTOMATIC_REORG_REWIND_BLOCKS: u64 = 64;
+
+pub const fn nockchain_reinclusion_within_rewind(old_height: u64, new_height: u64) -> bool {
+    old_height.abs_diff(new_height) <= NOCKCHAIN_MAX_AUTOMATIC_REORG_REWIND_BLOCKS
+}
+
+pub const fn nockchain_snapshot_is_stable_for_replay(
+    snapshot_height: u64,
+    old_inclusion_height: u64,
+) -> bool {
+    old_inclusion_height.saturating_sub(snapshot_height)
+        >= NOCKCHAIN_MAX_AUTOMATIC_REORG_REWIND_BLOCKS
+}
+
 #[cfg(test)]
 fn confirmed_height(chain_tip: u64, confirmation_depth: u64) -> Option<u64> {
     let target = if confirmation_depth == 0 {
@@ -1357,6 +1371,14 @@ mod tests {
         let target = confirmed_height(tip, depth);
         assert!(target.is_some());
         assert_eq!(target.expect("target should be Some for valid input"), 50);
+    }
+
+    #[test]
+    fn nockchain_reorg_recovery_boundaries_are_exact() {
+        assert!(nockchain_reinclusion_within_rewind(1_000, 1_064));
+        assert!(!nockchain_reinclusion_within_rewind(1_000, 1_065));
+        assert!(nockchain_snapshot_is_stable_for_replay(900, 964));
+        assert!(!nockchain_snapshot_is_stable_for_replay(901, 964));
     }
 
     #[test]
