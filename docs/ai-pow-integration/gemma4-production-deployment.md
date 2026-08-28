@@ -305,36 +305,8 @@ Give the container a termination grace period of at least 180 seconds.
 Extra command-line arguments after `ai-pow-inference-run` pass directly to
 `vllm serve`.
 
-## Benchmark procedure
+## Native benchmark
 
-Run the benchmark from the application host. This includes network and JSON
-costs:
-
-```sh
-VLLM_API_KEY=<RANDOM_SECRET> ai-pow-inference-bench \
-  --base-url http://127.0.0.1:8000 \
-  --requests 100 \
-  --concurrency 1 \
-  --warmup 5 \
-  --max-tokens 128 \
-  --stream
-```
-
-Repeat with application concurrency:
-
-```sh
-VLLM_API_KEY=<RANDOM_SECRET> ai-pow-inference-bench \
-  --base-url http://127.0.0.1:8000 \
-  --requests 200 \
-  --concurrency 8 \
-  --warmup 10 \
-  --max-tokens 128
-```
-
-The JSON report includes p50, p95, and p99 latency, streaming time to first
-token, requests per second, output tokens per second, and total tokens per
-second. Keep prompt text, output limit, concurrency, image digest, GPU, and
-driver fixed when comparing releases.
 
 Measure the isolated mining kernel inside the container:
 

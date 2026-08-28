@@ -60,22 +60,8 @@ LLAMA_8B = ModelTestConfig(
     plugin_log_msg="Using PearlKernel (mining_enabled=True) for mining layer",
 )
 
-QWEN3_MOE = ModelTestConfig(
-    id="qwen3_moe",
-    model="pearl-ai/Qwen3-30B-A3B-Instruct-2507-pearl",
-    prompt=(
-        "<|im_start|>system\n"
-        "You are a French translator. Reply with ONLY the French translation of the user's "
-        "sentence. No preamble, no quotes, no explanation, no follow-up.<|im_end|>\n"
-        "<|im_start|>user\n"
-        "The cat is on the table.<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    ),
-    consistency_prompt="<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n",
-    plugin_log_msg="Using PearlMoEExperts for MoE layer",
-)
 
-MODELS = [LLAMA_8B, QWEN3_MOE]
+MODELS = [LLAMA_8B]
 _model_param = pytest.mark.parametrize("model_config", MODELS, ids=lambda c: c.id)
 
 # Path to reference outputs for regression testing

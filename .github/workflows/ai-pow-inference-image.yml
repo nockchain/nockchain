@@ -19,7 +19,6 @@ on:
       - "crates/ai-pow-miner-cuda/**"
       - "crates/ai-pow-zk/**"
       - "crates/nockapp-grpc-proto/**"
-      - "scripts/benchmark-gemma4-openai.py"
       - "scripts/gemma4-vram-kat.py"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -57,6 +56,13 @@ jobs:
         env:
           RUSTFLAGS: -C target-cpu=native
         run: cargo test -p ai-pow-miner --features node
+
+      - name: Generate Python inference bindings
+        run: >-
+          uv run --with grpcio-tools==1.73.1 --with protobuf==6.33.5 python
+          crates/ai-pow-miner/vllm-plugin/generate_proto.py
+          crates/nockapp-grpc-proto/proto/nockchain/ai_pow/v1/inference_mining.proto
+          crates/ai-pow-miner/vllm-plugin/src/vllm_miner/proto
 
       - name: Test Python-to-gRPC-to-Rust job contract
         env:

@@ -12,7 +12,6 @@ from threading import Lock
 from typing import Any, override
 
 import torch
-from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
 from miner_utils import get_logger
 from pearl_gateway.comm.dataclasses import CommitmentHash, OpenedBlockInfo
 from vllm.distributed import (
@@ -70,18 +69,9 @@ def _pearl_mining_gemm_fake(
 
 
 def _gemma4_mining_transcript(manager: Any, mining_job: Any) -> tuple[bytes, bytes]:
-    if isinstance(manager, NockchainAsyncLoopManager):
-        return manager.get_mining_transcript(mining_job)
-    matmul_config = GPUMatmulConfigFactory.create(
-        k=5376, noise_rank=config.settings.noise_rank
-    )
-    adjusted_target = mining_job.adjust_target(
-        mining_config=matmul_config.mining_config
-    )
-    return (
-        bytes(matmul_config.mining_config.to_bytes()),
-        adjusted_target.to_bytes(32, "little"),
-    )
+    if not isinstance(manager, NockchainAsyncLoopManager):
+        raise RuntimeError("native Gemma mining requires the Nockchain bridge")
+    return manager.get_mining_transcript(mining_job)
 
 
 direct_register_custom_op(
@@ -515,7 +505,10 @@ class PearlKernel(Int8ScaledMMLinearKernel):
         x_q, x_s, _ = quant_7bit(
             x, smooth_scale=smooth_scale, block_size=hadamard_block_size
         )
-        if config.settings.no_mining:
+        manager = get_async_manager()
+        if config.settings.no_mining or not isinstance(
+            manager, NockchainAsyncLoopManager
+        ):
             return pearl_gemm_vanilla(
                 x_q.contiguous(),
                 w_q.contiguous(),

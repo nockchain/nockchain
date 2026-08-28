@@ -60,7 +60,7 @@ WORKDIR /opt/pearl
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    uv sync --locked --package vllm-miner --no-dev --no-editable \
+    uv sync --locked --package vllm-miner --no-dev --group build --no-editable \
     && uv build --package miner-utils --wheel --out-dir /wheelhouse \
     && uv build --package miner-base --wheel --out-dir /wheelhouse \
     && uv build --package pearl-gateway --wheel --out-dir /wheelhouse \
@@ -70,8 +70,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python-deps-builder AS python-source
 COPY crates/ai-pow-miner/vllm-plugin /tmp/vllm-plugin
+COPY crates/nockapp-grpc-proto/proto/nockchain/ai_pow/v1/inference_mining.proto \
+  /tmp/inference_mining.proto
 RUN rm -rf /opt/pearl/miner/vllm-miner \
-    && cp -R /tmp/vllm-plugin /opt/pearl/miner/vllm-miner
+    && cp -R /tmp/vllm-plugin /opt/pearl/miner/vllm-miner \
+    && /opt/pearl/.venv/bin/python \
+       /opt/pearl/miner/vllm-miner/generate_proto.py \
+       /tmp/inference_mining.proto \
+       /opt/pearl/miner/vllm-miner/src/vllm_miner/proto \
+    && rm -rf /tmp/vllm-plugin /tmp/inference_mining.proto
 
 FROM python-source AS python-builder
 WORKDIR /opt/pearl
@@ -108,18 +115,15 @@ COPY --from=rust-builder /usr/local/lib/libai_pow_gemma4.so /usr/local/lib/
 COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
 COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
 COPY docker/ai-pow-inference-health /usr/local/bin/ai-pow-inference-health
-COPY scripts/benchmark-gemma4-openai.py /usr/local/bin/ai-pow-inference-bench
 COPY docker/ai-pow-inference-container-entrypoint \
   /usr/local/bin/ai-pow-inference-container-entrypoint
 RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
       /usr/local/bin/ai-pow-inference-seed-model \
       /usr/local/bin/ai-pow-inference-health \
-      /usr/local/bin/ai-pow-inference-bench \
       /usr/local/bin/ai-pow-inference-container-entrypoint \
     && ai-pow-inference-bridge --help >/dev/null \
     && ai-pow-gemma4-bench --help >/dev/null \
     && ai-pow-inference-health --help >/dev/null \
-    && ai-pow-inference-bench --help >/dev/null \
     && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
 
 # The launcher applies measured FP8 kernel exclusions for H100 and Blackwell.
@@ -172,18 +176,15 @@ COPY --from=rust-builder /usr/local/lib/libai_pow_gemma4.so /usr/local/lib/
 COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
 COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
 COPY docker/ai-pow-inference-health /usr/local/bin/ai-pow-inference-health
-COPY scripts/benchmark-gemma4-openai.py /usr/local/bin/ai-pow-inference-bench
 COPY docker/ai-pow-inference-container-entrypoint \
   /usr/local/bin/ai-pow-inference-container-entrypoint
 RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
       /usr/local/bin/ai-pow-inference-seed-model \
       /usr/local/bin/ai-pow-inference-health \
-      /usr/local/bin/ai-pow-inference-bench \
       /usr/local/bin/ai-pow-inference-container-entrypoint \
     && ai-pow-inference-bridge --help >/dev/null \
     && ai-pow-gemma4-bench --help >/dev/null \
     && ai-pow-inference-health --help >/dev/null \
-    && ai-pow-inference-bench --help >/dev/null \
     && python3 -c "import torch, torchvision, vllm_miner; from vllm_miner.vllm_config import PearlConfig"
 # The launcher applies measured FP8 kernel exclusions for H100 and Blackwell.
 # Operators can override VLLM_DISABLED_KERNELS for a validated deployment.

@@ -93,10 +93,10 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Author: `@tacryt-socryp`
 - Date: 2026-08-22 01:40:35 UTC
 - Source: [issuecomment-5377155660](https://github.com/nockchain/nockchain/pull/164#issuecomment-5377155660)
-- Triage status: Pending
-- Disposition:
+- Triage status: No action
+- Disposition: Validation evidence
 - Owner:
-- Notes:
+- Notes: This comment records the tested predecessor image and hardware results. It contains no requested code change.
 
 > Production inference validation is complete.
 >
@@ -122,10 +122,10 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Author: `@bitemyapp`
 - Date: 2026-08-24 15:30:20 UTC
 - Source: [issuecomment-5397498585](https://github.com/nockchain/nockchain/pull/164#issuecomment-5397498585)
-- Triage status: Pending
-- Disposition:
+- Triage status: Implemented
+- Disposition: Accept with required CI exceptions
 - Owner:
-- Notes:
+- Notes: Dense-irrelevant MoE serving, legacy noisy-Gateway code, generic plugin images, benchmark helpers, Runpod utilities, and long optimization notes are removed. Python bindings are generated from the sole canonical schema, checkpoint startup is fail closed, and inference-node logic has a dedicated module. The honk-only parity trigger and hardened image workflow remain because the explicit review blockers and user direction require those gates.
 
 > Safe scope reductions that should not weaken correctness, security, or performance:
 >

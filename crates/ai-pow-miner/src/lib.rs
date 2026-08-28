@@ -117,6 +117,10 @@ pub mod gemma4_cuda;
 #[cfg(feature = "node")]
 pub mod inference;
 
+/// NockApp candidate subscription and inference-winner proof submission.
+#[cfg(feature = "node")]
+pub mod inference_node;
+
 /// Pearl Gateway `submitPlainProof` artifact construction.
 ///
 /// Internal by design: Hoon and external Nockchain callers submit only the

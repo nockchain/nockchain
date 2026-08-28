@@ -11,14 +11,11 @@ Both kernels handle smooth_quant_scale internally.
 import os
 from typing import Any, override
 
-import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationStrategy,
-    QuantizationType,
 )
 from miner_utils import get_logger
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
     CompressedTensorsConfig,
 )
@@ -104,74 +101,6 @@ class PearlConfig(CompressedTensorsConfig):
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
         return is_8_bits and is_token and weight_quant.symmetric and is_dynamic
-
-    @staticmethod
-    def _is_fp8_block_layer(
-        weight_quant: QuantizationArgs | None,
-        input_quant: QuantizationArgs | None,
-    ) -> bool:
-        """Check for fp8 block-wise weights + dynamic group fp8 activations (down proj)."""
-        if weight_quant is None or input_quant is None:
-            return False
-
-        def _is_float(quant: QuantizationArgs) -> bool:
-            return quant.type in (QuantizationType.FLOAT.value, QuantizationType.FLOAT)
-
-        is_fp8 = (
-            weight_quant.num_bits == input_quant.num_bits == 8
-            and _is_float(weight_quant)
-            and _is_float(input_quant)
-        )
-        is_block = weight_quant.strategy == QuantizationStrategy.BLOCK.value and bool(
-            weight_quant.block_structure
-        )
-        act_group = (
-            input_quant.strategy == QuantizationStrategy.GROUP.value
-            and input_quant.dynamic
-        )
-        return is_fp8 and is_block and act_group
-
-    # Expert-0 projection suffixes used to resolve a routed-expert layer's
-    # per-projection schemes.
-    _GATE_UP_PROBE_SUFFIX = ".0.gate_proj"
-    _DOWN_PROBE_SUFFIX = ".0.down_proj"
-
-    def _moe_proj_quant_args(
-        self, layer: torch.nn.Module, prefix: str, suffix: str
-    ) -> tuple[QuantizationArgs | None, QuantizationArgs | None]:
-        """Resolve the (weight, input) quant args for one MoE projection."""
-        scheme_dict = self.get_scheme_dict(layer, prefix + suffix)
-        if scheme_dict:
-            return scheme_dict.get("weights"), scheme_dict.get("input_activations")
-        return None, None
-
-    @override
-    def get_quant_method(
-        self,
-        layer: torch.nn.Module,
-        prefix: str,
-    ) -> "QuantizeMethodBase | None":
-        """Route mixed int7-gate/up + fp8-block-down routed experts to PearlMoE."""
-        from vllm.model_executor.layers.fused_moe import RoutedExperts
-
-        from .pearl_moe_method import PearlMoEMethod
-
-        if isinstance(layer, RoutedExperts):
-            gate_weight, gate_input = self._moe_proj_quant_args(
-                layer, prefix, self._GATE_UP_PROBE_SUFFIX
-            )
-            down_weight, down_input = self._moe_proj_quant_args(
-                layer, prefix, self._DOWN_PROBE_SUFFIX
-            )
-            if self._is_mining_layer(
-                gate_weight, gate_input
-            ) and self._is_fp8_block_layer(down_weight, down_input):
-                _LOGGER.debug(
-                    f"Pearl MoE (int7 gate/up + fp8 block down) detected for {prefix}"
-                )
-                return PearlMoEMethod(layer.moe_config, down_weight, down_input)
-
-        return super().get_quant_method(layer, prefix)
 
     @staticmethod
     def _is_dense_gate_up_layer(layer_name: str | None) -> bool:
