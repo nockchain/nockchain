@@ -205,6 +205,7 @@ my_nock_key = "${BRIDGE_NOCK_KEY}"
 grpc_address = "http://127.0.0.1:${NODE_PRIVATE_GRPC_PORT}"
 base_confirmation_depth = ${BASE_CONFIRMATION_DEPTH}
 nockchain_confirmation_depth = ${NOCKCHAIN_CONFIRMATION_DEPTH}
+withdrawal_policy = "withdrawal-policy-v1"
 ingress_listen_address = "127.0.0.1:8002"
 
 # Fake test data (valid format placeholders for local testing)
@@ -237,7 +238,7 @@ nock_pkh = "6666666666666666666666666666666666666666666666666666"
 [constants]
 min_signers = 3
 total_signers = 5
-minimum_event_nocks = 1000       # Lower for testing (prod: 1_000_000)
+minimum_event_nocks = 100000     # withdrawal-policy-v1
 nicks_fee_per_nock = 195
 base_blocks_chunk = 100
 base_start_height = ${BASE_START_HEIGHT}

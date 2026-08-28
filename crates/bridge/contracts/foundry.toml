@@ -27,4 +27,5 @@ cbor_metadata = true
 fs_permissions = [
   { access = "read-write", path = "./" },
   { access = "read-write", path = "./deployments.json" },
+  { access = "read", path = "../test-fixtures" },
 ]

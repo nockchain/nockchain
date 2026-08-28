@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::errors::BridgeError;
 use crate::shared::types::{
-    AtomBytes, BridgeConstants, NodeConfig, NodeInfo, SchnorrSecretKey, Tip5Hash,
+    AtomBytes, BridgeConstants, NodeConfig, NodeInfo, SchnorrSecretKey, Tip5Hash, WithdrawalPolicy,
+    WITHDRAWAL_POLICY_V1_BRIDGE_FEE_NICKS_PER_STARTED_NOCK, WITHDRAWAL_POLICY_V1_ID,
+    WITHDRAWAL_POLICY_V1_MINIMUM_GROSS_NOCKS,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +38,9 @@ pub struct BridgeConfigToml {
     /// Number of confirmations required on nockchain before sending a block to the kernel.
     /// Zero means the latest observed tip is eligible immediately.
     pub nockchain_confirmation_depth: u64,
+    /// Versioned withdrawal amount and wire policy.
+    #[serde(default = "default_withdrawal_policy_id")]
+    pub withdrawal_policy: String,
     /// Base contract lastDepositNonce at the time the deposit nonce epoch is activated.
     ///
     /// When non-zero, this must equal the nonce of the anchor deposit identified by
@@ -94,6 +99,9 @@ pub struct NodeInfoToml {
 pub struct SequencerConfigToml {
     pub nock_contract_address: String,
     pub nockchain_confirmation_depth: u64,
+    /// Versioned withdrawal amount and wire policy.
+    #[serde(default = "default_withdrawal_policy_id")]
+    pub withdrawal_policy: String,
     #[serde(default)]
     pub manual_submit_approval: bool,
     #[serde(default)]
@@ -233,10 +241,10 @@ fn default_total_signers() -> u64 {
     5
 }
 fn default_minimum_event_nocks() -> u64 {
-    100_000
+    WITHDRAWAL_POLICY_V1_MINIMUM_GROSS_NOCKS
 }
 fn default_nicks_fee_per_nock() -> u64 {
-    195
+    WITHDRAWAL_POLICY_V1_BRIDGE_FEE_NICKS_PER_STARTED_NOCK
 }
 fn default_base_blocks_chunk() -> u64 {
     100
@@ -249,6 +257,9 @@ fn default_nockchain_start_height() -> u64 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_withdrawal_policy_id() -> String {
+    WITHDRAWAL_POLICY_V1_ID.to_string()
 }
 fn default_sequencer_journal_region() -> String {
     "auto".to_string()
@@ -321,6 +332,30 @@ impl BridgeConstantsToml {
             nockchain_start_height: self.nockchain_start_height,
         })
     }
+}
+
+fn resolve_withdrawal_policy(
+    policy_id: &str,
+    constants: &BridgeConstants,
+) -> Result<WithdrawalPolicy, BridgeError> {
+    if policy_id != WITHDRAWAL_POLICY_V1_ID {
+        return Err(BridgeError::Config(format!(
+            "unsupported withdrawal_policy '{policy_id}', expected '{WITHDRAWAL_POLICY_V1_ID}'"
+        )));
+    }
+    if constants.minimum_event_nocks != WITHDRAWAL_POLICY_V1_MINIMUM_GROSS_NOCKS {
+        return Err(BridgeError::Config(format!(
+            "withdrawal_policy '{policy_id}' requires minimum_event_nocks={}, found {}",
+            WITHDRAWAL_POLICY_V1_MINIMUM_GROSS_NOCKS, constants.minimum_event_nocks
+        )));
+    }
+    if constants.nicks_fee_per_nock != WITHDRAWAL_POLICY_V1_BRIDGE_FEE_NICKS_PER_STARTED_NOCK {
+        return Err(BridgeError::Config(format!(
+            "withdrawal_policy '{policy_id}' requires nicks_fee_per_nock={}, found {}",
+            WITHDRAWAL_POLICY_V1_BRIDGE_FEE_NICKS_PER_STARTED_NOCK, constants.nicks_fee_per_nock
+        )));
+    }
+    Ok(WithdrawalPolicy::v1())
 }
 
 #[derive(Debug, Deserialize)]
@@ -536,12 +571,19 @@ impl BridgeConfigToml {
         self.ingress_listen_address.as_deref()
     }
 
-    /// Get bridge constants, using defaults if not configured.
+    /// Get bridge constants and verify they match the selected withdrawal policy.
     pub fn bridge_constants(&self) -> Result<BridgeConstants, BridgeError> {
-        match &self.constants {
-            Some(c) => c.to_bridge_constants(),
-            None => Ok(BridgeConstants::default()),
-        }
+        let constants = match &self.constants {
+            Some(c) => c.to_bridge_constants()?,
+            None => BridgeConstants::default(),
+        };
+        resolve_withdrawal_policy(&self.withdrawal_policy, &constants)?;
+        Ok(constants)
+    }
+
+    pub fn withdrawal_policy(&self) -> Result<WithdrawalPolicy, BridgeError> {
+        self.bridge_constants()?;
+        Ok(WithdrawalPolicy::v1())
     }
 
     /// Parses the optional nonce-epoch anchor tx id from base58.
@@ -590,12 +632,19 @@ impl SequencerConfigToml {
             .map_err(|e| BridgeError::Config(format!("Invalid nock_contract_address: {}", e)))
     }
 
-    /// Get bridge constants, using defaults if not configured.
+    /// Get bridge constants and verify they match the selected withdrawal policy.
     pub fn bridge_constants(&self) -> Result<BridgeConstants, BridgeError> {
-        match &self.constants {
-            Some(c) => c.to_bridge_constants(),
-            None => Ok(BridgeConstants::default()),
-        }
+        let constants = match &self.constants {
+            Some(c) => c.to_bridge_constants()?,
+            None => BridgeConstants::default(),
+        };
+        resolve_withdrawal_policy(&self.withdrawal_policy, &constants)?;
+        Ok(constants)
+    }
+
+    pub fn withdrawal_policy(&self) -> Result<WithdrawalPolicy, BridgeError> {
+        self.bridge_constants()?;
+        Ok(WithdrawalPolicy::v1())
     }
 
     /// Converts public operator facts into the validated node set required by
@@ -900,8 +949,55 @@ mod tests {
 
     #[test]
     fn bridge_constants_default_minimum_event_matches_kernel_floor() {
-        assert_eq!(default_minimum_event_nocks(), 100_000);
-        assert_eq!(BridgeConstants::default().minimum_event_nocks, 100_000);
+        let policy = WithdrawalPolicy::v1();
+        assert_eq!(default_minimum_event_nocks(), policy.minimum_gross_nocks);
+        assert_eq!(
+            BridgeConstants::default().minimum_event_nocks,
+            policy.minimum_gross_nocks
+        );
+        assert_eq!(
+            BridgeConstants::default().nicks_fee_per_nock,
+            policy.bridge_fee_nicks_per_started_nock
+        );
+    }
+
+    #[test]
+    fn withdrawal_policy_v1_accepts_matching_bridge_constants() {
+        assert_eq!(
+            resolve_withdrawal_policy(WITHDRAWAL_POLICY_V1_ID, &BridgeConstants::default())
+                .expect("policy should match defaults"),
+            WithdrawalPolicy::v1()
+        );
+    }
+
+    #[test]
+    fn withdrawal_policy_rejects_unknown_id() {
+        let error =
+            resolve_withdrawal_policy("withdrawal-policy-unknown", &BridgeConstants::default())
+                .expect_err("unknown policy must fail");
+        assert!(error.to_string().contains("unsupported withdrawal_policy"));
+    }
+
+    #[test]
+    fn withdrawal_policy_v1_rejects_minimum_mismatch() {
+        let constants = BridgeConstants {
+            minimum_event_nocks: 1_000,
+            ..BridgeConstants::default()
+        };
+        let error = resolve_withdrawal_policy(WITHDRAWAL_POLICY_V1_ID, &constants)
+            .expect_err("mismatched minimum must fail");
+        assert!(error.to_string().contains("requires minimum_event_nocks"));
+    }
+
+    #[test]
+    fn withdrawal_policy_v1_rejects_fee_mismatch() {
+        let constants = BridgeConstants {
+            nicks_fee_per_nock: 1,
+            ..BridgeConstants::default()
+        };
+        let error = resolve_withdrawal_policy(WITHDRAWAL_POLICY_V1_ID, &constants)
+            .expect_err("mismatched fee must fail");
+        assert!(error.to_string().contains("requires nicks_fee_per_nock"));
     }
 
     #[test]

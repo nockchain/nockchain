@@ -425,11 +425,49 @@ impl Default for BridgeConstants {
             version: 0,
             min_signers: 3,
             total_signers: 5,
-            minimum_event_nocks: 100_000,
-            nicks_fee_per_nock: 195,
+            minimum_event_nocks: WITHDRAWAL_POLICY_V1_MINIMUM_GROSS_NOCKS,
+            nicks_fee_per_nock: WITHDRAWAL_POLICY_V1_BRIDGE_FEE_NICKS_PER_STARTED_NOCK,
             base_blocks_chunk: 100,
             base_start_height: 39_694_000,
             nockchain_start_height: 46_810,
+        }
+    }
+}
+
+pub const WITHDRAWAL_POLICY_V1_ID: &str = "withdrawal-policy-v1";
+pub const WITHDRAWAL_WIRE_V1_ID: &str = "WithdrawalWireV1";
+pub const WITHDRAWAL_POLICY_V1_MINIMUM_GROSS_NOCKS: u64 = 100_000;
+pub const WITHDRAWAL_POLICY_V1_NICKS_PER_NOCK: u64 = 65_536;
+pub const WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NOCK: u128 = 10_000_000_000_000_000;
+pub const WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NICK: u128 = 152_587_890_625;
+pub const WITHDRAWAL_POLICY_V1_BRIDGE_FEE_NICKS_PER_STARTED_NOCK: u64 = 195;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WithdrawalPolicy {
+    pub id: &'static str,
+    pub wire_format: &'static str,
+    pub minimum_gross_nocks: u64,
+    pub minimum_is_inclusive: bool,
+    pub nicks_per_nock: u64,
+    pub base_units_per_nock: u128,
+    pub base_units_per_nick: u128,
+    pub maximum_nicks: u64,
+    pub bridge_fee_nicks_per_started_nock: u64,
+}
+
+impl WithdrawalPolicy {
+    pub const fn v1() -> Self {
+        Self {
+            id: WITHDRAWAL_POLICY_V1_ID,
+            wire_format: WITHDRAWAL_WIRE_V1_ID,
+            minimum_gross_nocks: WITHDRAWAL_POLICY_V1_MINIMUM_GROSS_NOCKS,
+            minimum_is_inclusive: true,
+            nicks_per_nock: WITHDRAWAL_POLICY_V1_NICKS_PER_NOCK,
+            base_units_per_nock: WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NOCK,
+            base_units_per_nick: WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NICK,
+            maximum_nicks: u64::MAX,
+            bridge_fee_nicks_per_started_nock:
+                WITHDRAWAL_POLICY_V1_BRIDGE_FEE_NICKS_PER_STARTED_NOCK,
         }
     }
 }

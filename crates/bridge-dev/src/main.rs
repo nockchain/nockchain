@@ -31,6 +31,7 @@ use bridge::shared::ingress::proto::withdrawal_sequencer_client::WithdrawalSeque
 use bridge::shared::nockchain::fetch_private_blockchain_constants;
 use bridge::shared::proposer::withdrawal_turn_proposer;
 use bridge::shared::signing::BridgeSigner;
+use bridge::shared::types::WITHDRAWAL_POLICY_V1_ID;
 use bridge::withdrawal::transport::withdrawal_id_from_proto;
 use clap::{Args, Parser, Subcommand};
 use ibig::UBig;
@@ -2151,16 +2152,12 @@ async fn run_deposit(
     Ok(())
 }
 
-fn minimum_event_nocks(config: &BridgeConfigToml) -> u64 {
-    config
-        .constants
-        .clone()
-        .unwrap_or_default()
-        .minimum_event_nocks
+fn minimum_event_nocks(config: &BridgeConfigToml) -> Result<u64> {
+    Ok(config.bridge_constants()?.minimum_event_nocks)
 }
 
 fn minimum_event_nicks(config: &BridgeConfigToml) -> Result<u64> {
-    let minimum_event_nocks = minimum_event_nocks(config);
+    let minimum_event_nocks = minimum_event_nocks(config)?;
     minimum_event_nocks
         .checked_mul(NICKS_PER_NOCK)
         .context("bridge minimum_event_nocks overflowed when converted to nicks")
@@ -2170,13 +2167,14 @@ fn ensure_withdrawal_amount_meets_floor(
     amount_nicks: u64,
     active_bridge_config: &BridgeConfigToml,
 ) -> Result<()> {
+    let minimum_nocks = minimum_event_nocks(active_bridge_config)?;
     let minimum_nicks = minimum_event_nicks(active_bridge_config)?;
-    if amount_nicks <= minimum_nicks {
+    if amount_nicks < minimum_nicks {
         bail!(
-            "withdrawal amount {} nicks must be greater than bridge minimum event size {} nicks (minimum_event_nocks={})",
+            "withdrawal amount {} nicks must be at least bridge minimum event size {} nicks (minimum_event_nocks={})",
             amount_nicks,
             minimum_nicks,
-            minimum_event_nocks(active_bridge_config)
+            minimum_nocks
         );
     }
     Ok(())
@@ -2837,7 +2835,7 @@ fn write_bridge_configs(
     let constants = BridgeConstantsToml {
         min_signers: 3,
         total_signers: 5,
-        minimum_event_nocks: 1000,
+        minimum_event_nocks: 100_000,
         nicks_fee_per_nock: 195,
         base_blocks_chunk: base_blocks_chunk()?,
         base_start_height: vnet.base_start_height,
@@ -2862,6 +2860,7 @@ fn write_bridge_configs(
             nockchain_sequencer_api_address: Some(sequencer_api_address.clone()),
             base_confirmation_depth: profile.cluster.base_confirmation_depth,
             nockchain_confirmation_depth: profile.cluster.nockchain_confirmation_depth,
+            withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
@@ -2885,6 +2884,7 @@ fn write_bridge_configs(
     let sequencer_config = SequencerConfigToml {
         nock_contract_address: vnet.nock_contract_address.clone(),
         nockchain_confirmation_depth: profile.cluster.nockchain_confirmation_depth,
+        withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
         manual_submit_approval: bridge_dev_manual_submit_approval()?,
         manual_submit_approval_dir: None,
         nodes: (0..5usize)
@@ -4385,6 +4385,7 @@ mod tests {
             nockchain_sequencer_api_address: None,
             base_confirmation_depth: 0,
             nockchain_confirmation_depth: 0,
+            withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
@@ -4393,16 +4394,16 @@ mod tests {
             ingress_listen_address: None,
             nodes: Vec::new(),
             constants: Some(BridgeConstantsToml {
-                minimum_event_nocks: 1_000,
+                minimum_event_nocks: 100_000,
                 ..BridgeConstantsToml::default()
             }),
         };
 
-        assert_eq!(minimum_event_nicks(&config).unwrap(), 65_536_000);
+        assert_eq!(minimum_event_nicks(&config).unwrap(), 6_553_600_000);
     }
 
     #[test]
-    fn withdrawal_floor_requires_more_than_minimum_event_nocks() {
+    fn withdrawal_floor_accepts_minimum_event_nocks() {
         let config = BridgeConfigToml {
             node_id: 0,
             base_ws_url: "ws://example".to_string(),
@@ -4415,6 +4416,7 @@ mod tests {
             nockchain_sequencer_api_address: None,
             base_confirmation_depth: 0,
             nockchain_confirmation_depth: 0,
+            withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
@@ -4423,17 +4425,18 @@ mod tests {
             ingress_listen_address: None,
             nodes: Vec::new(),
             constants: Some(BridgeConstantsToml {
-                minimum_event_nocks: 1_000,
+                minimum_event_nocks: 100_000,
                 ..BridgeConstantsToml::default()
             }),
         };
 
-        let err = ensure_withdrawal_amount_meets_floor(65_536_000, &config).unwrap_err();
+        let minimum_nicks = 6_553_600_000;
+        let err = ensure_withdrawal_amount_meets_floor(minimum_nicks - 1, &config).unwrap_err();
         assert!(err
             .to_string()
-            .contains("must be greater than bridge minimum event size"));
+            .contains("must be at least bridge minimum event size"));
 
-        ensure_withdrawal_amount_meets_floor(65_536_001, &config).unwrap();
+        ensure_withdrawal_amount_meets_floor(minimum_nicks, &config).unwrap();
     }
 
     #[test]
