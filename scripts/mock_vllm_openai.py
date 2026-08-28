@@ -24,6 +24,10 @@ sys.path.insert(0, str(_PLUGIN))
 from proto import inference_mining_pb2 as pb  # noqa: E402
 from proto import inference_mining_pb2_grpc as pb_grpc  # noqa: E402
 
+_CHECKPOINT_CONTENT_DIGEST = bytes.fromhex(
+    "c59cb83550f52b26893c1837133555bf32190495372ce00935d989592515ff40"
+)
+
 
 class MiningControl:
     def __init__(self, endpoint: str) -> None:
@@ -31,8 +35,8 @@ class MiningControl:
         self.stub = pb_grpc.InferenceMiningServiceStub(self.channel)
         registered = self.stub.RegisterRuntime(
             pb.RegisterRuntimeRequest(
-                protocol_version=2,
-                checkpoint_layout_digest=bytes([0x55]) * 32,
+                protocol_version=3,
+                checkpoint_content_digest=_CHECKPOINT_CONTENT_DIGEST,
                 cuda_device_uuid=bytes([0x66]) * 16,
                 process_id=8,
             ),

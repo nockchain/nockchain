@@ -4605,8 +4605,8 @@ mod tests {
             .expect("connect inference bridge");
         let registered = client
             .register_runtime(RegisterRuntimeRequest {
-                protocol_version: 2,
-                checkpoint_layout_digest: vec![0x33; 32],
+                protocol_version: 3,
+                checkpoint_content_digest: vec![0x33; 32],
                 cuda_device_uuid: vec![0x44; 16],
                 process_id: std::process::id(),
             })

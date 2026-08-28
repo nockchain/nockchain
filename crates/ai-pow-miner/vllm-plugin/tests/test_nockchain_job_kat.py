@@ -20,9 +20,12 @@ sys.path.insert(0, str(_PROTO_ROOT))
 from proto import inference_mining_pb2 as pb  # noqa: E402
 from proto import inference_mining_pb2_grpc as pb_grpc  # noqa: E402
 
-_PROTOCOL_VERSION = 2
+_PROTOCOL_VERSION = 3
 _CANONICAL_GEMMA4_MU = bytes.fromhex(
     "0015000080000000000f00000000000f00000000" + "00" * 32
+)
+_CHECKPOINT_CONTENT_DIGEST = bytes.fromhex(
+    "c59cb83550f52b26893c1837133555bf32190495372ce00935d989592515ff40"
 )
 
 
@@ -104,7 +107,7 @@ def test_python_receives_rust_canonical_mining_job() -> None:
             runtime = stub.RegisterRuntime(
                 pb.RegisterRuntimeRequest(
                     protocol_version=_PROTOCOL_VERSION,
-                    checkpoint_layout_digest=bytes([0x33]) * 32,
+                    checkpoint_content_digest=_CHECKPOINT_CONTENT_DIGEST,
                     cuda_device_uuid=bytes([0x44]) * 16,
                     process_id=os.getpid(),
                 ),

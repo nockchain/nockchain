@@ -24,43 +24,43 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16inference_mining.proto\x12\x13nockchain.ai_pow.v1\"\x82\x01\n\x16RegisterRuntimeRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12 \n\x18\x63heckpoint_layout_digest\x18\x02 \x01(\x0c\x12\x18\n\x10\x63uda_device_uuid\x18\x03 \x01(\x0c\x12\x12\n\nprocess_id\x18\x04 \x01(\r\"G\n\x17RegisterRuntimeResponse\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\x12\x18\n\x10protocol_version\x18\x02 \x01(\r\")\n\x13GetMiningJobRequest\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\"\x95\x01\n\tMiningJob\x12\x1c\n\x14\x63\x61ndidate_generation\x18\x01 \x01(\x04\x12\x19\n\x11incomplete_header\x18\x02 \x01(\x0c\x12\x1b\n\x13\x65\x66\x66\x65\x63tive_target_le\x18\x03 \x01(\x0c\x12\x1b\n\x13\x63\x65rtificate_version\x18\x04 \x01(\r\x12\x15\n\rmining_config\x18\x05 \x01(\x0c\"\xc2\x01\n\x11NotifyWorkRequest\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\x12\x0f\n\x07work_id\x18\x02 \x01(\x04\x12-\n\x05phase\x18\x03 \x01(\x0e\x32\x1e.nockchain.ai_pow.v1.WorkPhase\x12\r\n\x05layer\x18\x04 \x01(\r\x12\x13\n\x0btoken_count\x18\x05 \x01(\r\x12\x12\n\ncommon_dim\x18\x06 \x01(\r\x12\x12\n\noutput_dim\x18\x07 \x01(\r\x12\r\n\x05\x65rror\x18\x08 \x01(\t\"@\n\x12NotifyWorkResponse\x12\x0f\n\x07work_id\x18\x01 \x01(\x04\x12\x19\n\x11\x61\x63tive_work_items\x18\x02 \x01(\r\"\x94\x02\n\x13OpenedBlockMetadata\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\x12\x1c\n\x14\x63\x61ndidate_generation\x18\x02 \x01(\x04\x12\x0f\n\x07work_id\x18\x03 \x01(\x04\x12\x15\n\ra_row_indices\x18\x04 \x03(\r\x12\x18\n\x10\x62_column_indices\x18\x05 \x03(\r\x12\x14\n\x0cnoise_seed_a\x18\x06 \x01(\x0c\x12\x14\n\x0cnoise_seed_b\x18\x07 \x01(\x0c\x12\x12\n\nnoise_rank\x18\x08 \x01(\r\x12\x0e\n\x06\x61_rows\x18\t \x01(\r\x12\x11\n\tb_columns\x18\n \x01(\r\x12\x12\n\ncommon_dim\x18\x0b \x01(\r\x12\x12\n\nextranonce\x18\x0c \x01(\r\"d\n\x11OpenedTensorChunk\x12\x31\n\x06tensor\x18\x01 \x01(\x0e\x32!.nockchain.ai_pow.v1.OpenedTensor\x12\x0e\n\x06offset\x18\x02 \x01(\x04\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"\x97\x01\n\x0fOpenedBlockPart\x12<\n\x08metadata\x18\x01 \x01(\x0b\x32(.nockchain.ai_pow.v1.OpenedBlockMetadataH\x00\x12>\n\x0ctensor_chunk\x18\x02 \x01(\x0b\x32&.nockchain.ai_pow.v1.OpenedTensorChunkH\x00\x42\x06\n\x04part\"=\n\x19SubmitOpenedBlockResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\"\x12\n\x10GetStatusRequest\"\x87\x02\n\x15InferenceMiningStatus\x12\x30\n\x04mode\x18\x01 \x01(\x0e\x32\".nockchain.ai_pow.v1.SchedulerMode\x12\x19\n\x11\x61\x63tive_work_items\x18\x02 \x01(\r\x12\x14\n\x0cidle_batches\x18\x03 \x01(\x04\x12\x19\n\x11inference_batches\x18\x04 \x01(\x04\x12\x1c\n\x14\x63\x61ndidate_generation\x18\x05 \x01(\x04\x12\x1e\n\x16opened_blocks_received\x18\x06 \x01(\x04\x12\x1a\n\x12production_enabled\x18\x07 \x01(\x08\x12\x16\n\x0enode_connected\x18\x08 \x01(\x08*o\n\tWorkPhase\x12\x1a\n\x16WORK_PHASE_UNSPECIFIED\x10\x00\x12\x16\n\x12WORK_PHASE_STARTED\x10\x01\x12\x17\n\x13WORK_PHASE_FINISHED\x10\x02\x12\x15\n\x11WORK_PHASE_FAILED\x10\x03*}\n\x0cOpenedTensor\x12\x1d\n\x19OPENED_TENSOR_UNSPECIFIED\x10\x00\x12\x13\n\x0fOPENED_TENSOR_A\x10\x01\x12\x1e\n\x1aOPENED_TENSOR_B_TRANSPOSED\x10\x02\x12\x19\n\x15OPENED_TENSOR_ROUTING\x10\x03*t\n\rSchedulerMode\x12\x1e\n\x1aSCHEDULER_MODE_UNSPECIFIED\x10\x00\x12\x1e\n\x1aSCHEDULER_MODE_IDLE_MINING\x10\x01\x12#\n\x1fSCHEDULER_MODE_INFERENCE_MINING\x10\x02\x32\x8c\x04\n\x16InferenceMiningService\x12l\n\x0fRegisterRuntime\x12+.nockchain.ai_pow.v1.RegisterRuntimeRequest\x1a,.nockchain.ai_pow.v1.RegisterRuntimeResponse\x12X\n\x0cGetMiningJob\x12(.nockchain.ai_pow.v1.GetMiningJobRequest\x1a\x1e.nockchain.ai_pow.v1.MiningJob\x12]\n\nNotifyWork\x12&.nockchain.ai_pow.v1.NotifyWorkRequest\x1a\'.nockchain.ai_pow.v1.NotifyWorkResponse\x12k\n\x11SubmitOpenedBlock\x12$.nockchain.ai_pow.v1.OpenedBlockPart\x1a..nockchain.ai_pow.v1.SubmitOpenedBlockResponse(\x01\x12^\n\tGetStatus\x12%.nockchain.ai_pow.v1.GetStatusRequest\x1a*.nockchain.ai_pow.v1.InferenceMiningStatusb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16inference_mining.proto\x12\x13nockchain.ai_pow.v1\"\x83\x01\n\x16RegisterRuntimeRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12!\n\x19\x63heckpoint_content_digest\x18\x02 \x01(\x0c\x12\x18\n\x10\x63uda_device_uuid\x18\x03 \x01(\x0c\x12\x12\n\nprocess_id\x18\x04 \x01(\r\"G\n\x17RegisterRuntimeResponse\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\x12\x18\n\x10protocol_version\x18\x02 \x01(\r\")\n\x13GetMiningJobRequest\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\"\x95\x01\n\tMiningJob\x12\x1c\n\x14\x63\x61ndidate_generation\x18\x01 \x01(\x04\x12\x19\n\x11incomplete_header\x18\x02 \x01(\x0c\x12\x1b\n\x13\x65\x66\x66\x65\x63tive_target_le\x18\x03 \x01(\x0c\x12\x1b\n\x13\x63\x65rtificate_version\x18\x04 \x01(\r\x12\x15\n\rmining_config\x18\x05 \x01(\x0c\"\xc2\x01\n\x11NotifyWorkRequest\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\x12\x0f\n\x07work_id\x18\x02 \x01(\x04\x12-\n\x05phase\x18\x03 \x01(\x0e\x32\x1e.nockchain.ai_pow.v1.WorkPhase\x12\r\n\x05layer\x18\x04 \x01(\r\x12\x13\n\x0btoken_count\x18\x05 \x01(\r\x12\x12\n\ncommon_dim\x18\x06 \x01(\r\x12\x12\n\noutput_dim\x18\x07 \x01(\r\x12\r\n\x05\x65rror\x18\x08 \x01(\t\"@\n\x12NotifyWorkResponse\x12\x0f\n\x07work_id\x18\x01 \x01(\x04\x12\x19\n\x11\x61\x63tive_work_items\x18\x02 \x01(\r\"\x94\x02\n\x13OpenedBlockMetadata\x12\x12\n\nruntime_id\x18\x01 \x01(\x0c\x12\x1c\n\x14\x63\x61ndidate_generation\x18\x02 \x01(\x04\x12\x0f\n\x07work_id\x18\x03 \x01(\x04\x12\x15\n\ra_row_indices\x18\x04 \x03(\r\x12\x18\n\x10\x62_column_indices\x18\x05 \x03(\r\x12\x14\n\x0cnoise_seed_a\x18\x06 \x01(\x0c\x12\x14\n\x0cnoise_seed_b\x18\x07 \x01(\x0c\x12\x12\n\nnoise_rank\x18\x08 \x01(\r\x12\x0e\n\x06\x61_rows\x18\t \x01(\r\x12\x11\n\tb_columns\x18\n \x01(\r\x12\x12\n\ncommon_dim\x18\x0b \x01(\r\x12\x12\n\nextranonce\x18\x0c \x01(\r\"d\n\x11OpenedTensorChunk\x12\x31\n\x06tensor\x18\x01 \x01(\x0e\x32!.nockchain.ai_pow.v1.OpenedTensor\x12\x0e\n\x06offset\x18\x02 \x01(\x04\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"\x97\x01\n\x0fOpenedBlockPart\x12<\n\x08metadata\x18\x01 \x01(\x0b\x32(.nockchain.ai_pow.v1.OpenedBlockMetadataH\x00\x12>\n\x0ctensor_chunk\x18\x02 \x01(\x0b\x32&.nockchain.ai_pow.v1.OpenedTensorChunkH\x00\x42\x06\n\x04part\"=\n\x19SubmitOpenedBlockResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\"\x12\n\x10GetStatusRequest\"\x87\x02\n\x15InferenceMiningStatus\x12\x30\n\x04mode\x18\x01 \x01(\x0e\x32\".nockchain.ai_pow.v1.SchedulerMode\x12\x19\n\x11\x61\x63tive_work_items\x18\x02 \x01(\r\x12\x14\n\x0cidle_batches\x18\x03 \x01(\x04\x12\x19\n\x11inference_batches\x18\x04 \x01(\x04\x12\x1c\n\x14\x63\x61ndidate_generation\x18\x05 \x01(\x04\x12\x1e\n\x16opened_blocks_received\x18\x06 \x01(\x04\x12\x1a\n\x12production_enabled\x18\x07 \x01(\x08\x12\x16\n\x0enode_connected\x18\x08 \x01(\x08*o\n\tWorkPhase\x12\x1a\n\x16WORK_PHASE_UNSPECIFIED\x10\x00\x12\x16\n\x12WORK_PHASE_STARTED\x10\x01\x12\x17\n\x13WORK_PHASE_FINISHED\x10\x02\x12\x15\n\x11WORK_PHASE_FAILED\x10\x03*}\n\x0cOpenedTensor\x12\x1d\n\x19OPENED_TENSOR_UNSPECIFIED\x10\x00\x12\x13\n\x0fOPENED_TENSOR_A\x10\x01\x12\x1e\n\x1aOPENED_TENSOR_B_TRANSPOSED\x10\x02\x12\x19\n\x15OPENED_TENSOR_ROUTING\x10\x03*t\n\rSchedulerMode\x12\x1e\n\x1aSCHEDULER_MODE_UNSPECIFIED\x10\x00\x12\x1e\n\x1aSCHEDULER_MODE_IDLE_MINING\x10\x01\x12#\n\x1fSCHEDULER_MODE_INFERENCE_MINING\x10\x02\x32\x8c\x04\n\x16InferenceMiningService\x12l\n\x0fRegisterRuntime\x12+.nockchain.ai_pow.v1.RegisterRuntimeRequest\x1a,.nockchain.ai_pow.v1.RegisterRuntimeResponse\x12X\n\x0cGetMiningJob\x12(.nockchain.ai_pow.v1.GetMiningJobRequest\x1a\x1e.nockchain.ai_pow.v1.MiningJob\x12]\n\nNotifyWork\x12&.nockchain.ai_pow.v1.NotifyWorkRequest\x1a\'.nockchain.ai_pow.v1.NotifyWorkResponse\x12k\n\x11SubmitOpenedBlock\x12$.nockchain.ai_pow.v1.OpenedBlockPart\x1a..nockchain.ai_pow.v1.SubmitOpenedBlockResponse(\x01\x12^\n\tGetStatus\x12%.nockchain.ai_pow.v1.GetStatusRequest\x1a*.nockchain.ai_pow.v1.InferenceMiningStatusb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'inference_mining_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_WORKPHASE']._serialized_start=1595
-  _globals['_WORKPHASE']._serialized_end=1706
-  _globals['_OPENEDTENSOR']._serialized_start=1708
-  _globals['_OPENEDTENSOR']._serialized_end=1833
-  _globals['_SCHEDULERMODE']._serialized_start=1835
-  _globals['_SCHEDULERMODE']._serialized_end=1951
+  _globals['_WORKPHASE']._serialized_start=1596
+  _globals['_WORKPHASE']._serialized_end=1707
+  _globals['_OPENEDTENSOR']._serialized_start=1709
+  _globals['_OPENEDTENSOR']._serialized_end=1834
+  _globals['_SCHEDULERMODE']._serialized_start=1836
+  _globals['_SCHEDULERMODE']._serialized_end=1952
   _globals['_REGISTERRUNTIMEREQUEST']._serialized_start=48
-  _globals['_REGISTERRUNTIMEREQUEST']._serialized_end=178
-  _globals['_REGISTERRUNTIMERESPONSE']._serialized_start=180
-  _globals['_REGISTERRUNTIMERESPONSE']._serialized_end=251
-  _globals['_GETMININGJOBREQUEST']._serialized_start=253
-  _globals['_GETMININGJOBREQUEST']._serialized_end=294
-  _globals['_MININGJOB']._serialized_start=297
-  _globals['_MININGJOB']._serialized_end=446
-  _globals['_NOTIFYWORKREQUEST']._serialized_start=449
-  _globals['_NOTIFYWORKREQUEST']._serialized_end=643
-  _globals['_NOTIFYWORKRESPONSE']._serialized_start=645
-  _globals['_NOTIFYWORKRESPONSE']._serialized_end=709
-  _globals['_OPENEDBLOCKMETADATA']._serialized_start=712
-  _globals['_OPENEDBLOCKMETADATA']._serialized_end=988
-  _globals['_OPENEDTENSORCHUNK']._serialized_start=990
-  _globals['_OPENEDTENSORCHUNK']._serialized_end=1090
-  _globals['_OPENEDBLOCKPART']._serialized_start=1093
-  _globals['_OPENEDBLOCKPART']._serialized_end=1244
-  _globals['_SUBMITOPENEDBLOCKRESPONSE']._serialized_start=1246
-  _globals['_SUBMITOPENEDBLOCKRESPONSE']._serialized_end=1307
-  _globals['_GETSTATUSREQUEST']._serialized_start=1309
-  _globals['_GETSTATUSREQUEST']._serialized_end=1327
-  _globals['_INFERENCEMININGSTATUS']._serialized_start=1330
-  _globals['_INFERENCEMININGSTATUS']._serialized_end=1593
-  _globals['_INFERENCEMININGSERVICE']._serialized_start=1954
-  _globals['_INFERENCEMININGSERVICE']._serialized_end=2478
+  _globals['_REGISTERRUNTIMEREQUEST']._serialized_end=179
+  _globals['_REGISTERRUNTIMERESPONSE']._serialized_start=181
+  _globals['_REGISTERRUNTIMERESPONSE']._serialized_end=252
+  _globals['_GETMININGJOBREQUEST']._serialized_start=254
+  _globals['_GETMININGJOBREQUEST']._serialized_end=295
+  _globals['_MININGJOB']._serialized_start=298
+  _globals['_MININGJOB']._serialized_end=447
+  _globals['_NOTIFYWORKREQUEST']._serialized_start=450
+  _globals['_NOTIFYWORKREQUEST']._serialized_end=644
+  _globals['_NOTIFYWORKRESPONSE']._serialized_start=646
+  _globals['_NOTIFYWORKRESPONSE']._serialized_end=710
+  _globals['_OPENEDBLOCKMETADATA']._serialized_start=713
+  _globals['_OPENEDBLOCKMETADATA']._serialized_end=989
+  _globals['_OPENEDTENSORCHUNK']._serialized_start=991
+  _globals['_OPENEDTENSORCHUNK']._serialized_end=1091
+  _globals['_OPENEDBLOCKPART']._serialized_start=1094
+  _globals['_OPENEDBLOCKPART']._serialized_end=1245
+  _globals['_SUBMITOPENEDBLOCKRESPONSE']._serialized_start=1247
+  _globals['_SUBMITOPENEDBLOCKRESPONSE']._serialized_end=1308
+  _globals['_GETSTATUSREQUEST']._serialized_start=1310
+  _globals['_GETSTATUSREQUEST']._serialized_end=1328
+  _globals['_INFERENCEMININGSTATUS']._serialized_start=1331
+  _globals['_INFERENCEMININGSTATUS']._serialized_end=1594
+  _globals['_INFERENCEMININGSERVICE']._serialized_start=1955
+  _globals['_INFERENCEMININGSERVICE']._serialized_end=2479
 # @@protoc_insertion_point(module_scope)

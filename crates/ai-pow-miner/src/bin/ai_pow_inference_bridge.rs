@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "gpu")]
 use std::sync::Mutex;
@@ -10,6 +11,7 @@ use ai_pow::pearl_compat::PearlIncompleteBlockHeader;
 use ai_pow_miner::canonical::PreparedCanonicalDenseTemplate;
 #[cfg(feature = "gpu")]
 use ai_pow_miner::gemma4::GEMMA4_NATIVE_PARAMS;
+use ai_pow_miner::gemma4::{Gemma4Checkpoint, GEMMA4_CHECKPOINT_CONTENT_DIGEST};
 #[cfg(feature = "gpu")]
 use ai_pow_miner::gemma4_cuda::Gemma4CudaSession;
 use ai_pow_miner::inference::{
@@ -56,6 +58,14 @@ struct Args {
     /// Use a persistent native Gemma CUDA session for idle random-matrix work.
     #[arg(long)]
     cuda_device: Option<usize>,
+
+    /// Validated Gemma checkpoint directory used by the CUDA runtime.
+    #[arg(long)]
+    checkpoint_path: Option<PathBuf>,
+
+    /// Validate the checkpoint content and exit before CUDA initialization.
+    #[arg(long)]
+    verify_checkpoint_only: bool,
 }
 
 enum BridgeIdleBackend {
@@ -232,6 +242,27 @@ fn build_backend(args: &Args) -> Result<(BridgeIdleBackend, [u8; 76])> {
     }
 }
 
+fn checkpoint_preflight(args: &Args) -> Result<Option<[u8; 32]>> {
+    let path = match args.checkpoint_path.as_ref() {
+        Some(path) => path,
+        None if args.cuda_device.is_none() && args.node_addr.is_none() => return Ok(None),
+        None => bail!("--cuda-device or --node-addr requires --checkpoint-path"),
+    };
+    let checkpoint = Gemma4Checkpoint::open(path)
+        .with_context(|| format!("validate Gemma checkpoint {}", path.display()))?;
+    let actual = checkpoint
+        .content_digest()
+        .with_context(|| format!("hash Gemma checkpoint {}", path.display()))?;
+    if actual != GEMMA4_CHECKPOINT_CONTENT_DIGEST {
+        bail!(
+            "checkpoint content digest mismatch: expected {}, got {}",
+            hex::encode(GEMMA4_CHECKPOINT_CONTENT_DIGEST),
+            hex::encode(actual)
+        );
+    }
+    Ok(Some(actual))
+}
+
 fn node_config(args: &Args) -> Result<Option<InferenceNodeConfig>> {
     let mining_pkh_configs = if let Some(pkh) = &args.mining_pkh {
         vec![MiningPkhConfig {
@@ -259,6 +290,13 @@ fn node_config(args: &Args) -> Result<Option<InferenceNodeConfig>> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let checkpoint_content_digest = checkpoint_preflight(&args)?;
+    if args.verify_checkpoint_only {
+        let digest = checkpoint_content_digest
+            .ok_or_else(|| anyhow::anyhow!("checkpoint verification requires checkpoint inputs"))?;
+        println!("{}", hex::encode(digest));
+        return Ok(());
+    }
     let node_config = node_config(&args)?;
     let state = Arc::new(InferenceSchedulerState::default());
     let (mut backend, incomplete_header) = build_backend(&args)?;
@@ -268,7 +306,8 @@ async fn main() -> Result<()> {
         [0; 32], args.certificate_version,
     )?;
     let (proof_sender, proof_requests) = inference_proof_channel();
-    let rpc = InferenceMiningRpc::new(Arc::clone(&state), mining_job)?;
+    let rpc = InferenceMiningRpc::new(Arc::clone(&state), mining_job)?
+        .with_checkpoint_content_digest(GEMMA4_CHECKPOINT_CONTENT_DIGEST);
     let rpc = if node_config.is_some() {
         backend.configure_production(rpc.clone(), proof_sender.clone());
         rpc.with_proof_sender(proof_sender)
@@ -319,4 +358,40 @@ async fn main() -> Result<()> {
     let idle_result = idle.stop();
     result?;
     idle_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> Args {
+        Args {
+            listen: "127.0.0.1:5590".parse().unwrap(),
+            candidate_generation: 1,
+            certificate_version: 3,
+            node_addr: None,
+            mining_pkh: None,
+            mining_pkh_adv: None,
+            mock_idle_batch_ms: 1,
+            cuda_device: None,
+            checkpoint_path: None,
+            verify_checkpoint_only: false,
+        }
+    }
+
+    #[test]
+    fn checkpoint_content_digest_is_pinned() {
+        assert_eq!(
+            hex::encode(GEMMA4_CHECKPOINT_CONTENT_DIGEST),
+            "c59cb83550f52b26893c1837133555bf32190495372ce00935d989592515ff40"
+        );
+    }
+
+    #[test]
+    fn cuda_backend_requires_checkpoint_preflight() {
+        let mut args = args();
+        args.cuda_device = Some(0);
+        let error = checkpoint_preflight(&args).unwrap_err();
+        assert!(error.to_string().contains("--checkpoint-path"));
+    }
 }

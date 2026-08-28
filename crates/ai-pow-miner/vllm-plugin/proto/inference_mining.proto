@@ -12,7 +12,7 @@ service InferenceMiningService {
 
 message RegisterRuntimeRequest {
   uint32 protocol_version = 1;
-  bytes checkpoint_layout_digest = 2;
+  bytes checkpoint_content_digest = 2;
   bytes cuda_device_uuid = 3;
   uint32 process_id = 4;
 }

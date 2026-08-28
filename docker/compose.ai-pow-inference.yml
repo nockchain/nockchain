@@ -5,6 +5,8 @@ services:
     profiles: ["seed"]
     image: ${AI_POW_IMAGE:?Set AI_POW_IMAGE to an immutable production image}
     command: ["ai-pow-inference-seed-model"]
+    env_file:
+      - ${AI_POW_ENV_FILE:-./ai-pow-inference.env}
     environment:
       MODEL_PATH: /workspace/models/Gemma-4-31B-it-pearl
     volumes:
