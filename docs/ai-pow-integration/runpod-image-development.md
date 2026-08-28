@@ -52,6 +52,18 @@ Repeat these steps for each Python source revision:
 
 Publishing an image does not change a running pod. Let an active workload finish before replacing its pod.
 
+## Promotion GPU runners
+
+Release-tag promotion requires three ephemeral self-hosted runners:
+
+- `nockchain-h100` on one H100;
+- `nockchain-sm120` on one RTX PRO 6000 Blackwell;
+- `nockchain-rtx5090-dual` on two RTX 5090 devices.
+
+Each runner pulls the candidate by digest and runs the scalar differential and
+varied-batch VRAM KAT. Remove each Runpod pod after its matrix job finishes.
+Without all three runners, the workflow cannot create release tags.
+
 ## Complete image build
 
 Use a complete build after changes to any of these inputs:

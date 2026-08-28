@@ -1,8 +1,13 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-ARG RUNPOD_BASE=nvidia/cuda:12.9.1-devel-ubuntu24.04
+ARG RUNPOD_BASE=nvidia/cuda:12.9.1-devel-ubuntu24.04@sha256:020bc241a628776338f4d4053fed4c38f6f7f3d7eb5919fecb8de313bb8ba47c
 ARG VLLM_VERSION=0.27.1
-ARG VLLM_BASE=vllm/vllm-openai:v${VLLM_VERSION}-cu129
+ARG VLLM_BASE=vllm/vllm-openai:v${VLLM_VERSION}-cu129@sha256:07913e94a58a4e61322c88f8d4647411b4dd394838b53abacaa32448d9d8de0a
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:latest@sha256:95f2aa1fe59274951cfe9b0cbc7972e879ff1004bc8945d130a32eb0dbd85945
+ARG RUST_IMAGE=rust:1.93.0-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57
+
+FROM ${UV_IMAGE} AS uv
+FROM ${RUST_IMAGE} AS rust-toolchain
 FROM ${RUNPOD_BASE} AS toolchain
 
 ARG RUST_TOOLCHAIN=nightly-2026-04-03
@@ -11,17 +16,22 @@ ARG PEARL_REV=7df83305ede0256770c89d7f8bf7918f83427c82
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       build-essential ca-certificates clang curl git libssl-dev openssh-server \
+       build-essential ca-certificates clang git libssl-dev openssh-server \
        pkg-config protobuf-compiler cuda-sanitizer-13-0 \
     && mkdir -p /run/sshd \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:/usr/local/cuda/bin:/opt/pearl/.venv/bin:${PATH} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo
+RUN rustup set auto-self-update disable \
+    && rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
+    && rustup default "${RUST_TOOLCHAIN}"
 
-ENV PATH=/root/.cargo/bin:/usr/local/cuda/bin:/opt/pearl/.venv/bin:${PATH} \
-    CUDA_HOME=/usr/local/cuda \
+ENV CUDA_HOME=/usr/local/cuda \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/pearl/.venv \
     UV_PYTHON=3.12 \
@@ -30,8 +40,10 @@ ENV PATH=/root/.cargo/bin:/usr/local/cuda/bin:/opt/pearl/.venv/bin:${PATH} \
     PEARL_GEMM_FORCE_BUILD=TRUE
 
 COPY docker/pearl-vllm-0.27.1.patch /tmp/pearl-vllm.patch
-RUN git clone https://github.com/pearl-research-labs/pearl.git /opt/pearl \
-    && git -C /opt/pearl checkout "${PEARL_REV}" \
+RUN git init /opt/pearl \
+    && git -C /opt/pearl remote add origin https://github.com/pearl-research-labs/pearl.git \
+    && git -C /opt/pearl fetch --depth 1 origin "${PEARL_REV}" \
+    && git -C /opt/pearl checkout --detach FETCH_HEAD \
     && git -C /opt/pearl apply /tmp/pearl-vllm.patch \
     && git -C /opt/pearl submodule update --init --depth 1 \
        miner/pearl-gemm/third_party/cutlass \
@@ -41,14 +53,14 @@ RUN git clone https://github.com/pearl-research-labs/pearl.git /opt/pearl \
 FROM toolchain AS python-deps-source
 COPY crates/ai-pow-miner/vllm-plugin/pyproject.toml \
   /opt/pearl/miner/vllm-miner/pyproject.toml
+COPY crates/ai-pow-miner/vllm-plugin/uv.lock /opt/pearl/uv.lock
 
 FROM python-deps-source AS python-deps-builder
 WORKDIR /opt/pearl
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    uv lock \
-    && uv sync --package vllm-miner --no-dev --no-editable \
+    uv sync --locked --package vllm-miner --no-dev --no-editable \
     && uv build --package miner-utils --wheel --out-dir /wheelhouse \
     && uv build --package miner-base --wheel --out-dir /wheelhouse \
     && uv build --package pearl-gateway --wheel --out-dir /wheelhouse \
@@ -139,7 +151,7 @@ RUN apt-get update \
     && mkdir -p /run/sshd \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=python-builder /wheelhouse /wheelhouse
 RUN uv pip install --system --no-deps \
       /wheelhouse/*.whl \
