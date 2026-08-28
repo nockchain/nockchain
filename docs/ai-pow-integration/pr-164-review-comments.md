@@ -53,10 +53,10 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Date: 2026-08-24 15:30:07 UTC
 - Location: `.github/workflows/parity.yml:17`
 - Source: [discussion_r3844965586](https://github.com/nockchain/nockchain/pull/164#discussion_r3844965586)
-- Triage status: Pending
-- Disposition:
+- Triage status: Implemented
+- Disposition: Accept
 - Owner:
-- Notes:
+- Notes: The parity workflow again runs on pushes and pull requests to `master` and `nightly` when compiler, Hoon, Rust, Bazel, or parity-workflow inputs change.
 
 > **Please restore the automatic parity triggers.** This changes the repository-wide compiler parity gate from push/PR execution to manual-only, which is unrelated to inference mining and removes protection for future changes across the tree. If runtime or cost is the concern, narrow the path filters or schedule the expensive jobs in a separate PR rather than disabling the gate here.
 
