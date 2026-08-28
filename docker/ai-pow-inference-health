@@ -20,7 +20,9 @@ def _enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _bridge_status(timeout: float) -> dict[str, object]:
+def _bridge_status(
+    timeout: float, *, require_mining_runtime: bool
+) -> dict[str, object]:
     endpoint = os.getenv("NOCKCHAIN_AI_POW_ENDPOINT", "127.0.0.1:5590")
     channel = grpc.insecure_channel(endpoint)
     try:
@@ -40,11 +42,22 @@ def _bridge_status(timeout: float) -> dict[str, object]:
         "opened_blocks_received": status.opened_blocks_received,
         "production_enabled": status.production_enabled,
         "node_connected": status.node_connected,
+        "registered_runtimes": status.registered_runtimes,
+        "rank_zero_runtimes": status.rank_zero_runtimes,
+        "mining_enabled_runtimes": status.mining_enabled_runtimes,
+        "expired_runtimes": status.expired_runtimes,
+        "expired_work_items": status.expired_work_items,
+        "lease_duration_ms": status.lease_duration_ms,
+        "reconciled_work_items": status.reconciled_work_items,
     }
     if _enabled("AI_POW_REQUIRE_MINING") and not (
         status.production_enabled and status.node_connected
     ):
         raise RuntimeError("AI-PoW production mining is not connected to the node")
+    if require_mining_runtime and (
+        status.rank_zero_runtimes == 0 or status.mining_enabled_runtimes == 0
+    ):
+        raise RuntimeError("AI-PoW has no live rank-zero mining runtime")
     return value
 
 
@@ -91,7 +104,14 @@ def main() -> int:
     deadline = time.monotonic() + args.wait
     while True:
         try:
-            result = {"bridge": _bridge_status(args.timeout)}
+            result = {
+                "bridge": _bridge_status(
+                    args.timeout,
+                    require_mining_runtime=(
+                        _enabled("AI_POW_REQUIRE_MINING") and not args.bridge_only
+                    ),
+                )
+            }
             if not args.bridge_only:
                 result["vllm"] = _vllm_status(args.timeout)
             print(json.dumps(result, sort_keys=True))

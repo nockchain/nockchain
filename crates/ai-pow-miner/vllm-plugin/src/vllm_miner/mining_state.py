@@ -25,6 +25,14 @@ def get_async_manager() -> AsyncLoopManager:
     return _async_manager
 
 
+def _initial_rank_zero() -> bool:
+    value = os.getenv("LOCAL_RANK", os.getenv("RANK", "0"))
+    try:
+        return int(value) == 0
+    except ValueError as error:
+        raise ValueError(f"invalid runtime rank {value!r}") from error
+
+
 def init_async_manager(miner_settings: MinerSettings | None = None) -> None:
     """Initialize the global mining state."""
     global _async_manager
@@ -43,7 +51,11 @@ def init_async_manager(miner_settings: MinerSettings | None = None) -> None:
             _async_manager = NockchainAsyncLoopManager(
                 rpc_config,
                 miner_settings,
-                NockchainMiningClient(endpoint),
+                NockchainMiningClient(
+                    endpoint,
+                    rank_zero=_initial_rank_zero(),
+                    mining_enabled=not miner_settings.no_mining,
+                ),
             )
         else:
             _async_manager = AsyncLoopManager(rpc_config, miner_settings)
@@ -53,7 +65,6 @@ def init_async_manager(miner_settings: MinerSettings | None = None) -> None:
 
 
 def get_pinned_pool() -> HostSignalHeaderPinnedPool:
-
     if _pinned_pool is None:
         raise AssertionError("Pinned pool has not been initialized yet")
     return _pinned_pool

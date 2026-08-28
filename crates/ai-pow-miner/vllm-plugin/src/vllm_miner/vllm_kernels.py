@@ -442,9 +442,14 @@ class PearlKernel(Int8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         full_weight, full_scale, tp_rank, _local_n = self._full_tp_weight(w_q, w_s)
         tp_world = get_tensor_model_parallel_world_size()
+        manager = get_async_manager()
+        if isinstance(manager, NockchainAsyncLoopManager):
+            manager.set_runtime_state(
+                rank_zero=tp_rank == 0,
+                mining_enabled=self.mining_enabled and not config.settings.no_mining,
+            )
         if tp_rank != 0:
             return self._apply_tp_follower_gemma4(x_q, x_s, w_q, w_s)
-        manager = get_async_manager()
         mining_job = manager.get_mining_job()
         mu, target = _gemma4_mining_transcript(manager, mining_job)
         sigma = mining_job.incomplete_header_bytes

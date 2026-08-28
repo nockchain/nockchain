@@ -242,6 +242,13 @@ fn build_backend(args: &Args) -> Result<(BridgeIdleBackend, [u8; 76])> {
     }
 }
 
+fn validate_listener(args: &Args) -> Result<()> {
+    if !args.listen.ip().is_loopback() {
+        bail!("inference bridge listener must use loopback; got {}", args.listen);
+    }
+    Ok(())
+}
+
 fn checkpoint_preflight(args: &Args) -> Result<Option<[u8; 32]>> {
     let path = match args.checkpoint_path.as_ref() {
         Some(path) => path,
@@ -290,6 +297,7 @@ fn node_config(args: &Args) -> Result<Option<InferenceNodeConfig>> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    validate_listener(&args)?;
     let checkpoint_content_digest = checkpoint_preflight(&args)?;
     if args.verify_checkpoint_only {
         let digest = checkpoint_content_digest
@@ -393,5 +401,14 @@ mod tests {
         args.cuda_device = Some(0);
         let error = checkpoint_preflight(&args).unwrap_err();
         assert!(error.to_string().contains("--checkpoint-path"));
+    }
+
+    #[test]
+    fn bridge_listener_rejects_non_loopback_addresses() {
+        let mut args = args();
+        args.listen = "0.0.0.0:5590".parse().unwrap();
+        assert!(validate_listener(&args).is_err());
+        args.listen = "[::1]:5590".parse().unwrap();
+        validate_listener(&args).unwrap();
     }
 }

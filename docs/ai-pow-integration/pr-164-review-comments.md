@@ -79,10 +79,10 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Date: 2026-08-24 15:30:10 UTC
 - Location: `crates/ai-pow-miner/src/inference.rs:178`
 - Source: [discussion_r3844965912](https://github.com/nockchain/nockchain/pull/164#discussion_r3844965912)
-- Triage status: Pending
-- Disposition:
+- Triage status: Implemented
+- Disposition: Accept
 - Owner:
-- Notes:
+- Notes: Protocol 4 gives each runtime a five-second heartbeat lease and reconciles server work against the heartbeat's active IDs. Lost completion responses and expired runtimes cannot block idle mining. Health reports live, rank-zero, mining-enabled, expired, and reconciled counts. The bridge binary rejects non-loopback listeners.
 
 > **Active work has no lease or crash cleanup.** `STARTED` inserts this key indefinitely, and only an explicit `FINISHED` or `FAILED` removes it. A process crash or transient completion-RPC failure can therefore pause idle mining permanently; registered runtimes also never deregister. Please add a runtime heartbeat/lease and expiry, clean up its active work on timeout, and expose registered rank-zero/mining-enabled state in health checks. The bridge binary should also enforce loopback itself or authenticate non-loopback listeners.
 

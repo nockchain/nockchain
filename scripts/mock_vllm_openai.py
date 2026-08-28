@@ -35,10 +35,12 @@ class MiningControl:
         self.stub = pb_grpc.InferenceMiningServiceStub(self.channel)
         registered = self.stub.RegisterRuntime(
             pb.RegisterRuntimeRequest(
-                protocol_version=3,
+                protocol_version=4,
                 checkpoint_content_digest=_CHECKPOINT_CONTENT_DIGEST,
                 cuda_device_uuid=bytes([0x66]) * 16,
                 process_id=8,
+                rank_zero=True,
+                mining_enabled=True,
             ),
             timeout=5,
         )

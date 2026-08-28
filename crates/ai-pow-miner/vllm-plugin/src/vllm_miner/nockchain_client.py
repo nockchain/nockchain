@@ -17,7 +17,7 @@ from .proto import inference_mining_pb2 as pb
 from .proto import inference_mining_pb2_grpc as pb_grpc
 
 _LOGGER = get_logger("vllm.nockchain_ai_pow")
-_PROTOCOL_VERSION = 3
+_PROTOCOL_VERSION = 4
 _CHUNK_BYTES = 1024 * 1024
 _CHECKPOINT_CONTENT_DIGEST = bytes.fromhex(
     "c59cb83550f52b26893c1837133555bf32190495372ce00935d989592515ff40"
@@ -45,8 +45,10 @@ class _TrackedMiningJob:
 class NockchainMiningClient:
     """Synchronous gRPC client used by the miner manager's worker thread."""
 
-    def __init__(self, endpoint: str) -> None:
+    def __init__(self, endpoint: str, *, rank_zero: bool, mining_enabled: bool) -> None:
         self._endpoint = endpoint
+        self._rank_zero = rank_zero
+        self._mining_enabled = mining_enabled
         self._channel = grpc.insecure_channel(
             endpoint,
             options=(
@@ -61,6 +63,8 @@ class NockchainMiningClient:
                 checkpoint_content_digest=_CHECKPOINT_CONTENT_DIGEST,
                 cuda_device_uuid=_fixed_hex_env("NOCKCHAIN_CUDA_DEVICE_UUID", 16),
                 process_id=os.getpid(),
+                rank_zero=rank_zero,
+                mining_enabled=mining_enabled,
             ),
             timeout=10,
         )
@@ -70,13 +74,33 @@ class NockchainMiningClient:
             )
         if len(registered.runtime_id) != 16:
             raise RuntimeError("server returned an invalid runtime id")
+        if registered.lease_duration_ms == 0:
+            raise RuntimeError("server returned an invalid runtime lease")
         self._runtime_id = registered.runtime_id
         self._work_ids = itertools.count(1)
         self._work_shapes: dict[int, tuple[int, int, int, int]] = {}
         self._job_generations: dict[int, _TrackedMiningJob] = {}
         _LOGGER.info(f"Connected to Nockchain AI-PoW service at {endpoint}")
 
+    def set_runtime_state(self, *, rank_zero: bool, mining_enabled: bool) -> None:
+        self._rank_zero = rank_zero
+        self._mining_enabled = mining_enabled
+
+    def _heartbeat(self) -> None:
+        response = self._stub.HeartbeatRuntime(
+            pb.HeartbeatRuntimeRequest(
+                runtime_id=self._runtime_id,
+                rank_zero=self._rank_zero,
+                mining_enabled=self._mining_enabled,
+                active_work_ids=sorted(self._work_shapes),
+            ),
+            timeout=10,
+        )
+        if response.lease_duration_ms == 0:
+            raise RuntimeError("server returned an invalid runtime lease")
+
     def get_mining_info(self) -> MiningJob:
+        self._heartbeat()
         value = self._stub.GetMiningJob(
             pb.GetMiningJobRequest(runtime_id=self._runtime_id), timeout=10
         )
@@ -134,22 +158,24 @@ class NockchainMiningClient:
         except KeyError as error:
             raise ValueError(f"work id {work_id} is not active") from error
         phase = pb.WORK_PHASE_FAILED if failed else pb.WORK_PHASE_FINISHED
-        response = self._stub.NotifyWork(
-            pb.NotifyWorkRequest(
-                runtime_id=self._runtime_id,
-                work_id=work_id,
-                phase=phase,
-                layer=layer,
-                token_count=token_count,
-                common_dim=common_dim,
-                output_dim=output_dim,
-                error=failed or "",
-            ),
-            timeout=10,
-        )
-        if response.work_id != work_id:
-            raise RuntimeError("work-finish response id mismatch")
-        del self._work_shapes[work_id]
+        try:
+            response = self._stub.NotifyWork(
+                pb.NotifyWorkRequest(
+                    runtime_id=self._runtime_id,
+                    work_id=work_id,
+                    phase=phase,
+                    layer=layer,
+                    token_count=token_count,
+                    common_dim=common_dim,
+                    output_dim=output_dim,
+                    error=failed or "",
+                ),
+                timeout=10,
+            )
+            if response.work_id != work_id:
+                raise RuntimeError("work-finish response id mismatch")
+        finally:
+            del self._work_shapes[work_id]
 
     def submit_opened_block(
         self, opened_block_info: OpenedBlockInfo, mining_job: MiningJob

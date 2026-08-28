@@ -238,10 +238,11 @@ The command checks:
 - bridge gRPC readiness;
 - the vLLM `/health` endpoint;
 - the expected model in `/v1/models`;
-- node connectivity when `AI_POW_REQUIRE_MINING=1`.
+- node connectivity and a live rank-zero mining runtime when `AI_POW_REQUIRE_MINING=1`.
 
-It prints one JSON object with API and mining state. The image also defines a
-Docker `HEALTHCHECK` with a 10-minute startup grace period.
+It prints one JSON object with API state, runtime lease counts, rank-zero and
+mining-enabled ownership, and expiry counters. The image also defines a Docker
+`HEALTHCHECK` with a 10-minute startup grace period.
 
 Useful HTTP endpoints:
 
