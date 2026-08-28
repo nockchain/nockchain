@@ -17,7 +17,7 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Triage status: Implemented
 - Disposition: Accept
 - Owner:
-- Notes: Inference protocol 2 carries the Rust-encoded 52-byte mining configuration and effective target. The Nockchain plugin consumes both fields without local adjustment. A Python-to-gRPC-to-Rust known-answer test checks the fixed Gemma 4 values.
+- Notes: Inference protocol 4 carries the Rust-encoded 52-byte mining configuration and effective target. The Nockchain plugin consumes both fields without local adjustment. A Python-to-gRPC-to-Rust known-answer test checks the fixed Gemma 4 values.
 
 > **Blocker — Python and Rust serialize different mining configurations.** `GPUMatmulConfigFactory.create()` uses the pinned Pearl defaults (`rows=[0,8]` and 64 sparse columns), while Rust reconstruction builds contiguous 16×16 patterns. That changes the 52-byte `mu`, target work factor, `kappa`, seeds, and jackpot; a hit from the real vLLM path should fail Rust seed reconstruction. Please make the Rust `MiningJob` carry the authoritative `mu` and effective target, have Python consume them verbatim, and add a Python → gRPC → Rust known-answer test.
 
@@ -43,7 +43,7 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Triage status: Implemented
 - Disposition: Accept
 - Owner:
-- Notes: The bridge validates the full Gemma profile and SHA-256 hashes every safetensors weight byte before CUDA initialization. The expected digest and Hugging Face revision are compiled pins. Inference protocol 3 rejects runtimes that register a different content digest.
+- Notes: The bridge validates the full Gemma profile and SHA-256 hashes every safetensors weight byte before CUDA initialization. The expected digest and Hugging Face revision are compiled pins. Inference protocol 4 rejects runtimes that register a different content digest.
 
 > **Checkpoint validation is currently non-operative in production.** A missing environment value silently registers a zero layout digest; the bridge only length-checks and hashes it into the runtime ID, while `Gemma4Checkpoint::open` is referenced only by tests. The documented mismatch-before-CUDA property is therefore not enforced, and the layout digest is not a weight-content commitment. Either wire a fail-closed startup preflight with a pinned content digest, or remove/relabel the unused validation and identity path and correct the documentation.
 
