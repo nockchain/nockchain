@@ -20,9 +20,11 @@ nockapp-grpc = { workspace = true }
 nockchain-math = { workspace = true }
 nockchain-types = { path = "../nockchain-types" }
 op-alloy = { workspace = true, features = ["network"] }
+rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tar = { workspace = true }
@@ -43,6 +45,7 @@ tonic = { workspace = true }
 
 [dev-dependencies]
 aws-sdk-s3 = { workspace = true }
+proptest = { workspace = true }
 
 [lints]
 workspace = true
