@@ -30,7 +30,7 @@ use tonic::{Request, Response, Status};
 use crate::canonical::canonical_dense_mining_config;
 use crate::gemma4::GEMMA4_NATIVE_PARAMS;
 
-const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_VERSION: u32 = 3;
 const RUNTIME_ID_BYTES: usize = 16;
 const DIGEST_BYTES: usize = 32;
 const CUDA_DEVICE_UUID_BYTES: usize = 16;
@@ -119,8 +119,8 @@ impl InferenceSchedulerState {
                 request.protocol_version
             );
         }
-        let checkpoint_layout_digest = fixed_bytes::<DIGEST_BYTES>(
-            &request.checkpoint_layout_digest, "checkpoint_layout_digest",
+        let checkpoint_content_digest = fixed_bytes::<DIGEST_BYTES>(
+            &request.checkpoint_content_digest, "checkpoint_content_digest",
         )?;
         let cuda_device_uuid =
             fixed_bytes::<CUDA_DEVICE_UUID_BYTES>(&request.cuda_device_uuid, "cuda_device_uuid")?;
@@ -128,7 +128,7 @@ impl InferenceSchedulerState {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&sequence.to_le_bytes());
         hasher.update(&request.process_id.to_le_bytes());
-        hasher.update(&checkpoint_layout_digest);
+        hasher.update(&checkpoint_content_digest);
         hasher.update(&cuda_device_uuid);
         let mut runtime_id = [0u8; RUNTIME_ID_BYTES];
         runtime_id.copy_from_slice(&hasher.finalize().as_bytes()[..RUNTIME_ID_BYTES]);
@@ -310,6 +310,7 @@ pub struct InferenceMiningRpc {
     state: Arc<InferenceSchedulerState>,
     mining_job: Arc<Mutex<MiningJob>>,
     proof_sender: Option<InferenceProofSender>,
+    checkpoint_content_digest: Option<[u8; DIGEST_BYTES]>,
 }
 
 impl InferenceMiningRpc {
@@ -322,11 +323,20 @@ impl InferenceMiningRpc {
             state,
             mining_job: Arc::new(Mutex::new(mining_job)),
             proof_sender: None,
+            checkpoint_content_digest: None,
         })
     }
 
     pub fn with_proof_sender(mut self, proof_sender: InferenceProofSender) -> Self {
         self.proof_sender = Some(proof_sender);
+        self
+    }
+
+    pub fn with_checkpoint_content_digest(
+        mut self,
+        checkpoint_content_digest: [u8; DIGEST_BYTES],
+    ) -> Self {
+        self.checkpoint_content_digest = Some(checkpoint_content_digest);
         self
     }
 
@@ -375,9 +385,21 @@ impl InferenceMiningService for InferenceMiningRpc {
         &self,
         request: Request<RegisterRuntimeRequest>,
     ) -> Result<Response<RegisterRuntimeResponse>, Status> {
+        let request = request.into_inner();
+        if let Some(expected) = self.checkpoint_content_digest {
+            let actual = fixed_bytes::<DIGEST_BYTES>(
+                &request.checkpoint_content_digest, "checkpoint_content_digest",
+            )
+            .map_err(invalid_argument)?;
+            if actual != expected {
+                return Err(Status::invalid_argument(
+                    "checkpoint content digest does not match the validated model",
+                ));
+            }
+        }
         let runtime_id = self
             .state
-            .register_runtime(request.into_inner())
+            .register_runtime(request)
             .map_err(invalid_argument)?;
         Ok(Response::new(RegisterRuntimeResponse {
             runtime_id: runtime_id.to_vec(),
@@ -772,7 +794,7 @@ mod tests {
     fn runtime_request() -> RegisterRuntimeRequest {
         RegisterRuntimeRequest {
             protocol_version: PROTOCOL_VERSION,
-            checkpoint_layout_digest: vec![0x33; DIGEST_BYTES],
+            checkpoint_content_digest: vec![0x33; DIGEST_BYTES],
             cuda_device_uuid: vec![0x44; CUDA_DEVICE_UUID_BYTES],
             process_id: 7,
         }
@@ -878,7 +900,9 @@ mod tests {
     #[tokio::test]
     async fn rpc_roundtrip_returns_registered_job_and_status() {
         let state = Arc::new(InferenceSchedulerState::default());
-        let rpc = InferenceMiningRpc::new(Arc::clone(&state), mining_job()).unwrap();
+        let rpc = InferenceMiningRpc::new(Arc::clone(&state), mining_job())
+            .unwrap()
+            .with_checkpoint_content_digest([0x33; DIGEST_BYTES]);
         let registered = rpc
             .register_runtime(Request::new(runtime_request()))
             .await
@@ -916,7 +940,7 @@ mod tests {
     fn malformed_runtime_and_job_fields_reject() {
         let state = InferenceSchedulerState::default();
         let mut malformed = runtime_request();
-        malformed.checkpoint_layout_digest.pop();
+        malformed.checkpoint_content_digest.pop();
         assert!(state.register_runtime(malformed).is_err());
 
         let mut job = mining_job();
@@ -928,6 +952,20 @@ mod tests {
         assert!(
             InferenceMiningRpc::new(Arc::new(InferenceSchedulerState::default()), job).is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn rpc_rejects_wrong_checkpoint_content_digest() {
+        let rpc =
+            InferenceMiningRpc::new(Arc::new(InferenceSchedulerState::default()), mining_job())
+                .unwrap()
+                .with_checkpoint_content_digest([0x99; DIGEST_BYTES]);
+        let status = rpc
+            .register_runtime(Request::new(runtime_request()))
+            .await
+            .expect_err("mismatched checkpoint content must fail closed");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("checkpoint content digest"));
     }
 
     fn opened_metadata(output_dim: u32) -> OpenedBlockMetadata {

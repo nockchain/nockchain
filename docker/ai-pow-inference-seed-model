@@ -3,6 +3,10 @@ set -euo pipefail
 
 : "${MODEL_PATH:=/workspace/models/Gemma-4-31B-it-pearl}"
 : "${MODEL_ID:=pearl-ai/Gemma-4-31B-it-pearl}"
+: "${MODEL_REVISION:=f1dfba688ce6343b0433de57ca4dc0f3d1c5baa5}"
 
 mkdir -p "${MODEL_PATH}"
-hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+hf download "${MODEL_ID}" --revision "${MODEL_REVISION}" --local-dir "${MODEL_PATH}"
+ai-pow-inference-bridge \
+  --checkpoint-path "${MODEL_PATH}" \
+  --verify-checkpoint-only

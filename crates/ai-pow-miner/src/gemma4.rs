@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use ai_pow::params::MatmulParams;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Exact language model architecture supported by this target profile.
@@ -20,6 +21,13 @@ pub const GEMMA4_ARCHITECTURE: &str = "Gemma4ForConditionalGeneration";
 pub const GEMMA4_MODEL_TYPE: &str = "gemma4";
 /// Exact text model type supported by this target profile.
 pub const GEMMA4_TEXT_MODEL_TYPE: &str = "gemma4_text";
+/// Immutable Hugging Face revision for the selected checkpoint.
+pub const GEMMA4_CHECKPOINT_REVISION: &str = "f1dfba688ce6343b0433de57ca4dc0f3d1c5baa5";
+/// SHA-256 of `model.safetensors` at [`GEMMA4_CHECKPOINT_REVISION`].
+pub const GEMMA4_CHECKPOINT_CONTENT_DIGEST: [u8; 32] = [
+    197, 156, 184, 53, 80, 245, 43, 38, 137, 60, 24, 55, 19, 53, 85, 191, 50, 25, 4, 149, 55, 44,
+    224, 9, 53, 217, 137, 89, 37, 21, 255, 64,
+];
 /// Number of decoder layers in the selected checkpoint.
 pub const GEMMA4_LAYERS: usize = 60;
 /// Input width of each mineable Gemma 4 MLP projection.
@@ -116,14 +124,12 @@ impl LayerTensorSlices {
 
 /// Validated metadata for the selected Pearl Gemma 4 31B checkpoint.
 ///
-/// Opening a checkpoint reads only `config.json` and the bounded safetensors JSON
-/// header. Weight bytes remain on disk until
-/// [`Self::load_fused_gate_up_b_col_major`] is called.
+/// Opening a checkpoint validates `config.json` and the bounded safetensors JSON
+/// header. [`Self::content_digest`] scans both files before CUDA initialization.
 #[derive(Debug)]
 pub struct Gemma4Checkpoint {
     root: PathBuf,
     weights_path: PathBuf,
-    safetensors_layout_digest: [u8; 32],
     weights_file_len: u64,
     layers: Vec<LayerTensorSlices>,
 }
@@ -149,7 +155,6 @@ impl Gemma4Checkpoint {
         Ok(Self {
             root,
             weights_path,
-            safetensors_layout_digest: *blake3::hash(&manifest.header_bytes).as_bytes(),
             weights_file_len: manifest.file_len,
             layers,
         })
@@ -160,12 +165,17 @@ impl Gemma4Checkpoint {
         &self.root
     }
 
-    /// Return a digest of the safetensors JSON layout.
-    ///
-    /// This digest identifies tensor names, shapes, and offsets. It does not replace
-    /// the attempt-specific matrix commitments that bind weight values in consensus.
-    pub const fn safetensors_layout_digest(&self) -> [u8; 32] {
-        self.safetensors_layout_digest
+    /// Hash every safetensors weight byte with SHA-256.
+    pub fn content_digest(&self) -> Result<[u8; 32], Gemma4TargetError> {
+        let (weights_len, weights_digest) =
+            checkpoint_file_digest(&self.weights_path, "hash weights")?;
+        if weights_len != self.weights_file_len {
+            return Err(Gemma4TargetError::InvalidManifest(format!(
+                "weights length changed from {} to {weights_len} bytes",
+                self.weights_file_len
+            )));
+        }
+        Ok(weights_digest)
     }
 
     /// Return the validated safetensors file length.
@@ -228,6 +238,52 @@ impl Gemma4Checkpoint {
             GEMMA4_HIDDEN_SIZE, "Gemma activation",
         )
     }
+}
+
+fn checkpoint_file_digest(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(u64, [u8; 32]), Gemma4TargetError> {
+    let file = File::open(path).map_err(|source| Gemma4TargetError::Io {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let expected_len = file
+        .metadata()
+        .map_err(|source| Gemma4TargetError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    let mut read_len = 0u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|source| Gemma4TargetError::Io {
+                operation,
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        read_len = read_len
+            .checked_add(count as u64)
+            .ok_or_else(|| Gemma4TargetError::InvalidManifest("file length overflow".into()))?;
+    }
+    if read_len != expected_len {
+        return Err(Gemma4TargetError::InvalidManifest(format!(
+            "{} changed length while hashing: expected {expected_len}, read {read_len}",
+            path.display()
+        )));
+    }
+    Ok((read_len, hasher.finalize().into()))
 }
 
 fn read_projection_into(
@@ -562,7 +618,6 @@ fn require_quant_args(
 
 struct SafetensorsManifest {
     entries: BTreeMap<String, serde_json::Value>,
-    header_bytes: Vec<u8>,
     data_start: u64,
     file_len: u64,
 }
@@ -617,7 +672,6 @@ impl SafetensorsManifest {
             })?;
         Ok(Self {
             entries,
-            header_bytes,
             data_start,
             file_len,
         })
@@ -989,6 +1043,32 @@ mod tests {
         assert!(error.to_string().contains("INT7 operands"));
     }
 
+    #[test]
+    fn checkpoint_content_digest_binds_every_weight_byte() {
+        let mut weights: Vec<u8> = (0..64).collect();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nockchain-gemma4-content-{}-{unique}.safetensors",
+            std::process::id()
+        ));
+        std::fs::write(&path, &weights).unwrap();
+        let (length, digest) = checkpoint_file_digest(&path, "hash test weights").unwrap();
+        assert_eq!(length, 64);
+        assert_eq!(
+            hex::encode(digest),
+            "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108"
+        );
+
+        weights[31] ^= 1;
+        std::fs::write(&path, &weights).unwrap();
+        let (_, changed) = checkpoint_file_digest(&path, "hash changed test weights").unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_ne!(changed, digest);
+    }
+
     fn reference_checkpoint_path() -> PathBuf {
         std::env::var_os("GEMMA4_MODEL_DIR")
             .map(PathBuf::from)
@@ -1006,7 +1086,6 @@ mod tests {
         }
         let checkpoint = Gemma4Checkpoint::open(&path).unwrap();
         assert_eq!(checkpoint.root(), path);
-        assert_ne!(checkpoint.safetensors_layout_digest(), [0; 32]);
         assert!(checkpoint.weights_file_len() > 30_000_000_000);
     }
 

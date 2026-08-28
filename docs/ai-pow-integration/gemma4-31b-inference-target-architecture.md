@@ -54,10 +54,10 @@ Gate columns precede up columns. The inference result splits at column 21,504,
 and the per-channel scales concatenate in the same order.
 
 `ai_pow_miner::gemma4::Gemma4Checkpoint` validates the model configuration and
-bounded safetensors header before CUDA allocation. It rejects wrong tensor names,
-shapes, ranges, or values outside `[-64, 64]`. The safetensors layout digest is a
-runtime identity, not a weight commitment. Pearl V3 attempt commitments bind the
-fused matrix bytes.
+bounded safetensors header. The bridge then hashes every `model.safetensors`
+byte with SHA-256 and compares the result with the compiled checkpoint pin
+before CUDA initialization. Wrong tensor metadata or weight content fails
+startup. Pearl V3 attempt commitments separately bind each fused matrix.
 
 ## Consensus boundary
 
@@ -182,7 +182,7 @@ inference or mining throughput.
 
 An immutable operand generation contains:
 
-- checkpoint layout digest;
+- checkpoint content digest;
 - decoder layer;
 - logical and padded token counts;
 - fused gate/up weight identity;

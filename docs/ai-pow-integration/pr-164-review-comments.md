@@ -40,10 +40,10 @@ Each comment has triage fields. Complete pending fields during triage. The quote
 - Date: 2026-08-24 15:30:06 UTC
 - Location: `crates/ai-pow-miner/vllm-plugin/src/vllm_miner/nockchain_client.py:26`
 - Source: [discussion_r3844965429](https://github.com/nockchain/nockchain/pull/164#discussion_r3844965429)
-- Triage status: Pending
-- Disposition:
+- Triage status: Implemented
+- Disposition: Accept
 - Owner:
-- Notes:
+- Notes: The bridge validates the full Gemma profile and SHA-256 hashes every safetensors weight byte before CUDA initialization. The expected digest and Hugging Face revision are compiled pins. Inference protocol 3 rejects runtimes that register a different content digest.
 
 > **Checkpoint validation is currently non-operative in production.** A missing environment value silently registers a zero layout digest; the bridge only length-checks and hashes it into the runtime ID, while `Gemma4Checkpoint::open` is referenced only by tests. The documented mismatch-before-CUDA property is therefore not enforced, and the layout digest is not a weight-content commitment. Either wire a fail-closed startup preflight with a pinned content digest, or remove/relabel the unused validation and identity path and correct the documentation.
 

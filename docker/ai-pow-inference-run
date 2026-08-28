@@ -78,6 +78,7 @@ esac
 bridge_args=(
   --listen "127.0.0.1:${bridge_port}"
   --cuda-device "${AI_POW_CUDA_DEVICE}"
+  --checkpoint-path "${MODEL_PATH}"
 )
 if [[ -n "${NOCKCHAIN_NODE_ADDR:-}" ]]; then
   : "${MINING_PKH:?MINING_PKH is required with NOCKCHAIN_NODE_ADDR}"

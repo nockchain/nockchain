@@ -75,6 +75,7 @@ clap = { workspace = true, features = ["derive"] }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 num_cpus = { workspace = true }
 rayon = { workspace = true }

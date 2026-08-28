@@ -17,8 +17,11 @@ from .proto import inference_mining_pb2 as pb
 from .proto import inference_mining_pb2_grpc as pb_grpc
 
 _LOGGER = get_logger("vllm.nockchain_ai_pow")
-_PROTOCOL_VERSION = 2
+_PROTOCOL_VERSION = 3
 _CHUNK_BYTES = 1024 * 1024
+_CHECKPOINT_CONTENT_DIGEST = bytes.fromhex(
+    "c59cb83550f52b26893c1837133555bf32190495372ce00935d989592515ff40"
+)
 
 
 def _fixed_hex_env(name: str, length: int) -> bytes:
@@ -55,9 +58,7 @@ class NockchainMiningClient:
         registered = self._stub.RegisterRuntime(
             pb.RegisterRuntimeRequest(
                 protocol_version=_PROTOCOL_VERSION,
-                checkpoint_layout_digest=_fixed_hex_env(
-                    "NOCKCHAIN_CHECKPOINT_LAYOUT_DIGEST", 32
-                ),
+                checkpoint_content_digest=_CHECKPOINT_CONTENT_DIGEST,
                 cuda_device_uuid=_fixed_hex_env("NOCKCHAIN_CUDA_DEVICE_UUID", 16),
                 process_id=os.getpid(),
             ),

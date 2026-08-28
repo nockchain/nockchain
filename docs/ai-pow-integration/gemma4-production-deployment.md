@@ -47,6 +47,7 @@ the customer response open.
 
 - An immutable production image tag.
 - A model volume mounted at `/workspace/models`.
+- Checkpoint revision `f1dfba688ce6343b0433de57ca4dc0f3d1c5baa5`, whose `model.safetensors` SHA-256 is pinned in the bridge.
 - The node private gRPC URL.
 - A v1 mining public-key hash.
 - An API key if the HTTP listener is not loopback.
@@ -83,6 +84,9 @@ docker run --rm --gpus all \
   <IMAGE> \
   ai-pow-inference-seed-model
 ```
+
+The seed command downloads the fixed checkpoint revision and exits only after
+the bridge validates the profile and the pinned SHA-256 weight digest.
 
 Do not run the seed command when the volume already contains the complete
 checkpoint.
