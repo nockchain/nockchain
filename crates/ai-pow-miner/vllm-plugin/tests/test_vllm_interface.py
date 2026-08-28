@@ -18,6 +18,7 @@ from vllm import _custom_ops as vllm_ops
 from vllm_miner import PearlKernel
 from vllm_miner.config import config as pearl_config
 from vllm_miner.nockchain_manager import NockchainAsyncLoopManager
+from vllm_miner.nockchain_client import NockchainMiningClient
 from vllm_miner.vllm_kernels import _gemma4_mining_transcript
 from vllm_miner.quantization_operators import quant_8bit
 from vllm_miner.vllm_config import PearlConfig
@@ -75,6 +76,25 @@ def test_nockchain_mining_transcript_uses_bridge_values():
 
     create_local_config.assert_not_called()
     client.get_mining_transcript.assert_called_once_with(mining_job)
+
+
+def test_lost_finish_rpc_is_removed_from_next_heartbeat():
+    client = object.__new__(NockchainMiningClient)
+    client._stub = MagicMock()
+    client._stub.NotifyWork.side_effect = RuntimeError("completion response lost")
+    client._stub.HeartbeatRuntime.return_value.lease_duration_ms = 5_000
+    client._runtime_id = bytes(16)
+    client._rank_zero = True
+    client._mining_enabled = True
+    client._work_shapes = {7: (0, 128, 5376, 43008)}
+
+    with pytest.raises(RuntimeError, match="completion response lost"):
+        client.notify_work_finished(7)
+    assert client._work_shapes == {}
+
+    client._heartbeat()
+    heartbeat = client._stub.HeartbeatRuntime.call_args.args[0]
+    assert list(heartbeat.active_work_ids) == []
 
 
 @pytest.mark.parametrize("m, n, k", [(1024, 4096, 128)])

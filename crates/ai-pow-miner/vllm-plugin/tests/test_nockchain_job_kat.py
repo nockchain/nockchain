@@ -20,7 +20,7 @@ sys.path.insert(0, str(_PROTO_ROOT))
 from proto import inference_mining_pb2 as pb  # noqa: E402
 from proto import inference_mining_pb2_grpc as pb_grpc  # noqa: E402
 
-_PROTOCOL_VERSION = 3
+_PROTOCOL_VERSION = 4
 _CANONICAL_GEMMA4_MU = bytes.fromhex(
     "0015000080000000000f00000000000f00000000" + "00" * 32
 )
@@ -110,16 +110,33 @@ def test_python_receives_rust_canonical_mining_job() -> None:
                     checkpoint_content_digest=_CHECKPOINT_CONTENT_DIGEST,
                     cuda_device_uuid=bytes([0x44]) * 16,
                     process_id=os.getpid(),
+                    rank_zero=True,
+                    mining_enabled=True,
+                ),
+                timeout=5,
+            )
+            heartbeat = stub.HeartbeatRuntime(
+                pb.HeartbeatRuntimeRequest(
+                    runtime_id=runtime.runtime_id,
+                    rank_zero=True,
+                    mining_enabled=True,
                 ),
                 timeout=5,
             )
             job = stub.GetMiningJob(
                 pb.GetMiningJobRequest(runtime_id=runtime.runtime_id), timeout=5
             )
+            status = stub.GetStatus(pb.GetStatusRequest(), timeout=5)
         finally:
             channel.close()
 
     assert runtime.protocol_version == _PROTOCOL_VERSION
+    assert runtime.lease_duration_ms > 0
+    assert heartbeat.lease_duration_ms == runtime.lease_duration_ms
+    assert status.registered_runtimes == 1
+    assert status.rank_zero_runtimes == 1
+    assert status.mining_enabled_runtimes == 1
+    assert status.lease_duration_ms == runtime.lease_duration_ms
     assert job.candidate_generation == 1
     assert job.incomplete_header == bytes(76)
     assert job.mining_config == _CANONICAL_GEMMA4_MU

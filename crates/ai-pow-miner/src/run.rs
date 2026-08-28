@@ -4605,10 +4605,12 @@ mod tests {
             .expect("connect inference bridge");
         let registered = client
             .register_runtime(RegisterRuntimeRequest {
-                protocol_version: 3,
+                protocol_version: 4,
                 checkpoint_content_digest: vec![0x33; 32],
                 cuda_device_uuid: vec![0x44; 16],
                 process_id: std::process::id(),
+                rank_zero: true,
+                mining_enabled: true,
             })
             .await
             .expect("register native runtime")

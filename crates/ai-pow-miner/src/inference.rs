@@ -5,10 +5,11 @@
 //! already-launched idle batch may finish after work arrives; CUDA launches are not
 //! preemptible.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use ai_pow::params::{PEARL_K_MAX, PEARL_MN_MAX};
 use ai_pow::pearl_compat::{
@@ -19,10 +20,10 @@ use nockapp_grpc_proto::pb::ai_pow::v1::inference_mining_service_server::{
     InferenceMiningService, InferenceMiningServiceServer,
 };
 use nockapp_grpc_proto::pb::ai_pow::v1::{
-    opened_block_part, GetMiningJobRequest, GetStatusRequest, InferenceMiningStatus, MiningJob,
-    NotifyWorkRequest, NotifyWorkResponse, OpenedBlockMetadata, OpenedBlockPart, OpenedTensor,
-    RegisterRuntimeRequest, RegisterRuntimeResponse, SchedulerMode, SubmitOpenedBlockResponse,
-    WorkPhase,
+    opened_block_part, GetMiningJobRequest, GetStatusRequest, HeartbeatRuntimeRequest,
+    HeartbeatRuntimeResponse, InferenceMiningStatus, MiningJob, NotifyWorkRequest,
+    NotifyWorkResponse, OpenedBlockMetadata, OpenedBlockPart, OpenedTensor, RegisterRuntimeRequest,
+    RegisterRuntimeResponse, SchedulerMode, SubmitOpenedBlockResponse, WorkPhase,
 };
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
@@ -30,7 +31,7 @@ use tonic::{Request, Response, Status};
 use crate::canonical::canonical_dense_mining_config;
 use crate::gemma4::GEMMA4_NATIVE_PARAMS;
 
-const PROTOCOL_VERSION: u32 = 3;
+const PROTOCOL_VERSION: u32 = 4;
 const RUNTIME_ID_BYTES: usize = 16;
 const DIGEST_BYTES: usize = 32;
 const CUDA_DEVICE_UUID_BYTES: usize = 16;
@@ -45,6 +46,8 @@ const GEMMA_TILE: u32 = 16;
 const GEMMA_MAX_PADDED_ROWS: u32 = 4_096;
 pub const GEMMA_FUSED_OUTPUT_DIM: u32 = 43_008;
 const GEMMA_MAX_TOKENS: u32 = 8_192;
+const RUNTIME_LEASE_DURATION: Duration = Duration::from_secs(5);
+const MAX_HEARTBEAT_WORK_IDS: usize = 4_096;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct WorkKey {
@@ -76,9 +79,22 @@ pub struct InferenceProofRequest {
 
 pub type InferenceProofSender = mpsc::Sender<InferenceProofRequest>;
 
+#[derive(Clone, Copy, Debug)]
+struct RuntimeLease {
+    deadline: Instant,
+    rank_zero: bool,
+    mining_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LeaseExpiry {
+    runtimes: u64,
+    work_items: u64,
+}
+
 #[derive(Debug, Default)]
 struct SchedulerInner {
-    runtimes: HashSet<[u8; RUNTIME_ID_BYTES]>,
+    runtimes: HashMap<[u8; RUNTIME_ID_BYTES], RuntimeLease>,
     active: HashSet<WorkKey>,
 }
 
@@ -86,6 +102,7 @@ struct SchedulerInner {
 pub struct InferenceSchedulerState {
     inner: Mutex<SchedulerInner>,
     changed: Condvar,
+    lease_duration: Duration,
     next_runtime: AtomicU64,
     idle_batches: AtomicU64,
     inference_batches: AtomicU64,
@@ -93,13 +110,24 @@ pub struct InferenceSchedulerState {
     candidate_generation: AtomicU64,
     production_enabled: AtomicBool,
     node_connected: AtomicBool,
+    expired_runtimes: AtomicU64,
+    expired_work_items: AtomicU64,
+    reconciled_work_items: AtomicU64,
 }
 
 impl Default for InferenceSchedulerState {
     fn default() -> Self {
+        Self::with_lease_duration(RUNTIME_LEASE_DURATION)
+    }
+}
+
+impl InferenceSchedulerState {
+    fn with_lease_duration(lease_duration: Duration) -> Self {
+        assert!(!lease_duration.is_zero());
         Self {
             inner: Mutex::new(SchedulerInner::default()),
             changed: Condvar::new(),
+            lease_duration,
             next_runtime: AtomicU64::new(1),
             idle_batches: AtomicU64::new(0),
             inference_batches: AtomicU64::new(0),
@@ -107,12 +135,25 @@ impl Default for InferenceSchedulerState {
             candidate_generation: AtomicU64::new(0),
             production_enabled: AtomicBool::new(false),
             node_connected: AtomicBool::new(false),
+            expired_runtimes: AtomicU64::new(0),
+            expired_work_items: AtomicU64::new(0),
+            reconciled_work_items: AtomicU64::new(0),
         }
     }
-}
 
-impl InferenceSchedulerState {
+    fn lease_duration_ms(&self) -> u64 {
+        u64::try_from(self.lease_duration.as_millis()).unwrap_or(u64::MAX)
+    }
+
     fn register_runtime(&self, request: RegisterRuntimeRequest) -> Result<[u8; RUNTIME_ID_BYTES]> {
+        self.register_runtime_at(request, Instant::now())
+    }
+
+    fn register_runtime_at(
+        &self,
+        request: RegisterRuntimeRequest,
+        now: Instant,
+    ) -> Result<[u8; RUNTIME_ID_BYTES]> {
         if request.protocol_version != PROTOCOL_VERSION {
             bail!(
                 "unsupported inference protocol version {}; expected {PROTOCOL_VERSION}",
@@ -130,23 +171,115 @@ impl InferenceSchedulerState {
         hasher.update(&request.process_id.to_le_bytes());
         hasher.update(&checkpoint_content_digest);
         hasher.update(&cuda_device_uuid);
+        hasher.update(&[request.rank_zero.into(), request.mining_enabled.into()]);
         let mut runtime_id = [0u8; RUNTIME_ID_BYTES];
         runtime_id.copy_from_slice(&hasher.finalize().as_bytes()[..RUNTIME_ID_BYTES]);
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
-        inner.runtimes.insert(runtime_id);
+        self.expire_locked(&mut inner, now);
+        inner.runtimes.insert(
+            runtime_id,
+            RuntimeLease {
+                deadline: now + self.lease_duration,
+                rank_zero: request.rank_zero,
+                mining_enabled: request.mining_enabled,
+            },
+        );
         Ok(runtime_id)
+    }
+
+    fn heartbeat_runtime_at(
+        &self,
+        bytes: &[u8],
+        rank_zero: bool,
+        mining_enabled: bool,
+        active_work_ids: &[u64],
+        now: Instant,
+    ) -> Result<u32> {
+        let runtime_id = fixed_bytes::<RUNTIME_ID_BYTES>(bytes, "runtime_id")?;
+        if active_work_ids.len() > MAX_HEARTBEAT_WORK_IDS {
+            bail!("heartbeat active_work_ids exceeds {MAX_HEARTBEAT_WORK_IDS}");
+        }
+        let active_work_count = active_work_ids.len();
+        let active_work_ids: HashSet<_> = active_work_ids.iter().copied().collect();
+        if active_work_ids.contains(&0) {
+            bail!("heartbeat active_work_ids must be nonzero");
+        }
+        if active_work_ids.len() != active_work_count {
+            bail!("heartbeat active_work_ids must be unique");
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
+        self.expire_locked(&mut inner, now);
+        let runtime = inner
+            .runtimes
+            .get_mut(&runtime_id)
+            .ok_or_else(|| anyhow::anyhow!("runtime_id is not registered"))?;
+        runtime.deadline = now + self.lease_duration;
+        runtime.rank_zero = rank_zero;
+        runtime.mining_enabled = mining_enabled;
+        let active_before = inner.active.len();
+        inner.active.retain(|work| {
+            work.runtime_id != runtime_id || active_work_ids.contains(&work.work_id)
+        });
+        let reconciled = active_before.saturating_sub(inner.active.len()) as u64;
+        self.reconciled_work_items
+            .fetch_add(reconciled, Ordering::Relaxed);
+        if reconciled != 0 {
+            self.changed.notify_all();
+        }
+        Ok(u32::try_from(inner.active.len())?)
+    }
+
+    #[cfg(test)]
+    fn expire_leases_at(&self, now: Instant) -> Result<LeaseExpiry> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
+        Ok(self.expire_locked(&mut inner, now))
+    }
+
+    fn expire_locked(&self, inner: &mut SchedulerInner, now: Instant) -> LeaseExpiry {
+        let expired_ids: HashSet<_> = inner
+            .runtimes
+            .iter()
+            .filter_map(|(runtime_id, runtime)| (runtime.deadline <= now).then_some(*runtime_id))
+            .collect();
+        if expired_ids.is_empty() {
+            return LeaseExpiry::default();
+        }
+        inner
+            .runtimes
+            .retain(|runtime_id, _| !expired_ids.contains(runtime_id));
+        let active_before = inner.active.len();
+        inner
+            .active
+            .retain(|work| !expired_ids.contains(&work.runtime_id));
+        let expiry = LeaseExpiry {
+            runtimes: expired_ids.len() as u64,
+            work_items: active_before.saturating_sub(inner.active.len()) as u64,
+        };
+        self.expired_runtimes
+            .fetch_add(expiry.runtimes, Ordering::Relaxed);
+        self.expired_work_items
+            .fetch_add(expiry.work_items, Ordering::Relaxed);
+        self.changed.notify_all();
+        expiry
     }
 
     fn validate_runtime(&self, bytes: &[u8]) -> Result<[u8; RUNTIME_ID_BYTES]> {
         let runtime_id = fixed_bytes::<RUNTIME_ID_BYTES>(bytes, "runtime_id")?;
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
-        if !inner.runtimes.contains(&runtime_id) {
+        self.expire_locked(&mut inner, Instant::now());
+        if !inner.runtimes.contains_key(&runtime_id) {
             bail!("runtime_id is not registered");
         }
         Ok(runtime_id)
@@ -176,9 +309,13 @@ impl InferenceSchedulerState {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
-        if !inner.runtimes.contains(&runtime_id) {
-            bail!("runtime_id is not registered");
-        }
+        let now = Instant::now();
+        self.expire_locked(&mut inner, now);
+        let runtime = inner
+            .runtimes
+            .get_mut(&runtime_id)
+            .ok_or_else(|| anyhow::anyhow!("runtime_id is not registered"))?;
+        runtime.deadline = now + self.lease_duration;
         match phase {
             WorkPhase::Started => {
                 if !inner.active.insert(key) {
@@ -199,30 +336,60 @@ impl InferenceSchedulerState {
         Ok(active)
     }
 
-    fn active_work_items(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|inner| inner.active.len())
-            .unwrap_or(usize::MAX)
-    }
-
     fn wait_for_idle_or_stop(&self, stop: &AtomicBool) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(inner) => inner,
             Err(_) => return false,
         };
-        while !inner.active.is_empty() && !stop.load(Ordering::Acquire) {
-            inner = match self.changed.wait(inner) {
-                Ok(inner) => inner,
+        loop {
+            let now = Instant::now();
+            self.expire_locked(&mut inner, now);
+            if inner.active.is_empty() || stop.load(Ordering::Acquire) {
+                return !stop.load(Ordering::Acquire);
+            }
+            let deadline = inner
+                .active
+                .iter()
+                .filter_map(|work| {
+                    inner
+                        .runtimes
+                        .get(&work.runtime_id)
+                        .map(|runtime| runtime.deadline)
+                })
+                .min()
+                .unwrap_or(now + self.lease_duration);
+            let wait = deadline.saturating_duration_since(now);
+            inner = match self.changed.wait_timeout(inner, wait) {
+                Ok((inner, _)) => inner,
                 Err(_) => return false,
             };
         }
-        !stop.load(Ordering::Acquire)
     }
 
     fn status(&self) -> InferenceMiningStatus {
-        let active = self.active_work_items();
-        InferenceMiningStatus {
+        self.status_at(Instant::now())
+            .expect("inference scheduler lock poisoned")
+    }
+
+    fn status_at(&self, now: Instant) -> Result<InferenceMiningStatus> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
+        self.expire_locked(&mut inner, now);
+        let active = inner.active.len();
+        let registered_runtimes = inner.runtimes.len();
+        let rank_zero_runtimes = inner
+            .runtimes
+            .values()
+            .filter(|runtime| runtime.rank_zero)
+            .count();
+        let mining_enabled_runtimes = inner
+            .runtimes
+            .values()
+            .filter(|runtime| runtime.mining_enabled)
+            .count();
+        Ok(InferenceMiningStatus {
             mode: if active == 0 {
                 SchedulerMode::IdleMining.into()
             } else {
@@ -235,14 +402,18 @@ impl InferenceSchedulerState {
             opened_blocks_received: self.opened_blocks_received.load(Ordering::Relaxed),
             production_enabled: self.production_enabled.load(Ordering::Acquire),
             node_connected: self.node_connected.load(Ordering::Acquire),
-        }
+            registered_runtimes: u32::try_from(registered_runtimes).unwrap_or(u32::MAX),
+            rank_zero_runtimes: u32::try_from(rank_zero_runtimes).unwrap_or(u32::MAX),
+            mining_enabled_runtimes: u32::try_from(mining_enabled_runtimes).unwrap_or(u32::MAX),
+            expired_runtimes: self.expired_runtimes.load(Ordering::Relaxed),
+            expired_work_items: self.expired_work_items.load(Ordering::Relaxed),
+            lease_duration_ms: self.lease_duration_ms(),
+            reconciled_work_items: self.reconciled_work_items.load(Ordering::Relaxed),
+        })
     }
 
     pub fn runtime_snapshot_count(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|inner| inner.runtimes.len())
-            .unwrap_or(0)
+        self.status().registered_runtimes as usize
     }
 }
 
@@ -404,6 +575,28 @@ impl InferenceMiningService for InferenceMiningRpc {
         Ok(Response::new(RegisterRuntimeResponse {
             runtime_id: runtime_id.to_vec(),
             protocol_version: PROTOCOL_VERSION,
+            lease_duration_ms: self.state.lease_duration_ms(),
+        }))
+    }
+
+    async fn heartbeat_runtime(
+        &self,
+        request: Request<HeartbeatRuntimeRequest>,
+    ) -> Result<Response<HeartbeatRuntimeResponse>, Status> {
+        let request = request.into_inner();
+        let active_work_items = self
+            .state
+            .heartbeat_runtime_at(
+                &request.runtime_id,
+                request.rank_zero,
+                request.mining_enabled,
+                &request.active_work_ids,
+                Instant::now(),
+            )
+            .map_err(unauthenticated)?;
+        Ok(Response::new(HeartbeatRuntimeResponse {
+            lease_duration_ms: self.state.lease_duration_ms(),
+            active_work_items,
         }))
     }
 
@@ -761,7 +954,7 @@ fn unauthenticated(error: anyhow::Error) -> Status {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -797,6 +990,8 @@ mod tests {
             checkpoint_content_digest: vec![0x33; DIGEST_BYTES],
             cuda_device_uuid: vec![0x44; CUDA_DEVICE_UUID_BYTES],
             process_id: 7,
+            rank_zero: false,
+            mining_enabled: false,
         }
     }
 
@@ -836,6 +1031,124 @@ mod tests {
         );
         assert_eq!(state.status().mode, SchedulerMode::IdleMining as i32);
         assert_eq!(state.status().inference_batches, 1);
+    }
+
+    #[test]
+    fn runtime_lease_expiry_removes_active_work() {
+        let state = InferenceSchedulerState::with_lease_duration(Duration::from_millis(10));
+        let started = Instant::now();
+        let runtime_id = state.register_runtime(runtime_request()).unwrap();
+        state
+            .notify_work(work(&runtime_id, 1, WorkPhase::Started))
+            .unwrap();
+
+        let expired = state
+            .expire_leases_at(started + Duration::from_millis(20))
+            .unwrap();
+        assert_eq!(expired.runtimes, 1);
+        assert_eq!(expired.work_items, 1);
+        let status = state
+            .status_at(started + Duration::from_millis(20))
+            .unwrap();
+        assert_eq!(status.active_work_items, 0);
+        assert_eq!(status.registered_runtimes, 0);
+        assert_eq!(status.expired_runtimes, 1);
+        assert_eq!(status.expired_work_items, 1);
+    }
+
+    #[test]
+    fn heartbeat_extends_runtime_lease_and_reports_mining_state() {
+        let state = InferenceSchedulerState::with_lease_duration(Duration::from_millis(10));
+        let started = Instant::now();
+        let runtime_id = state.register_runtime(runtime_request()).unwrap();
+        state
+            .heartbeat_runtime_at(
+                &runtime_id,
+                true,
+                true,
+                &[],
+                started + Duration::from_millis(8),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state
+                .expire_leases_at(started + Duration::from_millis(15))
+                .unwrap()
+                .runtimes,
+            0
+        );
+        let status = state
+            .status_at(started + Duration::from_millis(15))
+            .unwrap();
+        assert_eq!(status.registered_runtimes, 1);
+        assert_eq!(status.rank_zero_runtimes, 1);
+        assert_eq!(status.mining_enabled_runtimes, 1);
+        assert_eq!(
+            state
+                .expire_leases_at(started + Duration::from_millis(20))
+                .unwrap()
+                .runtimes,
+            1
+        );
+    }
+
+    #[test]
+    fn heartbeat_reconciles_abandoned_work_without_expiring_runtime() {
+        let state = InferenceSchedulerState::with_lease_duration(Duration::from_millis(50));
+        let started = Instant::now();
+        let runtime_id = state.register_runtime(runtime_request()).unwrap();
+        state
+            .notify_work(work(&runtime_id, 7, WorkPhase::Started))
+            .unwrap();
+        assert_eq!(
+            state
+                .heartbeat_runtime_at(
+                    &runtime_id,
+                    true,
+                    true,
+                    &[7],
+                    started + Duration::from_millis(5),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .heartbeat_runtime_at(
+                    &runtime_id,
+                    true,
+                    true,
+                    &[],
+                    started + Duration::from_millis(10),
+                )
+                .unwrap(),
+            0
+        );
+        let status = state
+            .status_at(started + Duration::from_millis(10))
+            .unwrap();
+        assert_eq!(status.registered_runtimes, 1);
+        assert_eq!(status.active_work_items, 0);
+        assert_eq!(status.reconciled_work_items, 1);
+        assert!(state
+            .heartbeat_runtime_at(
+                &runtime_id,
+                true,
+                true,
+                &[0],
+                started + Duration::from_millis(11),
+            )
+            .is_err());
+        assert!(state
+            .heartbeat_runtime_at(
+                &runtime_id,
+                true,
+                true,
+                &[9, 9],
+                started + Duration::from_millis(11),
+            )
+            .is_err());
     }
 
     #[test]
@@ -895,6 +1208,28 @@ mod tests {
         }
         worker.stop().unwrap();
         assert!(state.status().idle_batches > 0);
+    }
+
+    #[test]
+    fn idle_worker_resumes_when_active_runtime_lease_expires() {
+        let state = Arc::new(InferenceSchedulerState::with_lease_duration(
+            Duration::from_millis(10),
+        ));
+        let runtime_id = state.register_runtime(runtime_request()).unwrap();
+        state
+            .notify_work(work(&runtime_id, 1, WorkPhase::Started))
+            .unwrap();
+        let backend = Arc::new(CountingBackend {
+            batches: AtomicUsize::new(0),
+        });
+        let worker = IdleMiningWorker::spawn(Arc::clone(&state), Arc::clone(&backend));
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while backend.batches.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker.stop().unwrap();
+        assert!(backend.batches.load(Ordering::Relaxed) > 0);
+        assert_eq!(state.status().active_work_items, 0);
     }
 
     #[tokio::test]

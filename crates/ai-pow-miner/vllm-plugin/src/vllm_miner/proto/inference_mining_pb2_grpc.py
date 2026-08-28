@@ -5,7 +5,7 @@ import warnings
 
 from . import inference_mining_pb2 as inference__mining__pb2
 
-GRPC_GENERATED_VERSION = '1.73.1'
+GRPC_GENERATED_VERSION = '1.83.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,14 +18,14 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in inference_mining_pb2_grpc.py depends on'
+        + ' but the generated code in inference_mining_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
     )
 
 
-class InferenceMiningServiceStub(object):
+class InferenceMiningServiceStub:
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -38,6 +38,11 @@ class InferenceMiningServiceStub(object):
                 '/nockchain.ai_pow.v1.InferenceMiningService/RegisterRuntime',
                 request_serializer=inference__mining__pb2.RegisterRuntimeRequest.SerializeToString,
                 response_deserializer=inference__mining__pb2.RegisterRuntimeResponse.FromString,
+                _registered_method=True)
+        self.HeartbeatRuntime = channel.unary_unary(
+                '/nockchain.ai_pow.v1.InferenceMiningService/HeartbeatRuntime',
+                request_serializer=inference__mining__pb2.HeartbeatRuntimeRequest.SerializeToString,
+                response_deserializer=inference__mining__pb2.HeartbeatRuntimeResponse.FromString,
                 _registered_method=True)
         self.GetMiningJob = channel.unary_unary(
                 '/nockchain.ai_pow.v1.InferenceMiningService/GetMiningJob',
@@ -61,10 +66,16 @@ class InferenceMiningServiceStub(object):
                 _registered_method=True)
 
 
-class InferenceMiningServiceServicer(object):
+class InferenceMiningServiceServicer:
     """Missing associated documentation comment in .proto file."""
 
     def RegisterRuntime(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def HeartbeatRuntime(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -102,6 +113,11 @@ def add_InferenceMiningServiceServicer_to_server(servicer, server):
                     request_deserializer=inference__mining__pb2.RegisterRuntimeRequest.FromString,
                     response_serializer=inference__mining__pb2.RegisterRuntimeResponse.SerializeToString,
             ),
+            'HeartbeatRuntime': grpc.unary_unary_rpc_method_handler(
+                    servicer.HeartbeatRuntime,
+                    request_deserializer=inference__mining__pb2.HeartbeatRuntimeRequest.FromString,
+                    response_serializer=inference__mining__pb2.HeartbeatRuntimeResponse.SerializeToString,
+            ),
             'GetMiningJob': grpc.unary_unary_rpc_method_handler(
                     servicer.GetMiningJob,
                     request_deserializer=inference__mining__pb2.GetMiningJobRequest.FromString,
@@ -130,7 +146,7 @@ def add_InferenceMiningServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class InferenceMiningService(object):
+class InferenceMiningService:
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
@@ -150,6 +166,33 @@ class InferenceMiningService(object):
             '/nockchain.ai_pow.v1.InferenceMiningService/RegisterRuntime',
             inference__mining__pb2.RegisterRuntimeRequest.SerializeToString,
             inference__mining__pb2.RegisterRuntimeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def HeartbeatRuntime(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/nockchain.ai_pow.v1.InferenceMiningService/HeartbeatRuntime',
+            inference__mining__pb2.HeartbeatRuntimeRequest.SerializeToString,
+            inference__mining__pb2.HeartbeatRuntimeResponse.FromString,
             options,
             channel_credentials,
             insecure,

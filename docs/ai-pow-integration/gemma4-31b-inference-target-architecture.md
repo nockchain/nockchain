@@ -180,6 +180,12 @@ opened INT7 activation and fused weight matrices to host memory and streams
 them in bounded chunks. This rare proof handoff does not affect no-hit
 inference or mining throughput.
 
+Each inference runtime has a five-second lease. Its heartbeat declares the
+runtime's active work IDs. The bridge removes server work that is absent from
+the heartbeat, so a lost completion response cannot pause idle mining. Lease
+expiry deregisters the runtime, removes its remaining work, and wakes idle
+mining. Status reports live ownership and both cleanup counters.
+
 An immutable operand generation contains:
 
 - checkpoint content digest;
@@ -205,8 +211,10 @@ The production bridge connects to the node's private gRPC endpoint:
 5. Invalidate the generation and install a zero target if the candidate stream
    disconnects.
 
-vLLM adjusts the raw node target by the Pearl shape work factor before the
-device comparison. A winner submission contains the candidate generation,
+The bridge adjusts the raw node target with its canonical Pearl mining
+configuration. vLLM consumes that effective target and the serialized mining
+configuration without local derivation for device comparison. A winner
+submission contains the candidate generation,
 header extranonce, opened row and column tile, rank-128 noise seeds, and the
 full INT7 `A` and `Bᵀ` matrices. The bridge requires:
 

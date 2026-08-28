@@ -55,6 +55,11 @@ class NockchainAsyncLoopManager(AsyncLoopManager):
     def get_mining_transcript(self, mining_job: MiningJob) -> tuple[bytes, bytes]:
         return self._nockchain_client.get_mining_transcript(mining_job)
 
+    def set_runtime_state(self, *, rank_zero: bool, mining_enabled: bool) -> None:
+        self._nockchain_client.set_runtime_state(
+            rank_zero=rank_zero, mining_enabled=mining_enabled
+        )
+
     def handle_submit_block(
         self, opened_block_info: OpenedBlockInfo, mining_job: MiningJob
     ) -> None:

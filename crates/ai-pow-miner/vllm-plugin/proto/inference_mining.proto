@@ -4,6 +4,7 @@ package nockchain.ai_pow.v1;
 
 service InferenceMiningService {
   rpc RegisterRuntime(RegisterRuntimeRequest) returns (RegisterRuntimeResponse);
+  rpc HeartbeatRuntime(HeartbeatRuntimeRequest) returns (HeartbeatRuntimeResponse);
   rpc GetMiningJob(GetMiningJobRequest) returns (MiningJob);
   rpc NotifyWork(NotifyWorkRequest) returns (NotifyWorkResponse);
   rpc SubmitOpenedBlock(stream OpenedBlockPart) returns (SubmitOpenedBlockResponse);
@@ -15,11 +16,26 @@ message RegisterRuntimeRequest {
   bytes checkpoint_content_digest = 2;
   bytes cuda_device_uuid = 3;
   uint32 process_id = 4;
+  bool rank_zero = 5;
+  bool mining_enabled = 6;
 }
 
 message RegisterRuntimeResponse {
   bytes runtime_id = 1;
   uint32 protocol_version = 2;
+  uint64 lease_duration_ms = 3;
+}
+
+message HeartbeatRuntimeRequest {
+  bytes runtime_id = 1;
+  bool rank_zero = 2;
+  bool mining_enabled = 3;
+  repeated uint64 active_work_ids = 4;
+}
+
+message HeartbeatRuntimeResponse {
+  uint64 lease_duration_ms = 1;
+  uint32 active_work_items = 2;
 }
 
 message GetMiningJobRequest {
@@ -114,4 +130,11 @@ message InferenceMiningStatus {
   uint64 opened_blocks_received = 6;
   bool production_enabled = 7;
   bool node_connected = 8;
+  uint32 registered_runtimes = 9;
+  uint32 rank_zero_runtimes = 10;
+  uint32 mining_enabled_runtimes = 11;
+  uint64 expired_runtimes = 12;
+  uint64 expired_work_items = 13;
+  uint64 lease_duration_ms = 14;
+  uint64 reconciled_work_items = 15;
 }
