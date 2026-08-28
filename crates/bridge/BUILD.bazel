@@ -460,7 +460,13 @@ rust_test_suite(
             "tests/reorg_recovery_tests.rs",
         ],
     ),
-    compile_data = ["bridge-conf.example.toml"],
+    compile_data = [
+        "bridge-conf.example.toml",
+        "contracts/environments/base-sepolia-testnet-accounts.md",
+        "contracts/tenderly.yaml",
+        "e2e/environments/base-sepolia.json",
+        "scripts/environments/base-sepolia.env.example",
+    ],
     crate_features = ["bazel_build"],
     data = [
         ":contracts/out/MessageInbox.sol/MessageInbox.json",

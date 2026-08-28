@@ -1,5 +1,6 @@
 pub mod base;
 pub mod config;
+pub mod e2e_environment;
 pub mod errors;
 pub mod grpc;
 pub mod ingress;

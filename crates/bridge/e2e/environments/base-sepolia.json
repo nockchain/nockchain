@@ -1,0 +1,140 @@
+{
+  "schema_id": "nockchain.bridge.e2e-environment",
+  "schema_version": 1,
+  "environment_id": "base-sepolia-fork",
+  "source_chain": {
+    "name": "base-sepolia",
+    "chain_id": 84532,
+    "fork_block": {
+      "number": 45957827,
+      "hash": "0x633227f2b6056cf867158718dc8f1e17c109d5d1df8d49d1f1160a0f2c42c43e",
+      "timestamp": "2026-08-25T18:52:22Z",
+      "finality": "finalized",
+      "explorer_url": "https://base-sepolia.blockscout.com/block/45957827"
+    }
+  },
+  "local_fork": {
+    "engine": "anvil",
+    "chain_id": 31338,
+    "rpc_host_policy": "loopback-only"
+  },
+  "contracts": {
+    "message_inbox": {
+      "proxy": {
+        "address": "0x9b1beca13c39b9be10db616f1be10c3cef9dfb36",
+        "runtime_code_keccak256": "0x275cf4a7e8f5ac5fe19ac458d40325057ae1d4377ee377dd1991d8a8da6d609e",
+        "deployment": {
+          "transaction_hash": "0xd360657d8c64143fbfbbd4da3aa0eb13741e3138d5414e2e2b6472622b777b45",
+          "block_number": 35118327,
+          "block_hash": "0x859dab9821c7007447593e148c55b90d18fb051aca06f47d30ced0b633c9be6f",
+          "timestamp": "2025-12-17T20:55:42Z",
+          "explorer_url": "https://base-sepolia.blockscout.com/tx/0xd360657d8c64143fbfbbd4da3aa0eb13741e3138d5414e2e2b6472622b777b45"
+        }
+      },
+      "implementation": {
+        "address": "0x7627db3a99596668c9d42693efa352ca69f089e3",
+        "runtime_code_keccak256": "0x213a95f94b6fb9afbe11369a88de1a04da218f999f2f3607ec183d1e0b15440b",
+        "deployment": {
+          "transaction_hash": "0x9d62414b87f0c999fb325f574757ea52238b003804d6ae4961e41654f1503b7b",
+          "block_number": 35118326,
+          "block_hash": "0xf26235b1f56fc6ecc0919fbb1a5f72e3a8872bd0231b5cd6b543ba352f7db81d",
+          "timestamp": "2025-12-17T20:55:40Z",
+          "explorer_url": "https://base-sepolia.blockscout.com/tx/0x9d62414b87f0c999fb325f574757ea52238b003804d6ae4961e41654f1503b7b"
+        }
+      }
+    },
+    "nock": {
+      "address": "0xa9cd4087d9b050d8b35727aaf810296ca957c7b3",
+      "runtime_code_keccak256": "0x4ea8f44adee27b2cb30c48287c1f49a517ea88ba72571a823d93346f83eb19bf",
+      "deployment": {
+        "transaction_hash": "0x3fcb45838fbfaf8a982248eaf91112390f1c250f896820181eca9ad29d9c856e",
+        "block_number": 35118325,
+        "block_hash": "0x14dc1fe08035ac0e34848490a9430b556ebac9e10d4ef64e0cdcbeb0eea5df50",
+        "timestamp": "2025-12-17T20:55:38Z",
+        "explorer_url": "https://base-sepolia.blockscout.com/tx/0x3fcb45838fbfaf8a982248eaf91112390f1c250f896820181eca9ad29d9c856e"
+      }
+    }
+  },
+  "pristine_state": {
+    "message_inbox_owner": "0x4356d2c1b6f7238dcee0a6e90c9b5b1717648555",
+    "nock_owner": "0x4356d2c1b6f7238dcee0a6e90c9b5b1717648555",
+    "bridge_nodes": [
+      "0x574e84e329167b49f7042d8374d7fd4760b1def3",
+      "0x9c042ad5d79c5d1c3dab14aad3ec3f4b385a650a",
+      "0x8b5b7fefdf42bbd4b5973b5a1bb5dc698c148f74",
+      "0xda9d645eab62ed6f5969a04997d47693263862f0",
+      "0x14df84e1b858b9ed2d552f9ee66d6ad815508c22"
+    ],
+    "threshold": 3,
+    "withdrawals_enabled": true,
+    "reciprocal_pairing": {
+      "message_inbox_nock": "0xa9cd4087d9b050d8b35727aaf810296ca957c7b3",
+      "nock_inbox": "0x9b1beca13c39b9be10db616f1be10c3cef9dfb36"
+    }
+  },
+  "artifacts": {
+    "hash_scheme": {
+      "id": "canonical-verified-compiler-artifact-v1",
+      "digest": "sha256",
+      "encoding": "0x-prefixed-lowercase-hex",
+      "canonicalization": "utf8-compact-json-sort-object-keys-sort-sources-by-file-path-preserve-other-array-order",
+      "artifact_fields": [
+        "abi",
+        "compiler_settings",
+        "compiler_version",
+        "creation_bytecode",
+        "deployed_bytecode",
+        "name",
+        "sources"
+      ]
+    },
+    "erc1967_proxy": {
+      "contract_name": "ERC1967Proxy",
+      "compiler_version": "v0.8.30+commit.73712a01",
+      "verified_artifact_sha256": "0xdd3905d52ac988ddf82876420cea969a088b1089a964b0740cf6a41994364eb2",
+      "abi_sha256": "0xc2378803cfdf078d5a2786affbe40163e27d43d98be9149ba90c077ea028c0c6",
+      "verification_url": "https://base-sepolia.blockscout.com/api/v2/smart-contracts/0x9b1beca13c39b9be10db616f1be10c3cef9dfb36"
+    },
+    "message_inbox": {
+      "contract_name": "MessageInbox",
+      "compiler_version": "v0.8.30+commit.73712a01",
+      "verified_artifact_sha256": "0x59f7d56f6eba3a16aca4e67affc7b4276aecde7105e1226b3f7cb01d89bd6c36",
+      "abi_sha256": "0x2cea081ccd4456fe30079efb7352b7fc977d4bbe2c62be57d70ecf22161c9042",
+      "verification_url": "https://base-sepolia.blockscout.com/api/v2/smart-contracts/0x7627db3a99596668c9d42693efa352ca69f089e3"
+    },
+    "nock": {
+      "contract_name": "Nock",
+      "compiler_version": "v0.8.30+commit.73712a01",
+      "verified_artifact_sha256": "0xf5e630cadeb76971a29a1466808ae244cc313abe3c6bf139846c74fb79305350",
+      "abi_sha256": "0xdecad7861ee98046fd6f4a111e6db9909d1e823c749aec2d859cd102fe24546e",
+      "verification_url": "https://base-sepolia.blockscout.com/api/v2/smart-contracts/0xa9cd4087d9b050d8b35727aaf810296ca957c7b3"
+    }
+  },
+  "protocol": {
+    "withdrawal_wire_id": "WithdrawalWireV1",
+    "withdrawal_policy_id": "withdrawal-policy-v1"
+  },
+  "evidence": {
+    "observed_at": "2026-08-25T19:08:02Z",
+    "rpc_sources": [
+      "Base public RPC",
+      "PublicNode Base Sepolia RPC"
+    ],
+    "explorer_id": "blockscout-base-sepolia"
+  },
+  "refresh": {
+    "mode": "manual-reviewed",
+    "requires_finalized_block": true,
+    "requires_two_rpc_sources": true,
+    "requires_reviewed_code_hashes": true,
+    "steps": [
+      "Select a finalized Base Sepolia block and record its number, hash, and timestamp; never certify latest.",
+      "At that exact block, read the ERC-1967 implementation slot, all three runtime bytecodes, both owners, all five bridge nodes, threshold, withdrawal gate, and reciprocal pairing.",
+      "Repeat every block and pristine-state read through a second independent RPC source and resolve any disagreement before editing.",
+      "Reject empty code, then compute keccak256 over each exact runtime bytecode and review every changed code hash.",
+      "Confirm each deployment transaction, block number, block hash, and contract address from successful chain receipts and an independent explorer record.",
+      "Fetch each verified compiler artifact and ABI, apply the declared canonicalization, and recompute both SHA-256 identities.",
+      "Update the manifest as one reviewed change, run cargo test -p bridge --test base_sepolia_manifest, and inspect the complete manifest diff before commit."
+    ]
+  }
+}
