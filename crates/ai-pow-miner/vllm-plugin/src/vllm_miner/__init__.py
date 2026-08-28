@@ -1,10 +1,9 @@
-from .gemm_operators import pearl_gemm_noisy, pearl_gemm_vanilla
+from .gemm_operators import pearl_gemm_vanilla
 from .register import register_pearl_miner_layer
 from .vllm_kernels import PearlKernel
 
 __all__ = [
     "PearlKernel",
-    "pearl_gemm_noisy",
     "pearl_gemm_vanilla",
     "register_pearl_miner_layer",
 ]

@@ -58,6 +58,8 @@ def init_async_manager(miner_settings: MinerSettings | None = None) -> None:
                 ),
             )
         else:
+            miner_settings.no_gateway = True
+            miner_settings.no_mining = True
             _async_manager = AsyncLoopManager(rpc_config, miner_settings)
         _async_manager.start()
         config.settings = miner_settings

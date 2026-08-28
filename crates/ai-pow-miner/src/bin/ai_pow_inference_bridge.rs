@@ -20,7 +20,9 @@ use ai_pow_miner::inference::{
 };
 #[cfg(feature = "gpu")]
 use ai_pow_miner::inference::{InferenceProofRequest, OpenedDenseWitness};
-use ai_pow_miner::run::{inference_proof_channel, run_inference_node, InferenceNodeConfig};
+use ai_pow_miner::inference_node::{
+    inference_proof_channel, run_inference_node, InferenceNodeConfig,
+};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use nockchain_mining_common::MiningPkhConfig;

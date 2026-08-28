@@ -146,9 +146,6 @@ deployment-specific reason.
 The CUDA 12.9 image requires an NVIDIA driver from the 580 series on RTX 5090.
 Driver 570 cannot use the CUDA forward-compatibility package on GeForce.
 
-Keep each HTTP server on loopback and use SSH port forwarding from the laptop.
-`scripts/compare-gemma4-openai.py` sends the same greedy request to each local
-tunnel and rejects unstable, cross-device-different, or unexpected output.
 
 ## Validation
 
