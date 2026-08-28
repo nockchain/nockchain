@@ -40,7 +40,7 @@ use crate::withdrawal::sequencer::base_verifier::{
 };
 use crate::withdrawal::sequencer::store::{
     jam_transaction, validate_canonical_proposal_tx_inputs, SequencerDecision,
-    WithdrawalSequencerStore,
+    WithdrawalSequencerStore, WithdrawalSubmissionEventRecord,
 };
 use crate::withdrawal::state::{LiveWithdrawalView, WithdrawalState};
 use crate::withdrawal::submission::{
@@ -537,7 +537,21 @@ fn sequenced_status_response(
     withdrawal_nonce: u64,
     current_confirmed_base_height: Option<u64>,
     handoff_window_blocks: u64,
+    confirmation: Option<WithdrawalSubmissionEventRecord>,
 ) -> SequencedWithdrawalStatusResponse {
+    let confirmation_event_id = confirmation
+        .as_ref()
+        .map(|event| format!("sequencer-confirmation:{}", event.event_id));
+    let reservation_release_event_id = confirmation
+        .as_ref()
+        .map(|event| format!("sequencer-reservation-release:{}", event.event_id));
+    let confirmed_height = confirmation
+        .as_ref()
+        .and_then(|event| event.confirmed_height);
+    let confirmed_block_id = confirmation
+        .as_ref()
+        .and_then(|event| event.confirmed_block_id.as_ref())
+        .map(|block_id| block_id.to_be_limb_bytes().to_vec());
     match row {
         Some(row) => {
             let blocks_until_handoff = sequenced_blocks_until_handoff(
@@ -555,6 +569,10 @@ fn sequenced_status_response(
                 current_confirmed_base_height,
                 handoff_window_blocks,
                 blocks_until_handoff,
+                confirmation_event_id,
+                reservation_release_event_id,
+                confirmed_height,
+                confirmed_block_id,
             }
         }
         None => SequencedWithdrawalStatusResponse {
@@ -569,6 +587,10 @@ fn sequenced_status_response(
             current_confirmed_base_height,
             handoff_window_blocks,
             blocks_until_handoff: None,
+            confirmation_event_id: None,
+            reservation_release_event_id: None,
+            confirmed_height: None,
+            confirmed_block_id: None,
         },
     }
 }
@@ -1524,11 +1546,27 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
             .await
             .map_err(|err| Status::internal(format!("sequencer nonce fetch failed: {err}")))?
             .unwrap_or(0);
+        let confirmation = if row
+            .as_ref()
+            .is_some_and(|view| view.state == WithdrawalState::Confirmed)
+        {
+            self.withdrawal_state_store
+                .latest_confirmation_event(&id)
+                .await
+                .map_err(|err| {
+                    Status::internal(format!(
+                        "sequencer confirmation evidence fetch failed: {err}"
+                    ))
+                })?
+        } else {
+            None
+        };
         Ok(Response::new(sequenced_status_response(
             row,
             withdrawal_nonce,
             self.base_height_tracker.latest_confirmed_base_height(),
             self.handoff_window_blocks,
+            confirmation,
         )))
     }
 
@@ -2834,6 +2872,10 @@ mod tests {
             current_confirmed_base_height: Some(61),
             handoff_window_blocks: 17,
             blocks_until_handoff: Some(6),
+            confirmation_event_id: Some("sequencer-confirmation:9".to_owned()),
+            reservation_release_event_id: Some("sequencer-reservation-release:9".to_owned()),
+            confirmed_height: Some(60),
+            confirmed_block_id: Some(vec![0x44; 40]),
         };
         let mut encoded = Vec::new();
         status.encode(&mut encoded).expect("encode status");
@@ -2843,6 +2885,16 @@ mod tests {
         assert_eq!(decoded.current_confirmed_base_height, Some(61));
         assert_eq!(decoded.handoff_window_blocks, 17);
         assert_eq!(decoded.blocks_until_handoff, Some(6));
+        assert_eq!(
+            decoded.confirmation_event_id.as_deref(),
+            Some("sequencer-confirmation:9")
+        );
+        assert_eq!(
+            decoded.reservation_release_event_id.as_deref(),
+            Some("sequencer-reservation-release:9")
+        );
+        assert_eq!(decoded.confirmed_height, Some(60));
+        assert_eq!(decoded.confirmed_block_id, Some(vec![0x44; 40]));
     }
 
     #[tokio::test]
@@ -2880,6 +2932,59 @@ mod tests {
         assert_eq!(response.handoff_window_blocks, handoff_window_blocks);
         assert_eq!(response.turn_started_base_height, Some(190));
         assert_eq!(response.blocks_until_handoff, Some(7));
+    }
+
+    #[tokio::test]
+    async fn confirmed_status_exposes_durable_confirmation_and_release_evidence() {
+        let (rpc, withdrawal_state_store, _base_height_tracker, _submitter, _dir) =
+            open_rpc_service().await;
+        let proposal = sample_proposal(12);
+        register_proposal_ordering(&withdrawal_state_store, &proposal, 1).await;
+        withdrawal_state_store
+            .record_proposal_canonicalized(&proposal, 100)
+            .await
+            .expect("record canonical proposal");
+        withdrawal_state_store
+            .record_proposal_authorized(&proposal)
+            .await
+            .expect("record authorized proposal");
+        withdrawal_state_store
+            .record_submit_outcome(&proposal, WithdrawalState::MempoolAccepted, 1, 200, None)
+            .await
+            .expect("record mempool acceptance");
+        let confirmed_block_id = Tip5Hash([Belt(701), Belt(702), Belt(703), Belt(704), Belt(705)]);
+        withdrawal_state_store
+            .record_tx_confirmed(&proposal, 777, confirmed_block_id.clone())
+            .await
+            .expect("record confirmation");
+        let event = withdrawal_state_store
+            .latest_confirmation_event(&proposal.id)
+            .await
+            .expect("load confirmation event")
+            .expect("confirmation event");
+
+        let response = rpc
+            .get_sequenced_withdrawal_status(Request::new(SequencedWithdrawalStatusRequest {
+                withdrawal_id: Some(withdrawal_id_to_proto(&proposal.id)),
+            }))
+            .await
+            .expect("sequenced status response")
+            .into_inner();
+
+        assert_eq!(response.state, WithdrawalState::Confirmed.as_str());
+        assert_eq!(
+            response.confirmation_event_id,
+            Some(format!("sequencer-confirmation:{}", event.event_id))
+        );
+        assert_eq!(
+            response.reservation_release_event_id,
+            Some(format!("sequencer-reservation-release:{}", event.event_id))
+        );
+        assert_eq!(response.confirmed_height, Some(777));
+        assert_eq!(
+            response.confirmed_block_id,
+            Some(confirmed_block_id.to_be_limb_bytes().to_vec())
+        );
     }
 
     #[tokio::test]

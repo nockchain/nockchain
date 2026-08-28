@@ -351,6 +351,8 @@ fn fake_artifacts(root: &Path) -> Result<E2eArtifacts> {
     Ok(E2eArtifacts {
         bridge: artifact(ArtifactRole::BridgeBinary, "bridge-bin")?,
         node: artifact(ArtifactRole::NodeBinary, "node-bin")?,
+        miner: artifact(ArtifactRole::MinerBinary, "zk-pow-mine")?,
+        wallet: artifact(ArtifactRole::WalletBinary, "nockchain-wallet")?,
         sequencer_ctl: Some(artifact(ArtifactRole::SequencerCtlBinary, "sequencer-ctl")?),
         bridge_jam: artifact(ArtifactRole::BridgeJam, "bridge.jam")?,
         roswell_jam: artifact(ArtifactRole::RoswellJam, "roswell.jam")?,

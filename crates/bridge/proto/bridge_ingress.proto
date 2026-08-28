@@ -328,6 +328,10 @@ message SequencedWithdrawalStatusResponse {
   optional uint64 current_confirmed_base_height = 10;
   uint64 handoff_window_blocks = 11;
   optional uint64 blocks_until_handoff = 12;
+  optional string confirmation_event_id = 13;
+  optional string reservation_release_event_id = 14;
+  optional uint64 confirmed_height = 15;
+  optional bytes confirmed_block_id = 16; // exactly 40 bytes
 }
 
 message SequencerCanonicalProposalArtifactsRequest {
@@ -541,6 +545,8 @@ message GetPublicWithdrawalReadinessResponse {
   string base_units_per_nick = 18;
   string maximum_nicks = 19;
   string bridge_fee_nicks_per_started_nock = 20;
+  bool operator_admission_enabled = 21;
+  optional bool contract_gate_enabled = 22;
   optional uint64 observed_nockchain_height = 9;
   int64 updated_at_unix_ms = 10;
   string support_hint = 11;

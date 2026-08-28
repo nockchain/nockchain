@@ -278,8 +278,8 @@ fn selected_input(index: usize, note_version: u64) -> SelectedInputNoteFacts {
         note_version,
         assets_nicks: 1,
         origin_height: 90 + index as u64,
-        origin_transaction_id: format!("origin-{index}"),
-        origin_is_coinbase: false,
+        origin_transaction_id: Some(format!("origin-{index}")),
+        origin_is_coinbase: Some(false),
     }
 }
 

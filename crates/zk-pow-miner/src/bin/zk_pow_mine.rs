@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use nockchain_mining_common::MiningPkhConfig;
+use nockchain_mining_common::{MiningKeyConfig, MiningPkhConfig};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
@@ -42,6 +42,10 @@ struct Args {
     /// Multi-recipient v1 mining pkh configs. Each entry is `share,pkh`.
     #[arg(long, value_parser = clap::value_parser!(MiningPkhConfig), num_args = 1..)]
     mining_pkh_adv: Option<Vec<MiningPkhConfig>>,
+
+    /// Legacy v0 reward configs. Each entry is `share,m:key1,key2`.
+    #[arg(long, value_parser = clap::value_parser!(MiningKeyConfig), num_args = 1..)]
+    mining_key_adv: Option<Vec<MiningKeyConfig>>,
 
     /// Worker pool size (number of concurrent SerfThreads, each running miner.jam).
     /// Defaults to `num_cpus - 1` (min 1).
@@ -85,6 +89,7 @@ fn main() -> ExitCode {
 
     let cfg = MinerConfig {
         node_addr: args.node_addr,
+        mining_key_configs: args.mining_key_adv.unwrap_or_default(),
         mining_pkh_configs: pkh_configs,
         num_threads,
         reconnect_backoff_initial: Duration::from_millis(args.reconnect_backoff_initial_ms),

@@ -2186,6 +2186,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "aws-sdk-s3",
+ "axum",
  "backon",
  "bincode 2.0.1",
  "blake3",
@@ -2251,6 +2252,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "aws-sdk-s3",
+ "axum",
  "base64",
  "bridge",
  "bs58",
@@ -2276,6 +2278,7 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tonic 0.14.6",
+ "wallet-tx-builder",
 ]
 
 [[package]]

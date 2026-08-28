@@ -13,8 +13,9 @@ use tokio::time::{sleep, timeout, timeout_at, Instant};
 
 use crate::artifacts::{ArtifactOverrides, ArtifactResolveOptions, ArtifactResolver, E2eArtifacts};
 use crate::evidence::{
-    EvidenceCollector, EvidenceEnvironmentFacts, EvidenceEnvironmentMode, EvidenceRunFacts,
-    EvidenceRunStatus, RedactionDeclaration, WithdrawalEvidenceCapsuleV1,
+    EvidenceArtifacts, EvidenceAssertion, EvidenceCollector, EvidenceEnvironmentFacts,
+    EvidenceEnvironmentMode, EvidenceRunFacts, EvidenceRunStatus, EvidenceStep,
+    RedactionDeclaration, WithdrawalEvidenceCapsuleV1,
 };
 use crate::iris_artifact::IrisArtifactInput;
 use crate::iris_driver::BurnSubmissionProof;
@@ -22,6 +23,7 @@ use crate::redaction::SecretRedactor;
 use crate::settlement_oracle::{SettlementConservationProof, TerminalWithdrawalProof};
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
+const E2E_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -74,6 +76,7 @@ pub struct E2eRunConfig {
 
 #[derive(Debug, Clone)]
 pub struct E2eRunContext {
+    pub workspace_root: PathBuf,
     pub run_id: String,
     pub run_dir: PathBuf,
     pub artifacts: E2eArtifacts,
@@ -346,6 +349,7 @@ impl E2eRunner {
             }
         };
         let context = E2eRunContext {
+            workspace_root: config.workspace_root.clone(),
             run_id: run_id.clone(),
             run_dir: run_dir.clone(),
             artifacts: artifacts.clone(),
@@ -385,9 +389,9 @@ impl E2eRunner {
                 Err(error) => errors.push(error),
             }
         }
-
         let shutdown_attempted = true;
-        match timeout(Duration::from_secs(5), executor.shutdown(&context)).await {
+
+        match timeout(E2E_SHUTDOWN_TIMEOUT, executor.shutdown(&context)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => errors.push(format!("shutdown: {error}")),
             Err(_) => errors.push("shutdown: timed out".to_owned()),
@@ -417,6 +421,9 @@ impl E2eRunner {
             .report_path
             .unwrap_or_else(|| run_dir.join("report.json"));
         write_report(&report_path, &report)?;
+        if report.status == "failed" {
+            write_failed_run_evidence(&context, &report)?;
+        }
         Ok(E2eRunOutcome {
             report,
             report_path,
@@ -470,6 +477,8 @@ fn resolve_artifacts(config: &E2eRunConfig) -> Result<E2eArtifacts, E2eRunnerErr
         })?;
         options.overrides = ArtifactOverrides {
             bridge: Some(expected.bridge.path.clone()),
+            miner: Some(expected.miner.path.clone()),
+            wallet: Some(expected.wallet.path.clone()),
             node: Some(expected.node.path.clone()),
             sequencer_ctl: expected
                 .sequencer_ctl
@@ -493,6 +502,8 @@ fn artifact_hashes(artifacts: &E2eArtifacts) -> Vec<&str> {
     let mut hashes = vec![
         artifacts.bridge.sha256.as_str(),
         artifacts.node.sha256.as_str(),
+        artifacts.miner.sha256.as_str(),
+        artifacts.wallet.sha256.as_str(),
         artifacts.bridge_jam.sha256.as_str(),
         artifacts.roswell_jam.sha256.as_str(),
         artifacts.fakenet_genesis_jam.sha256.as_str(),
@@ -504,14 +515,19 @@ fn artifact_hashes(artifacts: &E2eArtifacts) -> Vec<&str> {
 }
 
 fn allocate_run_dir(config: &E2eRunConfig) -> Result<(String, PathBuf), E2eRunnerError> {
-    let base = config
+    let requested_base = config
         .run_root
         .clone()
         .unwrap_or_else(|| config.workspace_root.join("target/bridge-e2e-runs"));
-    fs::create_dir_all(&base).map_err(|source| E2eRunnerError::RunDirectory {
-        path: base.clone(),
+    fs::create_dir_all(&requested_base).map_err(|source| E2eRunnerError::RunDirectory {
+        path: requested_base.clone(),
         source,
     })?;
+    let base =
+        fs::canonicalize(&requested_base).map_err(|source| E2eRunnerError::RunDirectory {
+            path: requested_base,
+            source,
+        })?;
     for _ in 0..32 {
         let counter = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
         let timestamp = SystemTime::now()
@@ -614,6 +630,80 @@ fn write_report(path: &Path, report: &E2eReport) -> Result<(), E2eRunnerError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn write_failed_run_evidence(
+    context: &E2eRunContext,
+    report: &E2eReport,
+) -> Result<(), E2eRunnerError> {
+    let final_evidence = context.run_dir.join("safe-evidence/report.json");
+    if final_evidence.is_file() {
+        return Ok(());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let mode = match context.base {
+        E2eBaseMode::Hermetic => EvidenceEnvironmentMode::Hermetic,
+        E2eBaseMode::BaseSepoliaFork => EvidenceEnvironmentMode::BaseSepoliaFork,
+    };
+    let error = report.errors.join("; ");
+    let mut capsule = WithdrawalEvidenceCapsuleV1::new(
+        EvidenceRunFacts {
+            run_id: context.run_id.clone(),
+            scenario: "withdrawal".to_owned(),
+            seed: context.seed,
+            status: EvidenceRunStatus::Failed,
+            error: Some(error.clone()),
+            started_at_unix_ms: now,
+            finished_at_unix_ms: Some(now),
+        },
+        EvidenceEnvironmentFacts {
+            mode,
+            environment_id: context.base.id().to_owned(),
+            source_manifest_sha256: None,
+            source_chain_id: (context.base == E2eBaseMode::BaseSepoliaFork).then_some(84_532),
+            source_block_number: None,
+            source_block_hash: None,
+            local_chain_id: 31_338,
+            rpc_endpoint_class: "loopback_anvil".to_owned(),
+        },
+        RedactionDeclaration {
+            policy: "withdrawal-e2e-redaction-v1".to_owned(),
+            removed_secret_classes: Vec::new(),
+            raw_logs_embedded: false,
+            external_artifacts_only: true,
+        },
+    );
+    capsule.artifacts = Some(EvidenceArtifacts {
+        bridge_runtime: context.artifacts.clone(),
+        iris: None,
+        nockswap_bundle: None,
+    });
+    capsule.steps.push(EvidenceStep {
+        index: 0,
+        action: "provision".to_owned(),
+        status: "failed".to_owned(),
+        started_at_unix_ms: now,
+        finished_at_unix_ms: now,
+        duration_ms: 0,
+        frontier_before: None,
+        frontier_after: None,
+        detail: Some(json!({"errors": report.errors})),
+    });
+    capsule.assertions.push(EvidenceAssertion {
+        assertion: "selected_scenario_completed".to_owned(),
+        status: "failed".to_owned(),
+        detail: Some(error),
+    });
+    let redactor = SecretRedactor::new(Vec::new())?;
+    let mut collector = EvidenceCollector::new(&context.run_dir, redactor)?;
+    collector.checkpoint("failed", &capsule)?;
+    collector.finish(&capsule)?;
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -721,22 +811,5 @@ impl E2eScenarioExecutor for ScriptedE2eExecutor {
         } else {
             Ok(())
         }
-    }
-}
-
-pub struct UnavailableE2eExecutor;
-
-#[async_trait]
-impl E2eScenarioExecutor for UnavailableE2eExecutor {
-    async fn provision(&mut self, _context: &E2eRunContext) -> Result<(), String> {
-        Err("selected withdrawal backend is not wired into the cluster runner yet".to_owned())
-    }
-
-    async fn execute(&mut self, _context: &E2eRunContext) -> Result<ScenarioExecution, String> {
-        Err("withdrawal execution is unavailable without provisioning".to_owned())
-    }
-
-    async fn shutdown(&mut self, _context: &E2eRunContext) -> Result<(), String> {
-        Ok(())
     }
 }

@@ -15,6 +15,7 @@ malloc = []
 snmalloc = ["dep:snmalloc-rs"]
 
 [dependencies]
+axum.workspace = true
 alloy = { workspace = true, features = ["provider-ws", "signer-local"] }
 anyhow.workspace = true
 async-trait.workspace = true

@@ -2088,6 +2088,7 @@ mod tests {
                         handoff_window_blocks: 0,
 
                         blocks_until_handoff: None,
+                        ..Default::default()
                     },
                 );
             };
@@ -2109,6 +2110,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             )
         }
@@ -2198,6 +2200,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             )
         }
@@ -2308,6 +2311,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             )
         }
@@ -2368,6 +2372,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             )
         }

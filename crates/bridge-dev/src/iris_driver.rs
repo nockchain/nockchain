@@ -321,6 +321,31 @@ pub async fn submit_withdrawal_burn(
     receipt_timeout: Duration,
 ) -> Result<BurnSubmissionProof, BurnSubmissionError> {
     validate_submission_binding(request, &output, require_official_iris)?;
+    let chain_id = backend.chain_id().await?;
+    if chain_id != BASE_SEPOLIA_E2E_CHAIN_ID {
+        return Err(BurnSubmissionError::ChainChanged {
+            expected: BASE_SEPOLIA_E2E_CHAIN_ID,
+            observed: chain_id,
+        });
+    }
+    let transaction_hash = backend
+        .send_transaction(request.burner, request.nock_token, output.calldata.clone())
+        .await?;
+    observe_withdrawal_burn(
+        backend, request, output, require_official_iris, transaction_hash, receipt_timeout,
+    )
+    .await
+}
+
+pub async fn observe_withdrawal_burn(
+    backend: &BaseBackend,
+    request: &WithdrawalClientRequest,
+    output: WithdrawalClientOutput,
+    require_official_iris: bool,
+    transaction_hash: B256,
+    receipt_timeout: Duration,
+) -> Result<BurnSubmissionProof, BurnSubmissionError> {
+    validate_submission_binding(request, &output, require_official_iris)?;
     if receipt_timeout.is_zero() {
         return Err(BurnSubmissionError::InvalidRequest(
             "receipt timeout must be positive",
@@ -333,9 +358,6 @@ pub async fn submit_withdrawal_burn(
             observed: chain_id,
         });
     }
-    let transaction_hash = backend
-        .send_transaction(request.burner, request.nock_token, output.calldata.clone())
-        .await?;
     let receipt = backend
         .wait_for_receipt(transaction_hash, receipt_timeout)
         .await?;
