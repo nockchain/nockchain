@@ -1,0 +1,23 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "ai-pow-zk",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "default",
+        "recursion",
+    ],
+    edition = "2021",
+    deps = [
+        "//crates/nockchain-math",
+    ] + all_crate_deps(),
+)

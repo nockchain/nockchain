@@ -12,6 +12,25 @@ The compact recursive verifier uses one proof-independent context for each reach
 
 A digest mismatch aborts startup. A node must not continue with a locally derived setup that differs from the consensus-known table.
 
+## Memory-bounded cache bootstrap
+
+Generating all production proofs in one process can retain more allocator
+working memory than a constrained validator host can provide. The setup-cache
+utility isolates each bucket in its own child process, retains completed shards
+across retries, verifies the assembled table against the committed consensus
+digest, and writes the canonical seed cache:
+
+```sh
+cargo run --release -p ai-pow-jets --bin ai-pow-setup-cache -- \
+  generate-all /path/to/nockchain-data
+```
+
+The resulting cache is
+`/path/to/nockchain-data/ai-pow/verifier-setup-seeds-v1.bin`. Starting a node
+with that data directory still validates the consensus digest and builds any
+missing disk contexts before networking starts. Re-running `generate-all`
+reuses every complete, checksummed shard and fails on malformed shard data.
+
 ## Verification path
 
 The jet resolves the certificate's required trace-height bucket after setup-free

@@ -375,6 +375,197 @@ message SequencerFrontierAllowsWithdrawalResponse {
   bool is_frontier = 3;
 }
 
+// PublicWithdrawalStatus is the deliberately coarse DApp lifecycle. Internal
+// proposal, signer, reservation, handoff, and submission states never cross
+// this API boundary.
+enum PublicWithdrawalStatus {
+  PUBLIC_WITHDRAWAL_STATUS_UNSPECIFIED = 0;
+  PUBLIC_WITHDRAWAL_STATUS_DRAFT = 1;
+  PUBLIC_WITHDRAWAL_STATUS_AWAITING_BASE = 2;
+  PUBLIC_WITHDRAWAL_STATUS_WITHDRAWAL_PENDING = 3;
+  PUBLIC_WITHDRAWAL_STATUS_CONFIRMED = 4;
+  PUBLIC_WITHDRAWAL_STATUS_DELAYED = 5;
+  PUBLIC_WITHDRAWAL_STATUS_FAILURE = 6;
+}
+
+enum PublicWithdrawalResolution {
+  PUBLIC_WITHDRAWAL_RESOLUTION_UNSPECIFIED = 0;
+  PUBLIC_WITHDRAWAL_RESOLUTION_FOUND = 1;
+  PUBLIC_WITHDRAWAL_RESOLUTION_NOT_OBSERVED = 2;
+  PUBLIC_WITHDRAWAL_RESOLUTION_AMBIGUOUS_LOG = 3;
+  PUBLIC_WITHDRAWAL_RESOLUTION_MALFORMED_BURN = 4;
+  PUBLIC_WITHDRAWAL_RESOLUTION_BELOW_POLICY = 5;
+  PUBLIC_WITHDRAWAL_RESOLUTION_REORGED = 6;
+  PUBLIC_WITHDRAWAL_RESOLUTION_INCONSISTENT = 7;
+  PUBLIC_WITHDRAWAL_RESOLUTION_COMPENSATED = 8;
+}
+
+enum PublicWithdrawalReadiness {
+  PUBLIC_WITHDRAWAL_READINESS_UNSPECIFIED = 0;
+  PUBLIC_WITHDRAWAL_READINESS_READY = 1;
+  PUBLIC_WITHDRAWAL_READINESS_DEGRADED = 2;
+  PUBLIC_WITHDRAWAL_READINESS_UNAVAILABLE = 3;
+}
+
+enum PublicWithdrawalReadinessReason {
+  PUBLIC_WITHDRAWAL_READINESS_REASON_UNSPECIFIED = 0;
+  PUBLIC_WITHDRAWAL_READINESS_REASON_HEALTHY = 1;
+  PUBLIC_WITHDRAWAL_READINESS_REASON_BASE_SCANNER_BEHIND = 2;
+  PUBLIC_WITHDRAWAL_READINESS_REASON_JOURNAL_RECONCILING = 3;
+  PUBLIC_WITHDRAWAL_READINESS_REASON_NOCKCHAIN_UNAVAILABLE = 4;
+  PUBLIC_WITHDRAWAL_READINESS_REASON_POLICY_UNAVAILABLE = 5;
+  PUBLIC_WITHDRAWAL_READINESS_REASON_WITHDRAWALS_PAUSED = 6;
+}
+
+message PublicWithdrawalDeployment {
+  uint64 base_chain_id = 1;
+  bytes nock_contract_address = 2; // exactly 20 bytes
+  string policy_id = 3;
+  string protocol_id = 4;
+}
+
+message PublicBaseWithdrawalLocator {
+  bytes transaction_hash = 1; // exactly 32 bytes
+  // Presence matters because log index zero is valid. Omit only when asking
+  // ResolveBaseWithdrawal to detect a unique withdrawal log in the receipt.
+  optional uint64 log_index = 2;
+}
+
+message PublicWithdrawalRecord {
+  uint32 schema_version = 1; // currently 1
+  PublicWithdrawalDeployment deployment = 2;
+  PublicBaseWithdrawalLocator base = 3;
+  bytes base_event_id = 4; // exactly 32 bytes
+  optional WithdrawalId withdrawal_id = 5;
+  bytes burner = 6; // exactly 20 bytes
+  string gross_amount_base_units = 7; // unsigned decimal, never floating point
+  string gross_amount_nicks = 8; // unsigned decimal
+  optional string net_amount_nicks = 9; // authoritative payout only
+  bytes destination_lock_root = 10; // exactly 40 bytes
+  PublicWithdrawalStatus status = 11;
+  PublicWithdrawalResolution resolution = 12;
+  // Monotonically increases when authoritative public facts change. Clients
+  // must accept status regression when a higher revision reports a reorg.
+  uint64 revision = 13;
+  bool canonical_base_event = 14;
+  optional uint64 base_block_number = 15;
+  optional bytes base_block_hash = 16; // exactly 32 bytes
+  optional int64 observed_at_unix_ms = 17;
+  optional int64 updated_at_unix_ms = 18;
+  optional string nock_transaction_name = 19;
+  optional uint64 nock_confirmed_height = 20;
+  optional bytes nock_confirmed_block_id = 21; // exactly 40 bytes
+  optional int64 confirmed_at_unix_ms = 22;
+  string support_hint = 23;
+  // Structured recovery facts are populated when current status reflects an
+  // invalidation or hold. They describe current canonical state, not history
+  // inferred by the client.
+  optional uint64 recovery_generation = 24;
+  optional uint64 invalidated_block_height = 25;
+  optional bytes invalidated_block_id = 26;
+  string prior_status = 27;
+  string recovery_reason = 28;
+}
+
+message ResolveBaseWithdrawalRequest {
+  PublicWithdrawalDeployment deployment = 1;
+  PublicBaseWithdrawalLocator base = 2;
+}
+
+message ResolveBaseWithdrawalResponse {
+  PublicWithdrawalResolution resolution = 1;
+  PublicWithdrawalStatus status = 2;
+  optional PublicWithdrawalRecord withdrawal = 3;
+  // Populated only when log_index was omitted and the transaction contains
+  // more than one candidate withdrawal log.
+  repeated uint64 candidate_log_indices = 4;
+  string support_hint = 5;
+}
+
+message PublicWithdrawalLookupKey {
+  PublicWithdrawalDeployment deployment = 1;
+  oneof key {
+    PublicBaseWithdrawalLocator base = 2;
+    bytes base_event_id = 3; // exactly 32 bytes
+    WithdrawalId withdrawal_id = 4;
+  }
+}
+
+message GetPublicWithdrawalRequest {
+  PublicWithdrawalLookupKey lookup = 1;
+}
+
+message GetPublicWithdrawalResponse {
+  bool found = 1;
+  optional PublicWithdrawalRecord withdrawal = 2;
+  PublicWithdrawalResolution resolution = 3;
+  string support_hint = 4;
+  uint64 revision = 5;
+}
+
+message ListPublicWithdrawalsByBurnerRequest {
+  PublicWithdrawalDeployment deployment = 1;
+  bytes burner = 2; // exactly 20 bytes
+  // Default 20, maximum 100. Zero requests the default.
+  uint32 page_size = 3;
+  // Opaque, tamper-evident cursor bound to deployment, burner, snapshot, and
+  // the last (Base block, log index, base_event_id) sort key.
+  string page_token = 4;
+}
+
+message ListPublicWithdrawalsByBurnerResponse {
+  repeated PublicWithdrawalRecord withdrawals = 1;
+  string next_page_token = 2;
+  uint64 snapshot_revision = 3;
+}
+
+message GetPublicWithdrawalReadinessRequest {
+  PublicWithdrawalDeployment deployment = 1;
+}
+
+message GetPublicWithdrawalReadinessResponse {
+  PublicWithdrawalReadiness readiness = 1;
+  bool accepting_new_withdrawals = 2;
+  repeated PublicWithdrawalReadinessReason reasons = 3;
+  string policy_id = 4;
+  string protocol_id = 5;
+  optional uint64 confirmed_base_height = 6;
+  optional uint64 indexed_base_height = 7;
+  optional uint64 reconciled_journal_sequence = 8;
+  optional int64 base_observed_at_unix_ms = 12;
+  string minimum_gross_nocks = 13;
+  string minimum_gross_nicks = 14;
+  string minimum_gross_base_units = 15;
+  string base_units_per_nock = 16;
+  string nicks_per_nock = 17;
+  string base_units_per_nick = 18;
+  string maximum_nicks = 19;
+  string bridge_fee_nicks_per_started_nock = 20;
+  optional uint64 observed_nockchain_height = 9;
+  int64 updated_at_unix_ms = 10;
+  string support_hint = 11;
+}
+
+message GetPublicWithdrawalQuoteRequest {
+  PublicWithdrawalDeployment deployment = 1;
+  string gross_amount_nicks = 2;
+  bytes destination_lock_root = 3; // exactly 40 bytes
+}
+
+message GetPublicWithdrawalQuoteResponse {
+  bool available = 1;
+  string gross_amount_nicks = 2;
+  string bridge_fee_nicks = 3;
+  string transaction_fee_nicks = 4;
+  string net_payout_nicks = 5;
+  optional uint64 snapshot_height = 6;
+  optional bytes snapshot_block_id = 7;
+  uint64 reserved_input_count = 8;
+  int64 observed_at_unix_ms = 9;
+  uint64 revision = 10;
+  string reason = 11;
+}
+
 service BridgeIngress {
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
   rpc BroadcastDepositSignature(DepositSignatureBroadcast) returns (DepositSignatureBroadcastResponse);
@@ -406,4 +597,15 @@ service WithdrawalSequencer {
   rpc FrontierAllowsWithdrawal(SequencerFrontierAllowsWithdrawalRequest) returns (SequencerFrontierAllowsWithdrawalResponse);
   rpc GetSequencedWithdrawalStatus(SequencedWithdrawalStatusRequest) returns (SequencedWithdrawalStatusResponse);
   rpc GetCanonicalProposalArtifacts(SequencerCanonicalProposalArtifactsRequest) returns (SequencerCanonicalProposalArtifactsResponse);
+}
+
+// WithdrawalPublicQuery is the only DApp-facing withdrawal service. It is
+// read-only and must be exposed on a listener/auth policy that cannot route to
+// the privileged WithdrawalSequencer service above.
+service WithdrawalPublicQuery {
+  rpc ResolveBaseWithdrawal(ResolveBaseWithdrawalRequest) returns (ResolveBaseWithdrawalResponse);
+  rpc GetWithdrawal(GetPublicWithdrawalRequest) returns (GetPublicWithdrawalResponse);
+  rpc ListWithdrawalsByBurner(ListPublicWithdrawalsByBurnerRequest) returns (ListPublicWithdrawalsByBurnerResponse);
+  rpc GetWithdrawalReadiness(GetPublicWithdrawalReadinessRequest) returns (GetPublicWithdrawalReadinessResponse);
+  rpc GetWithdrawalQuote(GetPublicWithdrawalQuoteRequest) returns (GetPublicWithdrawalQuoteResponse);
 }

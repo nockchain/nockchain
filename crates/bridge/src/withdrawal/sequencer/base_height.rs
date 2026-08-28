@@ -1,6 +1,8 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use alloy::primitives::Address;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::transports::ws::WsConnect;
 use backon::Retryable;
@@ -11,6 +13,7 @@ use tracing::{info, warn};
 
 use crate::core::loop_policy::BaseObserverLoopPolicy;
 use crate::observability::metrics;
+use crate::shared::base::{query_withdrawals_enabled, validate_base_chain_id};
 use crate::shared::errors::BridgeError;
 
 fn is_rate_limit_error<E: std::fmt::Display>(err: &E) -> bool {
@@ -23,6 +26,8 @@ fn is_rate_limit_error<E: std::fmt::Display>(err: &E) -> bool {
 #[derive(Debug)]
 pub struct SequencerBaseHeightTracker {
     latest_confirmed_base_height: AtomicU64,
+    last_advanced_at_unix_ms: AtomicU64,
+    withdrawals_enabled: AtomicU8,
     ready_notify: Notify,
 }
 
@@ -30,6 +35,8 @@ impl Default for SequencerBaseHeightTracker {
     fn default() -> Self {
         Self {
             latest_confirmed_base_height: AtomicU64::new(0),
+            last_advanced_at_unix_ms: AtomicU64::new(0),
+            withdrawals_enabled: AtomicU8::new(0),
             ready_notify: Notify::new(),
         }
     }
@@ -41,12 +48,39 @@ impl SequencerBaseHeightTracker {
         let height = self.latest_confirmed_base_height.load(Ordering::SeqCst);
         (height > 0).then_some(height)
     }
+    pub fn latest_confirmed_base_observation(&self) -> Option<(u64, u64)> {
+        let height = self.latest_confirmed_base_height()?;
+        let observed_at = self.last_advanced_at_unix_ms.load(Ordering::SeqCst);
+        (observed_at > 0).then_some((height, observed_at))
+    }
+    pub fn withdrawals_enabled(&self) -> Option<bool> {
+        match self.withdrawals_enabled.load(Ordering::SeqCst) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
 
-    /// Monotonically advances the tracked confirmed Base height.
+    pub fn record_withdrawals_enabled(&self, enabled: Option<bool>) {
+        self.withdrawals_enabled.store(
+            match enabled {
+                Some(false) => 1,
+                Some(true) => 2,
+                None => 0,
+            },
+            Ordering::SeqCst,
+        );
+    }
+
+    /// Monotonically advances the tracked confirmed Base height and records
+    /// when real chain progress was last observed.
     ///
     /// Returns `true` when the height advanced and `false` when the supplied
     /// height was stale or equal to the current value.
-    pub fn record_confirmed_base_height(&self, height: u64) -> bool {
+    pub fn record_confirmed_base_observation(&self, height: u64, observed_at_unix_ms: u64) -> bool {
+        if observed_at_unix_ms == 0 {
+            return false;
+        }
         loop {
             let current = self.latest_confirmed_base_height.load(Ordering::SeqCst);
             if height <= current {
@@ -57,10 +91,21 @@ impl SequencerBaseHeightTracker {
                 .compare_exchange(current, height, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                self.last_advanced_at_unix_ms
+                    .store(observed_at_unix_ms, Ordering::SeqCst);
                 self.ready_notify.notify_waiters();
                 return true;
             }
         }
+    }
+
+    pub fn record_confirmed_base_height(&self, height: u64) -> bool {
+        let observed_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+            .unwrap_or_default();
+        self.record_confirmed_base_observation(height, observed_at_unix_ms)
     }
 
     /// Waits until the watcher has observed at least one confirmed Base height.
@@ -115,11 +160,17 @@ fn confirmed_base_height(chain_tip: u64, confirmation_depth: u64) -> Option<u64>
 /// monotonic progress into the sequencer's in-memory tracker.
 pub async fn run_confirmed_base_height_watcher(
     ws_url: String,
+    expected_chain_id: u64,
     confirmation_depth: u64,
+    nock_contract_address: Address,
     tracker: Arc<SequencerBaseHeightTracker>,
     policy: BaseObserverLoopPolicy,
 ) -> Result<(), BridgeError> {
     let mut provider = connect_provider(&ws_url, policy).await?;
+    validate_base_chain_id(
+        &provider, expected_chain_id, "sequencer Base height watcher",
+    )
+    .await?;
 
     loop {
         let chain_tip = match (|| async { provider.get_block_number().await })
@@ -147,11 +198,32 @@ pub async fn run_confirmed_base_height_watcher(
             }
         };
 
+        match query_withdrawals_enabled(&provider, nock_contract_address).await {
+            Ok(enabled) => tracker.record_withdrawals_enabled(Some(enabled)),
+            Err(error) => {
+                tracker.record_withdrawals_enabled(None);
+                warn!(
+                    target: "nockchain.withdrawal_sequencer.base_height",
+                    error = %error,
+                    "failed to observe withdrawal contract gate"
+                );
+            }
+        }
         let Some(confirmed_height) = confirmed_base_height(chain_tip, confirmation_depth) else {
             continue;
         };
 
-        if tracker.record_confirmed_base_height(confirmed_height) {
+        let observed_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| BridgeError::Runtime(format!("system time before unix epoch: {err}")))
+            .and_then(|duration| {
+                u64::try_from(duration.as_millis()).map_err(|err| {
+                    BridgeError::ValueConversion(format!(
+                        "Base observation timestamp overflow: {err}"
+                    ))
+                })
+            })?;
+        if tracker.record_confirmed_base_observation(confirmed_height, observed_at_unix_ms) {
             metrics::init_metrics()
                 .sequencer_withdrawal_base_confirmed_height
                 .swap(confirmed_height as f64);
@@ -186,6 +258,38 @@ mod tests {
 
         assert!(tracker.record_confirmed_base_height(101));
         assert_eq!(tracker.latest_confirmed_base_height(), Some(101));
+    }
+    #[test]
+    fn observation_freshness_advances_only_with_chain_height() {
+        let tracker = SequencerBaseHeightTracker::default();
+        assert_eq!(tracker.latest_confirmed_base_observation(), None);
+        assert!(tracker.record_confirmed_base_observation(100, 1_000));
+        assert_eq!(
+            tracker.latest_confirmed_base_observation(),
+            Some((100, 1_000))
+        );
+        assert!(!tracker.record_confirmed_base_observation(100, 2_000));
+        assert_eq!(
+            tracker.latest_confirmed_base_observation(),
+            Some((100, 1_000))
+        );
+        assert!(tracker.record_confirmed_base_observation(101, 2_000));
+        assert_eq!(
+            tracker.latest_confirmed_base_observation(),
+            Some((101, 2_000))
+        );
+    }
+
+    #[test]
+    fn withdrawal_gate_observation_is_tristate() {
+        let tracker = SequencerBaseHeightTracker::default();
+        assert_eq!(tracker.withdrawals_enabled(), None);
+        tracker.record_withdrawals_enabled(Some(false));
+        assert_eq!(tracker.withdrawals_enabled(), Some(false));
+        tracker.record_withdrawals_enabled(Some(true));
+        assert_eq!(tracker.withdrawals_enabled(), Some(true));
+        tracker.record_withdrawals_enabled(None);
+        assert_eq!(tracker.withdrawals_enabled(), None);
     }
 
     #[test]

@@ -75,7 +75,53 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    sequencer_base_burn_rejections (
+        chain_id,
+        nock_contract_address,
+        base_event_id
+    ) {
+        chain_id -> BigInt,
+        nock_contract_address -> Binary,
+        base_event_id -> Binary,
+        block_number -> BigInt,
+        block_hash -> Binary,
+        parent_hash -> Binary,
+        observed_at_unix_secs -> Nullable<BigInt>,
+        tx_hash -> Binary,
+        tx_index -> BigInt,
+        log_index -> BigInt,
+        burner -> Nullable<Binary>,
+        amount_base_units -> Nullable<Text>,
+        commitment -> Nullable<Binary>,
+        calldata -> Binary,
+        rejection_code -> Text,
+        rejection_detail -> Text,
+        canonical -> BigInt,
+        first_observed_at -> BigInt,
+        last_observed_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    sequencer_compensated_withdrawals (
+        chain_id,
+        nock_contract_address,
+        base_event_id
+    ) {
+        chain_id -> BigInt,
+        nock_contract_address -> Binary,
+        base_event_id -> Binary,
+        tx_hash -> Binary,
+        log_index -> BigInt,
+        reason -> Text,
+        evidence_reference -> Text,
+        recorded_at -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     sequencer_journal_cursor, sequencer_withdrawals, withdrawal_reserved_inputs,
-    withdrawal_submission_events,
+    withdrawal_submission_events, sequencer_base_burn_rejections,
+    sequencer_compensated_withdrawals,
 );

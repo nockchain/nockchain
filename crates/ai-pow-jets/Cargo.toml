@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MIT OR Apache-2.0"
 description = "Consensus verifier jet for the AI-PoW (%ai-pow) puzzle: a Rust jet that verifies a decoded compact recursive certificate, with a stubbed Hoon arm (Branch b). The artifact noun stays transparent to Hoon; only the recursive-STARK verify is native."
 
+[[bin]]
+name = "ai-pow-setup-cache"
+path = "src/bin/ai_pow_setup_cache.rs"
+
 [dependencies]
 ai-pow = { path = "../ai-pow", features = ["zk"] }
 ai-pow-zk = { path = "../ai-pow-zk", features = ["recursion"] }
@@ -17,11 +21,11 @@ once_cell.workspace = true
 tracing.workspace = true
 serde.workspace = true
 bincode = { workspace = true, features = ["serde"] }
+tikv-jemallocator = { workspace = true }
 
 [dev-dependencies]
 nockapp = { path = "../nockapp" }
 tempfile = { workspace = true }
-tikv-jemallocator = { workspace = true }
 
 [lints]
 workspace = true

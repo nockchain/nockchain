@@ -2216,6 +2216,7 @@ dependencies = [
  "num-bigint",
  "op-alloy",
  "prost 0.14.3",
+ "prost-types",
  "protoc-bin-vendored",
  "ratatui 0.29.0",
  "reqwest 0.12.28",
@@ -6650,6 +6651,7 @@ version = "0.1.15"
 dependencies = [
  "bridge",
  "clap",
+ "hex",
  "nockapp",
  "nockchain",
  "nockvm",
@@ -12925,3 +12927,4 @@ dependencies = [
 [[patch.unused]]
 name = "aws-runtime"
 version = "1.7.4"
+

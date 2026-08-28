@@ -478,6 +478,7 @@ fn node_config_requires_matching_nock_signer_before_enabling_withdrawals() {
     let mut config = BridgeConfigToml {
         node_id: 1,
         base_ws_url: "wss://example.invalid".to_string(),
+        base_chain_id: Some(8_453),
         bridge_lock_root: CANONICAL_TESTING_BRIDGE_LOCK_ROOT_B58.to_string(),
         inbox_contract_address: None,
         nock_contract_address: None,
@@ -489,6 +490,7 @@ fn node_config_requires_matching_nock_signer_before_enabling_withdrawals() {
         base_confirmation_depth: 0,
         nockchain_confirmation_depth: 0,
         withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
+        compensated_withdrawals: Vec::new(),
         deposit_nonce_epoch_base: None,
         deposit_nonce_epoch_start_height: None,
         deposit_nonce_epoch_start_tx_id_base58: None,
@@ -1270,6 +1272,7 @@ fn sequencer_config_parses_public_facts_without_bridge_private_keys() {
     let config_content = format!(
         r#"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
+base_chain_id = 8453
 nockchain_confirmation_depth = 100
 withdrawal_policy = "withdrawal-policy-v1"
 
@@ -1295,6 +1298,10 @@ nockchain_start_height = 25
     let config =
         SequencerConfigToml::from_file(&config_path).expect("Failed to parse sequencer config");
     assert_eq!(config.nockchain_confirmation_depth, 100);
+    assert_eq!(
+        config.base_chain_id().expect("explicit Base chain id"),
+        8_453
+    );
     assert!(!config.manual_submit_approval);
     assert_eq!(config.manual_submit_approval_dir, None);
     assert_eq!(
@@ -1337,6 +1344,7 @@ fn sequencer_config_defaults_journal_when_section_is_omitted() {
     let config_content = format!(
         r#"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
+base_chain_id = 8453
 nockchain_confirmation_depth = 100
 withdrawal_policy = "withdrawal-policy-v1"
 
