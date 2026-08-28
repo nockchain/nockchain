@@ -1,4 +1,4 @@
-name: Compiler parity (manual)
+name: Compiler parity
 
 # Byte-for-byte artifact parity between hoonc (reference) and honk (native
 # compiler): each kernel plus the hoon-138 arbitrary self-mint, one job per
@@ -14,7 +14,34 @@ name: Compiler parity (manual)
 # co-schedule both compiles of a pair on a 16GB runner.
 
 on:
-  workflow_dispatch:
+  push:
+    branches: ["master", "nightly"]
+    paths:
+      - "hoon/**"
+      - "crates/**"
+      - "assets/**"
+      - "rules_hoon/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
+      - ".github/workflows/parity.yml"
+  pull_request:
+    branches: ["master", "nightly"]
+    paths:
+      - "hoon/**"
+      - "crates/**"
+      - "assets/**"
+      - "rules_hoon/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
+      - ".github/workflows/parity.yml"
 
 permissions:
   contents: read
