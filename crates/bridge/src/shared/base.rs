@@ -148,7 +148,7 @@ pub struct CompensatedWithdrawalRegistry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DecodedBurnForWithdrawalLog {
+pub struct DecodedBurnForWithdrawalLog {
     pub base_event_id: BaseEventId,
     pub burner: EthAddress,
     pub amount: u64,
@@ -230,7 +230,7 @@ fn parse_compensation_hex<const N: usize>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BurnForWithdrawalDecodeError {
+pub enum BurnForWithdrawalDecodeError {
     NotBurnForWithdrawal(String),
     AmountNotDivisible {
         amount_raw: U256,
@@ -1494,7 +1494,7 @@ pub(crate) fn compute_base_event_id(tx_hash: &B256, log_index: Option<u64>) -> B
     BaseEventId(keccak256(&hash_input).as_slice().to_vec())
 }
 
-pub(crate) fn burn_for_withdrawal_signature_hash() -> B256 {
+pub fn burn_for_withdrawal_signature_hash() -> B256 {
     Nock::BurnForWithdrawal::SIGNATURE_HASH
 }
 
@@ -1539,7 +1539,7 @@ pub fn encode_withdrawal_burn_calldata(
     Bytes::from(calldata)
 }
 
-fn parse_withdrawal_burn_calldata(
+pub fn parse_withdrawal_burn_calldata(
     calldata: &[u8],
 ) -> Result<(U256, B256, Tip5Hash), BurnForWithdrawalDecodeError> {
     if calldata.len() == WITHDRAWAL_BURN_BASE_CALLDATA_LEN {
@@ -1625,7 +1625,7 @@ pub(crate) fn decode_burn_for_withdrawal_event(
     })
 }
 
-pub(crate) fn decode_burn_for_withdrawal_log_with_calldata(
+pub fn decode_burn_for_withdrawal_log_with_calldata(
     raw: &RawLog,
     tx_hash: &B256,
     log_index: Option<u64>,

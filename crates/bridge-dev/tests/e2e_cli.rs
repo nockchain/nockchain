@@ -20,7 +20,8 @@ fn help_exposes_stable_withdrawal_command() -> Result<()> {
     let stdout = String::from_utf8(output.stdout)?;
     for option in [
         "--base", "--client", "--seed", "--build", "--artifacts", "--archive-rpc-url",
-        "--keep-artifacts", "--run-root", "--timeout-secs",
+        "--iris-checkout", "--iris-tarball", "--iris-metadata", "--iris-revision",
+        "--iris-version", "--keep-artifacts", "--run-root", "--timeout-secs",
     ] {
         assert!(stdout.contains(option), "help missing {option}");
     }

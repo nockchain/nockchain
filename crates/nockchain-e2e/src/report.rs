@@ -1,10 +1,14 @@
 use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
+pub const REPORT_SCHEMA_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Report {
+    pub schema_version: u64,
     pub scenario: String,
     pub seed: u64,
     pub run_id: String,
@@ -20,7 +24,8 @@ pub struct Report {
     pub nodes: Vec<NodeSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StepRecord {
     pub index: usize,
     pub action: String,
@@ -30,7 +35,8 @@ pub struct StepRecord {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssertOutcome {
     pub assert_type: String,
     pub status: String,
@@ -38,7 +44,8 @@ pub struct AssertOutcome {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeSummary {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +73,7 @@ impl StepTimer {
 impl Report {
     pub fn started(scenario: &str, seed: u64, run_id: &str) -> Self {
         Self {
+            schema_version: REPORT_SCHEMA_VERSION,
             scenario: scenario.to_string(),
             seed,
             run_id: run_id.to_string(),
@@ -77,6 +85,16 @@ impl Report {
             asserts: Vec::new(),
             nodes: Vec::new(),
         }
+    }
+
+    pub fn from_json(input: &str) -> anyhow::Result<Self> {
+        let report: Self = serde_json::from_str(input)?;
+        if report.schema_version != REPORT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported nockchain-e2e report schema version {}", report.schema_version
+            );
+        }
+        Ok(report)
     }
 
     pub fn record_step(&mut self, index: usize, action: &str, duration_ms: u64, ok: bool) {
@@ -148,4 +166,33 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Report, REPORT_SCHEMA_VERSION};
+
+    #[test]
+    fn report_v1_round_trips_with_legacy_fields_intact() {
+        let mut report = Report::started("scenario", 7, "run-1");
+        report.record_step(0, "start", 12, true);
+        report.record_assert("height", true, Some("matched".to_owned()));
+        report.record_node("node-0", Some(10), Some("block-10".to_owned()));
+        report.finish_ok();
+        let json = serde_json::to_string(&report).expect("serialize report");
+        let decoded = Report::from_json(&json).expect("decode report");
+        assert_eq!(decoded, report);
+        assert_eq!(decoded.schema_version, REPORT_SCHEMA_VERSION);
+        assert_eq!(decoded.steps[0].action, "start");
+        assert_eq!(decoded.asserts[0].assert_type, "height");
+        assert_eq!(decoded.nodes[0].id, "node-0");
+    }
+
+    #[test]
+    fn report_rejects_unknown_schema_version() {
+        let report = Report::started("scenario", 7, "run-1");
+        let mut value = serde_json::to_value(report).expect("serialize report");
+        value["schema_version"] = serde_json::json!(99);
+        assert!(Report::from_json(&value.to_string()).is_err());
+    }
 }
