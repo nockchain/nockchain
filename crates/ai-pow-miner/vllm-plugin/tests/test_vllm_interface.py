@@ -17,6 +17,8 @@ from utils import (
 from vllm import _custom_ops as vllm_ops
 from vllm_miner import PearlKernel
 from vllm_miner.config import config as pearl_config
+from vllm_miner.nockchain_manager import NockchainAsyncLoopManager
+from vllm_miner.vllm_kernels import _gemma4_mining_transcript
 from vllm_miner.quantization_operators import quant_8bit
 from vllm_miner.vllm_config import PearlConfig
 from vllm_miner.vllm_scheme import PearlScheme
@@ -56,6 +58,23 @@ def reset_mining_all(async_manager):
             torch.cuda.synchronize()
     except ImportError:
         pass
+
+
+def test_nockchain_mining_transcript_uses_bridge_values():
+    client = MagicMock()
+    manager = object.__new__(NockchainAsyncLoopManager)
+    manager._nockchain_client = client
+    mining_job = object()
+    expected = (bytes(range(52)), bytes(range(32)))
+    client.get_mining_transcript.return_value = expected
+
+    with patch(
+        "vllm_miner.vllm_kernels.GPUMatmulConfigFactory.create"
+    ) as create_local_config:
+        assert _gemma4_mining_transcript(manager, mining_job) == expected
+
+    create_local_config.assert_not_called()
+    client.get_mining_transcript.assert_called_once_with(mining_job)
 
 
 @pytest.mark.parametrize("m, n, k", [(1024, 4096, 128)])

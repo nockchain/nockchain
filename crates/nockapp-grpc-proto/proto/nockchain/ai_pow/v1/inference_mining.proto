@@ -29,8 +29,9 @@ message GetMiningJobRequest {
 message MiningJob {
   uint64 candidate_generation = 1;
   bytes incomplete_header = 2;
-  bytes target_le = 3;
+  bytes effective_target_le = 3;
   uint32 certificate_version = 4;
+  bytes mining_config = 5;
 }
 
 enum WorkPhase {

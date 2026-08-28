@@ -4,7 +4,7 @@ Source: [PR 164: `feat(ai-pow): add Gemma 4 inference mining path`](https://gith
 
 Captured on 2026-08-28. The pull request had six inline review comments and two general discussion comments. The six review submissions had no separate review body.
 
-Each comment has empty triage fields. Complete these fields during triage. The quoted text is the original comment text.
+Each comment has triage fields. Complete pending fields during triage. The quoted text is the original comment text.
 
 ## Inline review comments
 
@@ -14,10 +14,10 @@ Each comment has empty triage fields. Complete these fields during triage. The q
 - Date: 2026-08-24 15:30:03 UTC
 - Location: `crates/ai-pow-miner/vllm-plugin/src/vllm_miner/vllm_kernels.py:433`
 - Source: [discussion_r3844965065](https://github.com/nockchain/nockchain/pull/164#discussion_r3844965065)
-- Triage status: Pending
-- Disposition:
+- Triage status: Implemented
+- Disposition: Accept
 - Owner:
-- Notes:
+- Notes: Inference protocol 2 carries the Rust-encoded 52-byte mining configuration and effective target. The Nockchain plugin consumes both fields without local adjustment. A Python-to-gRPC-to-Rust known-answer test checks the fixed Gemma 4 values.
 
 > **Blocker — Python and Rust serialize different mining configurations.** `GPUMatmulConfigFactory.create()` uses the pinned Pearl defaults (`rows=[0,8]` and 64 sparse columns), while Rust reconstruction builds contiguous 16×16 patterns. That changes the 52-byte `mu`, target work factor, `kappa`, seeds, and jackpot; a hit from the real vLLM path should fail Rust seed reconstruction. Please make the Rust `MiningJob` carry the authoritative `mu` and effective target, have Python consume them verbatim, and add a Python → gRPC → Rust known-answer test.
 

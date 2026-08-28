@@ -62,7 +62,6 @@ use ai_pow_zk::{CompositePublicInputs, ZkParams};
 use futures::StreamExt;
 use nockapp::nockapp::wire::Wire;
 use nockapp::noun::slab::NounSlab;
-use nockapp_grpc_proto::pb::ai_pow::v1::MiningJob as InferenceMiningJob;
 use nockchain_mining_common::{
     MiningCandidate, MiningCandidateKind, MiningPkhConfig, NodeClient, NodeClientError,
     PokeTransportOutcome, PokeTransportStatus, PreparedPoke,
@@ -93,7 +92,8 @@ use crate::certificate_noun::{
     CertificateNounLimits,
 };
 use crate::inference::{
-    InferenceMiningRpc, InferenceProofRequest, InferenceProofSender, OpenedDenseWitness,
+    build_gemma4_mining_job, InferenceMiningRpc, InferenceProofRequest, InferenceProofSender,
+    OpenedDenseWitness,
 };
 #[cfg(feature = "gpu")]
 use crate::peak::MultiGpuPeakSearchBackend;
@@ -1618,25 +1618,24 @@ fn publish_inference_job(
     rpc: &InferenceMiningRpc,
     candidate: InferenceNodeCandidate,
 ) -> Result<(), MinerError> {
-    rpc.set_mining_job(InferenceMiningJob {
-        candidate_generation: candidate.generation,
-        incomplete_header: candidate.incomplete_header.to_vec(),
-        target_le: candidate.inputs.target.to_vec(),
-        certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
-    })
-    .map_err(|error| MinerError::Configure(format!("publish inference mining job: {error}")))
+    let job = build_gemma4_mining_job(
+        candidate.generation, candidate.incomplete_header, candidate.inputs.target,
+        PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+    )
+    .map_err(|error| MinerError::Configure(format!("build inference mining job: {error}")))?;
+    rpc.set_mining_job(job)
+        .map_err(|error| MinerError::Configure(format!("publish inference mining job: {error}")))
 }
 
 fn invalidate_inference_job(rpc: &InferenceMiningRpc, generation: u64) -> Result<(), MinerError> {
     let incomplete_header = canonical_dense_incomplete_header([0; 32], 0)
         .map_err(|error| MinerError::Configure(error.to_string()))?;
-    rpc.set_mining_job(InferenceMiningJob {
-        candidate_generation: generation,
-        incomplete_header: incomplete_header.to_vec(),
-        target_le: vec![0; 32],
-        certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
-    })
-    .map_err(|error| MinerError::Configure(format!("invalidate inference mining job: {error}")))
+    let job = build_gemma4_mining_job(
+        generation, incomplete_header, [0; 32], PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+    )
+    .map_err(|error| MinerError::Configure(format!("build invalid inference job: {error}")))?;
+    rpc.set_mining_job(job)
+        .map_err(|error| MinerError::Configure(format!("invalidate inference mining job: {error}")))
 }
 
 /// Subscribe the inference bridge to `%mine-ai`, prove scalar-rechecked native
@@ -3214,16 +3213,15 @@ mod tests {
         let state = Arc::new(InferenceSchedulerState::default());
         let rpc = InferenceMiningRpc::new(
             state,
-            InferenceMiningJob {
-                candidate_generation: 1,
-                incomplete_header: vec![0; 76],
-                target_le: vec![0; 32],
-                certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
-            },
+            build_gemma4_mining_job(1, [0; 76], [0; 32], PEARL_GATEWAY_CERTIFICATE_VERSION_V3)
+                .expect("initial mining job"),
         )
         .expect("initial inference job");
         let commit = [0x5a; 32];
-        let target = crate::easy_nock_target();
+        let target = crate::easy_target_for(
+            &crate::canonical::canonical_dense_mining_config(&crate::gemma4::GEMMA4_NATIVE_PARAMS)
+                .expect("Gemma mining config"),
+        );
         let candidate = InferenceNodeCandidate {
             generation: 2,
             inputs: NockchainCandidateInputs {
@@ -3237,14 +3235,17 @@ mod tests {
 
         publish_inference_job(&rpc, candidate).expect("publish candidate");
         let published = rpc.mining_job().expect("published job");
-        assert_eq!(published.candidate_generation, candidate.generation);
-        assert_eq!(published.incomplete_header, candidate.incomplete_header);
-        assert_eq!(published.target_le, target);
+        let expected = build_gemma4_mining_job(
+            candidate.generation, candidate.incomplete_header, target,
+            PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+        )
+        .expect("expected mining job");
+        assert_eq!(published, expected);
 
         invalidate_inference_job(&rpc, 3).expect("invalidate candidate");
         let invalidated = rpc.mining_job().expect("invalidated job");
         assert_eq!(invalidated.candidate_generation, 3);
-        assert_eq!(invalidated.target_le, vec![0; 32]);
+        assert_eq!(invalidated.effective_target_le, vec![0; 32]);
     }
 
     #[test]
@@ -4351,6 +4352,20 @@ mod tests {
         limbs
     }
 
+    fn inference_fitting_target_limbs() -> Vec<u64> {
+        let config =
+            crate::canonical::canonical_dense_mining_config(&crate::gemma4::GEMMA4_NATIVE_PARAMS)
+                .expect("Gemma mining config");
+        crate::easy_target_for(&config)
+            .chunks_exact(4)
+            .map(|chunk| {
+                u64::from(u32::from_le_bytes(
+                    chunk.try_into().expect("fixed target limb"),
+                ))
+            })
+            .collect()
+    }
+
     fn bignum_target_slab(limbs: &[u64]) -> NounSlab {
         let mut slab = NounSlab::new();
         let mut list = D(0);
@@ -4421,16 +4436,11 @@ mod tests {
         let node = MockNode::spawn().await;
         let state = Arc::new(InferenceSchedulerState::default());
         let initial_header = canonical_dense_incomplete_header([0; 32], 0).expect("initial header");
-        let rpc = InferenceMiningRpc::new(
-            state,
-            InferenceMiningJob {
-                candidate_generation: 1,
-                incomplete_header: initial_header.to_vec(),
-                target_le: vec![0; 32],
-                certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
-            },
+        let initial_job = build_gemma4_mining_job(
+            1, initial_header, [0; 32], PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
         )
-        .expect("initial inference job");
+        .expect("initial mining job");
+        let rpc = InferenceMiningRpc::new(state, initial_job).expect("initial inference job");
         let (proof_sender, proof_requests) = inference_proof_channel();
         let shutdown = CancellationToken::new();
         let runner_shutdown = shutdown.clone();
@@ -4455,7 +4465,11 @@ mod tests {
 
         assert_node_received_pkh_only_set_key(&node).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        node.publish_synth_mine_effect_with_target_limbs(800, &fitting_target_limbs(), 64);
+        node.publish_synth_mine_effect_with_target_limbs(
+            800,
+            &inference_fitting_target_limbs(),
+            64,
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let first = loop {
             let job = rpc.mining_job().expect("active inference job");
@@ -4468,9 +4482,13 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
-        assert_ne!(first.target_le, vec![0; 32]);
+        assert_ne!(first.effective_target_le, vec![0; 32]);
 
-        node.publish_synth_mine_effect_with_target_limbs(801, &fitting_target_limbs(), 64);
+        node.publish_synth_mine_effect_with_target_limbs(
+            801,
+            &inference_fitting_target_limbs(),
+            64,
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let second = loop {
             let job = rpc.mining_job().expect("replacement inference job");
@@ -4533,12 +4551,10 @@ mod tests {
         let node = MockNode::spawn().await;
         let state = Arc::new(InferenceSchedulerState::default());
         let initial_header = canonical_dense_incomplete_header([0; 32], 0).expect("initial header");
-        let initial_job = InferenceMiningJob {
-            candidate_generation: 1,
-            incomplete_header: initial_header.to_vec(),
-            target_le: vec![0; 32],
-            certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
-        };
+        let initial_job = build_gemma4_mining_job(
+            1, initial_header, [0; 32], PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+        )
+        .expect("initial mining job");
         let (proof_sender, proof_requests) = inference_proof_channel();
         let rpc = InferenceMiningRpc::new(state, initial_job)
             .expect("initial inference job")
@@ -4589,7 +4605,7 @@ mod tests {
             .expect("connect inference bridge");
         let registered = client
             .register_runtime(RegisterRuntimeRequest {
-                protocol_version: 1,
+                protocol_version: 2,
                 checkpoint_layout_digest: vec![0x33; 32],
                 cuda_device_uuid: vec![0x44; 16],
                 process_id: std::process::id(),
@@ -4610,20 +4626,11 @@ mod tests {
             ai_pow::synth::synth_matrices(b"nockchain-native-proof-bridge-kat-v1", &params);
         let a = Arc::new(a);
         let b = Arc::new(b);
-        let template =
-            PreparedCanonicalDenseTemplate::new(&params, [0; 32], Arc::clone(&a), Arc::clone(&b))
-                .expect("native template");
-        let prepared = template.prepare_search(0).expect("native mining config");
-        let raw_target: [u8; 32] = mining_job
-            .target_le
+        let target: [u8; 32] = mining_job
+            .effective_target_le
             .as_slice()
             .try_into()
-            .expect("fixed node target");
-        let target = ai_pow::difficulty::effective_jackpot_threshold(
-            &raw_target,
-            prepared.config().shape_work_factor().expect("work factor"),
-        )
-        .expect("adjusted target");
+            .expect("fixed effective target");
         let mut session = crate::gemma4_cuda::Gemma4CudaSession::new_source(
             0, params.m as usize, params.n as usize, &a, &b,
         )
@@ -4636,7 +4643,7 @@ mod tests {
             let mut header = base_header;
             header.timestamp = header.timestamp.wrapping_add(extranonce);
             let preparation = session
-                .prepare(&header.to_bytes(), prepared.mu())
+                .prepare(&header.to_bytes(), &mining_job.mining_config)
                 .expect("prepare native transcript");
             let result = session
                 .search(0, total_tickets, &target)
