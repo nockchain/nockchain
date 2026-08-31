@@ -1,0 +1,12 @@
+[package]
+name = "poc_p2p_jam_bitvec"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d", features = ["tokio", "quic", "request-response", "cbor"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
