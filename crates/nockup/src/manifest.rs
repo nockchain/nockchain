@@ -27,6 +27,19 @@ pub struct PackageMeta {
     pub template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_commit: Option<String>,
+    /// Git URL of a repo containing template directories. When set,
+    /// `nockup project init` fetches the repo into the templates cache
+    /// and resolves `template` from `<cache>/<template_path>/<template>/`.
+    /// Accepts `https://`, `git@`, and `file://` URLs (the last is useful
+    /// for local testing). When unset, falls back to the channel-managed
+    /// `~/.nockup/templates/<template>/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_git: Option<String>,
+    /// Subdirectory inside `template_git` holding the templates root.
+    /// Defaults to repo root when omitted. Leading/trailing slashes are
+    /// stripped during resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
