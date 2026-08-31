@@ -675,6 +675,14 @@ impl BlockExplorerCache {
     ) -> GrpcResult<FullPageDetails> {
         tracing::Span::current().record("height", &tracing::field::display(height));
 
+        // Validate height to prevent panic in D() for values > DIRECT_MAX (u64::MAX >> 1)
+        const DIRECT_MAX: u64 = u64::MAX >> 1;
+        if height > DIRECT_MAX {
+            return Err(NockAppGrpcError::InvalidRequest(
+                "height exceeds maximum supported value".to_string(),
+            ));
+        }
+
         let mut path_slab = NounSlab::new();
         let tag = nockapp::utils::make_tas(&mut path_slab, "heaviest-chain-blocks-range").as_noun();
         let start_noun = nockvm::noun::D(height);
@@ -1012,6 +1020,15 @@ impl BlockExplorerCache {
         height: u64,
     ) -> GrpcResult<BlockEntryWithTxs> {
         tracing::Span::current().record("height", &tracing::field::display(height));
+
+        // Validate height to prevent panic in D() for values > DIRECT_MAX (u64::MAX >> 1)
+        const DIRECT_MAX: u64 = u64::MAX >> 1;
+        if height > DIRECT_MAX {
+            return Err(NockAppGrpcError::InvalidRequest(
+                "height exceeds maximum supported value".to_string(),
+            ));
+        }
+
         let mut path_slab = NounSlab::new();
         let tag = nockapp::utils::make_tas(&mut path_slab, "heaviest-chain-blocks-range").as_noun();
         let start_noun = nockvm::noun::D(height);
