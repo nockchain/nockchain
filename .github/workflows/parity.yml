@@ -17,31 +17,15 @@ on:
   push:
     branches: ["master", "nightly"]
     paths:
-      - "hoon/**"
-      - "crates/**"
-      - "assets/**"
-      - "rules_hoon/**"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "MODULE.bazel"
-      - "MODULE.bazel.lock"
-      - ".bazelrc"
-      - ".bazelversion"
-      - ".github/workflows/parity.yml"
+      - "crates/honk/src/**"
+      - "crates/honk/build.rs"
+      - "crates/honk/Cargo.toml"
   pull_request:
     branches: ["master", "nightly"]
     paths:
-      - "hoon/**"
-      - "crates/**"
-      - "assets/**"
-      - "rules_hoon/**"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "MODULE.bazel"
-      - "MODULE.bazel.lock"
-      - ".bazelrc"
-      - ".bazelversion"
-      - ".github/workflows/parity.yml"
+      - "crates/honk/src/**"
+      - "crates/honk/build.rs"
+      - "crates/honk/Cargo.toml"
 
 permissions:
   contents: read

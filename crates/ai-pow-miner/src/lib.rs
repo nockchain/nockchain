@@ -102,9 +102,24 @@ pub mod pearl_mining;
 /// Bounded CPU and accelerator ticket-search backend contract.
 pub mod search;
 
+/// Gemma 4 31B checkpoint validation and native fused gate/up operand mapping.
+pub mod gemma4;
+
 /// RTX 5090 dense ticket-search session and benchmark contract.
 #[cfg(feature = "gpu")]
 pub mod peak;
+
+/// Native Gemma 4 fused gate/up CUDA session and benchmark contract.
+#[cfg(feature = "gpu")]
+pub mod gemma4_cuda;
+
+/// Typed vLLM control plane and mining-first request scheduler.
+#[cfg(feature = "node")]
+pub mod inference;
+
+/// NockApp candidate subscription and inference-winner proof submission.
+#[cfg(feature = "node")]
+pub mod inference_node;
 
 /// Pearl Gateway `submitPlainProof` artifact construction.
 ///

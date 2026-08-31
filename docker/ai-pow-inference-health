@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Check the local vLLM API and AI-PoW bridge readiness."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+import grpc
+from vllm_miner.proto import inference_mining_pb2 as pb
+from vllm_miner.proto import inference_mining_pb2_grpc as pb_grpc
+
+
+def _enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bridge_status(
+    timeout: float, *, require_mining_runtime: bool
+) -> dict[str, object]:
+    endpoint = os.getenv("NOCKCHAIN_AI_POW_ENDPOINT", "127.0.0.1:5590")
+    channel = grpc.insecure_channel(endpoint)
+    try:
+        grpc.channel_ready_future(channel).result(timeout=timeout)
+        status = pb_grpc.InferenceMiningServiceStub(channel).GetStatus(
+            pb.GetStatusRequest(), timeout=timeout
+        )
+    finally:
+        channel.close()
+    value = {
+        "endpoint": endpoint,
+        "mode": pb.SchedulerMode.Name(status.mode),
+        "active_work_items": status.active_work_items,
+        "idle_batches": status.idle_batches,
+        "inference_batches": status.inference_batches,
+        "candidate_generation": status.candidate_generation,
+        "opened_blocks_received": status.opened_blocks_received,
+        "production_enabled": status.production_enabled,
+        "node_connected": status.node_connected,
+        "registered_runtimes": status.registered_runtimes,
+        "rank_zero_runtimes": status.rank_zero_runtimes,
+        "mining_enabled_runtimes": status.mining_enabled_runtimes,
+        "expired_runtimes": status.expired_runtimes,
+        "expired_work_items": status.expired_work_items,
+        "lease_duration_ms": status.lease_duration_ms,
+        "reconciled_work_items": status.reconciled_work_items,
+    }
+    if _enabled("AI_POW_REQUIRE_MINING") and not (
+        status.production_enabled and status.node_connected
+    ):
+        raise RuntimeError("AI-PoW production mining is not connected to the node")
+    if require_mining_runtime and (
+        status.rank_zero_runtimes == 0 or status.mining_enabled_runtimes == 0
+    ):
+        raise RuntimeError("AI-PoW has no live rank-zero mining runtime")
+    return value
+
+
+def _http_request(path: str, timeout: float) -> tuple[int, bytes]:
+    host = os.getenv("VLLM_HOST", "127.0.0.1")
+    if host in {"0.0.0.0", "::", "[::]"}:
+        host = "127.0.0.1"
+    port = os.getenv("VLLM_PORT", "8000")
+    headers: dict[str, str] = {}
+    api_key = os.getenv("VLLM_API_KEY", "")
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(f"http://{host}:{port}{path}", headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.status, response.read()
+
+
+def _vllm_status(timeout: float) -> dict[str, object]:
+    health_status, _ = _http_request("/health", timeout)
+    if health_status != 200:
+        raise RuntimeError(f"vLLM /health returned HTTP {health_status}")
+    models_status, body = _http_request("/v1/models", timeout)
+    if models_status != 200:
+        raise RuntimeError(f"vLLM /v1/models returned HTTP {models_status}")
+    models = json.loads(body)
+    model_ids = [str(value["id"]) for value in models.get("data", [])]
+    expected_model = os.getenv("VLLM_SERVED_MODEL_NAME", "gemma-4-31b-it-pearl")
+    if expected_model not in model_ids:
+        raise RuntimeError(
+            f"vLLM model {expected_model!r} is not served; available models: {model_ids}"
+        )
+    return {"health": "ok", "served_models": model_ids}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bridge-only", action="store_true")
+    parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--wait", type=float, default=0.0)
+    args = parser.parse_args()
+    if args.timeout <= 0 or args.wait < 0:
+        parser.error("--timeout must be positive and --wait must be nonnegative")
+
+    deadline = time.monotonic() + args.wait
+    while True:
+        try:
+            result = {
+                "bridge": _bridge_status(
+                    args.timeout,
+                    require_mining_runtime=(
+                        _enabled("AI_POW_REQUIRE_MINING") and not args.bridge_only
+                    ),
+                )
+            }
+            if not args.bridge_only:
+                result["vllm"] = _vllm_status(args.timeout)
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            grpc.RpcError,
+            urllib.error.URLError,
+        ) as error:
+            if time.monotonic() >= deadline:
+                print(f"not ready: {error}", file=sys.stderr)
+                return 1
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

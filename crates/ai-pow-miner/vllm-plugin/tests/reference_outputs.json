@@ -1,0 +1,6 @@
+{
+  "llama_8b_no_mining": "Le chat est sur la table.",
+  "llama_8b_mining": "Le chat est sur la table.",
+  "llama_8b_consistency_mining": "2 + 2 = 4",
+  "llama_8b_consistency_no_mining": "2 + 2 = 4"
+}

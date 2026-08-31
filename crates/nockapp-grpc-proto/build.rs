@@ -35,6 +35,7 @@ fn ensure_protoc() -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rerun if any file in the proto directory changes
+    println!("cargo:rerun-if-changed=proto");
 
     ensure_protoc()?;
 

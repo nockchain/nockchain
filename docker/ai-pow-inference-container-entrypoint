@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p /run/sshd /root/.ssh /etc/ssh/sshd_config.d
+chmod 0700 /root/.ssh
+if [[ -n "${PUBLIC_KEY:-}" ]]; then
+  printf '%s\n' "${PUBLIC_KEY}" > /root/.ssh/authorized_keys
+  chmod 0600 /root/.ssh/authorized_keys
+fi
+
+cat > /etc/ssh/sshd_config.d/runpod.conf <<'EOF'
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+PubkeyAuthentication yes
+EOF
+ssh-keygen -A >/dev/null 2>&1
+/usr/sbin/sshd
+
+if [[ "$#" -eq 0 || -z "${1:-}" || "${1:-}" == "--help" ]]; then
+  set -- sleep infinity
+elif [[ "$#" -eq 1 && "$1" == *" "* ]]; then
+  exec /bin/bash -lc "$1"
+fi
+
+exec "$@"

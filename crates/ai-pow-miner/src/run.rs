@@ -76,13 +76,11 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+#[cfg(feature = "gpu")]
+use crate::canonical::PreparedCanonicalDenseSearch;
 use crate::canonical::{
     evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at_for_miner, CanonicalBlock,
-    CanonicalProveError, PreparedCanonicalMoeTemplate,
-};
-#[cfg(feature = "gpu")]
-use crate::canonical::{
-    CanonicalDenseBlock, PreparedCanonicalDenseSearch, PreparedCanonicalDenseTemplate,
+    CanonicalDenseBlock, CanonicalProveError, PreparedCanonicalMoeTemplate,
 };
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
@@ -112,9 +110,9 @@ use crate::{DifficultyTarget, MiningCancel};
 // target, and JSON-RPC envelope while still bounding untrusted Gateway input.
 const PEARL_GATEWAY_MAX_RESPONSE_LINE_BYTES: usize = 160 * 1024;
 const MAX_CHAIN_TARGET_U32_LIMBS: usize = 10;
-const PEARL_GATEWAY_CERTIFICATE_VERSION_V3: u32 = 3;
+pub(crate) const PEARL_GATEWAY_CERTIFICATE_VERSION_V3: u32 = 3;
 const AI_POW_MINE_CANDIDATE_VERSION: u64 = 4;
-const NODE_POKE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const NODE_POKE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AiPowProveTimings {
@@ -900,23 +898,30 @@ fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> 
     Ok(slab)
 }
 
-#[cfg(feature = "gpu")]
-fn build_peak_poke(block: &CanonicalDenseBlock) -> Result<NounSlab, MinerError> {
+pub(crate) fn build_dense_poke(
+    block: &CanonicalDenseBlock,
+    max_pattern_len: usize,
+) -> Result<NounSlab, MinerError> {
     let artifact = build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
         block.attempt.attempt(),
         &block.aux_inclusion,
         &block.a,
         &block.b,
-        PEAK_PRODUCTION_PARAMS.tile as usize,
+        max_pattern_len,
         &block.run,
     )
-    .map_err(|e| MinerError::CertificateBuild(format!("peak dense artifact: {e}")))?;
+    .map_err(|e| MinerError::CertificateBuild(format!("dense artifact: {e}")))?;
     let artifact_space = artifact.noun_space();
     let mut slab = NounSlab::new();
     let art = slab.copy_into(unsafe { *artifact.root() }, &artifact_space);
     let payload = T(&mut slab, &[D(tas!(b"command")), D(tas!(b"pow")), art]);
     slab.set_root(payload);
     Ok(slab)
+}
+
+#[cfg(feature = "gpu")]
+fn build_peak_poke(block: &CanonicalDenseBlock) -> Result<NounSlab, MinerError> {
+    build_dense_poke(block, PEAK_PRODUCTION_PARAMS.tile as usize)
 }
 
 enum GatewayFreeBlock {
@@ -1735,13 +1740,13 @@ struct PearlGatewayResolvedMiningJob {
 }
 
 #[derive(Clone, Copy)]
-struct NockchainCandidateInputs {
-    target: DifficultyTarget,
-    nock_block_commitment: [u8; 32],
-    pow_len: u64,
+pub(crate) struct NockchainCandidateInputs {
+    pub(crate) target: DifficultyTarget,
+    pub(crate) nock_block_commitment: [u8; 32],
+    pub(crate) pow_len: u64,
 }
 
-fn derive_nockchain_candidate_inputs(
+pub(crate) fn derive_nockchain_candidate_inputs(
     candidate: &MiningCandidate,
 ) -> Result<NockchainCandidateInputs, String> {
     expect_ai_pow_candidate_version(candidate)?;
@@ -2624,11 +2629,22 @@ mod tests {
     use tokio::sync::{broadcast, mpsc, Mutex as TMutex};
 
     use super::*;
-    use crate::canonical::prove_canonical_moe_block_at;
+    use crate::canonical::{
+        canonical_dense_incomplete_header, prove_canonical_moe_block_at,
+        PreparedCanonicalDenseTemplate,
+    };
     use crate::certificate_noun::{
         build_ai_pow_pearl_merge_artifact_noun_from_node, decode_ai_pow_pearl_merge_artifact_noun,
         pearl_merge_recursive_certificate_parts_from_ticket,
         pearl_merge_recursive_public_inputs_from_work, AiProofNode, PearlMergePublicStatementShape,
+    };
+    use crate::inference::{
+        build_gemma4_mining_job, InferenceMiningRpc, InferenceSchedulerState, OpenedDenseWitness,
+    };
+    use crate::inference_node::{
+        inference_proof_channel, invalidate_inference_job, publish_inference_job,
+        reconstruct_inference_dense_attempt, run_inference_node, InferenceNodeCandidate,
+        InferenceNodeConfig, INFERENCE_DENSE_TILE,
     };
     use crate::pearl_mining::{
         self, PearlMergeMineOptions, PearlMergeMiningError, PearlMergeMiningJob,
@@ -2778,6 +2794,46 @@ mod tests {
     }
 
     #[test]
+    fn inference_candidate_publication_and_invalidation_are_generation_bound() {
+        let state = Arc::new(InferenceSchedulerState::default());
+        let rpc = InferenceMiningRpc::new(
+            state,
+            build_gemma4_mining_job(1, [0; 76], [0; 32], PEARL_GATEWAY_CERTIFICATE_VERSION_V3)
+                .expect("initial mining job"),
+        )
+        .expect("initial inference job");
+        let commit = [0x5a; 32];
+        let target = crate::easy_target_for(
+            &crate::canonical::canonical_dense_mining_config(&crate::gemma4::GEMMA4_NATIVE_PARAMS)
+                .expect("Gemma mining config"),
+        );
+        let candidate = InferenceNodeCandidate {
+            generation: 2,
+            inputs: NockchainCandidateInputs {
+                target,
+                nock_block_commitment: commit,
+                pow_len: 77,
+            },
+            incomplete_header: canonical_dense_incomplete_header(commit, 0)
+                .expect("candidate header"),
+        };
+
+        publish_inference_job(&rpc, candidate).expect("publish candidate");
+        let published = rpc.mining_job().expect("published job");
+        let expected = build_gemma4_mining_job(
+            candidate.generation, candidate.incomplete_header, target,
+            PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+        )
+        .expect("expected mining job");
+        assert_eq!(published, expected);
+
+        invalidate_inference_job(&rpc, 3).expect("invalidate candidate");
+        let invalidated = rpc.mining_job().expect("invalidated job");
+        assert_eq!(invalidated.candidate_generation, 3);
+        assert_eq!(invalidated.effective_target_le, vec![0; 32]);
+    }
+
+    #[test]
     fn canonical_grind_exits_when_cancelled() {
         let cancel = Arc::new(AtomicBool::new(true));
         assert!(
@@ -2785,6 +2841,134 @@ mod tests {
                 .expect("cancelled grind should exit cleanly")
                 .is_none()
         );
+    }
+
+    fn inference_scalar_fixture(
+        extranonce: u32,
+    ) -> (
+        InferenceNodeCandidate,
+        OpenedDenseWitness,
+        PearlMergeCheckedTicketAttempt,
+    ) {
+        let params = MatmulParams {
+            m: 32,
+            k: 1024,
+            n: 32,
+            noise_rank: 64,
+            tile: INFERENCE_DENSE_TILE,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(b"nockchain-inference-proof-kat-v1", &params);
+        let a = Arc::new(a);
+        let b = Arc::new(b);
+        let commit = [0x5a; 32];
+        let template =
+            PreparedCanonicalDenseTemplate::new(&params, commit, Arc::clone(&a), Arc::clone(&b))
+                .expect("inference scalar template");
+        let prepared = template
+            .prepare_search(extranonce)
+            .expect("search transcript");
+        let target = crate::easy_target_for(&prepared.config());
+        let ordinal = 3;
+        let expected = template
+            .checked_search_winner(&prepared, ordinal, &target)
+            .expect("forced scalar winner");
+        let (rows, columns) = prepared
+            .offsets_at_ordinal(ordinal)
+            .expect("opened tile offsets");
+        let candidate = InferenceNodeCandidate {
+            generation: 7,
+            inputs: NockchainCandidateInputs {
+                target,
+                nock_block_commitment: commit,
+                pow_len: 99,
+            },
+            incomplete_header: canonical_dense_incomplete_header(commit, 0)
+                .expect("candidate header"),
+        };
+        let witness = OpenedDenseWitness {
+            candidate_generation: candidate.generation,
+            extranonce,
+            work_id: 11,
+            a_row_indices: (rows..rows + params.tile).collect(),
+            b_column_indices: (columns..columns + params.tile).collect(),
+            noise_seed_a: expected.commitments.s_a,
+            noise_seed_b: expected.commitments.s_b,
+            noise_rank: params.noise_rank,
+            a_rows: params.m,
+            b_columns: params.n,
+            common_dim: params.k,
+            a,
+            b_transposed: b,
+        };
+        (candidate, witness, expected)
+    }
+
+    #[test]
+    fn inference_winner_reconstruction_matches_scalar_transcript() {
+        let (candidate, witness, expected) = inference_scalar_fixture(1);
+        let (_, reconstructed) =
+            reconstruct_inference_dense_attempt(candidate, witness).expect("scalar reconstruction");
+        assert_eq!(reconstructed.commitments, expected.commitments);
+        assert_eq!(
+            reconstructed.ticket.jackpot_hash,
+            expected.ticket.jackpot_hash
+        );
+        assert_eq!(
+            reconstructed.aux.nock_block_commitment,
+            candidate.inputs.nock_block_commitment
+        );
+    }
+
+    #[test]
+    fn inference_winner_reconstruction_rejects_stale_and_corrupt_witnesses() {
+        let (candidate, mut stale, _) = inference_scalar_fixture(0);
+        stale.candidate_generation += 1;
+        assert!(reconstruct_inference_dense_attempt(candidate, stale)
+            .err()
+            .expect("stale witness must fail")
+            .to_string()
+            .contains("stale inference witness generation"));
+
+        let (candidate, mut corrupt, _) = inference_scalar_fixture(0);
+        corrupt.noise_seed_b[0] ^= 1;
+        assert!(reconstruct_inference_dense_attempt(candidate, corrupt)
+            .err()
+            .expect("corrupt witness must fail")
+            .to_string()
+            .contains("noise seeds disagree"));
+    }
+
+    #[test]
+    #[ignore = "builds and verifies a compact recursive inference-winner certificate"]
+    fn inference_forced_winner_verifies_through_consensus_entrypoint() {
+        let (candidate, witness, _) = inference_scalar_fixture(0);
+        let (template, attempt) =
+            reconstruct_inference_dense_attempt(candidate, witness).expect("scalar reconstruction");
+        let block = template.prove(attempt).expect("compact recursive proof");
+        let artifact = build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
+            block.attempt.attempt(),
+            &block.aux_inclusion,
+            &block.a,
+            &block.b,
+            INFERENCE_DENSE_TILE as usize,
+            &block.run,
+        )
+        .expect("inference artifact noun");
+        let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+            block.run.verifier_key_digest(),
+        );
+        crate::certificate_noun::verify_ai_pow_block_artifact_jam(
+            &artifact.jam(),
+            CertificateNounLimits::default(),
+            &candidate.inputs.nock_block_commitment,
+            &candidate.inputs.target,
+            INFERENCE_DENSE_TILE as usize,
+            block.run.verifier_context(),
+            &digest,
+        )
+        .expect("inference artifact verifies through consensus");
     }
 
     #[test]
@@ -3753,6 +3937,20 @@ mod tests {
         limbs
     }
 
+    fn inference_fitting_target_limbs() -> Vec<u64> {
+        let config =
+            crate::canonical::canonical_dense_mining_config(&crate::gemma4::GEMMA4_NATIVE_PARAMS)
+                .expect("Gemma mining config");
+        crate::easy_target_for(&config)
+            .chunks_exact(4)
+            .map(|chunk| {
+                u64::from(u32::from_le_bytes(
+                    chunk.try_into().expect("fixed target limb"),
+                ))
+            })
+            .collect()
+    }
+
     fn bignum_target_slab(limbs: &[u64]) -> NounSlab {
         let mut slab = NounSlab::new();
         let mut list = D(0);
@@ -3816,6 +4014,282 @@ mod tests {
 
     fn expected_aux_commitment_bridge(candidate: &MiningCandidate) -> [u8; 32] {
         *blake3::hash(&candidate.block_header.jam()).as_bytes()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inference_node_tracks_real_candidate_replacement() {
+        let node = MockNode::spawn().await;
+        let state = Arc::new(InferenceSchedulerState::default());
+        let initial_header = canonical_dense_incomplete_header([0; 32], 0).expect("initial header");
+        let initial_job = build_gemma4_mining_job(
+            1, initial_header, [0; 32], PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+        )
+        .expect("initial mining job");
+        let rpc = InferenceMiningRpc::new(state, initial_job).expect("initial inference job");
+        let (proof_sender, proof_requests) = inference_proof_channel();
+        let shutdown = CancellationToken::new();
+        let runner_shutdown = shutdown.clone();
+        let runner_rpc = rpc.clone();
+        let node_url = node.url();
+        let runner = tokio::spawn(async move {
+            run_inference_node(
+                InferenceNodeConfig {
+                    node_addr: node_url,
+                    mining_pkh_configs: vec![MiningPkhConfig {
+                        share: 1,
+                        pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
+                    }],
+                },
+                runner_rpc,
+                proof_requests,
+                runner_shutdown,
+            )
+            .await
+        });
+        let _proof_sender = proof_sender;
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        node.publish_synth_mine_effect_with_target_limbs(
+            800,
+            &inference_fitting_target_limbs(),
+            64,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let first = loop {
+            let job = rpc.mining_job().expect("active inference job");
+            if job.candidate_generation > 1 {
+                break job;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "inference bridge did not publish the first candidate"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_ne!(first.effective_target_le, vec![0; 32]);
+
+        node.publish_synth_mine_effect_with_target_limbs(
+            801,
+            &inference_fitting_target_limbs(),
+            64,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let second = loop {
+            let job = rpc.mining_job().expect("replacement inference job");
+            if job.candidate_generation > first.candidate_generation {
+                break job;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "inference bridge did not replace the candidate"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_ne!(second.incomplete_header, first.incomplete_header);
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), runner)
+            .await
+            .expect("inference node shutdown timeout")
+            .expect("inference node task")
+            .expect("inference node result");
+        node.shutdown().await;
+    }
+
+    #[cfg(feature = "gpu")]
+    fn opened_tensor_parts(
+        tensor: nockapp_grpc_proto::pb::ai_pow::v1::OpenedTensor,
+        values: &[i8],
+    ) -> Vec<nockapp_grpc_proto::pb::ai_pow::v1::OpenedBlockPart> {
+        use nockapp_grpc_proto::pb::ai_pow::v1::{
+            opened_block_part, OpenedBlockPart, OpenedTensorChunk,
+        };
+
+        // SAFETY: i8 and u8 have identical layout. The borrowed byte view does
+        // not outlive `values` and is copied into owned protobuf chunks.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
+        bytes
+            .chunks(1024 * 1024)
+            .enumerate()
+            .map(|(index, chunk)| OpenedBlockPart {
+                part: Some(opened_block_part::Part::TensorChunk(OpenedTensorChunk {
+                    tensor: tensor as i32,
+                    offset: (index * 1024 * 1024) as u64,
+                    data: chunk.to_vec(),
+                })),
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "gpu")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "runs the full native GPU winner, recursive proof, and node submission path"]
+    async fn native_inference_winner_submits_through_bridge() {
+        use nockapp_grpc_proto::pb::ai_pow::v1::inference_mining_service_client::InferenceMiningServiceClient;
+        use nockapp_grpc_proto::pb::ai_pow::v1::{
+            opened_block_part, GetMiningJobRequest, OpenedBlockMetadata, OpenedBlockPart,
+            OpenedTensor, RegisterRuntimeRequest,
+        };
+
+        let node = MockNode::spawn().await;
+        let state = Arc::new(InferenceSchedulerState::default());
+        let initial_header = canonical_dense_incomplete_header([0; 32], 0).expect("initial header");
+        let initial_job = build_gemma4_mining_job(
+            1, initial_header, [0; 32], PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+        )
+        .expect("initial mining job");
+        let (proof_sender, proof_requests) = inference_proof_channel();
+        let rpc = InferenceMiningRpc::new(state, initial_job)
+            .expect("initial inference job")
+            .with_proof_sender(proof_sender);
+
+        let node_shutdown = CancellationToken::new();
+        let node_runner = tokio::spawn(run_inference_node(
+            InferenceNodeConfig {
+                node_addr: node.url(),
+                mining_pkh_configs: vec![MiningPkhConfig {
+                    share: 1,
+                    pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
+                }],
+            },
+            rpc.clone(),
+            proof_requests,
+            node_shutdown.clone(),
+        ));
+        assert_node_received_pkh_only_set_key(&node).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut target_limbs = vec![u64::from(u32::MAX); 7];
+        target_limbs.push(0xff);
+        node.publish_synth_mine_effect_with_target_limbs(900, &target_limbs, 64);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while rpc.candidate_generation() == 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "inference bridge did not publish the GPU candidate"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind inference bridge");
+        let bridge_addr = listener.local_addr().expect("inference bridge address");
+        drop(listener);
+        let bridge_shutdown = CancellationToken::new();
+        let bridge_server_shutdown = bridge_shutdown.clone();
+        let bridge_server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(rpc.clone().into_server())
+                .serve_with_shutdown(bridge_addr, async move {
+                    bridge_server_shutdown.cancelled().await;
+                }),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut client = InferenceMiningServiceClient::connect(format!("http://{bridge_addr}"))
+            .await
+            .expect("connect inference bridge");
+        let registered = client
+            .register_runtime(RegisterRuntimeRequest {
+                protocol_version: 4,
+                checkpoint_content_digest: vec![0x33; 32],
+                cuda_device_uuid: vec![0x44; 16],
+                process_id: std::process::id(),
+                rank_zero: true,
+                mining_enabled: true,
+            })
+            .await
+            .expect("register native runtime")
+            .into_inner();
+        let mining_job = client
+            .get_mining_job(GetMiningJobRequest {
+                runtime_id: registered.runtime_id.clone(),
+            })
+            .await
+            .expect("get node mining job")
+            .into_inner();
+
+        let params = crate::gemma4::GEMMA4_NATIVE_PARAMS;
+        let (a, b) =
+            ai_pow::synth::synth_matrices(b"nockchain-native-proof-bridge-kat-v1", &params);
+        let a = Arc::new(a);
+        let b = Arc::new(b);
+        let target: [u8; 32] = mining_job
+            .effective_target_le
+            .as_slice()
+            .try_into()
+            .expect("fixed effective target");
+        let mut session = crate::gemma4_cuda::Gemma4CudaSession::new_source(
+            0, params.m as usize, params.n as usize, &a, &b,
+        )
+        .expect("native Gemma session");
+        let total_tickets = session.total_tickets();
+        let base_header = PearlIncompleteBlockHeader::from_bytes(&mining_job.incomplete_header)
+            .expect("candidate header");
+        let mut winner = None;
+        for extranonce in 0..32 {
+            let mut header = base_header;
+            header.timestamp = header.timestamp.wrapping_add(extranonce);
+            let preparation = session
+                .prepare(&header.to_bytes(), &mining_job.mining_config)
+                .expect("prepare native transcript");
+            let result = session
+                .search(0, total_tickets, &target)
+                .expect("native target search");
+            if let Some(ordinal) = result.winner {
+                winner = Some((extranonce, ordinal, preparation));
+                break;
+            }
+        }
+        let (extranonce, ordinal, preparation) =
+            winner.expect("deterministic native fixture must find a consensus-target winner");
+        let col_tickets = u64::from(params.n / params.tile);
+        let row_start = u32::try_from(ordinal / col_tickets)
+            .expect("winner row")
+            .checked_mul(params.tile)
+            .expect("winner row offset");
+        let column_start = u32::try_from(ordinal % col_tickets)
+            .expect("winner column")
+            .checked_mul(params.tile)
+            .expect("winner column offset");
+
+        let metadata = OpenedBlockMetadata {
+            runtime_id: registered.runtime_id,
+            candidate_generation: mining_job.candidate_generation,
+            work_id: 0,
+            a_row_indices: (row_start..row_start + params.tile).collect(),
+            b_column_indices: (column_start..column_start + params.tile).collect(),
+            noise_seed_a: preparation.commitments.s_a.to_vec(),
+            noise_seed_b: preparation.commitments.s_b.to_vec(),
+            noise_rank: params.noise_rank,
+            a_rows: params.m,
+            b_columns: params.n,
+            common_dim: params.k,
+            extranonce,
+        };
+        let mut parts = vec![OpenedBlockPart {
+            part: Some(opened_block_part::Part::Metadata(metadata)),
+        }];
+        parts.extend(opened_tensor_parts(OpenedTensor::A, &a));
+        parts.extend(opened_tensor_parts(OpenedTensor::BTransposed, &b));
+        let response = client
+            .submit_opened_block(tokio_stream::iter(parts))
+            .await
+            .expect("submit native opened witness")
+            .into_inner();
+        assert!(response.accepted, "{}", response.detail);
+        assert_eq!(node.mined_pokes.lock().await.len(), 1);
+
+        bridge_shutdown.cancel();
+        node_shutdown.cancel();
+        bridge_server
+            .await
+            .expect("inference bridge server task")
+            .expect("inference bridge server");
+        node_runner
+            .await
+            .expect("inference node task")
+            .expect("inference node result");
+        node.shutdown().await;
     }
 
     #[test]

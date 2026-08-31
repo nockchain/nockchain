@@ -1,0 +1,207 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+
+ARG RUNPOD_BASE=nvidia/cuda:12.9.1-devel-ubuntu24.04@sha256:020bc241a628776338f4d4053fed4c38f6f7f3d7eb5919fecb8de313bb8ba47c
+ARG VLLM_VERSION=0.27.1
+ARG VLLM_BASE=vllm/vllm-openai:v${VLLM_VERSION}-cu129@sha256:07913e94a58a4e61322c88f8d4647411b4dd394838b53abacaa32448d9d8de0a
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:latest@sha256:95f2aa1fe59274951cfe9b0cbc7972e879ff1004bc8945d130a32eb0dbd85945
+ARG RUST_IMAGE=rust:1.93.0-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57
+
+FROM ${UV_IMAGE} AS uv
+FROM ${RUST_IMAGE} AS rust-toolchain
+FROM ${RUNPOD_BASE} AS toolchain
+
+ARG RUST_TOOLCHAIN=nightly-2026-04-03
+ARG PEARL_REV=7df83305ede0256770c89d7f8bf7918f83427c82
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential ca-certificates clang git libssl-dev openssh-server \
+       pkg-config protobuf-compiler cuda-sanitizer-13-0 \
+    && mkdir -p /run/sshd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:/usr/local/cuda/bin:/opt/pearl/.venv/bin:${PATH} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo
+RUN rustup set auto-self-update disable \
+    && rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
+    && rustup default "${RUST_TOOLCHAIN}"
+
+ENV CUDA_HOME=/usr/local/cuda \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/pearl/.venv \
+    UV_PYTHON=3.12 \
+    UV_TORCH_BACKEND=cu129 \
+    TORCH_CUDA_ARCH_LIST="9.0a;12.0a" \
+    PEARL_GEMM_FORCE_BUILD=TRUE
+
+COPY docker/pearl-vllm-0.27.1.patch /tmp/pearl-vllm.patch
+RUN git init /opt/pearl \
+    && git -C /opt/pearl remote add origin https://github.com/pearl-research-labs/pearl.git \
+    && git -C /opt/pearl fetch --depth 1 origin "${PEARL_REV}" \
+    && git -C /opt/pearl checkout --detach FETCH_HEAD \
+    && git -C /opt/pearl apply /tmp/pearl-vllm.patch \
+    && git -C /opt/pearl submodule update --init --depth 1 \
+       miner/pearl-gemm/third_party/cutlass \
+    && rm -rf /opt/pearl/.git /opt/pearl/miner/pearl-gemm/third_party/cutlass/.git \
+       /tmp/pearl-vllm.patch
+
+FROM toolchain AS python-deps-source
+COPY crates/ai-pow-miner/vllm-plugin/pyproject.toml \
+  /opt/pearl/miner/vllm-miner/pyproject.toml
+COPY crates/ai-pow-miner/vllm-plugin/uv.lock /opt/pearl/uv.lock
+
+FROM python-deps-source AS python-deps-builder
+WORKDIR /opt/pearl
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    uv sync --locked --package vllm-miner --no-dev --group build --no-editable \
+    && uv build --package miner-utils --wheel --out-dir /wheelhouse \
+    && uv build --package miner-base --wheel --out-dir /wheelhouse \
+    && uv build --package pearl-gateway --wheel --out-dir /wheelhouse \
+    && uv build --package py-pearl-mining --wheel --out-dir /wheelhouse \
+    && uv build --package pearl-gemm-build-utils --wheel --out-dir /wheelhouse \
+    && uv build --package pearl-gemm --wheel --out-dir /wheelhouse
+
+FROM python-deps-builder AS python-source
+COPY crates/ai-pow-miner/vllm-plugin /tmp/vllm-plugin
+COPY crates/nockapp-grpc-proto/proto/nockchain/ai_pow/v1/inference_mining.proto \
+  /tmp/inference_mining.proto
+RUN rm -rf /opt/pearl/miner/vllm-miner \
+    && cp -R /tmp/vllm-plugin /opt/pearl/miner/vllm-miner \
+    && /opt/pearl/.venv/bin/python \
+       /opt/pearl/miner/vllm-miner/generate_proto.py \
+       /tmp/inference_mining.proto \
+       /opt/pearl/miner/vllm-miner/src/vllm_miner/proto \
+    && rm -rf /tmp/vllm-plugin /tmp/inference_mining.proto
+
+FROM python-source AS python-builder
+WORKDIR /opt/pearl
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv build --package vllm-miner --wheel --out-dir /wheelhouse
+
+FROM toolchain AS rust-builder
+WORKDIR /opt/nockchain
+COPY Cargo.toml Cargo.lock rust-toolchain.toml /opt/nockchain/
+COPY patches /opt/nockchain/patches
+COPY crates /opt/nockchain/crates
+ENV AI_POW_CUDA_GENCODES="compute_90a:sm_90a,compute_120a:sm_120a" \
+    AI_POW_CUDA_TOOLKIT=12.9
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/opt/nockchain/target \
+    cargo build --locked -p ai-pow-miner --release --features node,gpu \
+      --bin ai-pow-inference-bridge --bin ai-pow-gemma4-bench \
+    && cp target/release/ai-pow-inference-bridge \
+      target/release/ai-pow-gemma4-bench /usr/local/bin/ \
+    && nvcc -std=c++17 -O3 -shared -Xcompiler -fPIC \
+      -gencode arch=compute_90a,code=sm_90a \
+      -gencode arch=compute_120a,code=sm_120a \
+      crates/ai-pow-miner-cuda/csrc/ai_pow_v3_gemma4.cu \
+      -o /usr/local/lib/libai_pow_gemma4.so
+
+FROM python-builder AS development
+COPY docker/patch-vllm-piecewise-getitem.py /tmp/patch-vllm-piecewise-getitem.py
+RUN python3 /tmp/patch-vllm-piecewise-getitem.py \
+    && rm /tmp/patch-vllm-piecewise-getitem.py
+COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
+COPY --from=rust-builder /usr/local/bin/ai-pow-gemma4-bench /usr/local/bin/
+COPY --from=rust-builder /usr/local/lib/libai_pow_gemma4.so /usr/local/lib/
+COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
+COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
+COPY docker/ai-pow-inference-health /usr/local/bin/ai-pow-inference-health
+COPY docker/ai-pow-inference-container-entrypoint \
+  /usr/local/bin/ai-pow-inference-container-entrypoint
+RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
+      /usr/local/bin/ai-pow-inference-seed-model \
+      /usr/local/bin/ai-pow-inference-health \
+      /usr/local/bin/ai-pow-inference-container-entrypoint \
+    && ai-pow-inference-bridge --help >/dev/null \
+    && ai-pow-gemma4-bench --help >/dev/null \
+    && ai-pow-inference-health --help >/dev/null \
+    && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
+
+# The launcher applies measured FP8 kernel exclusions for H100 and Blackwell.
+# Operators can override VLLM_DISABLED_KERNELS for a validated deployment.
+ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
+    NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
+    AI_POW_CUDA_DEVICE=0 \
+    NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
+    VLLM_TENSOR_PARALLEL_SIZE=2 \
+    VLLM_MAX_MODEL_LEN=8192 \
+    VLLM_GPU_MEMORY_UTILIZATION=0.66 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_DISABLE_REQUIRE=1
+
+EXPOSE 22 8000
+ENTRYPOINT ["/usr/local/bin/ai-pow-inference-container-entrypoint"]
+
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+
+FROM ${VLLM_BASE} AS runtime
+ARG VLLM_VERSION
+LABEL org.opencontainers.image.vllm.version="${VLLM_VERSION}"
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates libgomp1 libssl3 libstdc++6 openssh-server \
+    && mkdir -p /run/sshd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=python-builder /wheelhouse /wheelhouse
+RUN uv pip install --system --no-deps \
+      /wheelhouse/*.whl \
+      base58check==1.0.2 \
+      bitcoin-utils==0.8.2 \
+      ecdsa==0.19.2 \
+      fastjsonschema==2.22.2 \
+      protobuf==6.33.5 \
+      transformers==5.5.4 \
+    && rm -rf /wheelhouse /root/.cache/uv
+COPY docker/patch-vllm-piecewise-getitem.py /tmp/patch-vllm-piecewise-getitem.py
+RUN python3 /tmp/patch-vllm-piecewise-getitem.py \
+    && rm /tmp/patch-vllm-piecewise-getitem.py
+
+COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
+COPY --from=rust-builder /usr/local/bin/ai-pow-gemma4-bench /usr/local/bin/
+COPY --from=rust-builder /usr/local/lib/libai_pow_gemma4.so /usr/local/lib/
+COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
+COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
+COPY docker/ai-pow-inference-health /usr/local/bin/ai-pow-inference-health
+COPY docker/ai-pow-inference-container-entrypoint \
+  /usr/local/bin/ai-pow-inference-container-entrypoint
+RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
+      /usr/local/bin/ai-pow-inference-seed-model \
+      /usr/local/bin/ai-pow-inference-health \
+      /usr/local/bin/ai-pow-inference-container-entrypoint \
+    && ai-pow-inference-bridge --help >/dev/null \
+    && ai-pow-gemma4-bench --help >/dev/null \
+    && ai-pow-inference-health --help >/dev/null \
+    && python3 -c "import torch, torchvision, vllm_miner; from vllm_miner.vllm_config import PearlConfig"
+# The launcher applies measured FP8 kernel exclusions for H100 and Blackwell.
+# Operators can override VLLM_DISABLED_KERNELS for a validated deployment.
+ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
+    NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
+    AI_POW_CUDA_DEVICE=0 \
+    NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
+    VLLM_TENSOR_PARALLEL_SIZE=2 \
+    VLLM_MAX_MODEL_LEN=8192 \
+    VLLM_GPU_MEMORY_UTILIZATION=0.66 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_DISABLE_REQUIRE=1
+
+EXPOSE 22 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10m --retries=3 \
+  CMD ["ai-pow-inference-health", "--timeout", "3"]
+ENTRYPOINT ["/usr/local/bin/ai-pow-inference-container-entrypoint"]
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

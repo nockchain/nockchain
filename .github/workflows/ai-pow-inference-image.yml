@@ -1,0 +1,201 @@
+name: AI-PoW inference image
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/ai-pow-inference-image.yml"
+      - "docker/Dockerfile.ai-pow-inference"
+      - "docker/ai-pow-inference-container-entrypoint"
+      - "docker/ai-pow-inference-health"
+      - "docker/pearl-vllm-0.27.1.patch"
+      - "docker/ai-pow-inference-run"
+      - "docker/ai-pow-inference-seed-model"
+      - "crates/ai-pow/**"
+      - "crates/ai-pow-miner/Cargo.toml"
+      - "crates/ai-pow-miner/build.rs"
+      - "crates/ai-pow-miner/src/**"
+      - "crates/ai-pow-miner/vllm-plugin/**"
+      - "crates/ai-pow-miner-cuda/**"
+      - "crates/ai-pow-zk/**"
+      - "crates/nockapp-grpc-proto/**"
+      - "scripts/gemma4-vram-kat.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: ai-pow-inference-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/nockchain/nockchain-ai-pow-inference
+  CANDIDATE_TAG: candidate-${{ github.sha }}
+
+jobs:
+  acceptance:
+    name: Cross-language acceptance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.12.7"
+          enable-cache: false
+
+      - name: Install Protocol Buffers compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Test Rust bridge and scalar reconstruction
+        env:
+          RUSTFLAGS: -C target-cpu=native
+        run: cargo test -p ai-pow-miner --features node
+
+      - name: Generate Python inference bindings
+        run: >-
+          uv run --with grpcio-tools==1.73.1 --with protobuf==6.33.5 python
+          crates/ai-pow-miner/vllm-plugin/generate_proto.py
+          crates/nockapp-grpc-proto/proto/nockchain/ai_pow/v1/inference_mining.proto
+          crates/ai-pow-miner/vllm-plugin/src/vllm_miner/proto
+
+      - name: Test Python-to-gRPC-to-Rust job contract
+        env:
+          RUSTFLAGS: -C target-cpu=native
+        run: >-
+          uv run --with pytest==8.4.2 --with grpcio==1.83.0
+          --with protobuf==6.33.5 pytest -q
+          crates/ai-pow-miner/vllm-plugin/tests/test_nockchain_job_kat.py
+
+  build-candidate:
+    name: Build candidate image
+    needs: acceptance
+    runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.ai-pow-inference
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.CANDIDATE_TAG }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-runtime
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-runtime,mode=max
+          provenance: mode=max
+          sbom: true
+
+  gpu-acceptance:
+    name: ${{ matrix.name }} acceptance
+    needs: build-candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: H100
+            runner: nockchain-h100
+            capability: 9
+            gpus: 1
+          - name: RTX PRO 6000 Blackwell
+            runner: nockchain-sm120
+            capability: 12
+            gpus: 1
+          - name: dual RTX 5090
+            runner: nockchain-rtx5090-dual
+            capability: 12
+            gpus: 2
+    runs-on: [self-hosted, linux, x64, "${{ matrix.runner }}"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull exact candidate digest
+        run: docker pull "${IMAGE}@${{ needs.build-candidate.outputs.digest }}"
+
+      - name: Verify target GPU and native scalar differential
+        run: |
+          image="${{ env.IMAGE }}@${{ needs.build-candidate.outputs.digest }}"
+          docker run --rm --gpus all "$image" python3 -c \
+            "import torch; capability=torch.cuda.get_device_capability()[0]; count=torch.cuda.device_count(); expected_capability=${{ matrix.capability }}; expected_count=${{ matrix.gpus }}; assert (capability, count) == (expected_capability, expected_count), (capability, count)"
+          docker run --rm --gpus all "$image" \
+            ai-pow-gemma4-bench --m 256 --warmup-iterations 1 --iterations 1
+
+      - name: Verify varied-batch steady-state VRAM
+        run: |
+          image="${{ env.IMAGE }}@${{ needs.build-candidate.outputs.digest }}"
+          docker run --rm --gpus all \
+            -v "${GITHUB_WORKSPACE}/scripts/gemma4-vram-kat.py:/validation/gemma4-vram-kat.py:ro" \
+            "$image" python3 /validation/gemma4-vram-kat.py
+
+  promote:
+    name: Sign and promote image
+    needs: [build-candidate, gpu-acceptance]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Promote validated digest
+        env:
+          DIGEST: ${{ needs.build-candidate.outputs.digest }}
+          TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && docker buildx imagetools create --tag "$tag" "${IMAGE}@${DIGEST}"
+          done <<< "$TAGS"
+
+      - name: Sign validated digest
+        env:
+          DIGEST: ${{ needs.build-candidate.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Verify keyless signature
+        env:
+          DIGEST: ${{ needs.build-candidate.outputs.digest }}
+        run: >-
+          cosign verify
+          --certificate-identity-regexp
+          '^https://github.com/nockchain/nockchain/.github/workflows/ai-pow-inference-image.yml@refs/(heads|tags)/.+$'
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          "${IMAGE}@${DIGEST}"

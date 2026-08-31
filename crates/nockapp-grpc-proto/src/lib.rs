@@ -22,6 +22,11 @@ pub mod pb {
             tonic::include_proto!("nockchain.monitoring.v1");
         }
     }
+    pub mod ai_pow {
+        pub mod v1 {
+            tonic::include_proto!("nockchain.ai_pow.v1");
+        }
+    }
     pub mod private {
         pub mod v1 {
             tonic::include_proto!("nockchain.private.v1");

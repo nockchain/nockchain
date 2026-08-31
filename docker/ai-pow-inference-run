@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MODEL_PATH:?MODEL_PATH is required}"
+: "${NOCKCHAIN_AI_POW_ENDPOINT:=127.0.0.1:5590}"
+: "${NOCKCHAIN_GEMMA4_MINING_LAYER:=0}"
+: "${AI_POW_CUDA_DEVICE:=0}"
+: "${AI_POW_REQUIRE_MINING:=0}"
+: "${AI_POW_BRIDGE_READY_TIMEOUT:=30}"
+: "${AI_POW_HF_CONFIG_DIR:=/run/nockchain-gemma-hf-config}"
+: "${VLLM_HOST:=127.0.0.1}"
+: "${VLLM_PORT:=8000}"
+: "${VLLM_SERVED_MODEL_NAME:=gemma-4-31b-it-pearl}"
+: "${VLLM_MAX_MODEL_LEN:=8192}"
+: "${VLLM_GPU_MEMORY_UTILIZATION:=0.66}"
+: "${VLLM_ENFORCE_EAGER:=0}"
+: "${VLLM_ALLOW_UNAUTHENTICATED:=0}"
+if [[ -z "${VLLM_COMPILATION_CONFIG+x}" ]]; then
+  VLLM_COMPILATION_CONFIG='{"cudagraph_mode":0,"splitting_ops":["vllm::unified_attention_with_output","vllm::pearl_mining_gemm"]}'
+fi
+
+if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
+  mapfile -t visible_gpus < <(nvidia-smi --list-gpus)
+  VLLM_TENSOR_PARALLEL_SIZE="${#visible_gpus[@]}"
+fi
+
+if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" -le 0 ]]; then
+  echo "no visible CUDA devices" >&2
+  exit 1
+fi
+
+if [[ -z "${VLLM_DISABLED_KERNELS+x}" ]]; then
+  primary_compute_capability="$(
+    nvidia-smi --query-gpu=compute_cap --format=csv,noheader \
+      | sed -n '1p' \
+      | tr -d ' '
+  )"
+  if [[ "${primary_compute_capability}" == 9.* ]]; then
+    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel
+  elif [[ "${primary_compute_capability}" == 12.* ]]; then
+    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel,DeepGemmFp8BlockScaledMMKernel
+  else
+    VLLM_DISABLED_KERNELS=
+  fi
+fi
+
+export AI_POW_REQUIRE_MINING NOCKCHAIN_AI_POW_ENDPOINT
+export NOCKCHAIN_GEMMA4_MINING_LAYER VLLM_HOST VLLM_PORT
+export VLLM_SERVED_MODEL_NAME
+if [[ -n "${VLLM_DISABLED_KERNELS:-}" ]]; then
+  export VLLM_DISABLED_KERNELS
+else
+  unset VLLM_DISABLED_KERNELS
+fi
+
+if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
+  echo "model config not found: ${MODEL_PATH}/config.json" >&2
+  exit 1
+fi
+
+bridge_host="${NOCKCHAIN_AI_POW_ENDPOINT%:*}"
+bridge_port="${NOCKCHAIN_AI_POW_ENDPOINT##*:}"
+if [[ "${bridge_host}" != "127.0.0.1" && "${bridge_host}" != "localhost" ]]; then
+  echo "NOCKCHAIN_AI_POW_ENDPOINT must use loopback" >&2
+  exit 1
+fi
+
+case "${VLLM_HOST}" in
+  127.0.0.1|localhost|::1|\[::1\]) ;;
+  *)
+    if [[ -z "${VLLM_API_KEY:-}" && "${VLLM_ALLOW_UNAUTHENTICATED}" != "1" ]]; then
+      echo "VLLM_API_KEY is required when VLLM_HOST is not loopback" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+bridge_args=(
+  --listen "127.0.0.1:${bridge_port}"
+  --cuda-device "${AI_POW_CUDA_DEVICE}"
+  --checkpoint-path "${MODEL_PATH}"
+)
+if [[ -n "${NOCKCHAIN_NODE_ADDR:-}" ]]; then
+  : "${MINING_PKH:?MINING_PKH is required with NOCKCHAIN_NODE_ADDR}"
+  bridge_args+=(--node-addr "${NOCKCHAIN_NODE_ADDR}" --mining-pkh "${MINING_PKH}")
+  printf 'AI-PoW production mining: node=%s mining_pkh=%s\n' \
+    "${NOCKCHAIN_NODE_ADDR}" "${MINING_PKH}"
+elif [[ -n "${MINING_PKH:-}" ]]; then
+  echo "MINING_PKH requires NOCKCHAIN_NODE_ADDR" >&2
+  exit 1
+elif [[ "${AI_POW_REQUIRE_MINING}" == "1" ]]; then
+  echo "AI_POW_REQUIRE_MINING=1 requires NOCKCHAIN_NODE_ADDR and MINING_PKH" >&2
+  exit 1
+fi
+
+ai-pow-inference-bridge "${bridge_args[@]}" &
+bridge_pid=$!
+vllm_pid=""
+
+cleanup() {
+  trap - EXIT HUP INT TERM
+  if [[ -n "${vllm_pid}" ]]; then
+    kill -TERM -- "-${vllm_pid}" 2>/dev/null || kill "${vllm_pid}" 2>/dev/null || true
+    wait "${vllm_pid}" 2>/dev/null || true
+  fi
+  kill "${bridge_pid}" 2>/dev/null || true
+  wait "${bridge_pid}" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+if ! ai-pow-inference-health \
+  --bridge-only \
+  --wait "${AI_POW_BRIDGE_READY_TIMEOUT}" \
+  --timeout 1 >/dev/null; then
+  echo "AI-PoW bridge did not become ready" >&2
+  exit 1
+fi
+
+mkdir -p "${AI_POW_HF_CONFIG_DIR}"
+python3 - "${MODEL_PATH}/config.json" "${AI_POW_HF_CONFIG_DIR}/config.json" <<'PY'
+import json
+import sys
+
+source, destination = sys.argv[1:3]
+with open(source) as input_file:
+    config = json.load(input_file)
+text_config = config.get("text_config")
+if not isinstance(text_config, dict):
+    raise SystemExit("Gemma config is missing text_config")
+text_config["allow_global_per_layer_attribute_access"] = True
+with open(destination, "w") as output_file:
+    json.dump(config, output_file)
+PY
+
+vllm_args=(
+  serve "${MODEL_PATH}"
+  --host "${VLLM_HOST}"
+  --port "${VLLM_PORT}"
+  --served-model-name "${VLLM_SERVED_MODEL_NAME}"
+  --hf-config-path "${AI_POW_HF_CONFIG_DIR}"
+  --language-model-only
+  --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}"
+  --max-model-len "${VLLM_MAX_MODEL_LEN}"
+  --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}"
+)
+if [[ "${VLLM_ENFORCE_EAGER}" == "1" ]]; then
+  vllm_args+=(--enforce-eager)
+else
+  vllm_args+=(--compilation-config "${VLLM_COMPILATION_CONFIG}")
+fi
+if [[ -n "${VLLM_MAX_NUM_SEQS:-}" ]]; then
+  vllm_args+=(--max-num-seqs "${VLLM_MAX_NUM_SEQS}")
+fi
+if [[ -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" ]]; then
+  vllm_args+=(--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}")
+fi
+
+vllm_environment=(
+  env
+  -u VLLM_HOST
+  -u VLLM_SERVED_MODEL_NAME
+  -u VLLM_TENSOR_PARALLEL_SIZE
+  -u VLLM_MAX_MODEL_LEN
+  -u VLLM_GPU_MEMORY_UTILIZATION
+  -u VLLM_ENFORCE_EAGER
+  -u VLLM_ALLOW_UNAUTHENTICATED
+  -u VLLM_COMPILATION_CONFIG
+  -u VLLM_MAX_NUM_SEQS
+  -u VLLM_MAX_NUM_BATCHED_TOKENS
+)
+
+setsid "${vllm_environment[@]}" vllm "${vllm_args[@]}" "$@" &
+vllm_pid=$!
+
+set +e
+wait -n "${bridge_pid}" "${vllm_pid}"
+status=$?
+set -e
+if ! kill -0 "${bridge_pid}" 2>/dev/null; then
+  echo "AI-PoW bridge exited; stopping vLLM" >&2
+elif ! kill -0 "${vllm_pid}" 2>/dev/null; then
+  echo "vLLM exited; stopping AI-PoW bridge" >&2
+fi
+exit "${status}"
