@@ -7,6 +7,11 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Registry to resolve packages from: a URL or a local file path.
+    /// Overrides the default (sigilante/typhoon) and the NOCKUP_REGISTRY env var.
+    #[arg(long, global = true, value_name = "URL_OR_PATH")]
+    pub registry: Option<String>,
 }
 
 #[derive(Subcommand)]
