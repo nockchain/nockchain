@@ -16,6 +16,7 @@ use alloy::providers::fillers::{
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{anyhow, bail, Context, Result};
+use async_trait::async_trait;
 use bridge::observability::tui::types::format_nock_from_nicks;
 use bridge::observability::tui_api::proto as tui_proto;
 use bridge::observability::tui_api::proto::bridge_tui_client::BridgeTuiClient;
@@ -33,6 +34,7 @@ use bridge::shared::proposer::withdrawal_turn_proposer;
 use bridge::shared::signing::BridgeSigner;
 use bridge::shared::types::WITHDRAWAL_POLICY_V1_ID;
 use bridge::withdrawal::transport::withdrawal_id_from_proto;
+use bridge_dev::actions::{execute_fault_trace, FaultTraceExecution};
 use bridge_dev::artifacts::{ArtifactResolveOptions, ArtifactResolver, E2eArtifacts};
 use bridge_dev::cluster_config::{
     BRIDGE_ETH_ADDRS, BRIDGE_ETH_KEYS, BRIDGE_NOCK_KEYS, BRIDGE_NOCK_PKHS,
@@ -41,7 +43,25 @@ use bridge_dev::e2e::{
     E2eBaseMode, E2eClientMode, E2eRunConfig, E2eRunner, E2eScenarioExecutor, ScriptedE2eExecutor,
     ScriptedPlan, UnavailableE2eExecutor,
 };
+use bridge_dev::evidence::{
+    EvidenceArtifacts, EvidenceAssertion, EvidenceEnvironmentFacts, EvidenceEnvironmentMode,
+    EvidenceRunFacts, EvidenceRunStatus, EvidenceStep, RedactionDeclaration,
+    WithdrawalEvidenceCapsuleV1,
+};
+use bridge_dev::fault_campaign::{
+    run_fault_campaign, CampaignExecutionFailure, CampaignExecutor, CampaignOptions,
+};
+use bridge_dev::formal_import::{import_formal_counterexample, FormalImportOptions};
+use bridge_dev::generated_scenario::{
+    generate_scenario, write_minimized_trace, GeneratedScenarioOptions,
+};
 use bridge_dev::iris_artifact::IrisArtifactInput;
+use bridge_dev::model_trace::{check_model_trace, map_fault_trace};
+use bridge_dev::replay::{
+    resolve_replay_artifacts, run_replay, ReplayExecutionContext, ReplayExecutor, ReplaySource,
+    SemanticComparisonClass,
+};
+use bridge_dev::scenario::ScenarioHarness;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ibig::UBig;
 use nockapp_grpc::pb::common::v2::note;
@@ -410,6 +430,13 @@ struct E2eArgs {
 #[derive(Subcommand, Debug)]
 enum E2eCommands {
     Withdrawal(WithdrawalE2eArgs),
+    #[command(name = "generate-faults")]
+    GenerateFaults(GenerateFaultsArgs),
+    Replay(ReplayE2eArgs),
+    #[command(name = "fault-campaign")]
+    FaultCampaign(FaultCampaignArgs),
+    #[command(name = "import-formal")]
+    ImportFormal(ImportFormalArgs),
 }
 
 #[derive(Args, Debug)]
@@ -442,6 +469,84 @@ struct WithdrawalE2eArgs {
     run_root: Option<PathBuf>,
     #[arg(long, default_value_t = 1_800)]
     timeout_secs: u64,
+}
+
+#[derive(Args, Debug)]
+struct GenerateFaultsArgs {
+    #[arg(long)]
+    seed: u64,
+    #[arg(long, default_value_t = 64)]
+    max_actions: usize,
+    #[arg(long, default_value_t = 100)]
+    max_runs: u64,
+    #[arg(long, default_value_t = 30_000)]
+    action_timeout_ms: u64,
+    #[arg(long, default_value_t = 1_800_000)]
+    overall_timeout_ms: u64,
+    #[arg(long, default_value_t = 10)]
+    negative_action_percent: u8,
+    #[arg(long, default_value = "local-generated")]
+    environment_id: String,
+    #[arg(long, default_value = "hermetic")]
+    backend: String,
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct ReplayE2eArgs {
+    source: PathBuf,
+    #[arg(long, help = "Explicit replacement artifacts.json manifest")]
+    artifacts: Option<PathBuf>,
+    #[arg(long, help = "Approve and label artifact identity substitutions")]
+    allow_artifact_substitution: bool,
+    #[arg(long, help = "Base archive RPC URL; accepted only for fork capsules")]
+    archive_rpc_url: Option<String>,
+    #[arg(long, help = "Parent directory for linked replay runs")]
+    output_root: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct FaultCampaignArgs {
+    #[arg(long)]
+    seed: u64,
+    #[arg(long, default_value_t = 16)]
+    runs: usize,
+    #[arg(long, default_value_t = 64)]
+    max_actions: usize,
+    #[arg(long, value_enum, default_value_t = CliE2eBaseMode::Hermetic)]
+    backend: CliE2eBaseMode,
+    #[arg(long, default_value_t = 30_000)]
+    action_timeout_ms: u64,
+    #[arg(long, default_value_t = 1_800_000)]
+    overall_timeout_ms: u64,
+    #[arg(long, default_value_t = 10)]
+    negative_action_percent: u8,
+    #[arg(long, conflicts_with = "continue_after_failure")]
+    fail_fast: bool,
+    #[arg(long = "continue", conflicts_with = "fail_fast")]
+    continue_after_failure: bool,
+    #[arg(long)]
+    archive_rpc_url: Option<String>,
+    #[arg(long, default_value = "target/bridge-fault-campaign")]
+    output_root: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct ImportFormalArgs {
+    source: PathBuf,
+    #[arg(long)]
+    property: String,
+    #[arg(long)]
+    counterexample_id: String,
+    #[arg(long, default_value = "formal-import")]
+    environment_id: String,
+    #[arg(long, default_value_t = 30_000)]
+    action_timeout_ms: u64,
+    #[arg(long, default_value_t = 1_800_000)]
+    overall_timeout_ms: u64,
+    #[arg(long, default_value = "target/bridge-formal-import")]
+    output_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -1464,7 +1569,16 @@ async fn main() -> Result<()> {
 }
 
 async fn run_e2e(paths: Paths, args: E2eArgs) -> Result<()> {
-    let E2eCommands::Withdrawal(args) = args.command;
+    match args.command {
+        E2eCommands::Withdrawal(args) => run_withdrawal_e2e(paths, args).await,
+        E2eCommands::GenerateFaults(args) => run_generate_faults(args),
+        E2eCommands::Replay(args) => run_replay_e2e(paths, args).await,
+        E2eCommands::FaultCampaign(args) => run_fault_campaign_e2e(args).await,
+        E2eCommands::ImportFormal(args) => run_import_formal(args),
+    }
+}
+
+async fn run_withdrawal_e2e(paths: Paths, args: WithdrawalE2eArgs) -> Result<()> {
     let base = E2eBaseMode::from(args.base);
     let client = E2eClientMode::from(args.client);
     match (base, args.archive_rpc_url.as_ref()) {
@@ -1562,6 +1676,325 @@ async fn run_e2e(paths: Paths, args: E2eArgs) -> Result<()> {
             outcome.report_path.display()
         )
     }
+}
+
+fn run_generate_faults(args: GenerateFaultsArgs) -> Result<()> {
+    let generated = generate_scenario(GeneratedScenarioOptions {
+        seed: args.seed,
+        max_actions: args.max_actions,
+        max_runs: args.max_runs,
+        action_timeout_ms: args.action_timeout_ms,
+        overall_timeout_ms: args.overall_timeout_ms,
+        negative_action_percent: args.negative_action_percent,
+        environment_id: args.environment_id,
+        backend: args.backend,
+    })?;
+    let path = write_minimized_trace(&args.output, &generated.trace)?;
+    println!("seed={}", generated.options.seed);
+    println!("max_runs={}", generated.options.max_runs);
+    println!("actions={}", generated.trace.actions.len());
+    println!("trace={}", path.display());
+    Ok(())
+}
+
+fn run_import_formal(args: ImportFormalArgs) -> Result<()> {
+    let result = import_formal_counterexample(
+        &args.source,
+        &args.output_root,
+        FormalImportOptions {
+            property: args.property,
+            counterexample_id: args.counterexample_id,
+            environment_id: args.environment_id,
+            action_timeout_ms: args.action_timeout_ms,
+            overall_timeout_ms: args.overall_timeout_ms,
+        },
+    )?;
+    println!("import_report={}", result.report_path.display());
+    println!("formal_trace={}", result.original_trace_path.display());
+    println!("scenario={}", result.scenario_path.display());
+    println!("actions={}", result.report.translated_action_count);
+    Ok(())
+}
+
+async fn run_fault_campaign_e2e(args: FaultCampaignArgs) -> Result<()> {
+    match (args.backend, args.archive_rpc_url.as_ref()) {
+        (CliE2eBaseMode::Hermetic, Some(_)) => {
+            bail!("--archive-rpc-url is valid only for --backend base-sepolia-fork")
+        }
+        (CliE2eBaseMode::BaseSepoliaFork, None) => {
+            bail!("--archive-rpc-url is required for --backend base-sepolia-fork")
+        }
+        (CliE2eBaseMode::BaseSepoliaFork, Some(_)) => {
+            bail!(
+                "fork fault campaigns are unavailable until the pinned fork scenario executor is wired"
+            )
+        }
+        (CliE2eBaseMode::Hermetic, None) => {}
+    }
+    let fail_fast = args.fail_fast || !args.continue_after_failure;
+    let mut executor = ModelCampaignExecutor;
+    let result = run_fault_campaign(
+        CampaignOptions {
+            seed: args.seed,
+            runs: args.runs,
+            max_actions: args.max_actions,
+            action_timeout_ms: args.action_timeout_ms,
+            overall_timeout_ms: args.overall_timeout_ms,
+            negative_action_percent: args.negative_action_percent,
+            environment_id: format!("fault-campaign-{}", args.seed),
+            backend: "hermetic".to_owned(),
+            fail_fast,
+        },
+        &args.output_root,
+        &mut executor,
+    )
+    .await?;
+    let failures = result
+        .report
+        .runs
+        .iter()
+        .filter(|run| run.status == bridge_dev::fault_campaign::CampaignRunStatus::Failed)
+        .count();
+    let flaky = result
+        .report
+        .runs
+        .iter()
+        .filter(|run| run.failure_reproduced == Some(false))
+        .count();
+    println!("campaign_report={}", result.report_path.display());
+    println!("selected_runs={}", result.report.selected_runs);
+    println!("executed_runs={}", result.report.executed_runs);
+    println!("covered_pairs={}", result.report.covered_pairs.len());
+    println!("uncovered_pairs={}", result.report.uncovered_pairs.len());
+    println!("failures={failures}");
+    println!("flaky_failures={flaky}");
+    if failures > 0 {
+        bail!(
+            "fault campaign found {failures} failure(s); report={}",
+            result.report_path.display()
+        );
+    }
+    Ok(())
+}
+
+struct ModelCampaignExecutor;
+
+#[async_trait]
+impl CampaignExecutor for ModelCampaignExecutor {
+    async fn execute(
+        &mut self,
+        _seed: u64,
+        trace: &bridge_dev::actions::WithdrawalFaultTrace,
+    ) -> std::result::Result<(), CampaignExecutionFailure> {
+        let mapped = map_fault_trace(trace).map_err(|error| CampaignExecutionFailure {
+            class: "mapping".to_owned(),
+            message: error.to_string(),
+        })?;
+        check_model_trace(&mapped)
+            .map(|_| ())
+            .map_err(|error| CampaignExecutionFailure {
+                class: "model_conformance".to_owned(),
+                message: error.to_string(),
+            })
+    }
+}
+
+async fn run_replay_e2e(paths: Paths, args: ReplayE2eArgs) -> Result<()> {
+    let source = ReplaySource::load(&args.source)?;
+    let expected_artifacts = source
+        .capsule
+        .as_ref()
+        .and_then(|capsule| capsule.artifacts.as_ref())
+        .map(|artifacts| &artifacts.bridge_runtime);
+    let (artifacts, artifact_resolution) = resolve_replay_artifacts(
+        &paths.workspace_root,
+        expected_artifacts,
+        args.artifacts.as_deref(),
+        args.allow_artifact_substitution,
+    )?;
+    let output_root = args.output_root.unwrap_or_else(|| {
+        if args.source.is_dir() {
+            args.source.join("replays")
+        } else {
+            args.source
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("replays")
+        }
+    });
+    let mut executor = ScenarioReplayExecutor {
+        workspace_root: paths.workspace_root,
+        bridge_dev_bin: std::env::current_exe().context("resolve bridge-dev executable")?,
+    };
+    let result = run_replay(
+        source, artifacts, artifact_resolution, args.archive_rpc_url, &output_root, &mut executor,
+    )
+    .await?;
+    println!("replay_report={}", result.report_path.display());
+    println!("linked_capsule={}", result.linked_capsule_path.display());
+    println!(
+        "artifact_resolution={}",
+        serde_json::to_string(&result.report.artifact_resolution)?
+    );
+    println!(
+        "semantic_comparison={}",
+        serde_json::to_string(&result.report.comparison.class)?
+    );
+    if result.report.failure_reproduced == Some(false) {
+        bail!(
+            "original failure no longer reproduces; report={}",
+            result.report_path.display()
+        );
+    }
+    if result.report.comparison.class == SemanticComparisonClass::SemanticDivergence {
+        bail!(
+            "replay semantic divergence; report={}",
+            result.report_path.display()
+        );
+    }
+    Ok(())
+}
+
+struct ScenarioReplayExecutor {
+    workspace_root: PathBuf,
+    bridge_dev_bin: PathBuf,
+}
+
+#[async_trait]
+impl ReplayExecutor for ScenarioReplayExecutor {
+    async fn execute(
+        &mut self,
+        context: &ReplayExecutionContext,
+    ) -> std::result::Result<WithdrawalEvidenceCapsuleV1, String> {
+        if context.source.environment_mode() == Some(EvidenceEnvironmentMode::BaseSepoliaFork) {
+            return Err(
+                "fork source identity was verified, but ScenarioHarness cannot yet provision a pinned fork replay"
+                    .to_owned(),
+            );
+        }
+        let name = format!("replay-{}", context.source.scenario.seed);
+        let mut harness = ScenarioHarness::for_e2e_run(
+            &name,
+            self.workspace_root.clone(),
+            self.bridge_dev_bin.clone(),
+            &context.run_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(artifacts) = &context.artifacts {
+            harness.extend_env_overrides(artifacts.environment_overrides());
+        }
+        let execution = execute_fault_trace(&context.source.scenario, &mut harness).await;
+        if execution.is_err() {
+            harness.preserve_failure_artifacts();
+        }
+        harness.stop();
+        let execution = execution.map_err(|error| error.to_string())?;
+        replay_capsule_from_execution(context, execution).map_err(|error| error.to_string())
+    }
+}
+
+fn replay_capsule_from_execution(
+    context: &ReplayExecutionContext,
+    execution: FaultTraceExecution,
+) -> Result<WithdrawalEvidenceCapsuleV1> {
+    let now = replay_unix_ms()?;
+    let mut capsule = context.source.capsule.clone().unwrap_or_else(|| {
+        let mode = if context.source.scenario.environment.backend == "base-sepolia-fork" {
+            EvidenceEnvironmentMode::BaseSepoliaFork
+        } else {
+            EvidenceEnvironmentMode::Hermetic
+        };
+        WithdrawalEvidenceCapsuleV1::new(
+            EvidenceRunFacts {
+                run_id: format!("replay-{now}-{}", std::process::id()),
+                scenario: "fault-trace-replay".to_owned(),
+                seed: context.source.scenario.seed,
+                status: EvidenceRunStatus::Running,
+                error: None,
+                started_at_unix_ms: now,
+                finished_at_unix_ms: None,
+            },
+            EvidenceEnvironmentFacts {
+                mode,
+                environment_id: context.source.scenario.environment.environment_id.clone(),
+                source_manifest_sha256: None,
+                source_chain_id: None,
+                source_block_number: None,
+                source_block_hash: None,
+                local_chain_id: 31_338,
+                rpc_endpoint_class: "loopback_anvil".to_owned(),
+            },
+            RedactionDeclaration {
+                policy: "e2e-secret-redaction-v1".to_owned(),
+                removed_secret_classes: Vec::new(),
+                raw_logs_embedded: false,
+                external_artifacts_only: true,
+            },
+        )
+    });
+    capsule.run.run_id = format!("replay-{now}-{}", std::process::id());
+    capsule.run.seed = context.source.scenario.seed;
+    capsule.run.started_at_unix_ms = now;
+    capsule.run.finished_at_unix_ms = Some(now);
+    capsule.run.status = EvidenceRunStatus::Failed;
+    capsule.run.error = Some(
+        "action trace executed, but this adapter did not collect fresh multi-source terminal facts"
+            .to_owned(),
+    );
+    capsule.steps = execution
+        .actions
+        .into_iter()
+        .enumerate()
+        .map(|(index, action)| EvidenceStep {
+            index: index as u64,
+            action: action.label,
+            status: action.status,
+            started_at_unix_ms: now,
+            finished_at_unix_ms: now,
+            duration_ms: 0,
+            frontier_before: None,
+            frontier_after: None,
+            detail: action.detail,
+        })
+        .collect();
+    capsule.assertions = vec![EvidenceAssertion {
+        assertion: "fresh_multi_source_terminal_proof".to_owned(),
+        status: "unavailable".to_owned(),
+        detail: Some(
+            "ScenarioHarness replay cannot reuse the original capsule's terminal facts".to_owned(),
+        ),
+    }];
+    capsule.artifacts = context.artifacts.clone().map(|bridge_runtime| {
+        let original = context
+            .source
+            .capsule
+            .as_ref()
+            .and_then(|capsule| capsule.artifacts.as_ref());
+        EvidenceArtifacts {
+            bridge_runtime,
+            iris: original.and_then(|artifacts| artifacts.iris.clone()),
+            nockswap_bundle: original.and_then(|artifacts| artifacts.nockswap_bundle.clone()),
+        }
+    });
+    capsule.deployment = None;
+    capsule.base = None;
+    capsule.sequencer = None;
+    capsule.nockchain = None;
+    capsule.kernels = None;
+    capsule.public = None;
+    capsule.conservation = None;
+    capsule.terminal = None;
+    capsule.external_artifacts.clear();
+    capsule.normalized_evidence_sha256 = None;
+    Ok(capsule)
+}
+
+fn replay_unix_ms() -> Result<u64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock precedes Unix epoch")?
+        .as_millis();
+    u64::try_from(millis).context("Unix millisecond timestamp exceeds u64")
 }
 
 async fn run_up(

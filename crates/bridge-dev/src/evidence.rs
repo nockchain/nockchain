@@ -386,6 +386,20 @@ impl WithdrawalEvidenceCapsuleV1 {
         }
     }
 
+    pub fn model_trace(
+        &self,
+    ) -> Result<crate::model_trace::ModelTraceV1, crate::model_trace::ModelTraceError> {
+        crate::model_trace::map_evidence_capsule(self)
+    }
+
+    pub fn check_model_conformance(
+        &self,
+    ) -> Result<crate::model_trace::ModelTraceConformance, crate::model_trace::ModelTraceError>
+    {
+        let trace = self.model_trace()?;
+        crate::model_trace::check_model_trace(&trace)
+    }
+
     pub fn from_json(input: &str) -> Result<Self, EvidenceSchemaError> {
         let header: Value = serde_json::from_str(input)?;
         let schema_id = header.get("schema_id").and_then(Value::as_str);
