@@ -1,46 +1,82 @@
 # Bridge Withdrawals
 
-Status: Active
+Status: Backend implemented; public Base-to-Nockchain launch disabled
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-04-01
+Last Reviewed: 2026-08-27
 Canonical/Legacy: Canonical bridge withdrawal protocol and implementation spec
 
 ## Scope
 
-This document specifies the implementation work required to enable bridge withdrawals (Base -> Nockchain) across:
+This document defines the Base-to-Nockchain withdrawal protocol across the
+Rust bridge (`crates/bridge`), the Hoon bridge kernel
+(`hoon/apps/bridge`), the sequencer, public read APIs, recovery state, and
+required verification.
 
-1. Rust bridge crate (`open/crates/bridge`)
-2. Hoon bridge kernel (`open/hoon/apps/bridge/bridge.hoon`, plus `base.hoon`, `nock.hoon`, `types.hoon`)
+It is normative for:
 
-This spec focuses on:
-
-1. The current implemented withdrawal protocol shape
-2. The intended steady-state coordination model
-3. Remaining hardening gaps and policy choices
-4. How to validate correctness
+1. `WithdrawalWireV1` and `withdrawal-policy-v1`;
+2. withdrawal identity, state, authorization, and single-flight ordering;
+3. persistence, reservation, journal, and reorg recovery invariants;
+4. public readiness, history, quote, and browser boundaries;
+5. launch and verification gates.
 
 ## Current Implementation Status
+
+### Launch gate
+
+Public withdrawal launch remains disabled:
+
+1. Rust implements canonical burn decoding, sequencer persistence and replay,
+   authenticated operator RPC, public lookup/history, bounded Base recovery,
+   and Nockchain inclusion recovery.
+2. Rust withholds Base and Nockchain observations until their configured
+   confirmation depths; the production example uses 300 and 400 blocks.
+   Ordinary shallow forks therefore do not reach Hoon. A parent mismatch after
+   that buffer is a finality-assumption violation: Hoon and Rust fail-stop, and
+   launch requires certified depth settings plus a tested operator
+   stop/close-gate/rebuild/replay procedure. Automatic in-place Hoon rewind is
+   an optional resilience improvement, not a launch prerequisite.
+3. Iris SDK `0.3.3` is a local release candidate with the 116-byte codec,
+   amount policy, canonical v1-PKH/direct-lock-root resolver, and a
+   self-contained E2E driver package. NockSwap and the withdrawal harness pin
+   its content-hashed tarball, but the public registry still serves `0.2.0`;
+   `0.3.3` is not yet an immutable public release.
+4. NockSwap keeps Base-to-Nockchain behind a compile-time-disabled launch flag.
+   The disabled path now uses the official SDK calldata, validates the Base
+   receipt and burn log, persists settlement identity and history, polls the
+   sequencer's production `/withdrawal-status` HTTP adapter, displays readiness
+   and fees, and has real-browser nominal and failure coverage against that
+   production adapter.
+5. The pinned Foundry gate runs all 57 contract tests, including the 13
+   withdrawal compatibility and fail-closed initialization tests. Hermetic and
+   Base Sepolia fork browser runs retain redacted terminal evidence. Live
+   production-host authentication, R2 recovery, post-confirmation
+   stop/rebuild/replay drills, immutable SDK publication, and independent
+   certification remain required.
+
+No current UI or CLI should offer an official Base-to-Nockchain withdrawal
+until every remaining gate above is closed at one exact revision.
 
 ### Kernel status (Hoon)
 
 1. Nock-side withdrawal tx detection is now wired (no intentional hard-stop):
-   - `open/hoon/apps/bridge/nock.hoon`
+   - `hoon/apps/bridge/nock.hoon`
    - arm: `++ process-nock-txs`
    - branch: `is-bridge-withdrawal-tx`
    - current behavior: detects packed `%bridge-w` note-data, parses withdrawal metadata, and builds `withdrawal-settlement` entries (non-matching/malformed outputs are skipped, not fatal)
 
 2. Nock-side settlement processing no longer intentionally rejects withdrawals:
-   - `open/hoon/apps/bridge/nock.hoon`
+   - `hoon/apps/bridge/nock.hoon`
    - arm: `++ nockchain-process-withdrawal-settlements`
    - current behavior: reconciles settlements against tracked withdrawals by counterpart identity and destination, enforces `0 < settled_amount < burned_amount`, emits hold when referenced `as_of` base hash is unknown, stops on irreconcilable counterpart issues or out-of-bounds settlement amounts, and clears matched unsettled entries
 
 3. Base-side withdrawal proposal arm is now implemented:
-   - `open/hoon/apps/bridge/base.hoon`
+   - `hoon/apps/bridge/base.hoon`
    - arm: `++ base-propose-withdrawals`
    - current behavior: returns `(list nock-withdrawal-request)` which is included in `%base-block-withdrawals-pending`
 
 4. Withdrawal data/effect surface was updated:
-   - `open/hoon/apps/bridge/types.hoon`
+   - `hoon/apps/bridge/types.hoon`
    - `withdrawal` now uses `dest=nock-lock-root` and no fee field
    - `withdrawal-settlement` now includes `base-batch-end` (including hashable encoding) and no `nock-tx-fee`
    - effects now include `%base-block-withdrawals-pending`,
@@ -62,14 +98,14 @@ This spec focuses on:
 ### Runtime status (Rust)
 
 1. Core runtime now wires both deposit and withdrawal execution:
-   - `open/crates/bridge/src/main.rs`
-   - `open/crates/bridge/src/shared/runtime.rs`
-   - `open/crates/bridge/src/withdrawal/runtime.rs`
+   - `crates/bridge/src/main.rs`
+   - `crates/bridge/src/shared/runtime.rs`
+   - `crates/bridge/src/withdrawal/runtime.rs`
    - active loops now include withdrawal assembly, signing, submission, and
      sequencer confirmation polling alongside the existing deposit path
 
 2. Rust effect surface now decodes the live withdrawal kernel effects:
-   - `open/crates/bridge/src/shared/types.rs`
+   - `crates/bridge/src/shared/types.rs`
    - withdrawal-related variants:
     `BridgeEffectVariant::BaseBlockWithdrawalsPending(PendingBaseBlockCommit)`,
      `BridgeEffectVariant::WithdrawalProposalBuilt(WithdrawalProposalData)`,
@@ -77,41 +113,36 @@ This spec focuses on:
    - legacy `BridgeEffectVariant::CreateWithdrawalTxs(...)` remains decodable but is not live execution work
    - there is no `BridgeEffectVariant::WithdrawalTerminal(...)` today
 
-3. Legacy runtime local effect queue was removed:
-   - `open/crates/bridge/src/shared/runtime.rs`
-   - `BridgeRuntime::process_effect` and `send_effect` no longer exist
-   - effect consumption is now driver-specific (e.g., stop/deposit drivers)
-
-4. Live effect handling now includes the withdrawal execution driver:
-   - `open/crates/bridge/src/deposit/log.rs`
-   - `open/crates/bridge/src/withdrawal/assembly.rs`
-   - `open/crates/bridge/src/main.rs` registers both
+3. Withdrawal effect handling is registered in the live runtime:
+   - `crates/bridge/src/deposit/log.rs`
+   - `crates/bridge/src/withdrawal/assembly.rs`
+   - `crates/bridge/src/main.rs` registers
      `create_commit_nock_deposits_driver` and
      `create_withdrawal_execution_driver`
-   - `open/crates/bridge/src/withdrawal/guard.rs` still exists as historical
-     milestone-1 scaffolding, but it is not the production path
 
-5. Ingress now serves both deposit and withdrawal coordination:
-   - `open/crates/bridge/proto/bridge_ingress.proto`
-   - `open/crates/bridge/src/shared/ingress.rs`
+4. Ingress serves both deposit and withdrawal coordination:
+   - `crates/bridge/proto/bridge_ingress.proto`
+   - `crates/bridge/src/shared/ingress.rs`
    - deposit proposal cache remains deposit-specific, but withdrawals use
      `WithdrawalProposalTransport` and dedicated ingress RPCs for proposal,
      canonicalization, and signed-proposal broadcast
 
-6. Withdrawal proposal validation and tracking belong to Rust:
+5. Withdrawal proposal validation and tracking belong to Rust:
    - there is no kernel proposal-validation cause in the intended design
    - Rust owns proposal-envelope validation against withdrawal identity,
      snapshot/selected-note inputs, epoch legality, replay/equivocation rules,
      and durable per-withdrawal proposal tracking
-7. Base burn events are observed and minimum-gated before they become tracked
-   withdrawals:
-   - `open/crates/bridge/src/ethereum.rs`
-   - `process_nock_log` decodes `BurnForWithdrawal`
-   - generated local `Withdrawal` currently has `dest: None`
-   - `open/hoon/apps/bridge/base.hoon` now rejects burns at or below the
+6. Base burn events are observed, decoded, and policy-gated before they become
+   tracked withdrawals:
+   - `crates/bridge/src/shared/base.rs` decodes the event together with
+     the fetched transaction input
+   - only self-consistent 116-byte calldata yields the five-limb destination
+   - malformed or ordinary 68-byte burns are excluded and classified for
+     incident monitoring rather than converted into destination-less work
+   - `hoon/apps/bridge/base.hoon` rejects burns below the inclusive
      configured minimum before they materialize into withdrawal state
 
-8. Withdrawal-specific coordination state is live:
+7. Withdrawal-specific coordination state is live:
    - a durable withdrawal state-store record of prepared / peer-canonical /
      authorized / submitted / confirmed withdrawals exists in Rust
    - append-only withdrawal lifecycle storage and sequencer-owned reserved-note
@@ -148,21 +179,222 @@ This spec focuses on:
 ### Contracts and dependencies
 
 1. Contracts support burn-side initiation:
-   - `open/crates/bridge/contracts/Nock.sol`: `burn(amount, lockRoot)` emits `BurnForWithdrawal`
-   - `open/crates/bridge/contracts/MessageInbox.sol`: `notifyBurn` + `withdrawalsEnabled` gate
+   - `crates/bridge/contracts/Nock.sol`: `burn(amount, lockRoot)` emits `BurnForWithdrawal`
+   - `crates/bridge/contracts/MessageInbox.sol`: `notifyBurn` + `withdrawalsEnabled` gate
 
-2. No immediate `Cargo.toml` dependency gap identified for baseline implementation:
-   - `open/crates/bridge/Cargo.toml`
-   - nockapp gRPC client dependencies already present
+2. Runtime dependencies are declared in `crates/bridge/Cargo.toml`; Cargo and
+   Bazel lockfiles pin the resolved graph.
+
+## Canonical Base Burn Wire Protocol (`WithdrawalWireV1`)
+
+### Contract Calldata Constraint
+
+`Nock.sol::burn(uint256,bytes32)` accepts ordinary ABI calldata, but the bridge
+cannot recover a five-limb Nockchain destination from that 68-byte call. The
+only supported withdrawal initiation path is therefore the exact 116-byte
+`WithdrawalWireV1` representation below. Official clients must construct it
+through the shared withdrawal SDK rather than a generated contract
+`writeContract` helper.
+
+### Exact Calldata Layout
+
+| Byte range | Size | Encoding | Meaning |
+|---|---:|---|---|
+| `0..4` | 4 | raw bytes | selector for `burn(uint256,bytes32)` |
+| `4..36` | 32 | unsigned big-endian | wrapped-NOCK amount in Base token units |
+| `36..68` | 32 | raw bytes | withdrawal commitment passed as the ABI `lockRoot` argument |
+| `68..76` | 8 | ASCII | literal trailer magic `NOCKWD1!` |
+| `76..116` | 40 | five unsigned 64-bit big-endian limbs | full Tip5 destination lock root |
+
+The total length is exactly 116 bytes. Shorter, longer, or differently ordered
+input is not a supported withdrawal request.
+
+Despite the Solidity parameter and event field name, the 32-byte `lockRoot`
+value is the withdrawal commitment, not the full Nockchain lock root. The full
+root is the final 40 calldata bytes.
+
+### Commitment
+
+The commitment is:
+
+```text
+keccak256(
+  "nock-withdrawal-calldata-v1"
+  || nock_token_address[20]
+  || burner_address[20]
+  || amount_be[32]
+  || lock_root_limbs_be[40]
+)
+```
+
+The input sequence is concatenated without ABI padding between fields:
+
+1. the exact ASCII domain string
+2. the deployed `Nock` token address
+3. the connected Base account that will send the burn
+4. the exact 32-byte amount used in calldata
+5. the five destination limbs in their serialized order
+
+The current commitment does not include Base chain id. Clients must separately
+verify the configured chain id and token deployment before constructing,
+simulating, or submitting the transaction.
+
+### Destination and Amount Invariants
+
+1. The destination is five Tip5 field limbs, not a 32-byte digest.
+2. Each limb is encoded as eight big-endian bytes.
+3. Each limb must be strictly below the Tip5 base-field prime.
+4. A v1 PKH address may be accepted as user input only by deriving its
+   canonical simple-PKH lock root before serialization.
+5. Direct lock-root input must parse to the same canonical five-limb form.
+6. The amount is an unsigned 256-bit Base token-unit integer.
+7. Rust additionally requires exact divisibility by
+   `152,587,890,625` Base token units per nick and conversion to fit `u64`.
+8. Minimum and fee-viability policy is versioned separately from this wire
+   format; an official client must validate the active policy before opening
+   the wallet.
+
+### Mandatory Client Workflow
+
+An official client must:
+
+1. read and validate the connected Base account, chain id, and deployed token
+2. parse the user amount without JavaScript floating-point conversion
+3. parse or derive the canonical five-limb destination
+4. construct the commitment and final 116-byte calldata
+5. decode those final bytes locally through the shared SDK
+6. compare the decoded selector, amount, commitment, magic, destination,
+   burner binding, and token binding with current client state
+7. simulate and estimate gas using those exact bytes
+8. submit those same bytes without rebuilding through a generated ABI helper
+
+A change to account, chain, token, amount, or destination invalidates any
+previously constructed calldata. The client must rebuild and revalidate before
+submission.
+
+### Unsupported Direct Calls and Residual Risk
+
+An ordinary generated-ABI call to `burn(amount, bytes32)` is not a supported
+withdrawal initiation method, even though the contract accepts and
+burns it. It omits the full destination, so the observer returns
+`MissingCalldataTrailer` and cannot reconstruct a normal payout.
+
+This residual risk cannot be removed off-chain. Production readiness therefore
+requires:
+
+1. prominent SDK, DApp, and integration documentation
+2. durable per-event quarantine in `sequencer_base_burn_rejections` without
+   allowing one unsupported burn to stop later canonical indexing
+3. an operator-owned refund or compensation procedure
+4. immutable, coordinate-validated compensation entries rendered identically
+   to all bridge nodes and the sequencer
+5. sequencer persistence and admission checks so a compensated burn can never
+   later settle as a withdrawal
+
+The shared Rust implementation in `src/shared/base.rs` is the executable source
+for selector, commitment, encoding, decoding, and rejection parity. Rust and
+TypeScript implementations must share byte-for-byte positive and mutated-field
+test vectors.
+
+The canonical cross-language fixture is
+`test-fixtures/withdrawal_wire_v1_vectors.json`. It contains versioned
+constants, positive vectors, and malformed-field vectors with stable rejection
+categories. SDK implementations must execute that fixture rather than copy
+example bytes into an independent test corpus.
+
+## Withdrawal Amount Policy (`withdrawal-policy-v1`)
+
+The first production withdrawal policy is `withdrawal-policy-v1`. It
+matches the existing Rust defaults and Hoon boundary behavior rather than the
+older 10,000/1,000,000-NOCK prose and examples.
+
+This value is not inferred from the deposit documentation. The executable
+kernel configuration defines `minimum-event-nocks` as `100.000`, and
+`base.hoon` rejects a burn only when its amount is less than
+`minimum-event-nocks * nicks-per-nock`; equality is admitted. The same
+configuration field currently gates Nockchain deposit events as well. A future
+`10,000 NOCK` withdrawal minimum would therefore require a distinct
+withdrawal-only kernel/config field and a new policy version, not a silent
+reinterpretation of `withdrawal-policy-v1`.
+
+| Field | `withdrawal-policy-v1` value |
+|---|---:|
+| wire format | `WithdrawalWireV1` |
+| wrapped-NOCK base units per NOCK | `10,000,000,000,000,000` |
+| nicks per NOCK | `65,536` |
+| wrapped-NOCK base units per nick | `152,587,890,625` |
+| minimum gross burn | `100,000 NOCK` |
+| minimum boundary | inclusive (`gross_nocks >= 100,000`) |
+| maximum converted amount | `u64::MAX` nicks |
+| bridge fee rate | `195` nicks per started whole NOCK |
+
+The gross minimum is `6,553,600,000` nicks or
+`1,000,000,000,000,000,000,000` wrapped-NOCK base units.
+
+### Admission Rules
+
+An official request is statically admissible only when:
+
+1. the raw amount is positive
+2. the raw amount is exactly divisible by `152,587,890,625`
+3. the converted nick amount fits `u64`
+4. the gross amount is at least `100,000 NOCK`
+5. the deterministic bridge fee is less than the gross amount
+
+The bridge fee is:
+
+```text
+ceil(gross_nicks / 65,536) * 195
+```
+
+The Nockchain transaction fee depends on the selected confirmed bridge inputs
+and transaction shape. The backend planner and proposal validator remain
+authoritative for that exact fee and enforce:
+
+```text
+gross_burn = bridge_fee + transaction_fee + net_payout
+net_payout > 0
+```
+
+The public policy/quote surface must return the active policy version and a
+current payout estimate using safe, unreserved liquidity. The estimate is not a
+guarantee: input reservations and chain state may change before construction.
+The official DApp must refuse submission when the policy is unavailable,
+unknown, stale, or when the quote reports no positive payout.
+
+### Policy Publication and Versioning
+
+The frontend must not hardcode this policy. A frontend-safe endpoint and the
+rendered deployment manifest must publish:
+
+1. policy id and wire-format id
+2. Base chain id and `Nock` token address
+3. effective Base block or deployment activation point
+4. minimum and boundary rule
+5. unit conversion constants and maximum nick amount
+6. bridge fee rate
+7. quote timestamp and readiness status
+
+Every admitted burn must retain the policy id under which it was accepted. A
+policy change requires a new id and explicit effective point; it must not
+reinterpret already observed burns. Clients fail closed on an unsupported
+policy id or a deployment mismatch.
+
+The `Nock` contract does not enforce this policy. Unsupported direct
+callers can bypass client validation and remain covered by malformed-burn
+monitoring and the operator compensation process.
 
 ## Target Withdrawal Flow
 
-1. User burns wrapped NOCK on Base (`Nock.sol::burn`), event emitted with `lockRoot`.
-2. Rust Base observer ingests burn, emits `%base-blocks` cause to kernel.
+1. The official client validates the active policy, constructs
+   `WithdrawalWireV1`, and submits those exact 116 bytes to `Nock.sol::burn`.
+   `BurnForWithdrawal.lockRoot` carries the 32-byte commitment.
+2. The Rust Base observer retrieves the transaction calldata, validates the
+   commitment and full destination, and emits a `%base-blocks` cause to the
+   kernel.
 3. Kernel stores unsettled withdrawals keyed by `(as_of base hash, base_event_id)`.
-   Base-side kernel processing now enforces the withdrawal minimum first; only
-   burns strictly above the configured minimum become withdrawals. We are
-   targetting a minimum of 10,000 NOCKS.
+   Under `withdrawal-policy-v1`, Base-side kernel processing admits burns at or
+   above the inclusive `100,000 NOCK` gross minimum.
 4. Kernel emits `%base-block-withdrawals-pending` with the Base batch identity and derived `nock-withdrawal-request` payloads.
 5. Runtime persists those requests idempotently, sends `%base-block-withdrawals-committed`, and then treats each request as a single-withdrawal coordination unit. `base-batch-end` remains part of withdrawal metadata, but settlement coordination is per-withdrawal rather than multi-withdrawal batching.
 6. For a given withdrawal id `(as_of, base_event_id)`, a deterministic epoch
@@ -254,6 +486,10 @@ This spec focuses on:
 22. The sequencer observes block inclusion directly from the colocated public
     Nockchain API, records confirmation for the authorized withdrawal, and
     clears the matching reserved-input / in-flight state.
+    The sequencer status response publishes the durable confirmation event
+    id, the matching reservation-release event id, and the confirmed
+    height/block only while the current row remains confirmed. Reorg-held or
+    invalidated rows return none of those terminal evidence fields.
 23. Kernel independently reconciles settlement with the counterpart withdrawal
     on the confirmed Nock block stream using counterpart identity, destination
     equality, and the basic bound `0 < settled_amount < burned_amount`, then
@@ -357,6 +593,10 @@ This spec focuses on:
      operator attempt in `Assembling`, `Prepared`, `PeerCanonical`,
      `Authorized`, or `MempoolAccepted`; `Pending` is tracked-but-not-live, and
      `Confirmed` is terminal.
+   - Sequencer ordering is stricter than the bridge-node live-work label:
+     `MempoolAccepted` remains the single nonce frontier. Only durable
+     `Confirmed` releases that nonce and permits the next withdrawal to
+     canonicalize, reserve inputs, authorize, or submit.
    - Tracks the current epoch, the current assembly / prepared / peer-canonical / authorized / submitted / confirmed phase, and the live peer-canonical / authorized candidate hashes when applicable.
    - Also acts as the live local assembly-lock record; there is no separate staged-request queue.
    - Must be rebuildable from the append-only log.
@@ -563,14 +803,20 @@ This spec focuses on:
    sequencer DB should be reconstructable from the remote journal plus Base /
    Nockchain reconciliation, except for explicitly fatal operator-intervention
    cases.
-6. Current implementation status: the sequencer can mirror lifecycle events to
-   remote object storage before local SQLite projection mutation, assign ordered
-   journal sequence numbers from a local SQLite cursor, and list/get ordered
-   R2 / S3-compatible journal objects. Startup verifies that the local cursor
-   names a real remote event, verifies that the cursor event's projection is
-   already present in SQLite, then replays every remote successor into SQLite.
-   Base activity replay and Base / Nockchain reconciliation are still deferred
-   follow-up phases.
+6. Current Rust implementation status:
+   - lifecycle decisions and exact retry artifacts are mirrored before SQLite
+     projection mutation and replayed through an exact remote cursor
+   - the verified Base activity index rebuilds canonical burns, tail-scans the
+     overlap window, recovers unmatched eligible burns, and refuses conflicting
+     chain facts
+   - Nockchain startup reconciliation requires exact authorized raw bytes,
+     confirms buried inclusion, retries only those bytes, filters unsafe-origin
+     liquidity, and blocks while local chain state is behind
+   - bounded Base and Nockchain invalidations are append-only and can regress
+     public lifecycle state while restoring reservations atomically
+   - real R2/chain drills and a tested operator recovery procedure for
+     post-confirmation history divergence remain launch gates; automatic
+     in-place Hoon rewind is an optional resilience improvement
 
 ### Remote Sequencer Journal
 
@@ -933,9 +1179,15 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
    - if not included, leave `MempoolAccepted`; orphan retry can resubmit using
      `authorized_raw_tx`
 4. For each `Confirmed` row:
-   - if the tx is still observable as confirmed, recovery continues
-   - if the tx is not visible, fail closed or alert by default; do not silently
-     roll back confirmed state without an explicit deep-reorg repair mode
+   - matching canonical inclusion keeps the row confirmed and clears any
+     missing-inclusion observation
+   - same-transaction inclusion in a different block appends invalidation and
+     reinclusion facts without changing raw bytes or creating a second payout
+   - absence requires two consecutive persisted observations before regression
+   - a stable snapshot may regress to `MempoolAccepted` or `Authorized`, restore
+     reservations, and resubmit only the exact authorized raw transaction
+   - unsafe input origins, excessive depth, or missing checkpoint evidence enter
+     `reorg_hold` before mutation
 5. Refresh current balance snapshot.
 6. Filter bridge-owned notes to safe-origin notes only.
 7. Verify each active reserved input is either:
@@ -995,254 +1247,306 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
 6. Future replay phases must advance the cursor in the same SQLite transaction
    as the projection writes covered by that cursor.
 
-### Updated Implementation Plan
+### Base and Nockchain Reorg Recovery Policy
 
-1. Terminology and configuration:
-   - rename operator-facing config/docs from S3-specific language to
-     R2 / S3-compatible object-store language
-   - keep R2 as the primary documented target
-   - keep compatibility aliases only where useful for rollout
-   - keep `bridge-dev` explicitly disabled unless local object-store settings
-     are configured
-2. Journal completeness:
-   - extend journal records with `sequence`, `event_id`,
-     `previous_event_id`, `created_at_unix_ms`, deployment-bound
-     `journal_id`, and event context blocks
-   - add missing event types for withdrawal ordering and mempool retry metadata
-   - journal `withdrawal_nonce`, handoff fields, submit-attempt metadata,
-     selected input origins, `transaction_jam`, submitted raw tx id, and
-     `authorized_raw_tx`
-3. R2 / object-store read path:
-   - extend the journal abstraction with append, list, and get
-   - use `aws-sdk-s3` for S3-compatible `ListObjectsV2` pagination and `GET`
-   - validate decoded records before mutating SQLite
-4. Replay projector:
-   - apply journal events to projection state without writing new remote events
-   - keep replay exact-frontier: a cursor event must already be projected, and
-     successors are applied one at a time
-   - reuse the local recovery cursor: last sequence and last event id
-   - fail if local SQLite projection is non-empty with no usable cursor, if the
-     cursor object is absent from the remote stream, or if the projection is
-     detectably ahead of the event being replayed
-5. Base reconciliation:
-   - add `BaseActivityIndex` / `BaseActivityStore`
-   - add local verified Base burn projection, e.g. `sequencer_base_burns`
-   - verify indexed records against Base RPC
-   - scan the recent overlap tail and insert missing burns
-   - recover unmatched burns as pending withdrawals
-6. Nockchain reconciliation:
-   - add startup reconciliation over `Authorized`, `MempoolAccepted`, and
-     `Confirmed` rows
-   - require raw tx bytes for unconfirmed in-flight withdrawals
-   - use tx-included-block lookup plus current tip to mark confirmations
-   - reject or defer currently unsafe-origin selected inputs in proposal
-     validation without advancing lifecycle state
-   - keep assembly pending when safe-origin liquidity is insufficient
-7. Tests:
-   - DB wipe rebuilds sequencer state from remote journal
-   - partial DB catches up from journal cursor
-   - remote append succeeds but local SQLite mutation fails; reboot applies the
-     remote event
-   - replay preserves `authorized_raw_tx` byte-for-byte
-   - replay restores and clears reserved inputs correctly
-   - replay does not re-append remote objects
-   - replay rejects projection/cursor skew instead of skipping over later local
-     lifecycle state
-   - malformed, missing, duplicated, gapped, or hash-discontinuous remote
-     records fail safely
-   - Base activity index verifies exact logs and tail scan finds missing recent
-     burns
-   - Base burn with no sequencer state recovers as pending
-   - journaled sequencer withdrawal with mismatched Base amount, destination, or
-     ordering fails recovery
-   - proposal construction excludes notes with `origin_height > safe_nock_tip`
-   - refund / change note is ignored before confirmation depth and accepted
-     after confirmation depth
-   - incoming proposal with an input that is unsafe at validation height is not
-     persisted, but the same otherwise-valid proposal can be accepted after the
-     local safe tip advances past that input origin
-   - insufficient safe notes leaves withdrawal pending and retries later
-   - incoming proposal using unsafe/recent note is rejected
-   - missing authorized raw tx for unconfirmed in-flight withdrawal fails safe
-   - journal write failure prevents mutation/submission in production mode
+#### Boundaries and checkpoints
 
-## Design Commitments and Remaining Hardening
+1. Both observers derive an eligible height from the latest RPC tip minus the
+   configured confirmation depth; they do not consume an RPC `safe` or
+   `finalized` tag. The buffer prevents ordinary shallow forks from reaching
+   Hoon and lowers the probability of deeper divergence, but a parent mismatch
+   after acceptance remains a fail-stop incident.
+2. For each chain, the maximum automatic rewind is:
 
-### A) Kernel behavior and remaining hardening (Hoon)
+   ```text
+   automatic_rewind_depth =
+     min(configured_confirmation_depth, 64 blocks)
+   ```
 
-1. Keep withdrawal proposal handling out of the kernel.
-   - do not introduce a kernel withdrawal proposal-validation cause
-   - do not persist `withdrawal-proposals` in kernel state
-   - do not validate proposal identity, epoch legality, replay, or
-     equivocation in the kernel
-   - do not validate proposal envelope fields against tracked withdrawal
-     metadata in the kernel
-   - the kernel should remain withdrawal-level only: qualifying burns create
-     live/unconfirmed withdrawals, and confirmed settlements clear them
-2. Harden Base-side proposal generation in `++ base-propose-withdrawals` (already emitting `nock-withdrawal-request`) with queue semantics suitable for single-flight assembly/canonicalization.
-3. Harden withdrawal parsing path in `++ process-nock-txs` (already creating `withdrawal-settlement`) and close remaining schema/validation gaps.
-4. Finalize `++ nockchain-process-withdrawal-settlements` behavior in `open/hoon/apps/bridge/nock.hoon`:
-   - reconcile settlement against tracked unsettled withdrawals
-   - apply hold/stop semantics for out-of-order or inconsistent settlement
-   - tolerate sequencer retries of the same authorized tx without treating them as a second withdrawal
-5. The dedicated `create-withdrawal-tx` poke/cause is the bridge-side tx
-   builder seam.
-   - it includes `epoch` and pinned
-     `withdrawal-snapshot` in addition to explicit withdrawal metadata plus
-     selected inputs
-   - it lets Rust ask the bridge app tx-builder to build one full
-     `withdrawal-proposal`, not just a raw tx
-   - successful construction comes back out via `%withdrawal-proposal-built`,
-     carrying that full proposal
-   - it remains separate from `%base-block-withdrawals-pending`, which stages
-     Base burn withdrawal intent until Rust persists and acks it
-6. `%sign-tx` is the dedicated poke/cause for transaction signing.
-   - input should be the full `withdrawal-proposal`
-   - Rust uses it after proposal construction / authorization, not as part of
-     kernel withdrawal-state transitions
-   - signing remains distinct from tx construction and from confirmed terminal
-     effects
-7. Kernel settlement reconciliation is currently state-only.
-   - on confirmed settlement reconciliation from the confirmed Nock block
-     stream, kernel clears the unsettled withdrawal directly
-   - there is no dedicated `%withdrawal-terminal` effect today
-   - if a future terminal effect is added, it should identify the confirmed
-     withdrawal and settlement outcome only; it must not include local note
-     names
-8. Normalize and finalize withdrawal metadata encoding:
-   - new packed key path: `%bridge-w`
-   - includes `base-block-hash`, `beid`, `base-batch-end`, `lock-root`
-9. Finalize amount semantics in kernel and Rust models now that dedicated
-   withdrawal fee fields were removed from molds.
-   - gross burned amount remains the source-of-truth input from Base
-   - net disbursed amount is the amount actually paid to the Nockchain
-     recipient
-   - kernel settlement reconciliation enforces only
-     `0 < settled_amount < gross_burned_amount`
-  - exact economic correctness
-    (`gross_burned_amount = withdrawal_fee + final_fee + net_disbursed_amount`)
-    belongs in the Rust proposal validation path owned by
-    `WithdrawalProposalRegistry`
-   - do not overload one public planner request type to mean both "gross burn"
-     and "net gift"
+   `64` is a hard protocol safety cap. A zero confirmation depth permits no
+   automatic rewind.
+3. Each observer persists the current confirmed header plus at least
+   `automatic_rewind_depth` predecessors. A checkpoint includes chain,
+   deployment, height, block id, parent id, observation time, and the projection
+   cursor/journal event covered by that header.
+4. The stable rewind anchor is the oldest retained checkpoint in that bounded
+   window. Automatic recovery is allowed only when all affected local
+   projections prove the same canonical common ancestor at or above that
+   anchor.
+5. The Base bridge observer and sequencer Base-activity scanner may be at
+   different tips. Recovery uses the older common ancestor proven by both; no
+   observer may independently resume ahead of the other.
+6. A fork that crosses the configured withdrawal activation block, the
+   `WithdrawalWireV1` rollout block, the withdrawal Nock activation frontier, or
+   a policy/deployment-id boundary is always manual even when it is fewer than
+   64 blocks.
+7. Oscillating shallow forks reuse the same stable anchor. The cumulative
+   rewind may never move below it. Each detected fork gets a distinct recovery
+   generation/event, so an old branch becoming visible again cannot silently
+   reactivate invalidated work.
+8. A mismatch beyond the retained anchor, missing/corrupt checkpoint evidence,
+   or disagreement between projections is a deep reorg. It pauses admission,
+   authorization, submission, confirmation, reservation release, and public
+   terminal-state advancement.
 
-### B) Rust bridge crate shape and remaining hardening
+#### Append-only recovery facts
 
-1. Withdrawal proposal transport and validation live in Rust:
-   - ingress RPC and message types exist for withdrawal proposal, canonical
-     proposal, and signed-proposal broadcast
-   - proposal envelope must include withdrawal id, epoch, pinned snapshot
-     metadata, selected input note names, the built `transaction`, net
-     disbursed amount, and gross burned amount
-   - decode and route directly to Rust withdrawal coordination logic rather
-     than via a kernel cause
-   - validate the proposal envelope in Rust by checking:
-     - whether the withdrawal exists
-     - whether the proposal's `burned_amount`, recipient, and batch metadata
-       match the tracked withdrawal
-     - same-epoch replay vs equivocation
-     - contiguous epoch legality
-     - future exact amount validation before persistence/canonicalization by
-       independently checking
-       `burned_amount = withdrawal_fee + final_fee + amount`
-   - also validate pinned snapshot, selected notes, and transaction identity
-     as part of the Rust-owned proposal envelope checks
-2. The split withdrawal tx-builder seam is live:
-   - Rust selects candidate inputs and pinned snapshot metadata, then pokes the
-     widened `%create-withdrawal-tx`
-   - decode `%withdrawal-proposal-built`, carrying the constructed full
-     `withdrawal-proposal`
-   - keep this builder seam implementable before durable submission is enabled
-   - make the withdrawal builder use a withdrawal-specific planning API that
-     takes gross burned amount as input and computes net disbursed amount plus
-     fee before calling `%create-withdrawal-tx`
-   - keep the existing generic `plan_create_tx` path as the net-gift planner;
-     share the lower-level selection/fee/refund engine rather than forcing one
-     top-level amount field to serve both meanings
-3. The signing seam is live:
-   - Rust pokes `%sign-tx` with the full `withdrawal-proposal`
-   - successful signing should come back out via `%withdrawal-tx-signed`,
-     carrying the proposal envelope with signed transaction data
-   - signing is driven from Rust-side coordination and remains separate from
-     kernel withdrawal-state transitions
-4. The withdrawal sequencing service is live:
-   - implement the durable sequencing service core and schema first
-   - append-only local log of proposal/canonicalization/submission/confirmation lifecycle
-   - authoritative tracking in the withdrawal state store of peer-canonical / authorized /
-     submitted withdrawals
-   - host the sequencer gRPC surface on the Nockchain API node process rather
-     than in a separate bridge-side binary
-   - have that API-node-hosted sequencer poll the colocated public Nockchain
-     API for confirmation and clear the in-flight set there
-   - reserve input notes by note `Name` at peer canonicalization and keep them
-     reserved through authorization / submission until confirmation
-   - drive local tx-status reconciliation using `tx-accepted` as a diagnostic
-     mempool/accepted signal and confirmed settlement observations as the
-     release signal
-   - confirmation and reservation release are sequencer-owned; kernel
-     settlement reconciliation is parallel and does not currently arrive as a
-     dedicated Rust terminal effect
-   - make the sequencer the only submission authority for withdrawals
-   - make bridge nodes ask the sequencer for `authorized` / `submitted` /
-     `confirmed` truth instead of reconstructing that lifecycle locally
-5. The withdrawal execution driver is live:
-   - consume `BridgeEffectVariant::BaseBlockWithdrawalsPending`
-   - allow at most one withdrawal in assembly/canonicalization at a time for the bridge-controlled spend authority / note pool
-   - make the sequencer gRPC service the only component that finalizes and submits an authorized raw tx using nockapp public nockchain gRPC client (`wallet_send_transaction`)
-   - include separate assembly timeout and sequencer submission timeout behavior
-   - if the sequencer is unavailable, stop withdrawal progress rather than failing over to peer submission
-6. Add proposal broadcast/signature workflow keyed off per-withdrawal epochs rather than deposit ids or withdrawal batches, with sequencer authorization required before a peer-canonical candidate becomes submit-ready.
-   - built proposals must be broadcast from the live `%withdrawal-proposal-built`
-     execution path
-   - canonicalization gossip must carry a threshold commit certificate
-   - authorization must reject peer-canonical proposals that lack that
-     certificate
-7. Runtime/main wiring now registers the withdrawal execution driver, ingress
-   transport, and withdrawal runtime loops in `open/crates/bridge/src/main.rs`.
-8. Bridge note snapshot handling should continue to:
-   - use a normalized bridge-note balance snapshot for private-node sync as well as public sync
-   - refresh the confirmed bridge-note snapshot whenever a newly confirmed nockchain block is observed
-   - support on-demand refresh before assembly when the cached snapshot is stale
-   - compute `spendable_notes = confirmed_snapshot(origin_page <= safe_nockchain_tip) - reserved_inputs`
-   - prevent reuse of notes that belong to peer-canonical / authorized /
-     mempool-accepted but unconfirmed withdrawal txs
-9. Durable withdrawal storage must continue to provide:
-   - an append-only withdrawal lifecycle log
-   - the live reserved-note set and current withdrawal state-store projection
-   - startup rebuild of live mutable state from the append-only log
-   - transactional reserved-note writes alongside the corresponding canonical /
-     confirmed lifecycle event append
-10. Optional but recommended:
-   - enrich `process_nock_log` output in `open/crates/bridge/src/ethereum.rs` to propagate destination/lock-root mapping into runtime observability structures, or explicitly document that kernel state is canonical and Rust-side `dest` remains advisory-only.
+Recovery changes mutable projections only by appending facts and rebuilding
+from them. The logical event set is:
 
-### C) Type/protocol shape
+- `reorg_recovery_started`
+- `base_burn_invalidated`
+- `proposal_invalidated`
+- `nock_inclusion_invalidated`
+- `kernel_settlement_invalidated`
+- `reservation_restored`
+- `reorg_recovery_completed`
+- `reorg_recovery_escalated`
 
-1. `open/crates/bridge/proto/bridge_ingress.proto`
-   - includes withdrawal proposal request/response
-   - proposal payload is a full withdrawal proposal envelope, not just a bare
-     transaction body
-   - includes withdrawal id, epoch, proposal hash / transaction name, pinned
-     snapshot metadata, selected input note names, and typed payload
-   - includes sequencer RPCs for register / handoff / canonical / signed /
-     reserved-inputs / authorize / submit / status / confirmed-record updates
-2. `open/crates/bridge/src/shared/types.rs`
-   - keep `NockWithdrawalRequestKernelData` as the kernel-emitted withdrawal intent payload
-   - include `%withdrawal-proposal-built`, carrying a full `withdrawal-proposal`
-   - include `%withdrawal-tx-signed`, carrying a full signed `withdrawal-proposal`
-   - include a separate withdrawal proposal envelope type for peer coordination
-   - there is no terminal withdrawal effect variant today
-   - ensure serialized field order matches Hoon `nock-withdrawal-request` (`base_event_id`, `recipient`, `amount`, `base_batch_end`, `as_of`)
-3. `open/hoon/apps/bridge/types.hoon`
-   - keep withdrawal molds aligned with new shapes (`nock-lock-root`, `base-batch-end`, no dedicated withdrawal fee field)
-   - widen `%create-withdrawal-tx` so bridge-side tx building includes
-     `epoch` and pinned `withdrawal-snapshot`, not just withdrawal metadata and
-     selected inputs
-   - add a `%withdrawal-proposal-built` effect mold carrying a full
-     `withdrawal-proposal`
-   - add a `%withdrawal-tx-signed` effect mold carrying a full signed
-     `withdrawal-proposal`
-   - there is no `%withdrawal-terminal` effect mold today
-   - do not add a withdrawal proposal-validation cause to the kernel molds
+Every invalidation references the original journal event, chain checkpoint,
+recovery generation, withdrawal id, and exact raw transaction id when one
+exists. An old event is never deleted or rewritten. A journal append that raced
+ahead of reorg detection remains in history and is followed by its invalidation.
+SQLite cursors/checkpoint projections may rewind atomically; remote journal
+sequence numbers never do.
+
+Canonical replay may re-admit a burn or inclusion after its invalidation. That
+is a new append-only fact referencing the prior invalidation, not resurrection
+by deleting it.
+
+#### Base reorg response by lifecycle
+
+| Lifecycle when Base burn is orphaned | Automatic response within boundary | Reservations | Public status |
+|---|---|---|---|
+| not admitted / activity index only | invalidate activity row, rewind cursor, rescan canonical logs | none | absent or `invalidated` |
+| `Pending`, `Assembling`, `Prepared` | append burn/proposal invalidation; discard local attempt; canonical rescan may re-admit | release only tentative pre-canonical work | regress to `invalidated` |
+| `PeerCanonical` | append burn and proposal invalidation; fixed proposal becomes permanently unusable | release pinned inputs atomically with invalidation | `invalidated` |
+| `Authorized` but not known in mempool | **manual**: a fully signed raw tx may already have escaped | retain all reservations | `reorg_hold` |
+| `MempoolAccepted` | **manual**: stop resubmission and query exact tx on canonical Nockchain | retain all reservations | `reorg_hold` |
+| Nock-included / sequencer `Confirmed` | **manual conservation incident** | restore/retain reservations; do not pay or refund again | regress to `reorg_hold` |
+| kernel settlement applied | **manual conservation incident**: Base funding is gone while payout may exist | retain incident evidence and safe-origin locks | `reorg_hold` |
+
+Once a proposal is authorized, automatic Base invalidation is prohibited
+because the exact fully signed Nock transaction can be submitted by another
+party. "Not observed" is not proof it cannot execute.
+
+A canonical replacement burn with the same tx/log identity may be re-admitted
+automatically only for rows that had not reached `Authorized`. A replacement at
+another Base identity is a new withdrawal. The system never infers that it is a
+refund or substitutes it for an already-paid orphan.
+
+#### Nockchain reorg response by lifecycle
+
+| Nock-side stage affected by orphaned blocks | Automatic response within boundary | Reservations / raw tx | Public status |
+|---|---|---|---|
+| note snapshot only; no fixed proposal | rewind snapshot/checkpoint and replan from canonical safe notes | discard tentative selection | unchanged or regress to assembling |
+| `PeerCanonical` and any selected input origin is orphaned | invalidate proposal and start a new epoch from a canonical snapshot | release invalid proposal reservations; never mutate its raw tx | regress to pending |
+| `Authorized` and all input origins remain at/below common ancestor | keep exact authorized raw tx; query mempool/inclusion; resubmit only those exact bytes if absent | retain reservations | `authorized` or `mempool_accepted` |
+| `Authorized` and an input/change-note origin is orphaned | **manual**: signed transaction safety cannot be proven | retain reservations and raw bytes | `reorg_hold` |
+| mempool accepted, inclusion not yet terminal | preserve exact raw tx; if still in mempool wait, otherwise resubmit exact bytes | retain reservations | `mempool_accepted` or `authorized` |
+| inclusion orphaned after sequencer `Confirmed` | append inclusion invalidation; if re-included record new block; otherwise regress and retry exact raw tx | atomically restore reservations before retry eligibility | regress from `confirmed` |
+| kernel settlement was applied on orphaned block | restore the last stable kernel checkpoint, append settlement invalidation, replay canonical Nock blocks | restore reservations/unsettled counterpart before any retry | regress from `confirmed` |
+| required kernel checkpoint absent, replay diverges, or descendant change note has been spent | **manual deep-reorg procedure** | freeze affected notes/reservations | `reorg_hold` |
+
+Re-inclusion of the same transaction in another block changes only inclusion
+facts; the transaction id/raw bytes stay identical and no second payout is
+created. If the old transaction remains in the mempool, do not submit a
+replacement. If it disappears and its input origins remain canonical, retry
+only the journaled `authorized_raw_tx`; recovery never reconstructs or
+re-signs it.
+
+Kernel replay is deterministic from the stable checkpoint and canonical block
+pages. It must restore `unsettled-withdrawals` before a previously cleared
+settlement can become retry-eligible. Rust projections advance in the same
+transaction as the replay cursor.
+
+#### Reservation and user-state invariants
+
+1. Pre-canonical invalidation releases reservations only when no authorized raw
+   transaction exists.
+2. `Authorized`, `MempoolAccepted`, and orphaned `Confirmed` rows retain or
+   atomically restore their exact input reservations until canonical inclusion
+   is proven again or an operator resolves a deep incident.
+3. A reservation restored after an orphaned confirmation becomes visible
+   before any planner snapshot can spend that note.
+4. Public state is allowed to regress. `confirmed` is not sticky across a
+   reorg. Responses include the recovery generation, invalidated block
+   reference, prior state, current state, and `reorg_hold`/recovery reason.
+5. Public pagination/readiness snapshots must not mix pre- and post-rewind
+   generations.
+6. No automatic path emits a refund for a burn that may already have produced a
+   Nock payout. No automatic path creates a second payout for one Base event.
+
+#### Recovery examples
+
+1. **Shallow Base fork, pending burn**
+   - retained ancestor: Base 1,000; orphan burn: 1,003; depth: 3
+   - append recovery start and burn invalidation
+   - atomically rewind activity/kernel-derived cursor to 1,001
+   - rescan 1,001..safe tip; re-admit only canonical wire-valid burns
+   - result: zero actionable rows for the orphan, conservation unchanged
+2. **Shallow Base fork, authorized payout**
+   - the same depth is inside the header window, but lifecycle is `Authorized`
+   - append escalation, globally pause submission, keep exact raw tx and
+     reservations
+   - result: no automatic refund, release, replacement, or second payout
+3. **Shallow Nock fork, sequencer confirmed**
+   - exact tx was included at Nock 2,010; common ancestor is 2,008
+   - append inclusion invalidation and restore reservations
+   - if canonical RPC reports the same tx at 2,011, append new inclusion and
+     confirm after depth; otherwise retain/resubmit the same raw bytes
+4. **Kernel-cleared settlement orphaned**
+   - restore kernel checkpoint at the common ancestor
+   - replay canonical pages; absent settlement restores the Base counterpart to
+     unsettled state
+   - public state regresses and reservations are restored before planning
+5. **Both chains reorg**
+   - pause once and assign one recovery generation
+   - reconcile Base funding first, then Nock inclusion/settlement against that
+     result
+   - any authorized Base orphan forces manual handling even if the Nock fork is
+     shallow
+6. **Journal append before detection**
+   - preserve the append, add an invalidation referencing it, rebuild the local
+     projection; journal sequence remains monotonic
+7. **Activation frontier crossed**
+   - append escalation and stop; do not recompute activation from the new fork
+     or admit pre-rollout calldata
+8. **Depth 65 with a 64-block anchor**
+   - no cursor/state mutation occurs
+   - record expected/got parent, newest/oldest checkpoint, candidate ancestor,
+     affected withdrawals/raw tx ids/reservations, and stop for operator repair
+
+#### Fatal deep-reorg procedure
+
+1. Stop all bridge nodes and sequencer mutation loops; keep read APIs in
+   `reorg_hold` readiness.
+2. Snapshot SQLite files and the remote append-only journal. Do not truncate,
+   delete, or rewrite either.
+3. Record both chains' canonical RPC endpoints/tips, expected and observed
+   parent ids, retained checkpoint range, activation/policy boundaries, journal
+   cursor, affected withdrawals, exact raw tx ids, and reservations.
+4. Determine the canonical common ancestor independently on at least two RPC
+   providers per affected chain.
+5. Classify every affected withdrawal for possible Base funding, Nock payout,
+   refund, and raw-tx replay. Preserve exact raw transaction bytes.
+6. Use an explicit audited repair mode to append checkpoint/invalidation facts
+   and rebuild projections. Never hand-edit live tables.
+7. Re-run conservation, reservation, journal-prefix, chain-readiness, and
+   public-status checks at one exact revision before resuming.
+
+The conservation condition is strict: one canonical Base burn funds at most one
+canonical Nock payout, and no refund is allowed while a payout may exist. An
+incident that cannot prove that condition remains paused.
+
+### Recovery implementation and release gates
+
+Rust implements the remote journal, exact replay cursor, Base activity index,
+startup Base/Nockchain reconciliation, safe-origin liquidity filters, exact raw
+transaction retry, bounded chain invalidation, reservation restoration, and
+public lifecycle regression. Tests cover wiped and partial SQLite recovery,
+remote-ahead replay, cursor/projection skew, authorized raw-byte preservation,
+reservation rebuild, Base-tail recovery, unsafe-origin deferral, shallow fork
+replay, and deep-fork holds.
+
+Production launch additionally requires:
+
+1. deployment-locked, nonzero Base and Nockchain confirmation depths with the
+   accepted finality assumptions recorded at the certified revision;
+2. real-kernel proof that post-confirmation parent divergence stops processing
+   without mutating the accepted hashchain, plus Rust mutation refusal and
+   fail-closed readiness;
+3. a tested operator procedure to disable new Base burns, preserve evidence,
+   rebuild or restore Hoon from a certified ancestor, replay canonical history,
+   and reconcile Rust projections before resuming;
+4. credentialed R2 and chain recovery drills;
+5. bridge-dev reorg and restart scenarios using the deployed kernel jams;
+6. conservation, journal-prefix, reservation, public-status, and readiness
+   certification at one exact revision.
+
+Automatic Hoon rewind may implement part of item 3, but is not required when
+the certified manual recovery procedure satisfies the same safety invariant.
+Missing kernel assets, live credentials, or a tested recovery procedure block
+launch. Mocks do not satisfy these gates.
+
+## Component Ownership
+
+### Hoon kernel
+
+The kernel owns withdrawal-level state:
+
+1. qualifying Base burns enter unsettled withdrawal state;
+2. `%base-block-withdrawals-pending` stages admitted withdrawal intent;
+3. `%create-withdrawal-tx` builds a proposal from explicit withdrawal,
+   snapshot, epoch, and selected-input data;
+4. `%withdrawal-proposal-built` returns the complete proposal envelope;
+5. `%sign-tx` signs a complete proposal;
+6. `%withdrawal-tx-signed` returns the signed proposal;
+7. confirmed Nockchain settlement reconciles and clears the matching
+   unsettled withdrawal.
+
+The kernel does not own proposal epochs, replay/equivocation detection,
+peer-canonical certificates, sequencer authorization, raw transaction retry,
+or note reservation projections. Those checks require Rust and durable
+sequencer state.
+
+Withdrawal metadata uses `%bridge-w` and carries `base-block-hash`, `beid`,
+`base-batch-end`, and `lock-root`. Kernel settlement reconciliation enforces
+identity, destination, and `0 < settled_amount < gross_burned_amount`. Rust
+proposal validation enforces the complete economic equation:
+
+```text
+gross_burned_amount = bridge_fee + transaction_fee + net_disbursed_amount
+```
+
+### Rust bridge runtime
+
+Rust owns proposal construction inputs, validation, peer transport, and runtime
+coordination:
+
+1. select a confirmed bridge-note snapshot and candidate inputs;
+2. compute bridge fee, transaction fee, and net payout;
+3. invoke `%create-withdrawal-tx` and decode the returned proposal;
+4. validate withdrawal identity, recipient, amount, Base batch, epoch,
+   snapshot, selected inputs, transaction body, and fee conservation;
+5. broadcast complete proposal envelopes;
+6. verify signed peer commits over the exact proposal hash;
+7. submit peer-canonical work to the sequencer for authorization;
+8. keep peer-canonical, authorized, and mempool-accepted inputs reserved until
+   durable confirmation or explicit recovery.
+
+`crates/bridge/src/main.rs` registers the withdrawal execution driver, ingress
+transport, runtime loops, blockchain-constant handshake, and confirmed-block
+watchers. Sequencer unavailability pauses withdrawal progress; peers do not
+take over submission.
+
+### Sequencer
+
+The API-node-hosted sequencer is the only withdrawal submission authority. It
+durably records ordering, handoff, peer-canonical proposal, authorization, raw
+transaction, submission, confirmation, reservation, incident, and public
+projection facts.
+
+Only one withdrawal may be authorized, submitted, or unconfirmed at a time.
+The next withdrawal cannot reserve or canonicalize until the current
+withdrawal has durable confirmation. Confirmation polling uses the colocated
+public Nockchain API and records the confirmed block plus matching
+reservation-release event before advancing the frontier.
+
+### Protocol types
+
+- `crates/bridge/proto/bridge_ingress.proto` defines proposal transport,
+  private sequencer mutation RPCs, read-only public queries, terminal evidence,
+  readiness, history, and quote messages.
+- `crates/bridge/proto/bridge_tui.proto` defines target-bound kernel
+  observability for terminal evidence.
+- `crates/bridge/src/shared/types.rs` mirrors the Hoon request and effect
+  field order.
+- `hoon/apps/bridge/types.hoon` defines `nock-withdrawal-request`,
+  `withdrawal-proposal`, snapshot, proposal-built, and signed-proposal molds.
+
+Field order and numeric encodings must remain identical across Rust, protobuf,
+Hoon, Iris, and the published test vectors.
 
 ## Invariants and Validation Rules
 
@@ -1293,7 +1597,57 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
 10. At most one withdrawal may hold the assembly/canonicalization lock at a time for the bridge-controlled spend authority / note pool.
 11. At most one withdrawal may be sequencer-authorized / submitted / unconfirmed at a time.
 
-## Testing Plan
+## Executable Bounded Lifecycle Model
+
+The independent Quint model is
+[`spec/bridge-withdrawal.qnt`](../../../spec/bridge-withdrawal.qnt), with
+deterministic happy, restart, Base-reorg, Nock-reinclusion, replacement-epoch,
+stale-kernel, simultaneous-fork, and compensation runs in
+[`spec/bridge-withdrawal-tests.qnt`](../../../spec/bridge-withdrawal-tests.qnt).
+It bounds exploration to three kernel nodes, two selected inputs, two proposal
+epochs, and two journal generations. Amounts are abstract integers that retain
+both conservation equations; process, SQLite, RPC, and cryptographic details
+remain outside the model.
+
+| Production/Rust concept | Quint state or action |
+|---|---|
+| `WithdrawalModelAction::ObserveBurn` | `observeCanonicalBurn` / `canonicalBurn` |
+| prepared and peer-canonical proposal epochs | `assemble`, `prepare`, `replacePrepared`, `canonicalize` |
+| exact authorized transaction name | `rawTxIdentity`, `authorizedTxIdentity`, `authorize` |
+| sequencer restart and journal replay | `journalGeneration`, `restartSequencer`, `restoreReservations`, `replayJournal` |
+| submitted/included/reincluded/confirmed | `submit`, `include`, `reinclusion`, `confirm` |
+| per-kernel settlement proof | `settledNodes`, `settleKernel` |
+| sequencer-owned note exclusion | `reservations`, `releaseReservations` |
+| Base/Nock reorg hold | `HoldKind` and the shallow/deep fork actions |
+| terminal multi-source proof | `publishTerminal` guarded by `terminalProofInv` |
+
+The executable invariant bundle `allSafety` maps to the production requirements
+as follows:
+
+- `onePayoutPerBurnInv` and `compensationExcludesPayoutInv`: one canonical burn
+  funds at most one payout, and compensation permanently excludes payout.
+- `oneReservationOwnerInv` and `activeReservationInv`: every selected input has
+  at most one owner and remains excluded until replay or terminal release.
+- `retryIdentityInv`: authorization, retry, inclusion, and reinclusion retain one
+  exact raw transaction identity.
+- `terminalProofInv`: terminal requires a canonical burn, exact inclusion,
+  every kernel settlement, both conservation equations, one payout, and released
+  reservations.
+- `unsafeForkHoldsInv` and `publicStateInv`: deep/unsafe fork paths enter
+  `PublicReorgHold` before payout mutation and public state cannot outrun the
+  protocol phase.
+
+The temporal properties state their assumptions in code. A continuously enabled
+healthy progress action is weakly fair only while Base, Nockchain, quorum, and
+liquidity remain available. A continuously enabled shallow-fork recovery
+observation is separately weakly fair; deep forks intentionally remain held.
+
+Local verification is pinned explicitly in the command line rather than CI:
+`npx -y @informalsystems/quint@0.32.0 test spec/bridge-withdrawal-tests.qnt`;
+TLC checks `allSafety`, `healthyEventuallyTerminal`, and
+`shallowForkEventuallyResolves`.
+
+## Required Verification
 
 ### Kernel tests
 
@@ -1313,9 +1667,9 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
 1. Ingress decodes withdrawal proposal and hands it directly to Rust
    withdrawal coordination logic.
 2. Rust proposal validation rejects unknown withdrawals, mismatched withdrawal
-   metadata, illegal epochs, replay with mismatched envelope, same-epoch
-   equivocation, and future economically inconsistent fee decomposition.
-3. Rust proposal broadcast driver emits full withdrawal proposal envelopes to peers correctly.
+   metadata, illegal epochs, replay with a mismatched envelope, same-epoch
+   equivocation, and inconsistent fee decomposition.
+3. Rust proposal broadcast carries complete proposal envelopes.
 4. Canonicalization is reached only when threshold peers persist and commit to
    the same proposal hash, and the resulting canonicalized broadcast carries a
    valid threshold commit certificate.
@@ -1354,30 +1708,11 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
 6. Conflicting later proposal for an already authorized withdrawal is treated as an invariant violation / stop.
 7. Simulated out-of-order Base/Nock arrival with hold release.
 
-## Remaining Policy Questions
-
-1. Fee model:
-   - exact formula for withdrawal fee deduction and where it is applied
-2. Hold metadata requirements:
-   - whether base block height must be embedded in tx metadata for deterministic unblock behavior
-3. Whether single-flight policy should remain permanent, or only the current intended design
-
-## Remaining Hardening Themes
-
-1. Kernel hardening
-   - keep kernel settlement reconciliation scoped to identity plus basic amount
-     bounds while moving exact fee validation into Rust proposal acceptance
-   - keep hold/stop behavior deterministic
-2. Runtime and integration hardening
-   - continue exercising multi-node proposal convergence, assembly failover,
-     sequencer restart recovery, and reservation integrity
-   - keep one-withdrawal-at-a-time assembly / submission behavior explicit
-3. Production hardening
-   - metrics, alerts, operational docs, replay abuse tests
 
 ## Acceptance Criteria
 
-1. No `TODO`/hard-stop paths remain for withdrawal causes/effects in kernel.
+1. Every withdrawal cause and effect has implemented runtime behavior;
+   deliberate stop paths are limited to invariant failures.
 2. Bridge nodes can process Base burns into canonicalized, submitted, and finalized per-withdrawal Nock settlements.
 3. If the scheduled assembler is offline before canonicalization, timeout handling is unambiguous:
    - `Assembling` rotates same-epoch pre-canonical handoff

@@ -67,6 +67,40 @@ contract MessageInboxBridgeNodeTest is Test {
         for (uint256 i = 0; i < 5; i++) {
             assertEq(inbox.bridgeNodes(i), bridgeNodeAddresses[i]);
         }
+        assertTrue(inbox.withdrawalsEnabled());
+    }
+
+    function test_owner_can_toggle_withdrawals() public {
+        inbox = new MessageInbox();
+        nock = new Nock("Nock", "NOCK", address(inbox));
+
+        address[5] memory nodes;
+        for (uint256 i = 0; i < 5; i++) {
+            nodes[i] = bridgeNodeAddresses[i];
+        }
+        inbox.initialize(nodes, address(nock));
+
+        inbox.setWithdrawalsEnabled(false);
+        assertFalse(inbox.withdrawalsEnabled());
+        inbox.setWithdrawalsEnabled(true);
+        assertTrue(inbox.withdrawalsEnabled());
+    }
+
+    function test_non_owner_cannot_toggle_withdrawals() public {
+        inbox = new MessageInbox();
+        nock = new Nock("Nock", "NOCK", address(inbox));
+
+        address[5] memory nodes;
+        for (uint256 i = 0; i < 5; i++) {
+            nodes[i] = bridgeNodeAddresses[i];
+        }
+        inbox.initialize(nodes, address(nock));
+
+        address nonOwner = vm.addr(uint256(keccak256("non-owner")));
+        vm.prank(nonOwner);
+        vm.expectRevert();
+        inbox.setWithdrawalsEnabled(false);
+        assertTrue(inbox.withdrawalsEnabled());
     }
 
     function test_updateBridgeNode_rejects_duplicate() public {

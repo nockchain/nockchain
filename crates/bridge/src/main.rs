@@ -1301,7 +1301,7 @@ mod tests {
     use bridge::deposit::log::persist_commit_nock_deposits_requests;
     use bridge::observability::tui;
     use bridge::shared::config::{BridgeConfigToml, NodeInfoToml};
-    use bridge::shared::types::{EthAddress, Tip5Hash};
+    use bridge::shared::types::{EthAddress, Tip5Hash, WITHDRAWAL_POLICY_V1_ID};
     use nockapp::kernel::boot;
     use nockchain_math::belt::Belt;
     use nockchain_types::default_fakenet_blockchain_constants;
@@ -1340,6 +1340,7 @@ mod tests {
             nockchain_sequencer_api_address: None,
             base_confirmation_depth: 1,
             nockchain_confirmation_depth: 1,
+            withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,

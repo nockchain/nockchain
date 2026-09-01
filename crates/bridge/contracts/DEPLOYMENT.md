@@ -2,12 +2,18 @@
 
 Status: Active
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-02-20
+Last Reviewed: 2026-08-24
 Canonical/Legacy: Legacy (bridge contracts deployment guide; canonical docs spine starts at [`START_HERE.md`](../../../START_HERE.md))
 
 This guide covers deploying, upgrading, and managing the bridge contracts
 (`MessageInbox` behind an ERC-1967 proxy plus the `Nock` ERC-20) on Tenderly
 networks (devnets, simulations, or proxied mainnets).
+
+> **Production withdrawal note:** Official Base-to-Nockchain clients must
+> submit the exact 116-byte `WithdrawalWireV1` calldata documented in
+> [`../docs/bridge-withdrawals.md`](../docs/bridge-withdrawals.md). Ordinary
+> generated-ABI `burn(uint256,bytes32)` calls are unsupported and may burn
+> funds without a processable destination.
 
 ## Quick Start
 
@@ -120,7 +126,7 @@ export BRIDGE_NODE_0="0x..."
 Use the bridge provisioning script from the repository root:
 
 ```bash
-cd open/crates/bridge
+cd crates/bridge
 ./scripts/tenderly-vnet-deploy.sh
 ```
 
