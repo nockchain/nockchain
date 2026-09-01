@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use anyhow::{anyhow, bail, Context, Result};
+use bridge::shared::types::WithdrawalPolicy;
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
 use crate::artifacts::{ArtifactResolveOptions, ArtifactResolver};
@@ -41,7 +42,6 @@ pub const E2E_FAKENET_GENESIS_JAM_RELATIVE_TO_CRATES: &str =
     "nockchain/jams/fakenet-genesis-pow-2-bex-1.jam";
 pub const E2E_DEPOSIT_AMOUNT_NICKS: &str = "6553600001";
 pub const E2E_DEPOSIT_SPEND_TIMEOUT_SECS: u64 = 1_800;
-pub const E2E_WITHDRAWAL_AMOUNT_NOCK: &str = "1001";
 pub const E2E_MIXED_INPUT_WITHDRAWAL_AMOUNT_NOCK: &str = "120000";
 pub const E2E_WITHDRAWAL_BASE_ADVANCE_BLOCKS: &str = "10";
 pub const E2E_WITHDRAWAL_PHASE_POLL_SECS: u64 = 30;
@@ -66,6 +66,29 @@ pub const ALL_COMPONENTS: &[&str] =
 pub const ALL_BRIDGE_COMPONENTS: &[&str] =
     &["bridge-0", "bridge-1", "bridge-2", "bridge-3", "bridge-4"];
 pub const ALL_BRIDGE_NODES: &[usize] = &[0, 1, 2, 3, 4];
+
+pub fn core_withdrawal_amount_nocks(policy: &WithdrawalPolicy, headroom_nocks: u64) -> Result<u64> {
+    let amount_nocks = policy
+        .minimum_gross_nocks
+        .checked_add(headroom_nocks)
+        .context("core withdrawal amount overflowed NOCK units")?;
+    let amount_nicks = amount_nocks
+        .checked_mul(policy.nicks_per_nock)
+        .context("core withdrawal amount overflowed nick units")?;
+    if amount_nicks > policy.maximum_nicks
+        || amount_nicks % policy.nicks_per_nock != 0
+        || amount_nocks < policy.minimum_gross_nocks
+    {
+        bail!("core withdrawal amount does not satisfy active policy");
+    }
+    Ok(amount_nocks)
+}
+
+pub fn core_withdrawal_amount_nicks(policy: &WithdrawalPolicy, headroom_nocks: u64) -> Result<u64> {
+    core_withdrawal_amount_nocks(policy, headroom_nocks)?
+        .checked_mul(policy.nicks_per_nock)
+        .context("core withdrawal amount overflowed nick units")
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioPaths {
     pub workspace_root: PathBuf,
@@ -74,6 +97,16 @@ pub struct ScenarioPaths {
     pub up_stdout: PathBuf,
     pub up_stderr: PathBuf,
     pub port_offset: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalBaseEnvironment {
+    pub http_url: String,
+    pub ws_url: String,
+    pub chain_id: u64,
+    pub start_height: u64,
+    pub inbox_contract: String,
+    pub nock_contract: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +216,34 @@ impl ScenarioHarness {
             env_overrides: Vec::new(),
             preserve_run_root: Cell::new(false),
             tempdir: Some(tempdir),
+        })
+    }
+
+    pub fn for_e2e_run(
+        name: &str,
+        workspace_root: PathBuf,
+        bridge_dev_bin: PathBuf,
+        run_dir: &Path,
+    ) -> Result<Self> {
+        let run_root = run_dir.join("cluster");
+        fs::create_dir_all(&run_root)
+            .with_context(|| format!("failed to create {}", run_root.display()))?;
+        let log_dir = run_dir.join("cluster-logs");
+        fs::create_dir_all(&log_dir)
+            .with_context(|| format!("failed to create {}", log_dir.display()))?;
+        Ok(Self {
+            workspace_root,
+            bridge_dev_bin,
+            run_root,
+            port_offset: scenario_port_offset(name)?,
+            up_child: None,
+            up_stdout: log_dir.join("up.stdout.log"),
+            up_stderr: log_dir.join("up.stderr.log"),
+            resolve_artifacts: false,
+            build_artifacts: false,
+            env_overrides: Vec::new(),
+            preserve_run_root: Cell::new(true),
+            tempdir: None,
         })
     }
 
@@ -323,6 +384,44 @@ impl ScenarioHarness {
         self.spawn_cluster(&["up", "--fresh", "--start"], Duration::from_secs(420))
     }
 
+    pub fn write_local_base_environment(
+        &self,
+        environment: &LocalBaseEnvironment,
+    ) -> Result<PathBuf> {
+        if environment.chain_id != 31_338
+            || !environment.http_url.starts_with("http://127.0.0.1:")
+            || !environment.ws_url.starts_with("ws://127.0.0.1:")
+            || environment.start_height == 0
+        {
+            bail!("local Base environment must bind dedicated chain 31338 to one loopback Anvil");
+        }
+        let path = self.run_root.join("virtual-testnet.generated.env");
+        let contents = format!(
+            "export BASE_RPC_URL=\"{}\"\nexport BASE_WS_URL=\"{}\"\nexport BASE_CHAIN_ID=\"{}\"\nexport BASE_START_HEIGHT=\"{}\"\nexport INBOX_CONTRACT_ADDRESS=\"{}\"\nexport NOCK_CONTRACT_ADDRESS=\"{}\"\n",
+            environment.http_url,
+            environment.ws_url,
+            environment.chain_id,
+            environment.start_height,
+            environment.inbox_contract,
+            environment.nock_contract,
+        );
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        use std::io::Write as _;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
+    }
+
+    pub fn spawn_local_cluster(&mut self) -> Result<()> {
+        self.spawn_cluster(
+            &["up", "--fresh-state", "--start"],
+            Duration::from_secs(420),
+        )
+    }
     pub fn spawn_cluster(&mut self, args: &[&str], status_timeout: Duration) -> Result<()> {
         if self.resolve_artifacts {
             let mut options = ArtifactResolveOptions::new(self.workspace_root.clone());
@@ -687,7 +786,8 @@ impl ScenarioHarness {
     }
 
     pub fn request_withdrawal_after_mint(&self) -> Result<()> {
-        self.request_withdrawal_after_mint_amount(E2E_WITHDRAWAL_AMOUNT_NOCK)
+        let amount_nock = core_withdrawal_amount_nocks(&WithdrawalPolicy::v1(), 1)?.to_string();
+        self.request_withdrawal_after_mint_amount(&amount_nock)
     }
 
     pub fn request_withdrawal_after_mint_amount(&self, amount_nock: &str) -> Result<()> {
@@ -697,7 +797,7 @@ impl ScenarioHarness {
         Ok(())
     }
 
-    pub fn wait_for_withdrawal_execution(
+    pub fn wait_for_withdrawal_sequencer_confirmation(
         &mut self,
     ) -> Result<(
         ObservedWithdrawal,
@@ -912,6 +1012,14 @@ impl ScenarioHarness {
             paths.push(current_dir.join(format!("bridge-{node_id}.stderr.log")));
             paths.push(current_dir.join(format!("bridge-{node_id}.stdout.log")));
         }
+        paths
+    }
+
+    pub fn evidence_log_paths(&self) -> Vec<PathBuf> {
+        let mut paths = vec![self.up_stdout.clone(), self.up_stderr.clone()];
+        paths.extend(self.current_log_paths());
+        paths.sort();
+        paths.dedup();
         paths
     }
 
