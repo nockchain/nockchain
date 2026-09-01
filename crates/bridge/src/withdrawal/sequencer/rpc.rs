@@ -208,6 +208,13 @@ impl WithdrawalSequencerRpcService {
             })
     }
 
+    async fn require_reorg_ready(&self) -> Result<(), Status> {
+        self.withdrawal_state_store
+            .ensure_reorg_ready()
+            .await
+            .map_err(|err| Status::failed_precondition(err.to_string()))
+    }
+
     fn deferred_submit_response(reason: impl Into<String>) -> SequencerUpdateResponse {
         SequencerUpdateResponse {
             request_accepted: false,
@@ -795,6 +802,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
         &self,
         request: Request<SequencerRegisterWithdrawalRequest>,
     ) -> Result<Response<SequencerUpdateResponse>, Status> {
+        self.require_reorg_ready().await?;
         metrics::init_metrics()
             .sequencer_withdrawal_registration_requests
             .increment();
@@ -955,6 +963,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
         &self,
         request: Request<SequencerRecordCanonicalRequest>,
     ) -> Result<Response<SequencerUpdateResponse>, Status> {
+        self.require_reorg_ready().await?;
         metrics::init_metrics()
             .sequencer_withdrawal_canonicalize_requests
             .increment();
@@ -1071,6 +1080,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
         &self,
         request: Request<SequencerAdvancePrecanonicalHandoffRequest>,
     ) -> Result<Response<SequencerUpdateResponse>, Status> {
+        self.require_reorg_ready().await?;
         let inner = request.into_inner();
         let id = inner
             .withdrawal_id
@@ -1091,6 +1101,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
         &self,
         request: Request<SequencerRecordSignedProposalRequest>,
     ) -> Result<Response<SequencerUpdateResponse>, Status> {
+        self.require_reorg_ready().await?;
         let inner = request.into_inner();
         let envelope = inner
             .proposal
@@ -1158,6 +1169,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
         &self,
         request: Request<SequencerAuthorizeProposalRequest>,
     ) -> Result<Response<SequencerUpdateResponse>, Status> {
+        self.require_reorg_ready().await?;
         metrics::init_metrics()
             .sequencer_withdrawal_authorize_requests
             .increment();
@@ -1260,6 +1272,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
         &self,
         request: Request<SequencerSubmitProposalRequest>,
     ) -> Result<Response<SequencerUpdateResponse>, Status> {
+        self.require_reorg_ready().await?;
         metrics::init_metrics()
             .sequencer_withdrawal_submit_attempts
             .increment();
@@ -2035,6 +2048,72 @@ mod tests {
         let err = elapsed_handoff_turns(200, 150, 10)
             .expect_err("regressing base height should be rejected");
         assert!(err.contains("behind stored turn_started_base_height"));
+    }
+
+    #[tokio::test]
+    async fn base_reorg_guard_blocks_every_mutating_rpc_and_preserves_read_access() {
+        let (rpc, withdrawal_state_store, _base_height_tracker, _submitter, _dir) =
+            open_rpc_service().await;
+        withdrawal_state_store
+            .activate_base_reorg_guard(
+                8_453,
+                Address::ZERO,
+                "proof fixture: Hoon recovery has not converged".to_string(),
+            )
+            .await
+            .expect("activate Base reorg guard");
+
+        let assert_blocked = |status: Status| {
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                status.message().contains("reorg hold generation"),
+                "unexpected guard error: {status}"
+            );
+        };
+
+        assert_blocked(
+            rpc.register_withdrawal(Request::new(SequencerRegisterWithdrawalRequest::default()))
+                .await
+                .expect_err("registration must fail during Base reorg hold"),
+        );
+        assert_blocked(
+            rpc.record_canonical_proposal(Request::new(SequencerRecordCanonicalRequest::default()))
+                .await
+                .expect_err("canonicalization must fail during Base reorg hold"),
+        );
+        assert_blocked(
+            rpc.advance_precanonical_handoff(Request::new(
+                SequencerAdvancePrecanonicalHandoffRequest::default(),
+            ))
+            .await
+            .expect_err("handoff advance must fail during Base reorg hold"),
+        );
+        assert_blocked(
+            rpc.record_signed_proposal(Request::new(
+                SequencerRecordSignedProposalRequest::default(),
+            ))
+            .await
+            .expect_err("signature progress must fail during Base reorg hold"),
+        );
+        assert_blocked(
+            rpc.authorize_proposal(Request::new(SequencerAuthorizeProposalRequest::default()))
+                .await
+                .expect_err("authorization must fail during Base reorg hold"),
+        );
+        assert_blocked(
+            rpc.submit_proposal(Request::new(SequencerSubmitProposalRequest::default()))
+                .await
+                .expect_err("submission must fail during Base reorg hold"),
+        );
+
+        let reserved = rpc
+            .get_reserved_withdrawal_inputs(Request::new(
+                SequencerReservedWithdrawalInputsRequest {},
+            ))
+            .await
+            .expect("read-only reservation query remains available")
+            .into_inner();
+        assert!(reserved.reserved_inputs.is_empty());
     }
 
     #[tokio::test]

@@ -799,6 +799,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             base_height_tracker.clone(),
             bridge_constants.base_start_height,
             bridge_constants.base_blocks_chunk,
+            base_confirmation_depth,
         )
         .await?,
     );

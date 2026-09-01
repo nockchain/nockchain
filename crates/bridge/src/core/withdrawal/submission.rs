@@ -63,9 +63,10 @@ fn submission_row_decision(
     node_pkhs: &[nockchain_types::tx_engine::common::Hash],
 ) -> Result<WithdrawalSubmissionRowDecision, BridgeError> {
     match row.state {
-        WithdrawalState::MempoolAccepted | WithdrawalState::Confirmed => {
-            Ok(WithdrawalSubmissionRowDecision::SkipReleasedNonce)
+        WithdrawalState::MempoolAccepted => {
+            Ok(WithdrawalSubmissionRowDecision::BlockedFrontierState)
         }
+        WithdrawalState::Confirmed => Ok(WithdrawalSubmissionRowDecision::SkipReleasedNonce),
         WithdrawalState::PeerCanonical => {
             if withdrawal_turn_proposer(&row.id, row.current_epoch, handoff_index, node_pkhs)
                 != local_node_id as usize
@@ -90,6 +91,8 @@ fn submission_row_decision(
             Ok(WithdrawalSubmissionRowDecision::BlockedFrontierState)
         }
         WithdrawalState::Pending => Ok(WithdrawalSubmissionRowDecision::SkipReleasedNonce),
+        WithdrawalState::Invalidated => Ok(WithdrawalSubmissionRowDecision::SkipReleasedNonce),
+        WithdrawalState::ReorgHold => Ok(WithdrawalSubmissionRowDecision::BlockedFrontierState),
     }
 }
 
@@ -225,6 +228,21 @@ mod tests {
         assert_eq!(
             candidate.kind,
             WithdrawalSubmissionCandidateKind::SubmitAuthorized
+        );
+    }
+
+    #[test]
+    fn mempool_accepted_frontier_blocks_later_work_until_confirmation() {
+        let decision = submission_row_decision(
+            &sample_row(4, 4, 0, WithdrawalState::MempoolAccepted),
+            0,
+            0,
+            &sample_node_pkhs(),
+        )
+        .expect("plan mempool-accepted frontier");
+        assert_eq!(
+            decision,
+            WithdrawalSubmissionRowDecision::BlockedFrontierState
         );
     }
 

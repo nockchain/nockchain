@@ -35,7 +35,7 @@ use crate::withdrawal::proposals::{
 use crate::withdrawal::snapshot::BridgeNoteSnapshotService;
 use crate::withdrawal::state::{LiveWithdrawalView, WithdrawalFallbackPolicy, WithdrawalState};
 use crate::withdrawal::submission::{
-    register_withdrawal_or_alert, sequenced_withdrawal_released,
+    register_withdrawal_or_alert, sequenced_withdrawal_needs_no_bridge_work,
     WithdrawalSequencerCanonicalizationError, WithdrawalSequencerPort,
 };
 use crate::withdrawal::types::{
@@ -364,7 +364,7 @@ impl WithdrawalProposalTransport {
                 let status = sequencer
                     .get_sequenced_withdrawal_status(&tracked.id)
                     .await?;
-                if sequenced_withdrawal_released(&status) {
+                if sequenced_withdrawal_needs_no_bridge_work(&status) {
                     continue;
                 }
                 if let Some(bridge_status) = self.bridge_status.as_ref() {
@@ -379,7 +379,7 @@ impl WithdrawalProposalTransport {
                 let status = sequencer
                     .get_sequenced_withdrawal_status(&tracked.id)
                     .await?;
-                if sequenced_withdrawal_released(&status) {
+                if sequenced_withdrawal_needs_no_bridge_work(&status) {
                     continue;
                 }
                 break;
@@ -1097,6 +1097,10 @@ impl WithdrawalProposalTransport {
                 .await?;
             self.registry
                 .reconcile_pending_epoch(id, status.current_epoch)
+                .await?;
+        } else if status.found && matches!(status.state.as_str(), "invalidated" | "reorg_hold") {
+            self.registry
+                .reconcile_base_reorg_state(id, status.current_epoch, status.state == "reorg_hold")
                 .await?;
         }
         Ok(())
@@ -3638,7 +3642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcaster_expires_prepared_attempt_when_local_reserved_input_precheck_fails() {
+    async fn broadcaster_keeps_later_reserved_input_conflict_passive_behind_frontier() {
         let request = sample_request();
         let proposal = sample_proposal(0);
         let mut blocking_request = sample_request();
@@ -3702,17 +3706,19 @@ mod tests {
             .await
             .expect("record blocking mempool acceptance");
 
-        let err = transport
+        let outcome = transport
             .broadcast_proposal_to_peers(&proposal, &[])
             .await
-            .expect_err("local reserved-input precheck should fail");
-        assert!(err.to_string().contains("before sequencer submission"));
+            .expect("later proposal should remain passive behind frontier");
+        assert!(outcome.accepted_node_ids.is_empty());
+        assert!(!outcome.canonicalized);
         let live = transport
             .registry()
             .fetch_live_withdrawal(&proposal.id)
             .await
-            .expect("fetch local live row");
-        assert_eq!(live, None);
+            .expect("fetch local live row")
+            .expect("prepared local row remains live");
+        assert_eq!(live.state, WithdrawalState::Prepared);
         let sequenced = withdrawal_state_store
             .fetch_sequenced_withdrawal(&proposal.id)
             .await
@@ -3839,6 +3845,14 @@ mod tests {
             )
             .await
             .expect("record stale mempool acceptance");
+        withdrawal_state_store
+            .record_tx_confirmed(
+                &stale_proposal,
+                777,
+                Tip5Hash([Belt(840), Belt(841), Belt(842), Belt(843), Belt(844)]),
+            )
+            .await
+            .expect("confirm stale nonce before frontier advances");
 
         let outcome = transport
             .broadcast_proposal_to_peers(&stale_proposal, &[])

@@ -120,6 +120,9 @@ pub enum SequencerJournalEventType {
     TxSeenMempoolAccepted,
     MempoolRetryAttempted,
     TxConfirmed,
+    BaseBurnInvalidated,
+    BaseReorgHold,
+    NockInclusionInvalidated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +148,20 @@ pub struct SequencerJournalBaseContext {
     pub turn_started_base_height: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_submit_attempt_base_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reorg_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalidated_block_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalidated_block_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub common_ancestor_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub common_ancestor_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reorg_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +219,12 @@ pub struct SequencerJournalConfirmationContext {
     pub confirmed_height: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmed_block_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reorg_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reorg_reason: Option<String>,
 }
 
 impl SequencerJournalRecord {
@@ -2022,6 +2045,13 @@ mod tests {
                 base_batch_end: Some(44),
                 turn_started_base_height: Some(45),
                 last_submit_attempt_base_height: None,
+                reorg_generation: None,
+                invalidated_block_height: None,
+                invalidated_block_hash: None,
+                common_ancestor_height: None,
+                common_ancestor_hash: None,
+                prior_state: None,
+                reorg_reason: None,
             }),
             Some(SequencerJournalNockchainContext {
                 snapshot_height: Some(100),

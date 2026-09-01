@@ -7,7 +7,7 @@ use deadpool_diesel::sqlite::{Manager, Pool};
 use deadpool_diesel::Runtime;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Binary, Text};
+use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::{Bytes, NounAllocator};
@@ -23,7 +23,8 @@ use crate::withdrawal::proposals::TrackedWithdrawalRequest;
 use crate::withdrawal::raw_tx as withdrawal_raw_tx;
 use crate::withdrawal::sequencer::base_activity::{
     assign_withdrawal_nonce, ensure_base_activity_schema, load_activity_cursor_for_reconciliation,
-    load_verified_burn_for_reconciliation, BaseActivityStore, VerifiedBaseWithdrawalBurn,
+    load_verified_burn_for_reconciliation, BaseActivityReorgPlan, BaseActivityStore,
+    VerifiedBaseWithdrawalBurn,
 };
 use crate::withdrawal::sequencer::base_incidents::compensated_withdrawal_exists;
 use crate::withdrawal::sequencer::journal::{
@@ -46,7 +47,47 @@ use crate::withdrawal::types::{
 };
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
+fn checked_i64(value: u64, field: &str) -> Result<i64, BridgeError> {
+    i64::try_from(value).map_err(|err| {
+        BridgeError::ValueConversion(format!("{field} does not fit SQLite INTEGER: {err}"))
+    })
+}
 
+#[derive(QueryableByName)]
+struct BaseReorgBurnRow {
+    #[diesel(sql_type = Binary)]
+    base_event_id: Vec<u8>,
+    #[diesel(sql_type = BigInt)]
+    block_number: i64,
+    #[diesel(sql_type = Binary)]
+    block_hash: Vec<u8>,
+}
+
+#[derive(QueryableByName)]
+struct OptionalMaxGeneration {
+    #[diesel(sql_type = Nullable<BigInt>)]
+    value: Option<i64>,
+}
+
+#[derive(QueryableByName)]
+struct BaseReorgGuardRow {
+    #[diesel(sql_type = BigInt)]
+    generation: i64,
+    #[diesel(sql_type = Text)]
+    reason: String,
+}
+
+#[derive(QueryableByName)]
+struct NockReorgObservationRow {
+    #[diesel(sql_type = BigInt)]
+    expected_height: i64,
+    #[diesel(sql_type = Binary)]
+    expected_block_id: Vec<u8>,
+    #[diesel(sql_type = BigInt)]
+    first_observed_at: i64,
+    #[diesel(sql_type = BigInt)]
+    missing_count: i64,
+}
 /// Sequencer-owned withdrawal coordination state store.
 ///
 /// This store is used by the API-node sequencer process. It owns the durable
@@ -65,12 +106,15 @@ pub enum WithdrawalSubmissionEventType {
     ProposerTurnExpired,
     ProposalAuthorized,
     ProposalRejected,
+    NockInclusionInvalidated,
     ProposalExpired,
     ProposalSuperseded,
     TxSubmitted,
     TxSeenMempoolAccepted,
     MempoolRetryAttempted,
     TxConfirmed,
+    BaseBurnInvalidated,
+    BaseReorgHold,
 }
 
 impl WithdrawalSubmissionEventType {
@@ -85,12 +129,15 @@ impl WithdrawalSubmissionEventType {
             Self::ProposerTurnExpired => "proposer_turn_expired",
             Self::ProposalAuthorized => "proposal_authorized",
             Self::ProposalRejected => "proposal_rejected",
+            Self::NockInclusionInvalidated => "nock_inclusion_invalidated",
             Self::ProposalExpired => "proposal_expired",
             Self::ProposalSuperseded => "proposal_superseded",
             Self::TxSubmitted => "tx_submitted",
             Self::TxSeenMempoolAccepted => "tx_seen_mempool_accepted",
             Self::MempoolRetryAttempted => "mempool_retry_attempted",
             Self::TxConfirmed => "tx_confirmed",
+            Self::BaseBurnInvalidated => "base_burn_invalidated",
+            Self::BaseReorgHold => "base_reorg_hold",
         }
     }
 
@@ -105,12 +152,15 @@ impl WithdrawalSubmissionEventType {
             "proposer_turn_expired" => Ok(Self::ProposerTurnExpired),
             "proposal_authorized" => Ok(Self::ProposalAuthorized),
             "proposal_rejected" => Ok(Self::ProposalRejected),
+            "nock_inclusion_invalidated" => Ok(Self::NockInclusionInvalidated),
             "proposal_expired" => Ok(Self::ProposalExpired),
             "proposal_superseded" => Ok(Self::ProposalSuperseded),
             "tx_submitted" => Ok(Self::TxSubmitted),
             "tx_seen_mempool_accepted" => Ok(Self::TxSeenMempoolAccepted),
             "mempool_retry_attempted" => Ok(Self::MempoolRetryAttempted),
             "tx_confirmed" => Ok(Self::TxConfirmed),
+            "base_burn_invalidated" => Ok(Self::BaseBurnInvalidated),
+            "base_reorg_hold" => Ok(Self::BaseReorgHold),
             other => Err(BridgeError::Runtime(format!(
                 "unknown withdrawal submission event type: {other}"
             ))),
@@ -134,10 +184,21 @@ pub struct WithdrawalSubmissionEventRecord {
     pub confirmed_block_id: Option<Tip5Hash>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicWithdrawalRecoveryProjection {
+    pub generation: u64,
+    pub invalidated_block_height: u64,
+    pub invalidated_block_id: Vec<u8>,
+    pub prior_status: String,
+    pub reason: String,
+    pub observed_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicWithdrawalLifecycleProjection {
     pub lifecycle: LiveWithdrawalView,
     pub net_amount: Option<u64>,
     pub confirmation: Option<WithdrawalSubmissionEventRecord>,
+    pub recovery: Option<PublicWithdrawalRecoveryProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +260,37 @@ pub struct BaseBurnRecoveryReport {
     pub recovered_pending: u64,
     pub already_registered: u64,
     pub ineligible: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfirmedNockchainWithdrawal {
+    pub id: WithdrawalId,
+    pub epoch: u64,
+    pub submitted_raw_tx_id: String,
+    pub raw_tx: nockchain_types::v1::RawTx,
+    pub confirmed_height: u64,
+    pub confirmed_block_id: Tip5Hash,
+    pub snapshot_height: u64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NockchainReorgRecoveryReport {
+    pub inspected: u64,
+    pub unchanged: u64,
+    pub re_included: u64,
+    pub regressed_to_mempool: u64,
+    pub regressed_to_authorized: u64,
+    pub held: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseActivityReorgReport {
+    pub generation: u64,
+    pub old_cursor_block: u64,
+    pub common_ancestor_block: u64,
+    pub rewind_depth: u64,
+    pub burns_invalidated: u64,
+    pub lifecycle_rows_invalidated: u64,
+    pub lifecycle_rows_held: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1096,6 +1188,25 @@ impl WithdrawalSequencerStore {
         .await
     }
 
+    pub async fn record_nockchain_inclusion_invalidated(
+        &self,
+        id: &WithdrawalId,
+        confirmed_height: u64,
+        confirmed_block_id: Tip5Hash,
+        next_state: WithdrawalState,
+        reason: String,
+    ) -> Result<u64, BridgeError> {
+        let id = id.clone();
+        let created_at = now_unix_secs()?;
+        self.with_write_tx(move |conn, journal| {
+            record_nockchain_inclusion_invalidated_tx(
+                conn, journal, &id, confirmed_height, &confirmed_block_id, next_state, &reason,
+                created_at,
+            )
+        })
+        .await
+    }
+
     /// Records that the submitted transaction was observed as mempool-accepted
     /// by a Nockchain node without yet marking it confirmed.
     pub async fn record_tx_seen_mempool_accepted(
@@ -1389,7 +1500,7 @@ impl WithdrawalSequencerStore {
     }
 
     /// Loads and validates the exact persisted raw transaction for startup
-    /// reconciliation of an authorized or mempool-accepted withdrawal.
+    /// reconciliation or operator inspection of an authorized transaction.
     pub async fn load_authorized_transaction_for_reconciliation(
         &self,
         id: &WithdrawalId,
@@ -1446,6 +1557,113 @@ impl WithdrawalSequencerStore {
             .await
     }
 
+    pub async fn list_confirmed_nockchain_withdrawals(
+        &self,
+    ) -> Result<Vec<ConfirmedNockchainWithdrawal>, BridgeError> {
+        self.with_conn(load_confirmed_nockchain_withdrawals).await
+    }
+
+    pub async fn note_missing_nockchain_inclusion(
+        &self,
+        id: &WithdrawalId,
+        expected_height: u64,
+        expected_block_id: &Tip5Hash,
+    ) -> Result<u64, BridgeError> {
+        let id = id.clone();
+        let expected_block_id = tip5_to_bytes(expected_block_id);
+        let observed_at = now_unix_secs()?;
+        self.with_conn(move |conn| {
+            conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                let expected_height_i64 = checked_i64(expected_height, "expected_height")?;
+                let existing = diesel::sql_query(
+                    r#"
+                    SELECT expected_height, expected_block_id,
+                           first_observed_at, missing_count
+                    FROM sequencer_nock_reorg_observations
+                    WHERE withdrawal_id_base_event_id = ?
+                    "#,
+                )
+                .bind::<Binary, _>(id.base_event_id.0.clone())
+                .get_result::<NockReorgObservationRow>(conn)
+                .optional()?;
+                let matches_expected = existing.as_ref().is_some_and(|row| {
+                    row.expected_height == expected_height_i64
+                        && row.expected_block_id == expected_block_id
+                });
+                let missing_count = if matches_expected {
+                    existing
+                        .as_ref()
+                        .and_then(|row| row.missing_count.checked_add(1))
+                        .ok_or_else(|| {
+                            BridgeError::ValueConversion(
+                                "Nock missing-inclusion count overflow".into(),
+                            )
+                        })?
+                } else {
+                    1
+                };
+                let first_observed_at = if matches_expected {
+                    existing
+                        .as_ref()
+                        .map(|row| row.first_observed_at)
+                        .unwrap_or(observed_at)
+                } else {
+                    observed_at
+                };
+                diesel::sql_query(
+                    r#"
+                    INSERT INTO sequencer_nock_reorg_observations (
+                        withdrawal_id_base_event_id, expected_height,
+                        expected_block_id, missing_count,
+                        first_observed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(withdrawal_id_base_event_id) DO UPDATE SET
+                        expected_height = excluded.expected_height,
+                        expected_block_id = excluded.expected_block_id,
+                        missing_count = excluded.missing_count,
+                        first_observed_at = excluded.first_observed_at,
+                        updated_at = excluded.updated_at
+                    "#,
+                )
+                .bind::<Binary, _>(id.base_event_id.0)
+                .bind::<BigInt, _>(expected_height_i64)
+                .bind::<Binary, _>(expected_block_id)
+                .bind::<BigInt, _>(missing_count)
+                .bind::<BigInt, _>(first_observed_at)
+                .bind::<BigInt, _>(observed_at)
+                .execute(conn)?;
+                Ok(u64::try_from(missing_count)?)
+            })
+            .map_err(|err| {
+                BridgeError::Runtime(format!(
+                    "Nock missing-inclusion observation transaction failed: {err}"
+                ))
+            })
+        })
+        .await
+    }
+
+    pub async fn clear_missing_nockchain_inclusion(
+        &self,
+        id: &WithdrawalId,
+    ) -> Result<(), BridgeError> {
+        let id = id.clone();
+        self.with_conn(move |conn| {
+            diesel::sql_query(
+                "DELETE FROM sequencer_nock_reorg_observations WHERE withdrawal_id_base_event_id = ?",
+            )
+            .bind::<Binary, _>(id.base_event_id.0)
+            .execute(conn)
+            .map_err(|err| {
+                BridgeError::Runtime(format!(
+                    "Nock missing-inclusion observation clear failed: {err}"
+                ))
+            })?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Verifies the complete lifecycle/reservation projection after replay and
     /// chain reconciliation. This check is read-only and fails closed rather
     /// than repairing corruption without a journal event.
@@ -1455,6 +1673,160 @@ impl WithdrawalSequencerStore {
         let journal_enabled = self.journal.is_enabled();
         self.with_conn(move |conn| verify_startup_lifecycle_integrity(conn, journal_enabled))
             .await
+    }
+
+    pub async fn activate_base_reorg_guard(
+        &self,
+        chain_id: u64,
+        nock_contract_address: Address,
+        reason: String,
+    ) -> Result<u64, BridgeError> {
+        let created_at = now_unix_secs()?;
+        self.with_conn(move |conn| {
+            conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                let existing = diesel::sql_query(
+                    r#"
+                    SELECT generation, reason
+                    FROM sequencer_base_reorg_guard
+                    WHERE chain_id = ? AND nock_contract_address = ?
+                    "#,
+                )
+                .bind::<BigInt, _>(checked_i64(chain_id, "chain_id")?)
+                .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+                .get_result::<BaseReorgGuardRow>(conn)
+                .optional()?;
+                if let Some(existing) = existing {
+                    if existing.reason == reason {
+                        return Ok(u64::try_from(existing.generation)?);
+                    }
+                }
+                let generation = diesel::sql_query(
+                    r#"
+                    SELECT MAX(value) AS value
+                    FROM (
+                        SELECT generation AS value
+                        FROM sequencer_base_reorg_events
+                        WHERE chain_id = ? AND nock_contract_address = ?
+                        UNION ALL
+                        SELECT generation AS value
+                        FROM sequencer_base_burn_invalidations
+                        WHERE chain_id = ? AND nock_contract_address = ?
+                        UNION ALL
+                        SELECT generation AS value
+                        FROM sequencer_base_reorg_guard
+                        WHERE chain_id = ? AND nock_contract_address = ?
+                    )
+                    "#,
+                )
+                .bind::<BigInt, _>(checked_i64(chain_id, "chain_id")?)
+                .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+                .bind::<BigInt, _>(checked_i64(chain_id, "chain_id")?)
+                .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+                .bind::<BigInt, _>(checked_i64(chain_id, "chain_id")?)
+                .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+                .get_result::<OptionalMaxGeneration>(conn)?
+                .value
+                .map(u64::try_from)
+                .transpose()?
+                .unwrap_or_default()
+                .saturating_add(1);
+                diesel::sql_query(
+                    r#"
+                    INSERT INTO sequencer_base_reorg_guard (
+                        chain_id, nock_contract_address, generation, reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(chain_id, nock_contract_address) DO UPDATE SET
+                        generation = excluded.generation,
+                        reason = excluded.reason,
+                        created_at = excluded.created_at
+                    "#,
+                )
+                .bind::<BigInt, _>(checked_i64(chain_id, "chain_id")?)
+                .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+                .bind::<BigInt, _>(checked_i64(generation, "reorg_generation")?)
+                .bind::<Text, _>(reason)
+                .bind::<BigInt, _>(created_at)
+                .execute(conn)?;
+                Ok(generation)
+            })
+            .map_err(|err| {
+                BridgeError::Runtime(format!("Base reorg guard transaction failed: {err}"))
+            })
+        })
+        .await
+    }
+
+    pub async fn ensure_reorg_ready(&self) -> Result<(), BridgeError> {
+        self.with_conn(|conn| {
+            let guard = diesel::sql_query(
+                r#"
+                SELECT generation, reason
+                FROM (
+                    SELECT generation, reason, created_at
+                    FROM sequencer_base_reorg_guard
+                    UNION ALL
+                    SELECT invalidation.generation, invalidation.reason,
+                           invalidation.invalidated_at AS created_at
+                    FROM sequencer_base_burn_invalidations AS invalidation
+                    JOIN sequencer_withdrawals AS withdrawal
+                      ON withdrawal.withdrawal_id_base_event_id =
+                         invalidation.base_event_id
+                    WHERE withdrawal.state = 'reorg_hold'
+                    UNION ALL
+                    SELECT invalidation.generation, invalidation.reason,
+                           invalidation.created_at
+                    FROM sequencer_nock_reorg_events AS invalidation
+                    JOIN sequencer_withdrawals AS withdrawal
+                      ON withdrawal.withdrawal_id_base_event_id =
+                         invalidation.withdrawal_id_base_event_id
+                    WHERE withdrawal.state = 'reorg_hold'
+                    UNION ALL
+                    SELECT -1 AS generation,
+                           'withdrawal lifecycle remains reorg_hold' AS reason,
+                           updated_at - 1 AS created_at
+                    FROM sequencer_withdrawals
+                    WHERE state = 'reorg_hold'
+                )
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .get_result::<BaseReorgGuardRow>(conn)
+            .optional()
+            .map_err(|err| BridgeError::Runtime(format!("Base reorg guard load failed: {err}")))?;
+            if let Some(guard) = guard {
+                return Err(BridgeError::BaseBridgeMonitoring(format!(
+                    "reorg hold generation {} blocks sequencer mutations: {}",
+                    guard.generation, guard.reason
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Applies one bounded Base rewind or durably escalates unsafe lifecycle rows.
+    pub async fn apply_base_activity_reorg(
+        &self,
+        plan: BaseActivityReorgPlan,
+    ) -> Result<BaseActivityReorgReport, BridgeError> {
+        let evidence = plan.clone();
+        let report = self
+            .with_write_tx(move |conn, journal| apply_base_activity_reorg_tx(conn, journal, &plan))
+            .await?;
+        if report.lifecycle_rows_held > 0 {
+            return Err(BridgeError::BaseBridgeMonitoring(format!(
+                "Base reorg requires operator intervention: generation={} cursor={} {:?} ancestor={} {:?} depth={} held_rows={}",
+                report.generation,
+                evidence.old_cursor.last_verified_block,
+                evidence.old_cursor.last_verified_block_hash,
+                evidence.common_ancestor.block_number,
+                evidence.common_ancestor.block_hash,
+                evidence.rewind_depth,
+                report.lifecycle_rows_held
+            )));
+        }
+        Ok(report)
     }
 
     /// Recovers eligible canonical Base burns that have no sequencer ordering
@@ -1557,6 +1929,36 @@ impl WithdrawalSequencerStore {
                         "sequencer withdrawal {:?} Base batch end conflicts with verified Base burn",
                         id
                     )));
+                }
+                if existing.state == WithdrawalState::Invalidated {
+                    let next_epoch = existing.current_epoch.checked_add(1).ok_or_else(|| {
+                        BridgeError::Runtime(format!(
+                            "invalidated withdrawal {:?} epoch overflow",
+                            existing.id
+                        ))
+                    })?;
+                    let record = sequencer_journal_record_with_request_facts(
+                        created_at,
+                        SequencerJournalEventType::WithdrawalOrdered,
+                        &id,
+                        next_epoch,
+                        existing.withdrawal_nonce,
+                        Some(&request_facts),
+                        journal_base_context(None, Some(turn_started_base_height), None),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )?;
+                    append_and_project_journal_records(conn, journal, &[record])?;
+                    let nonce = existing.withdrawal_nonce.ok_or_else(|| {
+                        BridgeError::Runtime(format!(
+                            "invalidated sequencer withdrawal {:?} is missing nonce",
+                            id
+                        ))
+                    })?;
+                    assign_withdrawal_nonce(conn, &burn, nonce)?;
+                    return Ok(BaseBurnRecoveryOutcome::Recovered);
                 }
                 let nonce = existing.withdrawal_nonce.ok_or_else(|| {
                     BridgeError::Runtime(format!(
@@ -1730,6 +2132,30 @@ impl WithdrawalSequencerStore {
             CREATE UNIQUE INDEX IF NOT EXISTS withdrawal_reserved_inputs_by_name
               ON withdrawal_reserved_inputs(input_first, input_last);
 
+
+            CREATE TABLE IF NOT EXISTS sequencer_nock_reorg_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                withdrawal_id_base_event_id BLOB NOT NULL
+                  CHECK(length(withdrawal_id_base_event_id) = 32),
+                generation INTEGER NOT NULL,
+                invalidated_height INTEGER NOT NULL,
+                invalidated_block_id BLOB NOT NULL
+                  CHECK(length(invalidated_block_id) = 40),
+                next_state TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE (withdrawal_id_base_event_id, generation)
+            );
+
+            CREATE TABLE IF NOT EXISTS sequencer_nock_reorg_observations (
+                withdrawal_id_base_event_id BLOB PRIMARY KEY NOT NULL
+                  CHECK(length(withdrawal_id_base_event_id) = 32),
+                expected_height INTEGER NOT NULL,
+                expected_block_id BLOB NOT NULL CHECK(length(expected_block_id) = 40),
+                missing_count INTEGER NOT NULL,
+                first_observed_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             DROP TABLE IF EXISTS current_reserved_inputs;
             DROP TABLE IF EXISTS withdrawal_submission_event_inputs;
             "#,
@@ -2018,6 +2444,13 @@ fn journal_base_context(
         base_batch_end,
         turn_started_base_height,
         last_submit_attempt_base_height,
+        reorg_generation: None,
+        invalidated_block_height: None,
+        invalidated_block_hash: None,
+        common_ancestor_height: None,
+        common_ancestor_hash: None,
+        prior_state: None,
+        reorg_reason: None,
     })
 }
 
@@ -2146,6 +2579,9 @@ fn journal_confirmation_context(
         included_block_id: None,
         confirmed_height: Some(confirmed_height),
         confirmed_block_id: Some(hex::encode(tip5_to_bytes(confirmed_block_id))),
+        reorg_generation: None,
+        next_state: None,
+        reorg_reason: None,
     }
 }
 
@@ -2437,6 +2873,8 @@ fn withdrawal_state_rank(state: WithdrawalState) -> u8 {
         WithdrawalState::Authorized => 3,
         WithdrawalState::MempoolAccepted => 4,
         WithdrawalState::Confirmed => 5,
+        WithdrawalState::Invalidated => 0,
+        WithdrawalState::ReorgHold => 6,
     }
 }
 
@@ -2516,6 +2954,15 @@ fn verify_journal_cursor_event_applied(
             verify_cursor_mempool_retry_attempted(conn, event, &decoded)
         }
         SequencerJournalEventType::TxConfirmed => verify_cursor_tx_confirmed(conn, event, &decoded),
+        SequencerJournalEventType::BaseBurnInvalidated => {
+            verify_cursor_base_reorg_state(conn, event, &decoded, WithdrawalState::Invalidated)
+        }
+        SequencerJournalEventType::BaseReorgHold => {
+            verify_cursor_base_reorg_state(conn, event, &decoded, WithdrawalState::ReorgHold)
+        }
+        SequencerJournalEventType::NockInclusionInvalidated => {
+            verify_cursor_nock_inclusion_invalidated(conn, event, &decoded)
+        }
     }
 }
 
@@ -2650,6 +3097,82 @@ fn verify_cursor_tx_confirmed(
             .submit_metadata()
             .reservations(CursorReservationCheck::Cleared),
     )
+}
+
+fn verify_cursor_base_reorg_state(
+    conn: &mut SqliteConnection,
+    event: &SequencerJournalRecord,
+    decoded: &DecodedJournalEvent,
+    target_state: WithdrawalState,
+) -> Result<(), BridgeError> {
+    let existing =
+        fetch_sequenced_withdrawal(conn, &decoded.id.base_event_id)?.ok_or_else(|| {
+            cursor_projection_mismatch(event, "Base reorg event has no sequencer row")
+        })?;
+    if existing.state != target_state {
+        return Err(cursor_projection_mismatch(
+            event, "Base reorg lifecycle state was not projected",
+        ));
+    }
+    let reserved = load_reserved_input_rows_for_withdrawal(conn, &decoded.id)?;
+    if target_state == WithdrawalState::Invalidated {
+        if !reserved.is_empty() {
+            return Err(cursor_projection_mismatch(
+                event, "invalidated Base burn still owns reservations",
+            ));
+        }
+        let active_burns = diesel::sql_query(
+            r#"
+            SELECT COUNT(*) AS value
+            FROM sequencer_base_burns
+            WHERE base_event_id = ? AND canonical = 1
+            "#,
+        )
+        .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+        .get_result::<LastInsertRowId>(conn)
+        .map_err(|err| {
+            BridgeError::Runtime(format!("Base reorg cursor burn verification failed: {err}"))
+        })?
+        .value;
+        if active_burns != 0 {
+            return Err(cursor_projection_mismatch(
+                event, "invalidated Base burn remains canonical in activity projection",
+            ));
+        }
+    } else {
+        let expected = canonical_inputs_for_startup_integrity(&existing)?;
+        verify_exact_startup_reservations(&existing, &reserved, &expected)
+            .map_err(|err| cursor_projection_mismatch(event, &err.to_string()))?;
+    }
+    Ok(())
+}
+
+fn verify_cursor_nock_inclusion_invalidated(
+    conn: &mut SqliteConnection,
+    event: &SequencerJournalRecord,
+    decoded: &DecodedJournalEvent,
+) -> Result<(), BridgeError> {
+    let confirmation = event.confirmation.as_ref().ok_or_else(|| {
+        cursor_projection_mismatch(event, "Nock invalidation has no confirmation context")
+    })?;
+    let next_state = confirmation
+        .next_state
+        .as_deref()
+        .ok_or_else(|| cursor_projection_mismatch(event, "Nock invalidation has no next state"))?;
+    let expected_state = WithdrawalState::parse(next_state)?;
+    let existing =
+        fetch_sequenced_withdrawal(conn, &decoded.id.base_event_id)?.ok_or_else(|| {
+            cursor_projection_mismatch(event, "Nock invalidation has no sequencer row")
+        })?;
+    if existing.state != expected_state {
+        return Err(cursor_projection_mismatch(
+            event, "Nock invalidation lifecycle state was not projected",
+        ));
+    }
+    let expected = canonical_inputs_for_startup_integrity(&existing)?;
+    let reserved = load_reserved_input_rows_for_withdrawal(conn, &decoded.id)?;
+    verify_exact_startup_reservations(&existing, &reserved, &expected)
+        .map_err(|err| cursor_projection_mismatch(event, &err.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4026,7 +4549,357 @@ fn apply_journal_event(
         SequencerJournalEventType::TxConfirmed => {
             apply_journal_tx_confirmed(conn, event, &decoded, mode)
         }
+        SequencerJournalEventType::BaseBurnInvalidated => apply_journal_base_reorg_state(
+            conn,
+            event,
+            &decoded,
+            mode,
+            WithdrawalState::Invalidated,
+        ),
+        SequencerJournalEventType::BaseReorgHold => {
+            apply_journal_base_reorg_state(conn, event, &decoded, mode, WithdrawalState::ReorgHold)
+        }
+        SequencerJournalEventType::NockInclusionInvalidated => {
+            apply_journal_nock_inclusion_invalidated(conn, event, &decoded, mode)
+        }
     }
+}
+fn apply_journal_base_reorg_state(
+    conn: &mut SqliteConnection,
+    event: &SequencerJournalRecord,
+    decoded: &DecodedJournalEvent,
+    mode: SequencerJournalApplyMode,
+    target_state: WithdrawalState,
+) -> Result<(), BridgeError> {
+    let base = event.base.as_ref().ok_or_else(|| {
+        BridgeError::Runtime(format!(
+            "{:?} is missing Base reorg context",
+            event.event_type
+        ))
+    })?;
+    let generation = base.reorg_generation.ok_or_else(|| {
+        BridgeError::Runtime(format!(
+            "{:?} is missing reorg generation",
+            event.event_type
+        ))
+    })?;
+    let invalidated_block_height = base.invalidated_block_height.ok_or_else(|| {
+        BridgeError::Runtime(format!(
+            "{:?} is missing invalidated block height",
+            event.event_type
+        ))
+    })?;
+    let invalidated_block_hash = decode_journal_hex(
+        "base.invalidated_block_hash",
+        base.invalidated_block_hash.as_deref().ok_or_else(|| {
+            BridgeError::Runtime(format!(
+                "{:?} is missing invalidated block hash",
+                event.event_type
+            ))
+        })?,
+    )?;
+    let common_ancestor_height = base.common_ancestor_height.ok_or_else(|| {
+        BridgeError::Runtime(format!(
+            "{:?} is missing common ancestor height",
+            event.event_type
+        ))
+    })?;
+    let common_ancestor_hash = decode_journal_hex(
+        "base.common_ancestor_hash",
+        base.common_ancestor_hash.as_deref().ok_or_else(|| {
+            BridgeError::Runtime(format!(
+                "{:?} is missing common ancestor hash",
+                event.event_type
+            ))
+        })?,
+    )?;
+    let reason = base.reorg_reason.as_deref().ok_or_else(|| {
+        BridgeError::Runtime(format!("{:?} is missing reorg reason", event.event_type))
+    })?;
+    let existing =
+        fetch_sequenced_withdrawal(conn, &decoded.id.base_event_id)?.ok_or_else(|| {
+            BridgeError::Runtime(format!(
+                "{:?} references missing withdrawal {:?}",
+                event.event_type, decoded.id
+            ))
+        })?;
+    if target_state == WithdrawalState::Invalidated
+        && matches!(
+            existing.state,
+            WithdrawalState::Authorized
+                | WithdrawalState::MempoolAccepted
+                | WithdrawalState::Confirmed
+                | WithdrawalState::ReorgHold
+        )
+    {
+        return Err(BridgeError::Runtime(format!(
+            "refusing automatic Base invalidation of {:?} in state {}",
+            decoded.id,
+            existing.state.as_str()
+        )));
+    }
+    if target_state == WithdrawalState::ReorgHold
+        && !matches!(
+            existing.state,
+            WithdrawalState::Authorized
+                | WithdrawalState::MempoolAccepted
+                | WithdrawalState::Confirmed
+                | WithdrawalState::ReorgHold
+        )
+    {
+        return Err(BridgeError::Runtime(format!(
+            "refusing Base reorg hold for pre-authorization withdrawal {:?} in state {}",
+            decoded.id,
+            existing.state.as_str()
+        )));
+    }
+    diesel::sql_query(
+        r#"
+        UPDATE sequencer_withdrawals
+        SET state = ?, updated_at = ?
+        WHERE withdrawal_id_base_event_id = ?
+        "#,
+    )
+    .bind::<Text, _>(target_state.as_str())
+    .bind::<BigInt, _>(decoded.created_at)
+    .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base reorg state update failed: {err}")))?;
+    if mode == SequencerJournalApplyMode::Runtime {
+        let debug_event_type = if target_state == WithdrawalState::Invalidated {
+            WithdrawalSubmissionEventType::BaseBurnInvalidated
+        } else {
+            WithdrawalSubmissionEventType::BaseReorgHold
+        };
+        let debug_row = NewWithdrawalSubmissionEventRow::from_withdrawal_id(
+            &decoded.id, decoded.epoch, debug_event_type, decoded.created_at,
+        )?;
+        insert_debug_event(conn, &debug_row)?;
+    }
+    if target_state == WithdrawalState::ReorgHold {
+        let inputs = canonical_inputs_for_startup_integrity(&existing)?;
+        insert_reserved_inputs_for_names(
+            conn, &existing.id, existing.current_epoch, &inputs, decoded.created_at, mode,
+        )?;
+    }
+
+    diesel::sql_query(
+        r#"
+            INSERT OR IGNORE INTO sequencer_base_burn_invalidations (
+                chain_id, nock_contract_address, generation, base_event_id,
+                old_block_number, old_block_hash, lifecycle_state,
+                invalidated_at, reason
+            )
+            SELECT chain_id, nock_contract_address, ?, base_event_id,
+                   block_number, block_hash, ?, ?, ?
+            FROM sequencer_base_burns
+            WHERE base_event_id = ? AND canonical = 1
+            "#,
+    )
+    .bind::<BigInt, _>(checked_i64(generation, "reorg_generation")?)
+    .bind::<Text, _>(
+        base.prior_state
+            .clone()
+            .unwrap_or_else(|| existing.state.as_str().to_string()),
+    )
+    .bind::<BigInt, _>(decoded.created_at)
+    .bind::<Text, _>(reason.to_string())
+    .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+    .execute(conn)
+    .map_err(|err| {
+        BridgeError::Runtime(format!(
+            "Base burn invalidation history insert failed: {err}"
+        ))
+    })?;
+    if target_state == WithdrawalState::Invalidated {
+        clear_reserved_inputs_for_withdrawal(conn, &existing.id)?;
+        diesel::sql_query(
+            r#"
+            UPDATE sequencer_base_burns
+            SET canonical = 0, invalidated_at = ?,
+                invalidation_generation = ?, invalidation_reason = ?
+            WHERE base_event_id = ? AND canonical = 1
+            "#,
+        )
+        .bind::<BigInt, _>(decoded.created_at)
+        .bind::<BigInt, _>(checked_i64(generation, "reorg_generation")?)
+        .bind::<Text, _>(reason.to_string())
+        .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+        .execute(conn)
+        .map_err(|err| {
+            BridgeError::Runtime(format!("Base burn invalidation update failed: {err}"))
+        })?;
+        diesel::sql_query(
+            r#"
+            UPDATE sequencer_base_activity_cursor
+            SET last_verified_block = ?, last_verified_block_hash = ?, updated_at = ?
+            WHERE EXISTS (
+                SELECT 1 FROM sequencer_base_burns AS burn
+                WHERE burn.chain_id = sequencer_base_activity_cursor.chain_id
+                  AND burn.nock_contract_address =
+                      sequencer_base_activity_cursor.nock_contract_address
+                  AND burn.base_event_id = ?
+            )
+              AND last_verified_block >= ?
+            "#,
+        )
+        .bind::<BigInt, _>(checked_i64(
+            common_ancestor_height, "common_ancestor_height",
+        )?)
+        .bind::<Binary, _>(common_ancestor_hash.clone())
+        .bind::<BigInt, _>(decoded.created_at)
+        .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+        .bind::<BigInt, _>(checked_i64(
+            common_ancestor_height, "common_ancestor_height",
+        )?)
+        .execute(conn)
+        .map_err(|err| {
+            BridgeError::Runtime(format!("Base activity cursor rewind failed: {err}"))
+        })?;
+        diesel::sql_query(
+            r#"
+            DELETE FROM sequencer_base_header_checkpoints
+            WHERE block_number > ?
+              AND EXISTS (
+                SELECT 1 FROM sequencer_base_burns AS burn
+                WHERE burn.chain_id = sequencer_base_header_checkpoints.chain_id
+                  AND burn.nock_contract_address =
+                      sequencer_base_header_checkpoints.nock_contract_address
+                  AND burn.base_event_id = ?
+              )
+            "#,
+        )
+        .bind::<BigInt, _>(checked_i64(
+            common_ancestor_height, "common_ancestor_height",
+        )?)
+        .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+        .execute(conn)
+        .map_err(|err| {
+            BridgeError::Runtime(format!("Base header checkpoint rewind failed: {err}"))
+        })?;
+    }
+    if invalidated_block_hash.len() != 32 || common_ancestor_hash.len() != 32 {
+        return Err(BridgeError::Runtime(
+            "Base reorg journal hashes must be 32 bytes".into(),
+        ));
+    }
+    if invalidated_block_height <= common_ancestor_height {
+        return Err(BridgeError::Runtime(format!(
+            "Base reorg invalidated height {invalidated_block_height} must exceed ancestor {common_ancestor_height}"
+        )));
+    }
+    Ok(())
+}
+
+fn apply_journal_nock_inclusion_invalidated(
+    conn: &mut SqliteConnection,
+    event: &SequencerJournalRecord,
+    decoded: &DecodedJournalEvent,
+    mode: SequencerJournalApplyMode,
+) -> Result<(), BridgeError> {
+    let confirmation = event.confirmation.as_ref().ok_or_else(|| {
+        BridgeError::Runtime("Nock inclusion invalidation is missing confirmation context".into())
+    })?;
+    let generation = confirmation.reorg_generation.ok_or_else(|| {
+        BridgeError::Runtime("Nock inclusion invalidation is missing generation".into())
+    })?;
+    let invalidated_height = confirmation.confirmed_height.ok_or_else(|| {
+        BridgeError::Runtime("Nock inclusion invalidation is missing old height".into())
+    })?;
+    let invalidated_block_id = decode_journal_hex(
+        "confirmation.confirmed_block_id",
+        confirmation.confirmed_block_id.as_deref().ok_or_else(|| {
+            BridgeError::Runtime("Nock inclusion invalidation is missing old block id".into())
+        })?,
+    )?;
+    if invalidated_block_id.len() != 40 {
+        return Err(BridgeError::Runtime(format!(
+            "Nock inclusion invalidation block id has {} bytes, expected 40",
+            invalidated_block_id.len()
+        )));
+    }
+    let next_state =
+        WithdrawalState::parse(confirmation.next_state.as_deref().ok_or_else(|| {
+            BridgeError::Runtime("Nock inclusion invalidation is missing next state".into())
+        })?)?;
+    if !matches!(
+        next_state,
+        WithdrawalState::Authorized | WithdrawalState::MempoolAccepted | WithdrawalState::ReorgHold
+    ) {
+        return Err(BridgeError::Runtime(format!(
+            "invalid Nock inclusion recovery state {}",
+            next_state.as_str()
+        )));
+    }
+    let reason = confirmation.reorg_reason.as_deref().ok_or_else(|| {
+        BridgeError::Runtime("Nock inclusion invalidation is missing reason".into())
+    })?;
+    if reason.is_empty() {
+        return Err(BridgeError::Runtime(
+            "Nock inclusion invalidation reason must not be empty".into(),
+        ));
+    }
+    let existing =
+        fetch_sequenced_withdrawal(conn, &decoded.id.base_event_id)?.ok_or_else(|| {
+            BridgeError::Runtime(format!(
+                "Nock inclusion invalidation references missing withdrawal {:?}",
+                decoded.id
+            ))
+        })?;
+    if existing.state != WithdrawalState::Confirmed && existing.state != next_state {
+        return Err(BridgeError::Runtime(format!(
+            "cannot invalidate Nock inclusion for {:?} from state {}",
+            decoded.id,
+            existing.state.as_str()
+        )));
+    }
+    diesel::sql_query(
+        r#"
+        INSERT OR IGNORE INTO sequencer_nock_reorg_events (
+            withdrawal_id_base_event_id, generation, invalidated_height,
+            invalidated_block_id, next_state, reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+    .bind::<BigInt, _>(checked_i64(generation, "nock_reorg_generation")?)
+    .bind::<BigInt, _>(checked_i64(invalidated_height, "invalidated_height")?)
+    .bind::<Binary, _>(invalidated_block_id)
+    .bind::<Text, _>(next_state.as_str())
+    .bind::<Text, _>(reason.to_string())
+    .bind::<BigInt, _>(decoded.created_at)
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Nock reorg event projection failed: {err}")))?;
+    diesel::sql_query(
+        r#"
+        UPDATE sequencer_withdrawals
+        SET state = ?, updated_at = ?
+        WHERE withdrawal_id_base_event_id = ?
+        "#,
+    )
+    .bind::<Text, _>(next_state.as_str())
+    .bind::<BigInt, _>(decoded.created_at)
+    .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+    .execute(conn)
+    .map_err(|err| {
+        BridgeError::Runtime(format!(
+            "Nock inclusion invalidation state update failed: {err}"
+        ))
+    })?;
+    let inputs = canonical_inputs_for_startup_integrity(&existing)?;
+    insert_reserved_inputs_for_names(
+        conn, &existing.id, existing.current_epoch, &inputs, decoded.created_at, mode,
+    )?;
+    if mode == SequencerJournalApplyMode::Runtime {
+        let debug = NewWithdrawalSubmissionEventRow::from_withdrawal_id(
+            &decoded.id,
+            decoded.epoch,
+            WithdrawalSubmissionEventType::NockInclusionInvalidated,
+            decoded.created_at,
+        )?;
+        insert_debug_event(conn, &debug)?;
+    }
+    Ok(())
 }
 
 /// Projects `withdrawal_ordered` by materializing the sequencer row and nonce.
@@ -4050,6 +4923,46 @@ fn apply_journal_withdrawal_ordered(
                 "withdrawal_ordered journal event {} request facts do not match existing projection for {:?}",
                 event.event_id, decoded.id
             )));
+        }
+        if existing.state == WithdrawalState::Invalidated {
+            diesel::sql_query(
+                r#"
+                UPDATE sequencer_withdrawals
+                SET withdrawal_id_as_of = ?, current_epoch = ?,
+                    proposal_hash = NULL, canonical_amount = NULL,
+                    canonical_base_batch_end = NULL,
+                    canonical_transaction_jam = NULL,
+                    canonical_selected_inputs_jam = NULL,
+                    canonical_snapshot_height = NULL,
+                    canonical_snapshot_block_id = NULL,
+                    peer_commit_certificate = NULL,
+                    authorized_transaction_name = NULL,
+                    authorized_transaction_jam = NULL,
+                    authorized_raw_tx = NULL,
+                    handoff_index = 0, turn_started_base_height = ?,
+                    submit_attempt_count = 0,
+                    last_submit_attempt_base_height = NULL,
+                    last_submit_error = NULL,
+                    state = 'pending', updated_at = ?
+                WHERE withdrawal_id_base_event_id = ?
+                "#,
+            )
+            .bind::<Binary, _>(tip5_to_bytes(&decoded.id.as_of))
+            .bind::<BigInt, _>(checked_i64(decoded.epoch, "epoch")?)
+            .bind::<Nullable<BigInt>, _>(
+                turn_started_base_height
+                    .map(|height| checked_i64(height, "turn_started_base_height"))
+                    .transpose()?,
+            )
+            .bind::<BigInt, _>(decoded.created_at)
+            .bind::<Binary, _>(decoded.id.base_event_id.0.clone())
+            .execute(conn)
+            .map_err(|err| {
+                BridgeError::Runtime(format!(
+                    "withdrawal_ordered re-admission update failed: {err}"
+                ))
+            })?;
+            return Ok(());
         }
         if turn_started_base_height.is_some()
             && existing.turn_started_base_height != turn_started_base_height
@@ -4371,10 +5284,10 @@ fn apply_journal_tx_confirmed(
     )?;
     // `sequencer_withdrawals` does not currently persist confirmation block
     // metadata; validate it here so malformed replay records still fail closed.
-    let _confirmed_height = confirmation.confirmed_height.ok_or_else(|| {
+    let confirmed_height = confirmation.confirmed_height.ok_or_else(|| {
         BridgeError::Runtime("tx_confirmed journal event is missing confirmed_height".to_string())
     })?;
-    let _confirmed_block_id = confirmation
+    let confirmed_block_id = confirmation
         .confirmed_block_id
         .as_deref()
         .ok_or_else(|| {
@@ -4445,7 +5358,30 @@ fn apply_journal_tx_confirmed(
             updated_at: decoded.created_at,
         },
     )?;
-    clear_reserved_inputs_for_withdrawal(conn, &decoded.id)
+    clear_reserved_inputs_for_withdrawal(conn, &decoded.id)?;
+    if mode == SequencerJournalApplyMode::Replay {
+        let debug = NewWithdrawalSubmissionEventRow {
+            created_at: decoded.created_at,
+            withdrawal_id_as_of: tip5_to_bytes(&decoded.id.as_of),
+            withdrawal_id_base_event_id: decoded.id.base_event_id.0.clone(),
+            epoch: i64::try_from(decoded.epoch)
+                .map_err(|err| BridgeError::ValueConversion(format!("epoch too large: {err}")))?,
+            proposal_hash: proposal.proposal_hash.clone(),
+            transaction_name: journal_submitted_raw_tx_id(event).unwrap_or_default(),
+            event_type: WithdrawalSubmissionEventType::TxConfirmed
+                .as_str()
+                .to_string(),
+            signer_node_id: None,
+            commit_certificate: None,
+            transaction_jam: None,
+            snapshot_height: None,
+            snapshot_block_id: None,
+            confirmed_height: Some(checked_i64(confirmed_height, "confirmed_height")?),
+            confirmed_block_id: Some(tip5_to_bytes(&confirmed_block_id)),
+        };
+        insert_debug_event(conn, &debug)?;
+    }
+    Ok(())
 }
 
 impl NewWithdrawalSubmissionEventRow {
@@ -4787,6 +5723,8 @@ fn set_journal_recovery_bounds(
         observe_height(max_base_height, base.base_batch_end);
         observe_height(max_base_height, base.turn_started_base_height);
         observe_height(max_base_height, base.last_submit_attempt_base_height);
+        observe_height(max_base_height, base.invalidated_block_height);
+        observe_height(max_base_height, base.common_ancestor_height);
     }
     if let Some(nockchain) = &record.nockchain {
         observe_height(max_nockchain_height, nockchain.snapshot_height);
@@ -5650,6 +6588,121 @@ fn record_tx_confirmed_tx(
     Ok(())
 }
 
+fn record_nockchain_inclusion_invalidated_tx(
+    conn: &mut SqliteConnection,
+    journal: &SequencerJournalHandle,
+    id: &WithdrawalId,
+    confirmed_height: u64,
+    confirmed_block_id: &Tip5Hash,
+    next_state: WithdrawalState,
+    reason: &str,
+    created_at: i64,
+) -> Result<u64, BridgeError> {
+    if !matches!(
+        next_state,
+        WithdrawalState::Authorized | WithdrawalState::MempoolAccepted | WithdrawalState::ReorgHold
+    ) {
+        return Err(BridgeError::Runtime(format!(
+            "unsupported Nock inclusion recovery state {}",
+            next_state.as_str()
+        )));
+    }
+    let existing = fetch_sequenced_withdrawal(conn, &id.base_event_id)?.ok_or_else(|| {
+        BridgeError::Runtime(format!(
+            "cannot invalidate Nock inclusion for missing withdrawal {:?}",
+            id
+        ))
+    })?;
+    if existing.state != WithdrawalState::Confirmed {
+        return Err(BridgeError::Runtime(format!(
+            "cannot invalidate Nock inclusion for withdrawal {:?} in state {}",
+            id,
+            existing.state.as_str()
+        )));
+    }
+    let confirmation = load_events(conn)?
+        .into_iter()
+        .rev()
+        .find(|event| {
+            event.event_type == WithdrawalSubmissionEventType::TxConfirmed
+                && same_base_event_id(&event.id, id)
+        })
+        .ok_or_else(|| {
+            BridgeError::Runtime(format!(
+                "confirmed withdrawal {:?} has no durable confirmation event",
+                id
+            ))
+        })?;
+    if confirmation.confirmed_height != Some(confirmed_height)
+        || confirmation.confirmed_block_id.as_ref() != Some(confirmed_block_id)
+    {
+        return Err(BridgeError::Runtime(format!(
+            "Nock inclusion invalidation evidence for {:?} does not match latest confirmation",
+            id
+        )));
+    }
+    let generation = diesel::sql_query(
+        r#"
+        SELECT MAX(generation) AS value
+        FROM sequencer_nock_reorg_events
+        WHERE withdrawal_id_base_event_id = ?
+        "#,
+    )
+    .bind::<Binary, _>(id.base_event_id.0.clone())
+    .get_result::<OptionalMaxGeneration>(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Nock reorg generation load failed: {err}")))?
+    .value
+    .map(u64::try_from)
+    .transpose()
+    .map_err(|err| {
+        BridgeError::ValueConversion(format!("Nock reorg generation is invalid: {err}"))
+    })?
+    .unwrap_or_default()
+    .saturating_add(1);
+    let nockchain =
+        existing
+            .canonical_snapshot
+            .as_ref()
+            .map(|snapshot| SequencerJournalNockchainContext {
+                snapshot_height: Some(snapshot.height),
+                snapshot_block_id: Some(hex::encode(tip5_to_bytes(&snapshot.block_id))),
+                safe_tip_height_observed_by_writer: None,
+            });
+    let record = sequencer_journal_record(
+        created_at,
+        SequencerJournalEventType::NockInclusionInvalidated,
+        &existing.id,
+        existing.current_epoch,
+        existing.withdrawal_nonce,
+        journal_base_context(
+            existing
+                .request_facts
+                .as_ref()
+                .map(|facts| facts.base_batch_end),
+            existing.turn_started_base_height,
+            existing.last_submit_attempt_base_height,
+        ),
+        nockchain,
+        Some(journal_proposal_context_from_existing(&existing)?),
+        Some(journal_submission_context_from_existing(
+            &existing,
+            Some(existing.submit_attempt_count),
+            existing.last_submit_error.as_deref(),
+        )),
+        Some(SequencerJournalConfirmationContext {
+            included_height: None,
+            included_block_id: None,
+            confirmed_height: Some(confirmed_height),
+            confirmed_block_id: Some(hex::encode(tip5_to_bytes(confirmed_block_id))),
+            reorg_generation: Some(generation),
+            next_state: Some(next_state.as_str().to_string()),
+            reorg_reason: Some(reason.to_string()),
+        }),
+    )?;
+    append_and_project_journal_records(conn, journal, &[record])?;
+    Ok(generation)
+}
+
 fn record_tx_seen_mempool_accepted_tx(
     conn: &mut SqliteConnection,
     journal: &SequencerJournalHandle,
@@ -6164,6 +7217,8 @@ fn current_live_withdrawal_frontier(
         WithdrawalState::Pending.as_str(),
         WithdrawalState::PeerCanonical.as_str(),
         WithdrawalState::Authorized.as_str(),
+        WithdrawalState::MempoolAccepted.as_str(),
+        WithdrawalState::ReorgHold.as_str(),
     ];
     let row = sequencer_withdrawals::table
         .filter(sequenced::state.eq_any(unreleased_states))
@@ -6371,6 +7426,76 @@ fn load_all_sequenced_withdrawal_views(
         .collect()
 }
 
+fn load_confirmed_nockchain_withdrawals(
+    conn: &mut SqliteConnection,
+) -> Result<Vec<ConfirmedNockchainWithdrawal>, BridgeError> {
+    let rows = load_all_sequenced_withdrawal_views(conn)?;
+    let events = load_events(conn)?;
+    rows.into_iter()
+        .filter(|row| row.state == WithdrawalState::Confirmed)
+        .map(|row| {
+            let confirmation = events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.event_type == WithdrawalSubmissionEventType::TxConfirmed
+                        && same_base_event_id(&event.id, &row.id)
+                })
+                .ok_or_else(|| {
+                    BridgeError::Runtime(format!(
+                        "confirmed withdrawal {:?} has no confirmation event",
+                        row.id
+                    ))
+                })?;
+            let confirmed_height = confirmation.confirmed_height.ok_or_else(|| {
+                BridgeError::Runtime(format!(
+                    "confirmed withdrawal {:?} event has no height",
+                    row.id
+                ))
+            })?;
+            let confirmed_block_id = confirmation.confirmed_block_id.clone().ok_or_else(|| {
+                BridgeError::Runtime(format!(
+                    "confirmed withdrawal {:?} event has no block id",
+                    row.id
+                ))
+            })?;
+            let submitted_raw_tx_id = row.authorized_transaction_name.clone().ok_or_else(|| {
+                BridgeError::Runtime(format!(
+                    "confirmed withdrawal {:?} has no raw tx id",
+                    row.id
+                ))
+            })?;
+            let raw_tx = withdrawal_raw_tx::decode_raw_tx(
+                row.authorized_raw_tx.clone().ok_or_else(|| {
+                    BridgeError::Runtime(format!(
+                        "confirmed withdrawal {:?} has no authorized raw tx",
+                        row.id
+                    ))
+                })?,
+            )?;
+            let snapshot_height = row
+                .canonical_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.height)
+                .ok_or_else(|| {
+                    BridgeError::Runtime(format!(
+                        "confirmed withdrawal {:?} has no canonical snapshot",
+                        row.id
+                    ))
+                })?;
+            Ok(ConfirmedNockchainWithdrawal {
+                id: row.id,
+                epoch: row.current_epoch,
+                submitted_raw_tx_id,
+                raw_tx,
+                confirmed_height,
+                confirmed_block_id,
+                snapshot_height,
+            })
+        })
+        .collect()
+}
+
 fn fetch_all_sequenced_withdrawals(
     conn: &mut SqliteConnection,
 ) -> Result<Vec<LiveWithdrawalView>, BridgeError> {
@@ -6378,6 +7503,136 @@ fn fetch_all_sequenced_withdrawals(
         .into_iter()
         .map(SequencedWithdrawalView::into_live_withdrawal_view)
         .collect())
+}
+
+fn public_recovery_bytes<const N: usize>(
+    value: &[u8],
+    field: &str,
+) -> Result<[u8; N], BridgeError> {
+    value.try_into().map_err(|_| {
+        BridgeError::ValueConversion(format!("public recovery {field} must be exactly {N} bytes"))
+    })
+}
+
+fn load_public_recovery_projections(
+    conn: &mut SqliteConnection,
+    base_event_ids: &[Vec<u8>],
+) -> Result<HashMap<BaseEventId, PublicWithdrawalRecoveryProjection>, BridgeError> {
+    use diesel::dsl::max;
+
+    use crate::withdrawal::sequencer::schema::sequencer_base_burn_invalidations::dsl as base;
+    use crate::withdrawal::sequencer::schema::sequencer_nock_reorg_events::dsl as nock;
+
+    let latest_base_event_ids = base::sequencer_base_burn_invalidations
+        .filter(base::base_event_id.eq_any(base_event_ids))
+        .group_by(base::base_event_id)
+        .select(max(base::event_id))
+        .load::<Option<i64>>(conn)
+        .map_err(|err| {
+            BridgeError::Runtime(format!("public Base recovery index query failed: {err}"))
+        })?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let latest_nock_event_ids = nock::sequencer_nock_reorg_events
+        .filter(nock::withdrawal_id_base_event_id.eq_any(base_event_ids))
+        .group_by(nock::withdrawal_id_base_event_id)
+        .select(max(nock::event_id))
+        .load::<Option<i64>>(conn)
+        .map_err(|err| {
+            BridgeError::Runtime(format!("public Nock recovery index query failed: {err}"))
+        })?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    let mut recoveries = HashMap::new();
+    if !latest_base_event_ids.is_empty() {
+        let rows = base::sequencer_base_burn_invalidations
+            .filter(base::event_id.eq_any(latest_base_event_ids))
+            .select((
+                base::base_event_id,
+                base::generation,
+                base::old_block_number,
+                base::old_block_hash,
+                base::lifecycle_state,
+                base::invalidated_at,
+                base::reason,
+            ))
+            .load::<(Vec<u8>, i64, i64, Vec<u8>, Option<String>, i64, String)>(conn)
+            .map_err(|err| {
+                BridgeError::Runtime(format!("public Base recovery query failed: {err}"))
+            })?;
+        for (base_event_id, generation, height, block_id, prior_status, observed_at, reason) in rows
+        {
+            let base_event_id =
+                BaseEventId(public_recovery_bytes::<32>(&base_event_id, "base_event_id")?.to_vec());
+            recoveries.insert(
+                base_event_id,
+                PublicWithdrawalRecoveryProjection {
+                    generation: u64::try_from(generation).map_err(|err| {
+                        BridgeError::ValueConversion(format!(
+                            "public Base recovery generation is invalid: {err}"
+                        ))
+                    })?,
+                    invalidated_block_height: u64::try_from(height).map_err(|err| {
+                        BridgeError::ValueConversion(format!(
+                            "public Base recovery height is invalid: {err}"
+                        ))
+                    })?,
+                    invalidated_block_id: public_recovery_bytes::<32>(&block_id, "Base block id")?
+                        .to_vec(),
+                    prior_status: prior_status.unwrap_or_else(|| "unknown".to_string()),
+                    reason,
+                    observed_at,
+                },
+            );
+        }
+    }
+    if !latest_nock_event_ids.is_empty() {
+        let rows = nock::sequencer_nock_reorg_events
+            .filter(nock::event_id.eq_any(latest_nock_event_ids))
+            .select((
+                nock::withdrawal_id_base_event_id,
+                nock::generation,
+                nock::invalidated_height,
+                nock::invalidated_block_id,
+                nock::reason,
+                nock::created_at,
+            ))
+            .load::<(Vec<u8>, i64, i64, Vec<u8>, String, i64)>(conn)
+            .map_err(|err| {
+                BridgeError::Runtime(format!("public Nock recovery query failed: {err}"))
+            })?;
+        for (base_event_id, generation, height, block_id, reason, observed_at) in rows {
+            let base_event_id =
+                BaseEventId(public_recovery_bytes::<32>(&base_event_id, "base_event_id")?.to_vec());
+            let recovery = PublicWithdrawalRecoveryProjection {
+                generation: u64::try_from(generation).map_err(|err| {
+                    BridgeError::ValueConversion(format!(
+                        "public Nock recovery generation is invalid: {err}"
+                    ))
+                })?,
+                invalidated_block_height: u64::try_from(height).map_err(|err| {
+                    BridgeError::ValueConversion(format!(
+                        "public Nock recovery height is invalid: {err}"
+                    ))
+                })?,
+                invalidated_block_id: public_recovery_bytes::<40>(&block_id, "Nock block id")?
+                    .to_vec(),
+                prior_status: WithdrawalState::Confirmed.as_str().to_string(),
+                reason,
+                observed_at,
+            };
+            if recoveries
+                .get(&base_event_id)
+                .is_none_or(|existing| existing.observed_at <= recovery.observed_at)
+            {
+                recoveries.insert(base_event_id, recovery);
+            }
+        }
+    }
+    Ok(recoveries)
 }
 
 fn load_public_lifecycle_projections(
@@ -6394,6 +7649,7 @@ fn load_public_lifecycle_projections(
         .iter()
         .map(|id| id.0.clone())
         .collect::<Vec<_>>();
+    let mut recoveries = load_public_recovery_projections(conn, &ids)?;
     let rows = sequencer_withdrawals::table
         .filter(sequenced::withdrawal_id_base_event_id.eq_any(ids.clone()))
         .load::<SequencerWithdrawalStoredRow>(conn)
@@ -6401,7 +7657,7 @@ fn load_public_lifecycle_projections(
             BridgeError::Runtime(format!("public lifecycle batch query failed: {err}"))
         })?;
     let confirmation_rows = withdrawal_submission_events::table
-        .filter(events::withdrawal_id_base_event_id.eq_any(ids))
+        .filter(events::withdrawal_id_base_event_id.eq_any(ids.clone()))
         .filter(events::event_type.eq(WithdrawalSubmissionEventType::TxConfirmed.as_str()))
         .filter(events::confirmed_height.is_not_null())
         .filter(events::confirmed_block_id.is_not_null())
@@ -6436,6 +7692,7 @@ fn load_public_lifecycle_projections(
                 lifecycle: view.into_live_withdrawal_view(),
                 net_amount,
                 confirmation: confirmations.remove(&base_event_id),
+                recovery: recoveries.remove(&base_event_id),
             },
         );
     }
@@ -6512,6 +7769,25 @@ fn verify_startup_lifecycle_integrity(
                     ));
                 }
             }
+            WithdrawalState::Invalidated => {
+                if !reserved.is_empty() {
+                    return Err(startup_integrity_error(
+                        row, "invalidated withdrawal still owns input reservations",
+                    ));
+                }
+            }
+            WithdrawalState::ReorgHold => {
+                let expected_inputs = canonical_inputs_for_startup_integrity(row)?;
+                verify_authorized_startup_artifacts(row)?;
+                verify_exact_startup_reservations(row, &reserved, &expected_inputs)?;
+                report.reservations_verified = report.reservations_verified.saturating_add(
+                    u64::try_from(reserved.len()).map_err(|err| {
+                        BridgeError::ValueConversion(format!(
+                            "startup reservation count overflow: {err}"
+                        ))
+                    })?,
+                );
+            }
         }
     }
 
@@ -6521,6 +7797,350 @@ fn verify_startup_lifecycle_integrity(
         )));
     }
     Ok(report)
+}
+
+fn apply_base_activity_reorg_tx(
+    conn: &mut SqliteConnection,
+    journal: &SequencerJournalHandle,
+    plan: &BaseActivityReorgPlan,
+) -> Result<BaseActivityReorgReport, BridgeError> {
+    let cursor =
+        load_activity_cursor_for_reconciliation(conn, plan.chain_id, plan.nock_contract_address)?
+            .ok_or_else(|| BridgeError::Runtime("Base reorg has no activity cursor".into()))?;
+    if cursor != plan.old_cursor {
+        return Err(BridgeError::Runtime(format!(
+            "Base reorg plan cursor changed before apply: planned {} {:?}, current {} {:?}",
+            plan.old_cursor.last_verified_block,
+            plan.old_cursor.last_verified_block_hash,
+            cursor.last_verified_block,
+            cursor.last_verified_block_hash
+        )));
+    }
+    let generation = diesel::sql_query(
+        r#"
+        SELECT MAX(value) AS value
+        FROM (
+            SELECT generation AS value
+            FROM sequencer_base_reorg_events
+            WHERE chain_id = ? AND nock_contract_address = ?
+            UNION ALL
+            SELECT generation AS value
+            FROM sequencer_base_burn_invalidations
+            WHERE chain_id = ? AND nock_contract_address = ?
+        )
+        "#,
+    )
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .get_result::<OptionalMaxGeneration>(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base reorg generation load failed: {err}")))?
+    .value
+    .map(u64::try_from)
+    .transpose()
+    .map_err(|err| {
+        BridgeError::ValueConversion(format!("Base reorg generation is invalid: {err}"))
+    })?
+    .unwrap_or_default()
+    .saturating_add(1);
+    let affected = diesel::sql_query(
+        r#"
+        SELECT base_event_id, block_number, block_hash
+        FROM sequencer_base_burns
+        WHERE chain_id = ? AND nock_contract_address = ?
+          AND canonical = 1 AND block_number > ?
+        ORDER BY block_number ASC, base_event_id ASC
+        "#,
+    )
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(checked_i64(
+        plan.common_ancestor.block_number, "common_ancestor_block",
+    )?)
+    .load::<BaseReorgBurnRow>(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base reorg burn load failed: {err}")))?;
+    let reason = format!(
+        "Base fork generation {generation}: cursor {} {:?} rewinds to common ancestor {} {:?}",
+        plan.old_cursor.last_verified_block,
+        plan.old_cursor.last_verified_block_hash,
+        plan.common_ancestor.block_number,
+        plan.common_ancestor.block_hash
+    );
+    let mut lifecycle = Vec::new();
+    let mut held = Vec::new();
+    for burn in &affected {
+        let event_id = BaseEventId(burn.base_event_id.clone());
+        let Some(existing) = fetch_sequenced_withdrawal(conn, &event_id)? else {
+            continue;
+        };
+        if matches!(
+            existing.state,
+            WithdrawalState::Authorized
+                | WithdrawalState::MempoolAccepted
+                | WithdrawalState::Confirmed
+                | WithdrawalState::ReorgHold
+        ) {
+            held.push((burn, existing));
+        } else {
+            lifecycle.push((burn, existing));
+        }
+    }
+    if !held.is_empty() {
+        let records = held
+            .iter()
+            .map(|(burn, existing)| {
+                base_reorg_journal_record(
+                    SequencerJournalEventType::BaseReorgHold,
+                    plan,
+                    generation,
+                    burn,
+                    existing,
+                    &reason,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        append_and_project_journal_records(conn, journal, &records)?;
+        diesel::sql_query(
+            r#"
+            INSERT INTO sequencer_base_reorg_guard (
+                chain_id, nock_contract_address, generation, reason, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chain_id, nock_contract_address) DO UPDATE SET
+                generation = excluded.generation,
+                reason = excluded.reason,
+                created_at = excluded.created_at
+            "#,
+        )
+        .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+        .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+        .bind::<BigInt, _>(checked_i64(generation, "reorg_generation")?)
+        .bind::<Text, _>(reason.clone())
+        .bind::<BigInt, _>(plan.detected_at)
+        .execute(conn)
+        .map_err(|err| BridgeError::Runtime(format!("Base reorg guard update failed: {err}")))?;
+        insert_base_reorg_event(conn, plan, generation, "escalated", &reason)?;
+        return Ok(BaseActivityReorgReport {
+            generation,
+            old_cursor_block: plan.old_cursor.last_verified_block,
+            common_ancestor_block: plan.common_ancestor.block_number,
+            rewind_depth: plan.rewind_depth,
+            burns_invalidated: 0,
+            lifecycle_rows_invalidated: 0,
+            lifecycle_rows_held: u64::try_from(held.len()).map_err(|err| {
+                BridgeError::ValueConversion(format!("Base reorg held row count overflow: {err}"))
+            })?,
+        });
+    }
+    let records = lifecycle
+        .iter()
+        .map(|(burn, existing)| {
+            base_reorg_journal_record(
+                SequencerJournalEventType::BaseBurnInvalidated,
+                plan,
+                generation,
+                burn,
+                existing,
+                &reason,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    append_and_project_journal_records(conn, journal, &records)?;
+    for burn in &affected {
+        let event_id = BaseEventId(burn.base_event_id.clone());
+        let lifecycle_state =
+            fetch_sequenced_withdrawal(conn, &event_id)?.map(|row| row.state.as_str().to_string());
+        diesel::sql_query(
+            r#"
+            INSERT OR IGNORE INTO sequencer_base_burn_invalidations (
+                chain_id, nock_contract_address, generation, base_event_id,
+                old_block_number, old_block_hash, lifecycle_state,
+                invalidated_at, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+        .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+        .bind::<BigInt, _>(checked_i64(generation, "reorg_generation")?)
+        .bind::<Binary, _>(burn.base_event_id.clone())
+        .bind::<BigInt, _>(burn.block_number)
+        .bind::<Binary, _>(burn.block_hash.clone())
+        .bind::<Nullable<Text>, _>(lifecycle_state)
+        .bind::<BigInt, _>(plan.detected_at)
+        .bind::<Text, _>(reason.clone())
+        .execute(conn)
+        .map_err(|err| {
+            BridgeError::Runtime(format!("Base burn invalidation insert failed: {err}"))
+        })?;
+    }
+    diesel::sql_query(
+        r#"
+        UPDATE sequencer_base_burns
+        SET canonical = 0, invalidated_at = ?,
+            invalidation_generation = ?, invalidation_reason = ?
+        WHERE chain_id = ? AND nock_contract_address = ?
+          AND canonical = 1 AND block_number > ?
+        "#,
+    )
+    .bind::<BigInt, _>(plan.detected_at)
+    .bind::<BigInt, _>(checked_i64(generation, "reorg_generation")?)
+    .bind::<Text, _>(reason.clone())
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(checked_i64(
+        plan.common_ancestor.block_number, "common_ancestor_block",
+    )?)
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base burn rewind update failed: {err}")))?;
+    diesel::sql_query(
+        r#"
+        UPDATE sequencer_base_burn_rejections
+        SET canonical = 0
+        WHERE chain_id = ? AND nock_contract_address = ?
+          AND canonical = 1 AND block_number > ?
+        "#,
+    )
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(checked_i64(
+        plan.common_ancestor.block_number, "common_ancestor_block",
+    )?)
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base rejection rewind update failed: {err}")))?;
+    diesel::sql_query(
+        r#"
+        UPDATE sequencer_base_activity_cursor
+        SET last_verified_block = ?, last_verified_block_hash = ?, updated_at = ?
+        WHERE chain_id = ? AND nock_contract_address = ?
+        "#,
+    )
+    .bind::<BigInt, _>(checked_i64(
+        plan.common_ancestor.block_number, "common_ancestor_block",
+    )?)
+    .bind::<Binary, _>(plan.common_ancestor.block_hash.as_slice().to_vec())
+    .bind::<BigInt, _>(plan.detected_at)
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base activity rewind failed: {err}")))?;
+    diesel::sql_query(
+        r#"
+        DELETE FROM sequencer_base_header_checkpoints
+        WHERE chain_id = ? AND nock_contract_address = ? AND block_number > ?
+        "#,
+    )
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(checked_i64(
+        plan.common_ancestor.block_number, "common_ancestor_block",
+    )?)
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base checkpoint rewind failed: {err}")))?;
+    diesel::sql_query(
+        r#"
+        DELETE FROM sequencer_base_reorg_guard
+        WHERE chain_id = ? AND nock_contract_address = ?
+        "#,
+    )
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base reorg guard clear failed: {err}")))?;
+    insert_base_reorg_event(conn, plan, generation, "rewound", &reason)?;
+    Ok(BaseActivityReorgReport {
+        generation,
+        old_cursor_block: plan.old_cursor.last_verified_block,
+        common_ancestor_block: plan.common_ancestor.block_number,
+        rewind_depth: plan.rewind_depth,
+        burns_invalidated: u64::try_from(affected.len()).map_err(|err| {
+            BridgeError::ValueConversion(format!("Base reorg burn count overflow: {err}"))
+        })?,
+        lifecycle_rows_invalidated: u64::try_from(lifecycle.len()).map_err(|err| {
+            BridgeError::ValueConversion(format!("Base reorg lifecycle count overflow: {err}"))
+        })?,
+        lifecycle_rows_held: 0,
+    })
+}
+
+fn base_reorg_journal_record(
+    event_type: SequencerJournalEventType,
+    plan: &BaseActivityReorgPlan,
+    generation: u64,
+    burn: &BaseReorgBurnRow,
+    existing: &SequencedWithdrawalView,
+    reason: &str,
+) -> Result<SequencerJournalRecord, BridgeError> {
+    sequencer_journal_record(
+        plan.detected_at,
+        event_type,
+        &existing.id,
+        existing.current_epoch,
+        existing.withdrawal_nonce,
+        Some(SequencerJournalBaseContext {
+            base_batch_end: existing
+                .request_facts
+                .as_ref()
+                .map(|facts| facts.base_batch_end),
+            turn_started_base_height: existing.turn_started_base_height,
+            last_submit_attempt_base_height: existing.last_submit_attempt_base_height,
+            reorg_generation: Some(generation),
+            invalidated_block_height: Some(u64::try_from(burn.block_number).map_err(|err| {
+                BridgeError::ValueConversion(format!(
+                    "Base reorg burn block number is invalid: {err}"
+                ))
+            })?),
+            invalidated_block_hash: Some(hex::encode(&burn.block_hash)),
+            common_ancestor_height: Some(plan.common_ancestor.block_number),
+            common_ancestor_hash: Some(hex::encode(plan.common_ancestor.block_hash.as_slice())),
+            prior_state: Some(existing.state.as_str().to_string()),
+            reorg_reason: Some(reason.to_string()),
+        }),
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+fn insert_base_reorg_event(
+    conn: &mut SqliteConnection,
+    plan: &BaseActivityReorgPlan,
+    generation: u64,
+    outcome: &str,
+    reason: &str,
+) -> Result<(), BridgeError> {
+    diesel::sql_query(
+        r#"
+        INSERT INTO sequencer_base_reorg_events (
+            chain_id, nock_contract_address, generation, detected_at,
+            old_cursor_block, old_cursor_hash, common_ancestor_block,
+            common_ancestor_hash, canonical_tip_block, canonical_tip_hash,
+            rewind_depth, outcome, reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind::<BigInt, _>(checked_i64(plan.chain_id, "chain_id")?)
+    .bind::<Binary, _>(plan.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(checked_i64(generation, "reorg_generation")?)
+    .bind::<BigInt, _>(plan.detected_at)
+    .bind::<BigInt, _>(checked_i64(
+        plan.old_cursor.last_verified_block, "old_cursor_block",
+    )?)
+    .bind::<Binary, _>(plan.old_cursor.last_verified_block_hash.as_slice().to_vec())
+    .bind::<Nullable<BigInt>, _>(Some(checked_i64(
+        plan.common_ancestor.block_number, "common_ancestor_block",
+    )?))
+    .bind::<Nullable<Binary>, _>(Some(plan.common_ancestor.block_hash.as_slice().to_vec()))
+    .bind::<BigInt, _>(checked_i64(
+        plan.canonical_cursor_header.block_number, "canonical_tip_block",
+    )?)
+    .bind::<Binary, _>(plan.canonical_cursor_header.block_hash.as_slice().to_vec())
+    .bind::<Nullable<BigInt>, _>(Some(checked_i64(plan.rewind_depth, "rewind_depth")?))
+    .bind::<Text, _>(outcome.to_string())
+    .bind::<Text, _>(reason.to_string())
+    .execute(conn)
+    .map_err(|err| BridgeError::Runtime(format!("Base reorg event insert failed: {err}")))?;
+    Ok(())
 }
 
 fn reconcile_journal_with_base_tx(
@@ -6564,6 +8184,15 @@ fn reconcile_journal_with_base_tx(
     };
     let mut ordering = Vec::new();
     for row in &rows {
+        if row.state == WithdrawalState::Invalidated {
+            report.historical_rows_skipped = report.historical_rows_skipped.saturating_add(1);
+            continue;
+        }
+        if row.state == WithdrawalState::ReorgHold {
+            return Err(base_reconciliation_error(
+                row, "lifecycle state", "actionable canonical state", "reorg_hold",
+            ));
+        }
         let facts = row
             .request_facts
             .as_ref()
@@ -7350,8 +8979,12 @@ fn load_authorized_transaction_for_reconciliation(
     load_authorized_transaction(
         conn,
         id,
-        &[WithdrawalState::Authorized, WithdrawalState::MempoolAccepted],
-        "startup reconciliation",
+        &[
+            WithdrawalState::Authorized,
+            WithdrawalState::MempoolAccepted,
+            WithdrawalState::ReorgHold,
+        ],
+        "startup reconciliation or operator inspection",
     )
 }
 
@@ -7910,6 +9543,72 @@ mod tests {
             )
             .await
             .expect("advance Base activity cursor");
+    }
+
+    async fn seed_base_reorg_activity(
+        service: &WithdrawalSequencerStore,
+        proposal: &WithdrawalProposalData,
+    ) -> BaseActivityReorgPlan {
+        let mut burn =
+            sample_verified_base_burn(200, 105, proposal.base_batch_end, proposal.burned_amount);
+        burn.base_event_id = proposal.id.base_event_id.clone();
+        burn.lock_root = proposal.recipient.clone();
+        burn.block_hash = B256::from([0x55; 32]);
+        burn.parent_hash = B256::from([0x44; 32]);
+        let ancestor = crate::withdrawal::sequencer::base_activity::BaseActivityHeaderCheckpoint {
+            chain_id: 8_453,
+            nock_contract_address: Address::ZERO,
+            block_number: 104,
+            block_hash: B256::from([0x44; 32]),
+            parent_hash: B256::from([0x43; 32]),
+            block_timestamp: 1_700_000_104,
+            verified_at: 1_700_000_200,
+        };
+        let old_cursor_header =
+            crate::withdrawal::sequencer::base_activity::BaseActivityHeaderCheckpoint {
+                chain_id: 8_453,
+                nock_contract_address: Address::ZERO,
+                block_number: 109,
+                block_hash: B256::from([0xa5; 32]),
+                parent_hash: B256::from([0xa4; 32]),
+                block_timestamp: 1_700_000_109,
+                verified_at: 1_700_000_200,
+            };
+        let old_cursor = crate::withdrawal::sequencer::base_activity::BaseActivityCursor {
+            chain_id: 8_453,
+            nock_contract_address: Address::ZERO,
+            last_verified_block: 109,
+            last_verified_block_hash: old_cursor_header.block_hash,
+            updated_at: 1_700_000_200,
+        };
+        service
+            .base_activity_store()
+            .apply_verified_chunk_with_headers(
+                vec![burn],
+                vec![ancestor.clone(), old_cursor_header],
+                old_cursor.clone(),
+                100,
+            )
+            .await
+            .expect("seed Base reorg activity");
+        BaseActivityReorgPlan {
+            chain_id: 8_453,
+            nock_contract_address: Address::ZERO,
+            old_cursor,
+            common_ancestor: ancestor,
+            canonical_cursor_header:
+                crate::withdrawal::sequencer::base_activity::BaseActivityHeaderCheckpoint {
+                    chain_id: 8_453,
+                    nock_contract_address: Address::ZERO,
+                    block_number: 109,
+                    block_hash: B256::from([0xb5; 32]),
+                    parent_hash: B256::from([0xb4; 32]),
+                    block_timestamp: 1_700_000_109,
+                    verified_at: 1_700_000_201,
+                },
+            rewind_depth: 5,
+            detected_at: 1_700_000_201,
+        }
     }
 
     async fn base_reconciliation_cursor_count(service: &WithdrawalSequencerStore) -> i64 {
@@ -10881,7 +12580,7 @@ mod tests {
             .expect_err("authorized-but-not-mempool-accepted retry load should fail");
         assert!(err
             .to_string()
-            .contains("instead of mempool_accepted for orphan retry"));
+            .contains("instead of an allowed state for orphan retry"));
     }
 
     #[tokio::test]
@@ -11509,10 +13208,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorization_blocks_later_nonce_until_prior_released() {
-        // A later nonce cannot even become peer-canonical while an earlier
-        // nonce remains the unreleased sequencer frontier. Once the earlier
-        // nonce reaches mempool acceptance, the frontier can advance.
+    async fn authorization_blocks_later_nonce_until_prior_confirmed() {
+        // A later nonce cannot become peer-canonical while an earlier nonce is
+        // pending, authorized, or merely mempool-accepted. Durable confirmation
+        // is the only normal frontier release.
         let (_dir, service) = open_service().await;
         let proposal_a = sample_proposal(10, 0);
         let proposal_b = sample_proposal(20, 0);
@@ -11548,11 +13247,24 @@ mod tests {
         service
             .record_submit_outcome(&proposal_a, WithdrawalState::MempoolAccepted, 1, 111, None)
             .await
-            .expect("release first nonce from ordering");
-        service
+            .expect("record first nonce mempool acceptance");
+        let still_blocked = service
             .record_proposal_canonicalized(&proposal_b, 102)
             .await
-            .expect("record second canonicalized after release");
+            .expect_err("mempool acceptance must not release the frontier");
+        assert!(still_blocked.to_string().contains("sequencer frontier"));
+        service
+            .record_tx_confirmed(
+                &proposal_a,
+                777,
+                Tip5Hash([Belt(870), Belt(871), Belt(872), Belt(873), Belt(874)]),
+            )
+            .await
+            .expect("confirm first nonce");
+        service
+            .record_proposal_canonicalized(&proposal_b, 103)
+            .await
+            .expect("record second canonicalized after confirmation");
         service
             .record_proposal_authorized(&proposal_b)
             .await
@@ -11710,7 +13422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mempool_accepted_releases_next_pending_ordering() {
+    async fn mempool_accepted_holds_next_pending_ordering_until_confirmation() {
         let (_dir, service) = open_service().await;
         let proposal_a = sample_proposal(10, 0);
         let proposal_b = sample_proposal(20, 0);
@@ -11741,8 +13453,8 @@ mod tests {
             .await
             .expect("next pending ordering")
             .expect("pending ordering exists");
-        assert_eq!(next.0, proposal_b.id);
-        assert_eq!(next.1, 2);
+        assert_eq!(next.0, proposal_a.id);
+        assert_eq!(next.1, 1);
         assert_eq!(
             service
                 .list_reserved_input_names()
@@ -11750,6 +13462,21 @@ mod tests {
                 .expect("list reserved inputs after mempool acceptance"),
             proposal_a.selected_inputs
         );
+        service
+            .record_tx_confirmed(
+                &proposal_a,
+                777,
+                Tip5Hash([Belt(860), Belt(861), Belt(862), Belt(863), Belt(864)]),
+            )
+            .await
+            .expect("confirm first ordering");
+        let next = service
+            .next_pending_withdrawal_ordering()
+            .await
+            .expect("next ordering after confirmation")
+            .expect("second ordering exists");
+        assert_eq!(next.0, proposal_b.id);
+        assert_eq!(next.1, 2);
     }
 
     #[tokio::test]
@@ -11841,9 +13568,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_live_withdrawal_nonce_skips_mempool_accepted_nonce() {
-        // MempoolAccepted releases its nonce under the default ordering rule,
-        // so the frontier advances to the next unreleased row.
+    async fn current_live_withdrawal_nonce_holds_mempool_accepted_until_confirmed() {
+        // Mempool acceptance is not durable settlement. Nonce 1 remains the
+        // single frontier until confirmation, then nonce 2 advances.
         let (_dir, service) = open_service().await;
         let proposal_a = sample_proposal(24, 0);
         let proposal_b = sample_proposal(25, 0);
@@ -11874,6 +13601,21 @@ mod tests {
                 .current_live_withdrawal_nonce()
                 .await
                 .expect("current live withdrawal nonce"),
+            Some(1)
+        );
+        service
+            .record_tx_confirmed(
+                &proposal_a,
+                777,
+                Tip5Hash([Belt(911), Belt(912), Belt(913), Belt(914), Belt(915)]),
+            )
+            .await
+            .expect("record durable confirmation");
+        assert_eq!(
+            service
+                .current_live_withdrawal_nonce()
+                .await
+                .expect("frontier after confirmation"),
             Some(2)
         );
     }
@@ -11954,6 +13696,14 @@ mod tests {
             .record_submit_outcome(&proposal_a, WithdrawalState::MempoolAccepted, 1, 111, None)
             .await
             .expect("record first mempool accepted");
+        service
+            .record_tx_confirmed(
+                &proposal_a,
+                777,
+                Tip5Hash([Belt(850), Belt(851), Belt(852), Belt(853), Belt(854)]),
+            )
+            .await
+            .expect("confirm first withdrawal");
         service
             .record_proposal_canonicalized(&proposal_b, 101)
             .await
@@ -12103,7 +13853,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canonicalization_rejects_inputs_reserved_by_other_withdrawal() {
+    async fn frontier_preserves_cross_withdrawal_reservation_ownership() {
         let (_dir, service) = open_service().await;
         let proposal_a = sample_proposal(60, 0);
         let mut proposal_b = sample_proposal(61, 0);
@@ -12134,12 +13884,8 @@ mod tests {
         let err = service
             .record_proposal_canonicalized(&proposal_b, 200)
             .await
-            .expect_err("canonicalization should reject conflicting reserved inputs");
-        assert!(matches!(
-            err,
-            WithdrawalSequencerStoreError::Store(ref message)
-                if message.contains("already reserved by withdrawal")
-        ));
+            .expect_err("later withdrawal must not claim an active reservation");
+        assert!(err.to_string().contains("sequencer frontier"));
 
         let blocked = service
             .fetch_sequenced_withdrawal(&proposal_b.id)
@@ -12156,10 +13902,34 @@ mod tests {
                 .expect("list reserved inputs after canonical conflict"),
             proposal_a.selected_inputs
         );
+        service
+            .record_tx_confirmed(
+                &proposal_a,
+                777,
+                Tip5Hash([Belt(880), Belt(881), Belt(882), Belt(883), Belt(884)]),
+            )
+            .await
+            .expect("confirm reservation owner");
+        assert!(service
+            .list_reserved_input_names()
+            .await
+            .expect("reservations after owner confirmation")
+            .is_empty());
+        service
+            .record_proposal_canonicalized(&proposal_b, 201)
+            .await
+            .expect("later withdrawal claims released inputs");
+        assert_eq!(
+            service
+                .list_reserved_input_names()
+                .await
+                .expect("later reservation owner"),
+            proposal_b.selected_inputs
+        );
     }
 
     #[tokio::test]
-    async fn later_nonce_may_confirm_before_earlier_nonce_after_mempool_acceptance() {
+    async fn later_nonce_waits_for_earlier_durable_confirmation() {
         let (_dir, service) = open_service().await;
         let proposal_a = sample_proposal(10, 0);
         let proposal_b = sample_proposal(20, 0);
@@ -12171,49 +13941,69 @@ mod tests {
                 .ensure_tracked_withdrawal_ordering(&tracked_from_proposal(proposal, nonce))
                 .await
                 .expect("record ordering");
-            service
-                .record_proposal_canonicalized(proposal, 100)
-                .await
-                .expect("record canonicalized");
-            service
-                .record_proposal_authorized(proposal)
-                .await
-                .expect("record authorized");
-            service
-                .record_submit_outcome(proposal, WithdrawalState::MempoolAccepted, 1, 111, None)
-                .await
-                .expect("record mempool accepted");
         }
+        service
+            .record_proposal_canonicalized(&proposal_a, 100)
+            .await
+            .expect("record first canonicalized");
+        service
+            .record_proposal_authorized(&proposal_a)
+            .await
+            .expect("record first authorized");
+        service
+            .record_submit_outcome(&proposal_a, WithdrawalState::MempoolAccepted, 1, 111, None)
+            .await
+            .expect("record first mempool accepted");
+
+        let blocked = service
+            .record_proposal_canonicalized(&proposal_b, 112)
+            .await
+            .expect_err("later nonce must wait for durable confirmation");
+        assert!(blocked.to_string().contains("sequencer frontier"));
+        assert_eq!(
+            service
+                .current_live_withdrawal_nonce()
+                .await
+                .expect("frontier before confirmation"),
+            Some(1)
+        );
 
         service
-            .record_tx_confirmed(&proposal_b, 777, block_b.clone())
+            .record_tx_confirmed(&proposal_a, 777, block_a)
             .await
-            .expect("confirm later nonce first");
-
-        let earlier = service
-            .fetch_sequenced_withdrawal(&proposal_a.id)
-            .await
-            .expect("fetch earlier withdrawal")
-            .expect("earlier withdrawal exists");
-        let later = service
-            .fetch_sequenced_withdrawal(&proposal_b.id)
-            .await
-            .expect("fetch later withdrawal")
-            .expect("later withdrawal exists");
-        assert_eq!(earlier.state, WithdrawalState::MempoolAccepted);
-        assert_eq!(later.state, WithdrawalState::Confirmed);
-
+            .expect("confirm first nonce");
+        assert_eq!(
+            service
+                .current_live_withdrawal_nonce()
+                .await
+                .expect("frontier after first confirmation"),
+            Some(2)
+        );
         service
-            .record_tx_confirmed(&proposal_a, 778, block_a.clone())
+            .record_proposal_canonicalized(&proposal_b, 113)
             .await
-            .expect("confirm earlier nonce second");
-
-        let earlier = service
-            .fetch_sequenced_withdrawal(&proposal_a.id)
+            .expect("record second canonicalized");
+        service
+            .record_proposal_authorized(&proposal_b)
             .await
-            .expect("fetch earlier withdrawal after confirm")
-            .expect("earlier withdrawal exists");
-        assert_eq!(earlier.state, WithdrawalState::Confirmed);
+            .expect("record second authorized");
+        service
+            .record_submit_outcome(&proposal_b, WithdrawalState::MempoolAccepted, 1, 114, None)
+            .await
+            .expect("record second mempool accepted");
+        service
+            .record_tx_confirmed(&proposal_b, 778, block_b)
+            .await
+            .expect("confirm second nonce");
+        assert_eq!(
+            service
+                .fetch_sequenced_withdrawal(&proposal_b.id)
+                .await
+                .expect("fetch second withdrawal")
+                .expect("second withdrawal")
+                .state,
+            WithdrawalState::Confirmed
+        );
     }
 
     #[tokio::test]
@@ -13165,6 +14955,265 @@ mod tests {
                 .expect("replay-mapped burn")
                 .withdrawal_nonce,
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn shallow_base_reorg_invalidates_peer_canonical_and_releases_reservations() {
+        let journal = RecordingSequencerJournal::default();
+        let (_dir, service) = open_service_with_journal(journal.handle()).await;
+        let proposal = sample_proposal(200, 0);
+        service
+            .ensure_tracked_withdrawal_ordering(&tracked_from_proposal(&proposal, 1))
+            .await
+            .expect("register withdrawal ordering");
+        service
+            .record_proposal_canonicalized(&proposal, 100)
+            .await
+            .expect("record canonical proposal");
+        let plan = seed_base_reorg_activity(&service, &proposal).await;
+
+        let report = service
+            .apply_base_activity_reorg(plan)
+            .await
+            .expect("apply shallow Base reorg");
+        assert_eq!(report.burns_invalidated, 1);
+        assert_eq!(report.lifecycle_rows_invalidated, 1);
+        assert_eq!(report.lifecycle_rows_held, 0);
+        let row = service
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch invalidated row")
+            .expect("invalidated row");
+        assert_eq!(row.state, WithdrawalState::Invalidated);
+        service
+            .ensure_reorg_ready()
+            .await
+            .expect("shallow rewind clears Base reorg guard");
+        assert!(service
+            .reserved_input_names_for(&proposal.id)
+            .await
+            .expect("load invalidated reservations")
+            .is_empty());
+        let activity = service.base_activity_store();
+        assert!(activity
+            .load_verified_burn(8_453, Address::ZERO, &proposal.id.base_event_id)
+            .await
+            .expect("load invalidated burn")
+            .is_none());
+        let public_burn = activity
+            .load_public_burn(8_453, Address::ZERO, &proposal.id.base_event_id)
+            .await
+            .expect("load invalidated public burn")
+            .expect("invalidated public burn remains queryable");
+        assert!(!public_burn.canonical);
+        assert_eq!(public_burn.invalidation_generation, Some(1));
+        assert!(public_burn
+            .invalidation_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Base fork generation")));
+        assert_eq!(
+            activity
+                .load_cursor(8_453, Address::ZERO)
+                .await
+                .expect("load rewound cursor")
+                .expect("rewound cursor")
+                .last_verified_block,
+            104
+        );
+        assert_eq!(
+            journal
+                .records()
+                .last()
+                .expect("Base invalidation journal event")
+                .event_type,
+            SequencerJournalEventType::BaseBurnInvalidated
+        );
+        let (_replay_dir, replay) = open_service_with_journal(journal.handle()).await;
+        replay
+            .recover_from_journal_on_startup()
+            .await
+            .expect("replay Base invalidation journal")
+            .expect("Base invalidation recovery report");
+        let replayed = replay
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch replayed invalidation")
+            .expect("replayed invalidation row");
+        assert_eq!(replayed.state, WithdrawalState::Invalidated);
+        assert!(replay
+            .reserved_input_names_for(&proposal.id)
+            .await
+            .expect("replayed invalidation reservations")
+            .is_empty());
+        assert_eq!(
+            replay
+                .recover_from_journal_on_startup()
+                .await
+                .expect("verify replayed invalidation cursor")
+                .expect("second invalidation recovery report")
+                .replayed_count,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn base_reorg_after_authorization_commits_hold_without_rewinding() {
+        let journal = RecordingSequencerJournal::default();
+        let (_dir, service) = open_service_with_journal(journal.handle()).await;
+        let proposal = sample_proposal(201, 0);
+        authorize_with_handoffs(&service, &proposal).await;
+        let authorized_before = service
+            .load_authorized_transaction_for_reconciliation(&proposal.id)
+            .await
+            .expect("load authorized identity")
+            .expect("authorized identity");
+        let plan = seed_base_reorg_activity(&service, &proposal).await;
+
+        let error = service
+            .apply_base_activity_reorg(plan)
+            .await
+            .expect_err("authorized Base orphan must escalate");
+        assert!(error.to_string().contains("operator intervention"));
+        let row = service
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch held row")
+            .expect("held row");
+        assert_eq!(row.state, WithdrawalState::ReorgHold);
+        assert_eq!(
+            service
+                .load_authorized_transaction_for_reconciliation(&proposal.id)
+                .await
+                .expect("reload held authorized identity")
+                .expect("held authorized identity"),
+            authorized_before
+        );
+        let guard = service
+            .ensure_reorg_ready()
+            .await
+            .expect_err("authorized orphan must activate Base reorg guard");
+        assert!(guard.to_string().contains("generation 1"));
+        assert_eq!(
+            service
+                .reserved_input_names_for(&proposal.id)
+                .await
+                .expect("load held reservations"),
+            proposal.selected_inputs
+        );
+        let activity = service.base_activity_store();
+        assert!(activity
+            .load_verified_burn(8_453, Address::ZERO, &proposal.id.base_event_id)
+            .await
+            .expect("load held burn")
+            .is_some());
+        assert_eq!(
+            activity
+                .load_cursor(8_453, Address::ZERO)
+                .await
+                .expect("load unrewound cursor")
+                .expect("unrewound cursor")
+                .last_verified_block,
+            109
+        );
+        assert_eq!(
+            journal
+                .records()
+                .last()
+                .expect("Base hold journal event")
+                .event_type,
+            SequencerJournalEventType::BaseReorgHold
+        );
+        let (_replay_dir, replay) = open_service_with_journal(journal.handle()).await;
+        replay
+            .recover_from_journal_on_startup()
+            .await
+            .expect("replay Base reorg hold")
+            .expect("Base reorg hold recovery report");
+        let replayed = replay
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch replayed hold")
+            .expect("replayed hold row");
+        assert_eq!(replayed.state, WithdrawalState::ReorgHold);
+        assert_eq!(
+            replay
+                .load_authorized_transaction_for_reconciliation(&proposal.id)
+                .await
+                .expect("load replayed authorized identity")
+                .expect("replayed authorized identity"),
+            authorized_before
+        );
+        assert_eq!(
+            replay
+                .reserved_input_names_for(&proposal.id)
+                .await
+                .expect("replayed hold reservations"),
+            proposal.selected_inputs
+        );
+        assert!(replay.ensure_reorg_ready().await.is_err());
+    }
+    #[tokio::test]
+    async fn nock_inclusion_invalidation_replays_exact_artifacts_and_reservations() {
+        let journal = RecordingSequencerJournal::default();
+        let (_dir, service) = open_service_with_journal(journal.handle()).await;
+        let proposal = sample_proposal(202, 0);
+        mempool_accept_with_handoffs(&service, &proposal, 1, 200, None).await;
+        let confirmed_block_id = Tip5Hash([Belt(801), Belt(802), Belt(803), Belt(804), Belt(805)]);
+        service
+            .record_tx_confirmed(&proposal, 8_000, confirmed_block_id.clone())
+            .await
+            .expect("record confirmed withdrawal");
+        service
+            .record_nockchain_inclusion_invalidated(
+                &proposal.id,
+                8_000,
+                confirmed_block_id,
+                WithdrawalState::MempoolAccepted,
+                "test orphaned Nock inclusion".to_string(),
+            )
+            .await
+            .expect("record Nock inclusion invalidation");
+        let row = service
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch regressed row")
+            .expect("regressed row");
+        assert_eq!(row.state, WithdrawalState::MempoolAccepted);
+        assert_eq!(
+            service
+                .reserved_input_names_for(&proposal.id)
+                .await
+                .expect("restored source reservations"),
+            proposal.selected_inputs
+        );
+        assert_eq!(
+            journal
+                .records()
+                .last()
+                .expect("Nock invalidation journal event")
+                .event_type,
+            SequencerJournalEventType::NockInclusionInvalidated
+        );
+
+        let (_replay_dir, replay) = open_service_with_journal(journal.handle()).await;
+        replay
+            .recover_from_journal_on_startup()
+            .await
+            .expect("replay Nock invalidation")
+            .expect("Nock invalidation recovery report");
+        let replayed = replay
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch replayed Nock invalidation")
+            .expect("replayed Nock invalidation row");
+        assert_eq!(replayed.state, WithdrawalState::MempoolAccepted);
+        assert_eq!(
+            replay
+                .reserved_input_names_for(&proposal.id)
+                .await
+                .expect("replayed Nock reservations"),
+            proposal.selected_inputs
         );
     }
 }

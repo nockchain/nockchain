@@ -27,6 +27,10 @@ use crate::shared::errors::BridgeError;
 use crate::shared::ingress::proto::{
     SequencedWithdrawalStatusResponse, WithdrawalCommitCertificate,
 };
+use crate::shared::nockchain::{
+    nockchain_reinclusion_within_rewind, nockchain_snapshot_is_stable_for_replay,
+    NOCKCHAIN_MAX_AUTOMATIC_REORG_REWIND_BLOCKS,
+};
 use crate::shared::stop::StopHandle;
 use crate::shared::types::Tip5Hash;
 use crate::withdrawal::proposals::{
@@ -35,7 +39,7 @@ use crate::withdrawal::proposals::{
 use crate::withdrawal::raw_tx as withdrawal_raw_tx;
 use crate::withdrawal::sequencer::base_height::SequencerBaseHeightTracker;
 use crate::withdrawal::sequencer::store::{
-    cue_transaction, AuthorizedRetryPayload, WithdrawalSequencerStore,
+    cue_transaction, AuthorizedRetryPayload, NockchainReorgRecoveryReport, WithdrawalSequencerStore,
 };
 use crate::withdrawal::state::{LiveWithdrawalView, WithdrawalFallbackPolicy, WithdrawalState};
 use crate::withdrawal::types::{
@@ -48,7 +52,12 @@ pub(crate) fn is_withdrawal_submit_deferred_error(error: &str) -> bool {
     error.starts_with(WITHDRAWAL_SUBMIT_DEFERRED_PREFIX)
 }
 
-pub(crate) fn sequenced_withdrawal_released(status: &SequencedWithdrawalStatusResponse) -> bool {
+/// Stops duplicate bridge-node assembly/broadcast work. Mempool acceptance
+/// satisfies this predicate but remains the sequencer ordering frontier until
+/// durable confirmation.
+pub(crate) fn sequenced_withdrawal_needs_no_bridge_work(
+    status: &SequencedWithdrawalStatusResponse,
+) -> bool {
     status.found && matches!(status.state.as_str(), "mempool_accepted" | "confirmed")
 }
 
@@ -79,6 +88,13 @@ pub trait WithdrawalSubmitPort: Send + Sync {
     async fn transaction_mempool_accepted(
         &self,
         _proposal: &WithdrawalProposalData,
+    ) -> Result<Option<bool>, BridgeError> {
+        Ok(None)
+    }
+
+    async fn raw_tx_mempool_accepted(
+        &self,
+        _submitted_raw_tx_id: &str,
     ) -> Result<Option<bool>, BridgeError> {
         Ok(None)
     }
@@ -564,6 +580,14 @@ impl WithdrawalSubmitPort for PublicNockchainWithdrawalSubmitter {
             .await
     }
 
+    async fn raw_tx_mempool_accepted(
+        &self,
+        submitted_raw_tx_id: &str,
+    ) -> Result<Option<bool>, BridgeError> {
+        self.raw_tx_mempool_accepted_by_id(submitted_raw_tx_id)
+            .await
+    }
+
     async fn get_transaction_included_block(
         &self,
         submitted_raw_tx_id: &str,
@@ -631,7 +655,7 @@ async fn ensure_frontier_withdrawal_registered<S: WithdrawalSequencerPort>(
             .sequencer
             .get_sequenced_withdrawal_status(&tracked.id)
             .await?;
-        if sequenced_withdrawal_released(&status) {
+        if sequenced_withdrawal_needs_no_bridge_work(&status) {
             continue;
         }
         register_withdrawal_or_alert(context.sequencer.as_ref(), &context.bridge_status, &tracked)
@@ -643,7 +667,7 @@ async fn ensure_frontier_withdrawal_registered<S: WithdrawalSequencerPort>(
             .sequencer
             .get_sequenced_withdrawal_status(&tracked.id)
             .await?;
-        if sequenced_withdrawal_released(&status) {
+        if sequenced_withdrawal_needs_no_bridge_work(&status) {
             continue;
         }
         return Ok(None);
@@ -876,6 +900,14 @@ pub async fn withdrawal_sequencer_startup_reconcile<S>(
 where
     S: WithdrawalSubmitPort + ?Sized,
 {
+    let nock_reorg =
+        withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store, submitter).await?;
+    if nock_reorg.held > 0 {
+        return Err(BridgeError::Runtime(format!(
+            "{} confirmed Nock withdrawal(s) entered reorg hold during startup",
+            nock_reorg.held
+        )));
+    }
     let sequenced = withdrawal_state_store.list_sequenced_withdrawals().await?;
     let has_unconfirmed = sequenced.iter().any(|row| {
         matches!(
@@ -1060,6 +1092,153 @@ fn nockchain_inclusion_has_depth(
     tip_height.saturating_sub(included_height) >= confirmation_depth
 }
 
+/// Revalidates every terminal Nock inclusion and applies bounded recovery.
+pub async fn withdrawal_sequencer_nock_reorg_tick_once<S>(
+    withdrawal_state_store: &WithdrawalSequencerStore,
+    submitter: &S,
+) -> Result<NockchainReorgRecoveryReport, BridgeError>
+where
+    S: WithdrawalSubmitPort + ?Sized,
+{
+    withdrawal_state_store.ensure_reorg_ready().await?;
+    let candidates = withdrawal_state_store
+        .list_confirmed_nockchain_withdrawals()
+        .await?;
+    let mut report = NockchainReorgRecoveryReport::default();
+    for candidate in candidates {
+        report.inspected = report.inspected.saturating_add(1);
+        let inclusion = submitter
+            .get_transaction_included_block(&candidate.submitted_raw_tx_id)
+            .await?;
+        if inclusion.as_ref().is_some_and(|included| {
+            included.height == candidate.confirmed_height
+                && included.block_id == candidate.confirmed_block_id
+        }) {
+            withdrawal_state_store
+                .clear_missing_nockchain_inclusion(&candidate.id)
+                .await?;
+            report.unchanged = report.unchanged.saturating_add(1);
+            continue;
+        }
+        if let Some(included) = inclusion {
+            withdrawal_state_store
+                .clear_missing_nockchain_inclusion(&candidate.id)
+                .await?;
+            if !nockchain_reinclusion_within_rewind(candidate.confirmed_height, included.height) {
+                withdrawal_state_store
+                    .record_nockchain_inclusion_invalidated(
+                        &candidate.id,
+                        candidate.confirmed_height,
+                        candidate.confirmed_block_id,
+                        WithdrawalState::ReorgHold,
+                        format!(
+                            "Nock transaction {} moved from block {} to {} beyond automatic depth {}",
+                            candidate.submitted_raw_tx_id,
+                            candidate.confirmed_height,
+                            included.height,
+                            NOCKCHAIN_MAX_AUTOMATIC_REORG_REWIND_BLOCKS
+                        ),
+                    )
+                    .await?;
+                report.held = report.held.saturating_add(1);
+                continue;
+            }
+            withdrawal_state_store
+                .record_nockchain_inclusion_invalidated(
+                    &candidate.id,
+                    candidate.confirmed_height,
+                    candidate.confirmed_block_id,
+                    WithdrawalState::MempoolAccepted,
+                    format!(
+                        "Nock transaction {} was re-included at block {} {:?}",
+                        candidate.submitted_raw_tx_id, included.height, included.block_id
+                    ),
+                )
+                .await?;
+            withdrawal_state_store
+                .record_tx_confirmed_by_id(&candidate.id, included.height, included.block_id)
+                .await?;
+            report.re_included = report.re_included.saturating_add(1);
+            continue;
+        }
+        let missing_count = withdrawal_state_store
+            .note_missing_nockchain_inclusion(
+                &candidate.id, candidate.confirmed_height, &candidate.confirmed_block_id,
+            )
+            .await?;
+        if missing_count < 2 {
+            report.unchanged = report.unchanged.saturating_add(1);
+            continue;
+        }
+        let snapshot_is_stable = nockchain_snapshot_is_stable_for_replay(
+            candidate.snapshot_height, candidate.confirmed_height,
+        );
+        if !snapshot_is_stable {
+            withdrawal_state_store
+                .record_nockchain_inclusion_invalidated(
+                    &candidate.id,
+                    candidate.confirmed_height,
+                    candidate.confirmed_block_id,
+                    WithdrawalState::ReorgHold,
+                    format!(
+                        "Nock transaction {} disappeared and snapshot height {} is not {} blocks behind old inclusion {}",
+                        candidate.submitted_raw_tx_id,
+                        candidate.snapshot_height,
+                        NOCKCHAIN_MAX_AUTOMATIC_REORG_REWIND_BLOCKS,
+                        candidate.confirmed_height
+                    ),
+                )
+                .await?;
+            withdrawal_state_store
+                .clear_missing_nockchain_inclusion(&candidate.id)
+                .await?;
+            report.held = report.held.saturating_add(1);
+            continue;
+        }
+        let mempool_accepted = submitter
+            .raw_tx_mempool_accepted(&candidate.submitted_raw_tx_id)
+            .await?
+            .unwrap_or(false);
+        let next_state = if mempool_accepted {
+            WithdrawalState::MempoolAccepted
+        } else {
+            WithdrawalState::Authorized
+        };
+        withdrawal_state_store
+            .record_nockchain_inclusion_invalidated(
+                &candidate.id,
+                candidate.confirmed_height,
+                candidate.confirmed_block_id,
+                next_state,
+                format!(
+                    "Nock transaction {} is no longer included; preserving exact authorized raw transaction",
+                    candidate.submitted_raw_tx_id
+                ),
+            )
+            .await?;
+        withdrawal_state_store
+            .clear_missing_nockchain_inclusion(&candidate.id)
+            .await?;
+        if mempool_accepted {
+            report.regressed_to_mempool = report.regressed_to_mempool.saturating_add(1);
+            continue;
+        }
+        match submitter.resubmit_raw_tx(&candidate.raw_tx).await? {
+            WithdrawalNetworkSubmitStatus::MempoolAccepted
+            | WithdrawalNetworkSubmitStatus::AlreadyMempoolAccepted => {
+                withdrawal_state_store
+                    .record_authorized_mempool_accepted_by_id(&candidate.id)
+                    .await?;
+                report.regressed_to_mempool = report.regressed_to_mempool.saturating_add(1);
+            }
+            WithdrawalNetworkSubmitStatus::RetryExhausted => {
+                report.regressed_to_authorized = report.regressed_to_authorized.saturating_add(1);
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Runs one sequencer-owned confirmation poll over accepted withdrawals using
 /// the colocated public Nockchain API.
 pub async fn withdrawal_sequencer_confirmation_tick_once<S>(
@@ -1070,6 +1249,14 @@ pub async fn withdrawal_sequencer_confirmation_tick_once<S>(
 where
     S: WithdrawalSubmitPort + ?Sized,
 {
+    let reorg =
+        withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store, submitter).await?;
+    if reorg.held > 0 {
+        return Err(BridgeError::Runtime(format!(
+            "{} confirmed Nock withdrawal(s) entered reorg hold",
+            reorg.held
+        )));
+    }
     metrics::init_metrics()
         .sequencer_withdrawal_confirmation_polls
         .increment();
@@ -1162,6 +1349,7 @@ pub async fn withdrawal_sequencer_orphan_retry_tick_once<S>(
 where
     S: WithdrawalSubmitPort + ?Sized,
 {
+    withdrawal_state_store.ensure_reorg_ready().await?;
     let Some(current_base_height) = base_height_tracker.latest_confirmed_base_height() else {
         return Ok(0);
     };
@@ -1785,6 +1973,7 @@ mod tests {
     struct RecordingSubmitter {
         included_blocks: Mutex<HashMap<String, WithdrawalIncludedBlock>>,
         nockchain_tip_height: Mutex<Option<u64>>,
+        raw_tx_mempool_acceptance: Mutex<HashMap<String, bool>>,
         resubmitted_raw_tx_ids: Mutex<Vec<String>>,
         resubmitted_raw_txs: Mutex<Vec<nockchain_types::v1::RawTx>>,
         scripted_resubmit_results: Mutex<VecDeque<Result<WithdrawalNetworkSubmitStatus, String>>>,
@@ -1813,6 +2002,13 @@ mod tests {
                 .lock()
                 .expect("included blocks lock")
                 .insert(submitted_raw_tx_id, block);
+        }
+
+        fn set_raw_tx_mempool_accepted(&self, submitted_raw_tx_id: String, accepted: bool) {
+            self.raw_tx_mempool_acceptance
+                .lock()
+                .expect("raw tx mempool acceptance lock")
+                .insert(submitted_raw_tx_id, accepted);
         }
     }
 
@@ -1847,6 +2043,18 @@ mod tests {
                 Ok(status) => Ok(status),
                 Err(message) => Err(BridgeError::Runtime(message)),
             }
+        }
+
+        async fn raw_tx_mempool_accepted(
+            &self,
+            submitted_raw_tx_id: &str,
+        ) -> Result<Option<bool>, BridgeError> {
+            Ok(self
+                .raw_tx_mempool_acceptance
+                .lock()
+                .expect("raw tx mempool acceptance lock")
+                .get(submitted_raw_tx_id)
+                .copied())
         }
 
         async fn get_transaction_included_block(
@@ -2045,7 +2253,7 @@ mod tests {
             for (id, withdrawal_nonce) in candidates {
                 let released = statuses
                     .get(&id)
-                    .map(|status| matches!(status.state.as_str(), "mempool_accepted" | "confirmed"))
+                    .map(|status| status.state == "confirmed")
                     .unwrap_or(false);
                 if !released {
                     return Ok(Some(NextPendingWithdrawalOrdering {
@@ -3003,7 +3211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submission_tick_submits_later_nonce_after_prior_nonce_mempool_accepted() {
+    async fn submission_tick_waits_for_prior_nonce_confirmation() {
         let (registry, _withdrawal_state_store, _dir) = open_context().await;
         let earlier = sample_request_with_seed(0xaa);
         let later = sample_request_with_seed(0xbb);
@@ -3120,7 +3328,24 @@ mod tests {
 
         let outcome = withdrawal_submission_tick_once(&context)
             .await
-            .expect("submission tick");
+            .expect("submission tick before confirmation");
+        assert_eq!(outcome, WithdrawalSubmissionTickOutcome::Idle);
+        assert!(sequencer
+            .submitted
+            .lock()
+            .expect("submitted proposals lock")
+            .is_empty());
+
+        sequencer
+            .statuses
+            .lock()
+            .expect("sequencer statuses lock")
+            .get_mut(&earlier_proposal.id)
+            .expect("earlier status")
+            .state = "confirmed".to_string();
+        let outcome = withdrawal_submission_tick_once(&context)
+            .await
+            .expect("submission tick after confirmation");
         assert_eq!(
             outcome,
             WithdrawalSubmissionTickOutcome::MempoolAccepted {
@@ -3660,6 +3885,140 @@ mod tests {
         .await
         .expect("sequencer confirmation tick");
         assert_eq!(observed, 0);
+    }
+
+    #[tokio::test]
+    async fn nock_reorg_reincludes_exact_confirmed_transaction_in_new_block() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_confirmed_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal, 111).await;
+        let submitter = RecordingSubmitter::default();
+        let tx_id = transaction_id_base58(&proposal.transaction).expect("tx id");
+        submitter.set_included_block(tx_id, sample_included_block(7_780));
+
+        let report =
+            withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store.as_ref(), &submitter)
+                .await
+                .expect("Nock re-inclusion recovery");
+        assert_eq!(report.re_included, 1);
+        let row = withdrawal_state_store
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch re-included row")
+            .expect("re-included row");
+        assert_eq!(row.state, WithdrawalState::Confirmed);
+        assert!(withdrawal_state_store
+            .list_reserved_input_names()
+            .await
+            .expect("re-included reservations")
+            .is_empty());
+        assert!(submitter
+            .resubmitted_raw_tx_ids
+            .lock()
+            .expect("resubmitted ids lock")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn nock_reorg_regresses_confirmed_to_mempool_and_restores_reservations() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_confirmed_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal, 111).await;
+        let submitter = RecordingSubmitter::default();
+        let tx_id = transaction_id_base58(&proposal.transaction).expect("tx id");
+        submitter.set_raw_tx_mempool_accepted(tx_id, true);
+
+        let first =
+            withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store.as_ref(), &submitter)
+                .await
+                .expect("first missing inclusion observation");
+        assert_eq!(first.unchanged, 1);
+        let report =
+            withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store.as_ref(), &submitter)
+                .await
+                .expect("Nock mempool recovery");
+        assert_eq!(report.regressed_to_mempool, 1);
+        let row = withdrawal_state_store
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch regressed row")
+            .expect("regressed row");
+        assert_eq!(row.state, WithdrawalState::MempoolAccepted);
+        assert_eq!(
+            withdrawal_state_store
+                .list_reserved_input_names()
+                .await
+                .expect("restored reservations"),
+            proposal.selected_inputs
+        );
+    }
+
+    #[tokio::test]
+    async fn nock_reorg_resubmits_only_exact_authorized_raw_transaction() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_confirmed_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal, 111).await;
+        let expected = withdrawal_state_store
+            .list_confirmed_nockchain_withdrawals()
+            .await
+            .expect("confirmed recovery candidates")
+            .remove(0);
+        let submitter = RecordingSubmitter::default();
+        submitter.set_raw_tx_mempool_accepted(expected.submitted_raw_tx_id.clone(), false);
+        submitter.script_resubmit_results([Ok(WithdrawalNetworkSubmitStatus::MempoolAccepted)]);
+
+        let first =
+            withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store.as_ref(), &submitter)
+                .await
+                .expect("first missing inclusion observation");
+        assert_eq!(first.unchanged, 1);
+        let report =
+            withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store.as_ref(), &submitter)
+                .await
+                .expect("Nock exact raw transaction recovery");
+        assert_eq!(report.regressed_to_mempool, 1);
+        assert_eq!(
+            submitter
+                .resubmitted_raw_txs
+                .lock()
+                .expect("resubmitted raw tx lock")
+                .as_slice(),
+            &[expected.raw_tx]
+        );
+    }
+
+    #[tokio::test]
+    async fn nock_reorg_holds_confirmed_transaction_with_unsafe_snapshot_origin() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let mut proposal = sample_proposal(0);
+        proposal.snapshot.height = 7_750;
+        seed_confirmed_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal, 111).await;
+        let submitter = RecordingSubmitter::default();
+
+        let first =
+            withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store.as_ref(), &submitter)
+                .await
+                .expect("first missing inclusion observation");
+        assert_eq!(first.unchanged, 1);
+        let report =
+            withdrawal_sequencer_nock_reorg_tick_once(withdrawal_state_store.as_ref(), &submitter)
+                .await
+                .expect("Nock unsafe-origin recovery classification");
+        assert_eq!(report.held, 1);
+        let row = withdrawal_state_store
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch held row")
+            .expect("held row");
+        assert_eq!(row.state, WithdrawalState::ReorgHold);
+        assert_eq!(
+            withdrawal_state_store
+                .list_reserved_input_names()
+                .await
+                .expect("held reservations"),
+            proposal.selected_inputs
+        );
+        assert!(withdrawal_state_store.ensure_reorg_ready().await.is_err());
     }
 
     #[tokio::test]

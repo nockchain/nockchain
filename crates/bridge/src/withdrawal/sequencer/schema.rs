@@ -119,9 +119,37 @@ diesel::table! {
         recorded_at -> BigInt,
     }
 }
+diesel::table! {
+    sequencer_base_burn_invalidations (event_id) {
+        event_id -> BigInt,
+        chain_id -> BigInt,
+        nock_contract_address -> Binary,
+        generation -> BigInt,
+        base_event_id -> Binary,
+        old_block_number -> BigInt,
+        old_block_hash -> Binary,
+        lifecycle_state -> Nullable<Text>,
+        invalidated_at -> BigInt,
+        reason -> Text,
+    }
+}
+
+diesel::table! {
+    sequencer_nock_reorg_events (event_id) {
+        event_id -> BigInt,
+        withdrawal_id_base_event_id -> Binary,
+        generation -> BigInt,
+        invalidated_height -> BigInt,
+        invalidated_block_id -> Binary,
+        next_state -> Text,
+        reason -> Text,
+        created_at -> BigInt,
+    }
+}
 
 diesel::allow_tables_to_appear_in_same_query!(
     sequencer_journal_cursor, sequencer_withdrawals, withdrawal_reserved_inputs,
     withdrawal_submission_events, sequencer_base_burn_rejections,
-    sequencer_compensated_withdrawals,
+    sequencer_compensated_withdrawals, sequencer_base_burn_invalidations,
+    sequencer_nock_reorg_events,
 );

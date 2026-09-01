@@ -117,6 +117,18 @@ impl BaseIncidentStore {
         })
         .await
     }
+    pub async fn list_rejected_burns_by_burner(
+        &self,
+        chain_id: u64,
+        nock_contract_address: Address,
+        burner: Address,
+        limit: u32,
+    ) -> Result<Vec<RejectedBaseWithdrawalBurn>, BridgeError> {
+        self.with_conn(move |conn| {
+            load_rejected_burn_rows_by_burner(conn, chain_id, nock_contract_address, burner, limit)
+        })
+        .await
+    }
 
     pub async fn record_compensated_withdrawals(
         &self,
@@ -163,6 +175,19 @@ impl BaseIncidentStore {
         self.with_conn(move |conn| {
             load_compensated_withdrawal_by_tx_log_row(
                 conn, chain_id, nock_contract_address, tx_hash, log_index,
+            )
+        })
+        .await
+    }
+    pub async fn list_compensated_withdrawals_by_tx_hash(
+        &self,
+        chain_id: u64,
+        nock_contract_address: Address,
+        tx_hash: B256,
+    ) -> Result<Vec<CompensatedBaseWithdrawal>, BridgeError> {
+        self.with_conn(move |conn| {
+            load_compensated_withdrawal_rows_by_tx_hash(
+                conn, chain_id, nock_contract_address, tx_hash,
             )
         })
         .await
@@ -572,6 +597,37 @@ fn load_rejected_burn_rows_by_tx_hash(
     .map(TryInto::try_into)
     .collect()
 }
+fn load_rejected_burn_rows_by_burner(
+    conn: &mut SqliteConnection,
+    chain_id: u64,
+    nock_contract_address: Address,
+    burner: Address,
+    limit: u32,
+) -> Result<Vec<RejectedBaseWithdrawalBurn>, BridgeError> {
+    diesel::sql_query(
+        r#"
+        SELECT chain_id, nock_contract_address, base_event_id,
+               block_number, block_hash, parent_hash, observed_at_unix_secs,
+               tx_hash, tx_index, log_index, burner, amount_base_units,
+               commitment, calldata, rejection_code, rejection_detail,
+               first_observed_at, last_observed_at
+        FROM sequencer_base_burn_rejections
+        WHERE chain_id = ? AND nock_contract_address = ? AND burner = ?
+          AND canonical = 1
+        ORDER BY block_number DESC, log_index DESC, base_event_id DESC
+        LIMIT ?
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
+    .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+    .bind::<Binary, _>(burner.as_slice().to_vec())
+    .bind::<BigInt, _>(i64::from(limit))
+    .load::<RejectedBurnSqlRow>(conn)
+    .map_err(|error| BridgeError::Runtime(format!("Base rejection history failed: {error}")))?
+    .into_iter()
+    .map(TryInto::try_into)
+    .collect()
+}
 
 #[derive(QueryableByName)]
 struct CountRow {
@@ -730,6 +786,33 @@ fn load_compensated_withdrawal_by_tx_log_row(
     })?
     .map(TryInto::try_into)
     .transpose()
+}
+
+fn load_compensated_withdrawal_rows_by_tx_hash(
+    conn: &mut SqliteConnection,
+    chain_id: u64,
+    nock_contract_address: Address,
+    tx_hash: B256,
+) -> Result<Vec<CompensatedBaseWithdrawal>, BridgeError> {
+    diesel::sql_query(
+        r#"
+        SELECT chain_id, nock_contract_address, base_event_id,
+               tx_hash, log_index, reason, evidence_reference, recorded_at
+        FROM sequencer_compensated_withdrawals
+        WHERE chain_id = ? AND nock_contract_address = ? AND tx_hash = ?
+        ORDER BY log_index ASC
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
+    .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+    .bind::<Binary, _>(tx_hash.as_slice().to_vec())
+    .load::<CompensatedWithdrawalSqlRow>(conn)
+    .map_err(|error| {
+        BridgeError::Runtime(format!("compensated withdrawal tx list failed: {error}"))
+    })?
+    .into_iter()
+    .map(TryInto::try_into)
+    .collect()
 }
 
 fn load_compensated_withdrawal_rows(
