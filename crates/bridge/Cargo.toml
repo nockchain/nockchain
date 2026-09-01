@@ -79,6 +79,7 @@ tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 kernels-roswell = { workspace = true }
+prost-types = { workspace = true }
 tempfile = "3.8"
 
 [lints]

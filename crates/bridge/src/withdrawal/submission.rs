@@ -34,7 +34,9 @@ use crate::withdrawal::proposals::{
 };
 use crate::withdrawal::raw_tx as withdrawal_raw_tx;
 use crate::withdrawal::sequencer::base_height::SequencerBaseHeightTracker;
-use crate::withdrawal::sequencer::store::{cue_transaction, WithdrawalSequencerStore};
+use crate::withdrawal::sequencer::store::{
+    cue_transaction, AuthorizedRetryPayload, WithdrawalSequencerStore,
+};
 use crate::withdrawal::state::{LiveWithdrawalView, WithdrawalFallbackPolicy, WithdrawalState};
 use crate::withdrawal::types::{
     WithdrawalId, WithdrawalProposalData, WithdrawalSequencerProposalArtifacts,
@@ -848,6 +850,205 @@ pub async fn run_withdrawal_submission_loop<S: WithdrawalSequencerPort>(
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WithdrawalSequencerStartupReconciliationReport {
+    pub inspected: u64,
+    pub authorized_resubmitted: u64,
+    pub mempool_accepted_observed: u64,
+    pub confirmed: u64,
+    pub stale_retries: u64,
+    pub waiting: u64,
+    pub lifecycle_rows_verified: u64,
+    pub live_canonical_rows_verified: u64,
+    pub confirmed_rows_verified: u64,
+    pub reservations_verified: u64,
+}
+
+/// Reconciles every persisted authorized or mempool-accepted withdrawal before
+/// the sequencer starts serving RPC.
+pub async fn withdrawal_sequencer_startup_reconcile<S>(
+    withdrawal_state_store: &WithdrawalSequencerStore,
+    submitter: &S,
+    base_height_tracker: &SequencerBaseHeightTracker,
+    nockchain_confirmation_depth: u64,
+    retry_after_base_blocks: u64,
+) -> Result<WithdrawalSequencerStartupReconciliationReport, BridgeError>
+where
+    S: WithdrawalSubmitPort + ?Sized,
+{
+    let sequenced = withdrawal_state_store.list_sequenced_withdrawals().await?;
+    let has_unconfirmed = sequenced.iter().any(|row| {
+        matches!(
+            row.state,
+            WithdrawalState::Authorized | WithdrawalState::MempoolAccepted
+        )
+    });
+    if has_unconfirmed {
+        submitter.submission_node_available().await?;
+    }
+    let mut report = WithdrawalSequencerStartupReconciliationReport::default();
+    for row in sequenced.into_iter().filter(|row| {
+        matches!(
+            row.state,
+            WithdrawalState::Authorized | WithdrawalState::MempoolAccepted
+        )
+    }) {
+        report.inspected = report.inspected.saturating_add(1);
+        let payload = withdrawal_state_store
+            .load_authorized_transaction_for_reconciliation(&row.id)
+            .await?
+            .ok_or_else(|| {
+                BridgeError::Runtime(format!(
+                    "startup reconciliation could not reload withdrawal {:?}",
+                    row.id
+                ))
+            })?;
+        let raw_tx = decode_and_validate_authorized_raw_tx(&payload)?;
+        if let Some(block) = submitter
+            .get_transaction_included_block(&payload.submitted_raw_tx_id)
+            .await?
+        {
+            let tip_height = submitter
+                .current_nockchain_tip_height()
+                .await?
+                .ok_or_else(|| {
+                    BridgeError::Runtime(format!(
+                        "Nockchain tip is unavailable while withdrawal {:?} is included at height {}",
+                        row.id, block.height
+                    ))
+                })?;
+            if tip_height < block.height {
+                return Err(BridgeError::Runtime(format!(
+                    "Nockchain tip {} is behind included withdrawal {:?} at height {}",
+                    tip_height, row.id, block.height
+                )));
+            }
+            if row.state == WithdrawalState::Authorized
+                && withdrawal_state_store
+                    .record_authorized_mempool_accepted_by_id(&row.id)
+                    .await?
+            {
+                report.mempool_accepted_observed =
+                    report.mempool_accepted_observed.saturating_add(1);
+            }
+            if nockchain_inclusion_has_depth(tip_height, block.height, nockchain_confirmation_depth)
+            {
+                if withdrawal_state_store
+                    .record_tx_confirmed_by_id(&row.id, block.height, block.block_id)
+                    .await?
+                {
+                    report.confirmed = report.confirmed.saturating_add(1);
+                }
+            } else {
+                report.waiting = report.waiting.saturating_add(1);
+            }
+            continue;
+        }
+
+        if row.state == WithdrawalState::Authorized {
+            match submitter.resubmit_raw_tx(&raw_tx).await? {
+                WithdrawalNetworkSubmitStatus::MempoolAccepted
+                | WithdrawalNetworkSubmitStatus::AlreadyMempoolAccepted => {
+                    withdrawal_state_store
+                        .record_authorized_mempool_accepted_by_id(&row.id)
+                        .await?;
+                    report.authorized_resubmitted = report.authorized_resubmitted.saturating_add(1);
+                    report.mempool_accepted_observed =
+                        report.mempool_accepted_observed.saturating_add(1);
+                }
+                WithdrawalNetworkSubmitStatus::RetryExhausted => {
+                    return Err(BridgeError::Runtime(format!(
+                        "authorized withdrawal {:?} was not included or mempool-accepted during startup reconciliation",
+                        row.id
+                    )));
+                }
+            }
+            continue;
+        }
+
+        let Some(current_base_height) = base_height_tracker.latest_confirmed_base_height() else {
+            report.waiting = report.waiting.saturating_add(1);
+            continue;
+        };
+        let last_submit_attempt_base_height =
+            row.last_submit_attempt_base_height.ok_or_else(|| {
+                BridgeError::Runtime(format!(
+                    "mempool-accepted withdrawal {:?} is missing last submit Base height during startup reconciliation",
+                    row.id
+                ))
+            })?;
+        if current_base_height.saturating_sub(last_submit_attempt_base_height)
+            < retry_after_base_blocks
+        {
+            report.waiting = report.waiting.saturating_add(1);
+            continue;
+        }
+
+        let retry_error = match submitter.resubmit_raw_tx(&raw_tx).await {
+            Ok(WithdrawalNetworkSubmitStatus::MempoolAccepted)
+            | Ok(WithdrawalNetworkSubmitStatus::AlreadyMempoolAccepted) => None,
+            Ok(WithdrawalNetworkSubmitStatus::RetryExhausted) => Some(
+                "transaction was not reported mempool-accepted before the retry budget was exhausted"
+                    .to_string(),
+            ),
+            Err(err) => Some(err.to_string()),
+        };
+        withdrawal_state_store
+            .record_mempool_retry_attempt(
+                &payload.id,
+                payload.epoch,
+                &payload.proposal_hash,
+                current_base_height,
+                retry_error.clone(),
+            )
+            .await
+            .map_err(|err| {
+                BridgeError::Runtime(format!(
+                    "failed to record startup orphan retry for {:?}: {err}",
+                    payload.id
+                ))
+            })?;
+        report.stale_retries = report.stale_retries.saturating_add(1);
+        if retry_error.is_some() {
+            report.waiting = report.waiting.saturating_add(1);
+        }
+    }
+    let integrity = withdrawal_state_store
+        .verify_startup_lifecycle_integrity()
+        .await?;
+    report.lifecycle_rows_verified = integrity.rows_verified;
+    report.live_canonical_rows_verified = integrity.live_canonical_rows_verified;
+    report.confirmed_rows_verified = integrity.confirmed_rows_verified;
+    report.reservations_verified = integrity.reservations_verified;
+    Ok(report)
+}
+
+fn decode_and_validate_authorized_raw_tx(
+    payload: &AuthorizedRetryPayload,
+) -> Result<nockchain_types::v1::RawTx, BridgeError> {
+    let raw_tx = withdrawal_raw_tx::decode_raw_tx(payload.raw_tx_bytes.clone())?;
+    let computed_raw_tx_id = raw_tx.compute_id().map_err(|err| {
+        BridgeError::Runtime(format!(
+            "failed to recompute persisted authorized raw tx id for withdrawal {:?}: {err}",
+            payload.id
+        ))
+    })?;
+    if raw_tx.id != computed_raw_tx_id {
+        return Err(BridgeError::Runtime(format!(
+            "persisted authorized raw tx contents do not match the embedded id for withdrawal {:?}",
+            payload.id
+        )));
+    }
+    let actual_raw_tx_id = computed_raw_tx_id.to_base58();
+    if actual_raw_tx_id != payload.submitted_raw_tx_id {
+        return Err(BridgeError::Runtime(format!(
+            "persisted authorized raw tx id mismatch for withdrawal {:?}: expected {} got {}",
+            payload.id, payload.submitted_raw_tx_id, actual_raw_tx_id
+        )));
+    }
+    Ok(raw_tx)
+}
+
 fn nockchain_inclusion_has_depth(
     tip_height: u64,
     included_height: u64,
@@ -998,7 +1199,7 @@ where
             continue;
         };
 
-        let raw_tx = withdrawal_raw_tx::decode_raw_tx(payload.raw_tx_bytes)?;
+        let raw_tx = decode_and_validate_authorized_raw_tx(&payload)?;
         metrics::init_metrics()
             .sequencer_withdrawal_orphan_retry_attempts
             .increment();
@@ -1532,6 +1733,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
 
+    use alloy::primitives::{Address, B256};
     use diesel::prelude::*;
     use diesel::sqlite::SqliteConnection;
     use nockapp::noun::slab::{NockJammer, NounSlab};
@@ -1544,7 +1746,12 @@ mod tests {
     use super::*;
     use crate::observability::tui::types::AlertSeverity;
     use crate::withdrawal::proposals::{WithdrawalProjectionStore, WithdrawalProposalRegistry};
+    use crate::withdrawal::sequencer::base_activity::{
+        BaseActivityCursor, VerifiedBaseWithdrawalBurn,
+    };
+    use crate::withdrawal::sequencer::journal::RecordingSequencerJournal;
     use crate::withdrawal::sequencer::schema::sequencer_withdrawals;
+    use crate::withdrawal::sequencer::store::BaseJournalReconciliationOutcome;
     use crate::withdrawal::transport::withdrawal_id_to_proto;
     use crate::withdrawal::types::{
         NockWithdrawalRequestKernelData, WithdrawalProposalData, WithdrawalSnapshot,
@@ -2324,12 +2531,9 @@ mod tests {
         }
     }
 
-    async fn seed_sequenced_submit_state(
+    async fn seed_authorized_sequenced_withdrawal(
         withdrawal_state_store: &WithdrawalSequencerStore,
         proposal: &WithdrawalProposalData,
-        final_state: WithdrawalState,
-        last_submit_attempt_base_height: u64,
-        last_submit_error: Option<String>,
     ) {
         register_proposal_ordering(withdrawal_state_store, proposal, 1).await;
         withdrawal_state_store
@@ -2344,6 +2548,16 @@ mod tests {
             .record_proposal_authorized(proposal)
             .await
             .expect("record authorized");
+    }
+
+    async fn seed_sequenced_submit_state(
+        withdrawal_state_store: &WithdrawalSequencerStore,
+        proposal: &WithdrawalProposalData,
+        final_state: WithdrawalState,
+        last_submit_attempt_base_height: u64,
+        last_submit_error: Option<String>,
+    ) {
+        seed_authorized_sequenced_withdrawal(withdrawal_state_store, proposal).await;
         withdrawal_state_store
             .record_submit_outcome(
                 proposal, final_state, 1, last_submit_attempt_base_height, last_submit_error,
@@ -2392,6 +2606,22 @@ mod tests {
         .set(sequenced::last_submit_attempt_base_height.eq(Option::<i64>::None))
         .execute(&mut conn)
         .expect("clear last_submit_attempt_base_height");
+    }
+
+    fn clear_authorized_raw_tx(dir: &tempfile::TempDir, id: &WithdrawalId) {
+        use crate::withdrawal::sequencer::schema::sequencer_withdrawals::dsl as sequenced;
+
+        let db_path = dir.path().join("withdrawal-state-store.sqlite");
+        let mut conn = SqliteConnection::establish(db_path.to_string_lossy().as_ref())
+            .expect("open sequencer sqlite for test mutation");
+        diesel::update(
+            sequencer_withdrawals::table
+                .filter(sequenced::withdrawal_id_as_of.eq(id.as_of.to_be_limb_bytes().to_vec()))
+                .filter(sequenced::withdrawal_id_base_event_id.eq(id.base_event_id.0.clone())),
+        )
+        .set(sequenced::authorized_raw_tx.eq(Option::<Vec<u8>>::None))
+        .execute(&mut conn)
+        .expect("clear authorized raw transaction");
     }
 
     #[tokio::test]
@@ -3919,5 +4149,371 @@ mod tests {
                 .expect("reserved inputs after failed retry"),
             proposal.selected_inputs
         );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_resubmits_exact_authorized_transaction() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_authorized_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal).await;
+        let submitter = RecordingSubmitter::default();
+        let tracker = SequencerBaseHeightTracker::default();
+
+        let report = withdrawal_sequencer_startup_reconcile(
+            withdrawal_state_store.as_ref(),
+            &submitter,
+            &tracker,
+            10,
+            10,
+        )
+        .await
+        .expect("startup reconciliation");
+
+        assert_eq!(
+            report,
+            WithdrawalSequencerStartupReconciliationReport {
+                inspected: 1,
+                authorized_resubmitted: 1,
+                mempool_accepted_observed: 1,
+                confirmed: 0,
+                stale_retries: 0,
+                waiting: 0,
+                lifecycle_rows_verified: 1,
+                live_canonical_rows_verified: 1,
+                confirmed_rows_verified: 0,
+                reservations_verified: u64::try_from(proposal.selected_inputs.len())
+                    .expect("reservation count"),
+            }
+        );
+        assert_eq!(
+            submitter
+                .resubmitted_raw_txs
+                .lock()
+                .expect("resubmitted raw txs lock")
+                .as_slice(),
+            &[raw_tx_from_transaction(&proposal.transaction).expect("proposal raw tx")]
+        );
+        assert_eq!(
+            withdrawal_state_store
+                .fetch_sequenced_withdrawal(&proposal.id)
+                .await
+                .expect("fetch reconciled withdrawal")
+                .expect("reconciled withdrawal")
+                .state,
+            WithdrawalState::MempoolAccepted
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_confirms_included_transaction_at_depth() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_sequenced_submit_state(
+            withdrawal_state_store.as_ref(),
+            &proposal,
+            WithdrawalState::MempoolAccepted,
+            100,
+            None,
+        )
+        .await;
+        let submitter = RecordingSubmitter::default();
+        submitter.set_included_block(
+            transaction_id_base58(&proposal.transaction).expect("tx id"),
+            sample_included_block(100),
+        );
+        submitter.set_nockchain_tip_height(110);
+        let tracker = SequencerBaseHeightTracker::default();
+
+        let report = withdrawal_sequencer_startup_reconcile(
+            withdrawal_state_store.as_ref(),
+            &submitter,
+            &tracker,
+            10,
+            10,
+        )
+        .await
+        .expect("startup reconciliation");
+
+        assert_eq!(report.inspected, 1);
+        assert_eq!(report.confirmed, 1);
+        assert!(submitter
+            .resubmitted_raw_txs
+            .lock()
+            .expect("resubmitted raw txs lock")
+            .is_empty());
+        assert_eq!(
+            withdrawal_state_store
+                .fetch_sequenced_withdrawal(&proposal.id)
+                .await
+                .expect("fetch confirmed withdrawal")
+                .expect("confirmed withdrawal")
+                .state,
+            WithdrawalState::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_retries_stale_mempool_transaction() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_sequenced_submit_state(
+            withdrawal_state_store.as_ref(),
+            &proposal,
+            WithdrawalState::MempoolAccepted,
+            100,
+            None,
+        )
+        .await;
+        let submitter = RecordingSubmitter::default();
+        let tracker = SequencerBaseHeightTracker::default();
+        tracker.record_confirmed_base_height(115);
+
+        let report = withdrawal_sequencer_startup_reconcile(
+            withdrawal_state_store.as_ref(),
+            &submitter,
+            &tracker,
+            10,
+            10,
+        )
+        .await
+        .expect("startup reconciliation");
+
+        assert_eq!(report.inspected, 1);
+        assert_eq!(report.stale_retries, 1);
+        assert_eq!(report.waiting, 0);
+        assert_eq!(
+            submitter
+                .resubmitted_raw_txs
+                .lock()
+                .expect("resubmitted raw txs lock")
+                .as_slice(),
+            &[raw_tx_from_transaction(&proposal.transaction).expect("proposal raw tx")]
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_fails_closed_without_raw_transaction() {
+        let (_validator, withdrawal_state_store, dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_authorized_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal).await;
+        clear_authorized_raw_tx(&dir, &proposal.id);
+        let submitter = RecordingSubmitter::default();
+        let tracker = SequencerBaseHeightTracker::default();
+
+        let error = withdrawal_sequencer_startup_reconcile(
+            withdrawal_state_store.as_ref(),
+            &submitter,
+            &tracker,
+            10,
+            10,
+        )
+        .await
+        .expect_err("missing raw transaction must fail startup");
+
+        assert!(error.to_string().contains("missing authorized_raw_tx"));
+        assert!(submitter
+            .resubmitted_raw_txs
+            .lock()
+            .expect("resubmitted raw txs lock")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_blocks_on_unaccepted_authorized_transaction() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_authorized_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal).await;
+        let submitter = RecordingSubmitter::default();
+        submitter.script_resubmit_results([Ok(WithdrawalNetworkSubmitStatus::RetryExhausted)]);
+        let tracker = SequencerBaseHeightTracker::default();
+
+        let error = withdrawal_sequencer_startup_reconcile(
+            withdrawal_state_store.as_ref(),
+            &submitter,
+            &tracker,
+            10,
+            10,
+        )
+        .await
+        .expect_err("unaccepted authorized transaction must block startup");
+
+        assert!(error
+            .to_string()
+            .contains("was not included or mempool-accepted"));
+        assert_eq!(
+            withdrawal_state_store
+                .fetch_sequenced_withdrawal(&proposal.id)
+                .await
+                .expect("fetch authorized withdrawal")
+                .expect("authorized withdrawal")
+                .state,
+            WithdrawalState::Authorized
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_ignores_confirmed_rows() {
+        let (_validator, withdrawal_state_store, _dir) = open_context().await;
+        let proposal = sample_proposal(0);
+        seed_confirmed_sequenced_withdrawal(withdrawal_state_store.as_ref(), &proposal, 100).await;
+        let submitter = RecordingSubmitter::default();
+        let tracker = SequencerBaseHeightTracker::default();
+
+        let report = withdrawal_sequencer_startup_reconcile(
+            withdrawal_state_store.as_ref(),
+            &submitter,
+            &tracker,
+            10,
+            10,
+        )
+        .await
+        .expect("startup reconciliation");
+
+        assert_eq!(report.inspected, 0);
+        assert_eq!(report.lifecycle_rows_verified, 1);
+        assert_eq!(report.live_canonical_rows_verified, 0);
+        assert_eq!(report.confirmed_rows_verified, 1);
+        assert_eq!(report.reservations_verified, 0);
+        assert!(submitter
+            .resubmitted_raw_txs
+            .lock()
+            .expect("resubmitted raw txs lock")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn cross_source_recovery_resumes_confirmed_state_across_reboot() {
+        let directory = tempdir().expect("temporary directory");
+        let store_path = directory.path().join("cross-source-sequencer.sqlite");
+        let journal = RecordingSequencerJournal::default();
+        let store = WithdrawalSequencerStore::open(store_path.clone())
+            .await
+            .expect("open sequencer store")
+            .with_journal(journal.handle());
+        let mut proposal = sample_proposal(0);
+        let policy = crate::shared::types::WithdrawalPolicy::v1();
+        proposal.burned_amount = policy
+            .minimum_gross_nocks
+            .checked_mul(policy.nicks_per_nock)
+            .expect("minimum withdrawal nicks");
+        proposal.amount = proposal.burned_amount - 222;
+        let amount_base_units = u128::from(proposal.burned_amount)
+            .checked_mul(policy.base_units_per_nick)
+            .expect("Base amount");
+        let burn = VerifiedBaseWithdrawalBurn {
+            chain_id: 8_453,
+            nock_contract_address: Address::ZERO,
+            base_event_id: proposal.id.base_event_id.clone(),
+            block_number: proposal.base_batch_end - 1,
+            block_hash: B256::from([0x31; 32]),
+            parent_hash: B256::from([0x30; 32]),
+            observed_at_unix_secs: Some(1_699_999_999),
+            tx_hash: B256::from([0x32; 32]),
+            tx_index: 1,
+            log_index: 2,
+            burner: Address::from([0x33; 20]),
+            amount_base_units: amount_base_units.to_string(),
+            amount_nicks: proposal.burned_amount,
+            lock_root: proposal.recipient.clone(),
+            calldata: vec![0x34; 116],
+            base_batch_end: proposal.base_batch_end,
+            withdrawal_nonce: None,
+            verified_at: 1_700_000_000,
+            policy_id: Some(crate::shared::types::WITHDRAWAL_POLICY_V1_ID.to_string()),
+            protocol_id: Some(crate::shared::types::WITHDRAWAL_WIRE_V1_ID.to_string()),
+        };
+        let activity = store.base_activity_store();
+        activity
+            .insert_verified_burn(burn.clone())
+            .await
+            .expect("insert Base burn");
+        activity
+            .advance_cursor(BaseActivityCursor {
+                chain_id: burn.chain_id,
+                nock_contract_address: burn.nock_contract_address,
+                last_verified_block: proposal.base_batch_end,
+                last_verified_block_hash: B256::from([0x35; 32]),
+                updated_at: 1_700_000_001,
+            })
+            .await
+            .expect("advance Base cursor");
+        store
+            .recover_unmatched_base_burns(
+                burn.chain_id, burn.nock_contract_address, 700, proposal.base_batch_end,
+            )
+            .await
+            .expect("recover pending lifecycle");
+        store
+            .record_proposal_canonicalized(&proposal, proposal.base_batch_end)
+            .await
+            .expect("record canonical proposal");
+        store
+            .record_proposal_authorized(&proposal)
+            .await
+            .expect("record authorized proposal");
+        store
+            .record_submit_outcome(
+                &proposal,
+                WithdrawalState::MempoolAccepted,
+                1,
+                proposal.base_batch_end,
+                None,
+            )
+            .await
+            .expect("record mempool acceptance");
+        let persisted_tx_id = store
+            .fetch_sequenced_withdrawal(&proposal.id)
+            .await
+            .expect("fetch submitted row")
+            .expect("submitted row")
+            .authorized_transaction_name
+            .expect("persisted raw transaction id");
+        let submitter = RecordingSubmitter::default();
+        submitter.set_included_block(persisted_tx_id, sample_included_block(500));
+        submitter.set_nockchain_tip_height(510);
+        let tracker = SequencerBaseHeightTracker::default();
+        tracker.record_confirmed_base_height(proposal.base_batch_end);
+
+        let startup = withdrawal_sequencer_startup_reconcile(&store, &submitter, &tracker, 10, 10)
+            .await
+            .expect("cross-source startup reconciliation");
+        assert_eq!(startup.confirmed, 1);
+        assert!(matches!(
+            store
+                .reconcile_journal_with_base(burn.chain_id, burn.nock_contract_address, 700,)
+                .await
+                .expect("cross-source Base reconciliation"),
+            BaseJournalReconciliationOutcome::Ready(_)
+        ));
+        assert!(store
+            .list_reserved_input_names()
+            .await
+            .expect("list confirmed reservations")
+            .is_empty());
+        let journal_count = journal.records().len();
+
+        let reopened = WithdrawalSequencerStore::open(store_path)
+            .await
+            .expect("reopen sequencer store")
+            .with_journal(journal.handle());
+        reopened
+            .recover_from_journal_on_startup()
+            .await
+            .expect("verify journal tail after reboot")
+            .expect("journal recovery report");
+        let second_startup =
+            withdrawal_sequencer_startup_reconcile(&reopened, &submitter, &tracker, 10, 10)
+                .await
+                .expect("repeated startup reconciliation");
+        assert_eq!(second_startup.inspected, 0);
+        assert_eq!(second_startup.confirmed_rows_verified, 1);
+        assert!(matches!(
+            reopened
+                .reconcile_journal_with_base(burn.chain_id, burn.nock_contract_address, 700,)
+                .await
+                .expect("repeated Base reconciliation"),
+            BaseJournalReconciliationOutcome::Ready(_)
+        ));
+        assert_eq!(journal.records().len(), journal_count);
     }
 }

@@ -16,6 +16,8 @@ type SequencerJournalRecoveryReport =
 type BridgeError = bridge::shared::errors::BridgeError;
 
 const RECOVERY_CHAIN_CATCHUP_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const DEFAULT_BASE_ACTIVITY_OVERLAP_BLOCKS: u64 = 100;
+const DEFAULT_WITHDRAWAL_PUBLIC_DELAYED_AFTER_SECS: u64 = 24 * 60 * 60;
 
 fn withdrawal_sequencer_listen_addr(
     public_addr: SocketAddr,
@@ -41,9 +43,34 @@ fn public_nockchain_client_addr(public_addr: SocketAddr) -> SocketAddr {
         public_addr.port(),
     )
 }
+fn private_nockchain_client_addr(public_addr: SocketAddr, private_grpc_port: u16) -> SocketAddr {
+    let loopback = match public_addr.ip() {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    };
+    SocketAddr::new(loopback, private_grpc_port)
+}
 
 fn withdrawal_sequencer_data_dir() -> PathBuf {
     nockapp::system_data_dir().join("nockchain")
+}
+
+fn withdrawal_public_page_token_key() -> Result<[u8; 32], BridgeError> {
+    let raw = std::env::var("WITHDRAWAL_PUBLIC_PAGE_TOKEN_KEY").map_err(|_| {
+        BridgeError::Config(
+            "WITHDRAWAL_PUBLIC_PAGE_TOKEN_KEY must be set to a 32-byte hex secret".into(),
+        )
+    })?;
+    let raw = raw.strip_prefix("0x").unwrap_or(&raw);
+    let bytes = hex::decode(raw).map_err(|_| {
+        BridgeError::Config("WITHDRAWAL_PUBLIC_PAGE_TOKEN_KEY must be valid hex".into())
+    })?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        BridgeError::Config(format!(
+            "WITHDRAWAL_PUBLIC_PAGE_TOKEN_KEY must decode to 32 bytes, got {}",
+            bytes.len()
+        ))
+    })
 }
 
 // The verifier setup releases multi-gigabyte contexts through jemalloc.
@@ -74,6 +101,32 @@ struct NockchainBridgeSequencerCli {
         help = "Number of Base confirmations required before the sequencer records confirmed base height."
     )]
     base_confirmation_depth: u64,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_BASE_ACTIVITY_OVERLAP_BLOCKS,
+        help = "Confirmed Base blocks rescanned on every withdrawal activity pass."
+    )]
+    base_activity_overlap_blocks: u64,
+
+    #[arg(
+        long,
+        help = "First Base block eligible for automatic withdrawal recovery; set to the official WithdrawalWireV1 activation block."
+    )]
+    withdrawal_recovery_activation_block: u64,
+
+    #[arg(
+        long,
+        help = "Dedicated listen address for the read-only public withdrawal query service."
+    )]
+    withdrawal_public_grpc_addr: SocketAddr,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_WITHDRAWAL_PUBLIC_DELAYED_AFTER_SECS,
+        help = "Seconds before a still-pending public withdrawal is reported as delayed."
+    )]
+    withdrawal_public_delayed_after_secs: u64,
 
     #[arg(
         long,
@@ -285,6 +338,48 @@ async fn wait_for_replayed_base_bound(
     }
 }
 
+async fn wait_for_initial_base_recovery(
+    scanner: &bridge::withdrawal::sequencer::base_verifier::SequencerBaseRpcWithdrawalVerifier,
+    activity_store: &bridge::withdrawal::sequencer::base_activity::BaseActivityStore,
+    sequencer_store: &bridge::withdrawal::sequencer::store::WithdrawalSequencerStore,
+    overlap_blocks: u64,
+    activation_block: u64,
+) -> bridge::withdrawal::sequencer::base_verifier::SequencerBaseRecoveryPassReport {
+    loop {
+        match scanner
+            .scan_and_recover_confirmed_burns(
+                activity_store, sequencer_store, overlap_blocks, activation_block,
+            )
+            .await
+        {
+            Ok(report) => match &report.reconciliation {
+                bridge::withdrawal::sequencer::store::BaseJournalReconciliationOutcome::Ready(
+                    _,
+                ) => return report,
+                bridge::withdrawal::sequencer::store::BaseJournalReconciliationOutcome::ScannerBehind {
+                    current_verified_block,
+                    required_base_batch_end,
+                } => {
+                    info!(
+                        target: "nockchain.withdrawal_sequencer.base_activity",
+                        current_verified_block = ?current_verified_block,
+                        required_base_batch_end,
+                        "waiting for Base scanner to reach journal lifecycle facts"
+                    );
+                }
+            },
+            Err(err) => {
+                error!(
+                    target: "nockchain.withdrawal_sequencer.base_activity",
+                    error = %err,
+                    "initial Base burn scan/recovery failed; sequencer RPC readiness remains blocked"
+                );
+            }
+        }
+        tokio::time::sleep(RECOVERY_CHAIN_CATCHUP_POLL_INTERVAL).await;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_withdrawal_sequencer(
     public_addr: SocketAddr,
@@ -295,6 +390,14 @@ async fn start_withdrawal_sequencer(
     base_withdrawal_verifier: Arc<
         dyn bridge::withdrawal::sequencer::base_verifier::SequencerBaseWithdrawalVerifier,
     >,
+    base_activity_scanner: Arc<
+        bridge::withdrawal::sequencer::base_verifier::SequencerBaseRpcWithdrawalVerifier,
+    >,
+    base_activity_overlap_blocks: u64,
+    withdrawal_recovery_activation_block: u64,
+    withdrawal_public_grpc_addr: SocketAddr,
+    withdrawal_public_config:
+        bridge::withdrawal::sequencer::public_rpc::PublicWithdrawalQueryConfig,
     handoff_window_blocks: u64,
     authorized_submit_retry_after_base_blocks: u64,
     confirmation_policy: bridge::withdrawal::submission::WithdrawalSequencerConfirmationLoopPolicy,
@@ -302,6 +405,8 @@ async fn start_withdrawal_sequencer(
     node_pkhs: Vec<bridge::shared::types::Tip5Hash>,
     node_eth_addresses: bridge::shared::signing::BridgeNodeEthAddressMap,
     journal: SequencerJournalHandle,
+    compensated_withdrawals: bridge::shared::base::CompensatedWithdrawalRegistry,
+    quote_service: Arc<dyn bridge::withdrawal::quote::WithdrawalQuotePort>,
     manual_submit_approval: bridge::withdrawal::sequencer::approval::ManualSubmitApprovalConfig,
 ) -> Result<tokio::task::JoinHandle<Result<(), BridgeError>>, Box<dyn Error>> {
     let data_dir = withdrawal_sequencer_data_dir();
@@ -319,6 +424,32 @@ async fn start_withdrawal_sequencer(
         .sequencer_withdrawal_journal_enabled
         .swap(if journal_enabled { 1.0 } else { 0.0 });
     withdrawal_state_store = withdrawal_state_store.with_journal(journal);
+    let compensated_records = compensated_withdrawals
+        .values()
+        .map(
+            |record| bridge::withdrawal::sequencer::base_incidents::CompensatedBaseWithdrawal {
+                chain_id: withdrawal_public_config.base_chain_id,
+                nock_contract_address: withdrawal_public_config.nock_contract_address,
+                base_event_id: record.base_event_id.clone(),
+                tx_hash: record.transaction_hash,
+                log_index: record.log_index,
+                reason: record.reason.clone(),
+                evidence_reference: record.evidence_reference.clone(),
+                recorded_at: record.recorded_at_unix_secs,
+            },
+        )
+        .collect::<Vec<_>>();
+    let compensated_inserted = withdrawal_state_store
+        .base_activity_store()
+        .incident_store()
+        .record_compensated_withdrawals(compensated_records)
+        .await?;
+    info!(
+        target: "nockchain.withdrawal_sequencer.base_activity",
+        configured = compensated_withdrawals.values().count(),
+        inserted = compensated_inserted,
+        "loaded durable compensated withdrawal identities"
+    );
     if journal_enabled {
         let recovery = match withdrawal_state_store
             .recover_from_journal_on_startup()
@@ -359,6 +490,45 @@ async fn start_withdrawal_sequencer(
             "withdrawal sequencer durable R2/S3-compatible journal enabled"
         );
     }
+    let base_activity_store = Arc::new(withdrawal_state_store.base_activity_store());
+    let base_recovery_pass = wait_for_initial_base_recovery(
+        base_activity_scanner.as_ref(),
+        base_activity_store.as_ref(),
+        &withdrawal_state_store,
+        base_activity_overlap_blocks,
+        withdrawal_recovery_activation_block,
+    )
+    .await;
+    let base_reconciliation = match &base_recovery_pass.reconciliation {
+        bridge::withdrawal::sequencer::store::BaseJournalReconciliationOutcome::Ready(report) => {
+            report
+        }
+        bridge::withdrawal::sequencer::store::BaseJournalReconciliationOutcome::ScannerBehind {
+            ..
+        } => {
+            return Err("Base scanner remained behind after readiness wait".into());
+        }
+    };
+    info!(
+        target: "nockchain.withdrawal_sequencer.base_activity",
+        confirmed_tip = base_recovery_pass.scan.confirmed_tip,
+        scan_start = base_recovery_pass.scan.scan_start,
+        scan_end = base_recovery_pass.scan.scan_end,
+        chunks_verified = base_recovery_pass.scan.chunks_verified,
+        blocks_verified = base_recovery_pass.scan.blocks_verified,
+        logs_seen = base_recovery_pass.scan.logs_seen,
+        burns_inserted = base_recovery_pass.scan.burns_inserted,
+        burns_rejected = base_recovery_pass.scan.burns_rejected,
+        recovery_candidates = base_recovery_pass.recovery.candidates_inspected,
+        recovered_pending = base_recovery_pass.recovery.recovered_pending,
+        already_registered = base_recovery_pass.recovery.already_registered,
+        ineligible = base_recovery_pass.recovery.ineligible,
+        lifecycle_rows_validated = base_reconciliation.rows_validated,
+        historical_rows_skipped = base_reconciliation.historical_rows_skipped,
+        journal_sequence = base_reconciliation.journal_sequence,
+        base_cursor_block = base_reconciliation.base_cursor_block,
+        "initial Base burn scan and journal reconciliation completed"
+    );
     let withdrawal_state_store = Arc::new(withdrawal_state_store);
 
     let sequencer_listen_addr = withdrawal_sequencer_listen_addr(public_addr, private_grpc_port)?;
@@ -368,6 +538,29 @@ async fn start_withdrawal_sequencer(
             "http://{public_client_addr}"
         )),
     );
+    let startup_reconciliation =
+        bridge::withdrawal::submission::withdrawal_sequencer_startup_reconcile(
+            withdrawal_state_store.as_ref(),
+            sequencer_submitter.as_ref(),
+            base_height_tracker.as_ref(),
+            confirmation_policy.nockchain_confirmation_depth,
+            orphan_retry_policy.retry_after_base_blocks,
+        )
+        .await?;
+    info!(
+        target: "nockchain.withdrawal_sequencer",
+        inspected = startup_reconciliation.inspected,
+        authorized_resubmitted = startup_reconciliation.authorized_resubmitted,
+        mempool_accepted_observed = startup_reconciliation.mempool_accepted_observed,
+        confirmed = startup_reconciliation.confirmed,
+        stale_retries = startup_reconciliation.stale_retries,
+        waiting = startup_reconciliation.waiting,
+        lifecycle_rows_verified = startup_reconciliation.lifecycle_rows_verified,
+        live_canonical_rows_verified = startup_reconciliation.live_canonical_rows_verified,
+        confirmed_rows_verified = startup_reconciliation.confirmed_rows_verified,
+        reservations_verified = startup_reconciliation.reservations_verified,
+        "withdrawal sequencer startup reconciliation completed"
+    );
 
     let service_store = withdrawal_state_store.clone();
     let confirmation_store = withdrawal_state_store.clone();
@@ -375,7 +568,29 @@ async fn start_withdrawal_sequencer(
     let confirmation_submitter = sequencer_submitter.clone();
     let orphan_retry_submitter = sequencer_submitter.clone();
     let orphan_retry_base_height_tracker = base_height_tracker.clone();
-    let rpc_task = tokio::spawn(async move {
+    let recurring_base_activity_scanner = base_activity_scanner.clone();
+    let recurring_base_activity_store = base_activity_store.clone();
+    let recurring_sequencer_store = withdrawal_state_store.clone();
+    let public_query_service =
+        bridge::withdrawal::sequencer::public_rpc::PublicWithdrawalQueryService::new(
+            withdrawal_state_store.clone(),
+            base_height_tracker.clone(),
+            sequencer_submitter.clone(),
+            quote_service,
+            withdrawal_public_config,
+        );
+    tokio::spawn(async move {
+        bridge::withdrawal::sequencer::base_verifier::run_confirmed_base_burn_tail_scanner(
+            recurring_base_activity_scanner,
+            recurring_base_activity_store,
+            recurring_sequencer_store,
+            base_activity_overlap_blocks,
+            withdrawal_recovery_activation_block,
+            BaseObserverLoopPolicy::default(),
+        )
+        .await;
+    });
+    let private_rpc_task = tokio::spawn(async move {
         bridge::withdrawal::sequencer::rpc::serve_withdrawal_sequencer(
             sequencer_listen_addr, service_store, sequencer_submitter, base_height_tracker,
             base_withdrawal_verifier, handoff_window_blocks,
@@ -383,6 +598,28 @@ async fn start_withdrawal_sequencer(
             manual_submit_approval,
         )
         .await
+    });
+    let public_rpc_task = tokio::spawn(async move {
+        bridge::withdrawal::sequencer::public_rpc::serve_public_withdrawal_query(
+            withdrawal_public_grpc_addr, public_query_service,
+        )
+        .await
+    });
+    let rpc_task = tokio::spawn(async move {
+        tokio::select! {
+            result = private_rpc_task => match result {
+                Ok(result) => result,
+                Err(err) => Err(BridgeError::Runtime(format!(
+                    "private withdrawal sequencer RPC task failed: {err}"
+                ))),
+            },
+            result = public_rpc_task => match result {
+                Ok(result) => result,
+                Err(err) => Err(BridgeError::Runtime(format!(
+                    "public withdrawal query RPC task failed: {err}"
+                ))),
+            },
+        }
     });
     tokio::spawn(async move {
         if let Err(err) =
@@ -426,6 +663,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if cli.base_confirmation_depth == 0 {
         return Err("base confirmation depth must be greater than 0".into());
     }
+    if cli.base_activity_overlap_blocks == 0 {
+        return Err("base activity overlap blocks must be greater than 0".into());
+    }
+    if cli.withdrawal_public_delayed_after_secs == 0 {
+        return Err("withdrawal public delayed threshold must be greater than 0".into());
+    }
 
     let base_height_tracker =
         Arc::new(bridge::withdrawal::sequencer::base_height::SequencerBaseHeightTracker::default());
@@ -435,9 +678,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("nockchain-bridge-sequencer requires --bind-public-grpc-addr to be set")?;
     let prover_hot_state = nockchain::consensus::prepare_consensus_runtime(&mut nockchain_cli)?;
 
+    let private_grpc_port = nockchain_cli.bind_private_grpc_port;
     let base_ws_url = cli.base_ws_url.clone();
     let verifier_base_ws_url = base_ws_url.clone();
     let base_confirmation_depth = cli.base_confirmation_depth;
+    let base_activity_overlap_blocks = cli.base_activity_overlap_blocks;
+    let withdrawal_recovery_activation_block = cli.withdrawal_recovery_activation_block;
+    let withdrawal_public_grpc_addr = cli.withdrawal_public_grpc_addr;
+    let withdrawal_public_delayed_after =
+        Duration::from_secs(cli.withdrawal_public_delayed_after_secs);
+    let withdrawal_public_page_token_key = withdrawal_public_page_token_key()?;
     let handoff_window_blocks = cli.withdrawal_handoff_window_blocks;
     let authorized_submit_retry_after_base_blocks = cli.authorized_submit_retry_after_base_blocks;
     let orphan_retry_policy =
@@ -447,6 +697,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
     let sequencer_config =
         bridge::shared::config::SequencerConfigToml::from_file(&cli.sequencer_config_path)?;
+    let expected_base_chain_id = sequencer_config.base_chain_id()?;
+    let nock_contract_address = sequencer_config.nock_contract_address()?;
+    let withdrawal_policy = sequencer_config.withdrawal_policy()?;
+    let compensated_withdrawals = bridge::shared::base::CompensatedWithdrawalRegistry::from_config(
+        &sequencer_config.compensated_withdrawals,
+    )?;
     let sequencer_data_dir = withdrawal_sequencer_data_dir();
     let manual_submit_approval =
         bridge::withdrawal::sequencer::approval::ManualSubmitApprovalConfig {
@@ -461,6 +717,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }),
         };
     let bridge_constants = sequencer_config.bridge_constants()?;
+    let private_sequencer_port = private_grpc_port
+        .checked_add(100)
+        .ok_or("withdrawal sequencer port overflow")?;
+    if withdrawal_public_grpc_addr.port() == public_addr.port()
+        || withdrawal_public_grpc_addr.port() == private_sequencer_port
+    {
+        return Err(
+            "withdrawal public gRPC port must differ from Nockchain public and private sequencer ports"
+                .into(),
+        );
+    }
+    if withdrawal_recovery_activation_block < bridge_constants.base_start_height {
+        return Err(format!(
+            "withdrawal recovery activation block {} precedes configured Base start height {}",
+            withdrawal_recovery_activation_block, bridge_constants.base_start_height
+        )
+        .into());
+    }
+    let activation_offset =
+        withdrawal_recovery_activation_block - bridge_constants.base_start_height;
+    if activation_offset % bridge_constants.base_blocks_chunk != 0 {
+        return Err(format!(
+            "withdrawal recovery activation block {} must align to Base batch size {} from start {}",
+            withdrawal_recovery_activation_block,
+            bridge_constants.base_blocks_chunk,
+            bridge_constants.base_start_height
+        )
+        .into());
+    }
     let journal = build_sequencer_journal(&cli, &sequencer_config.sequencer_journal)?;
     let confirmation_policy =
         bridge::withdrawal::submission::WithdrawalSequencerConfirmationLoopPolicy {
@@ -482,7 +767,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Err(err) =
             bridge::withdrawal::sequencer::base_height::run_confirmed_base_height_watcher(
                 base_ws_url,
+                expected_base_chain_id,
                 base_confirmation_depth,
+                nock_contract_address,
                 watcher_base_height_tracker,
                 BaseObserverLoopPolicy::default(),
             )
@@ -504,22 +791,64 @@ async fn main() -> Result<(), Box<dyn Error>> {
         confirmed_base_height = initial_confirmed_base_height,
         "sequencer base height watcher initialized; starting withdrawal sequencer service"
     );
-    let base_withdrawal_verifier = Arc::new(
+    let base_activity_scanner = Arc::new(
         bridge::withdrawal::sequencer::base_verifier::SequencerBaseRpcWithdrawalVerifier::connect(
             verifier_base_ws_url,
-            sequencer_config.nock_contract_address()?,
+            expected_base_chain_id,
+            nock_contract_address,
             base_height_tracker.clone(),
+            bridge_constants.base_start_height,
             bridge_constants.base_blocks_chunk,
         )
         .await?,
-    )
-        as Arc<dyn bridge::withdrawal::sequencer::base_verifier::SequencerBaseWithdrawalVerifier>;
+    );
+    let base_withdrawal_verifier: Arc<
+        dyn bridge::withdrawal::sequencer::base_verifier::SequencerBaseWithdrawalVerifier,
+    > = base_activity_scanner.clone();
 
-    let withdrawal_sequencer_rpc_task = start_withdrawal_sequencer(
+    let (quote_spend_condition, quote_lock_root) =
+        bridge::shared::config::derive_bridge_spend_authority_from_pkhs(
+            bridge_constants.min_signers,
+            withdrawal_node_pkhs.iter().cloned(),
+        )?;
+    let quote_private_addr = private_nockchain_client_addr(public_addr, private_grpc_port);
+    let quote_service: Arc<dyn bridge::withdrawal::quote::WithdrawalQuotePort> = Arc::new(
+        bridge::withdrawal::quote::NockchainWithdrawalQuoteService::new_private(
+            format!("http://{quote_private_addr}"),
+            quote_lock_root,
+            quote_spend_condition,
+            bridge_constants.nicks_fee_per_nock,
+            sequencer_config.nockchain_confirmation_depth,
+            Duration::from_secs(15),
+        )?,
+    );
+    let api_config = nockchain::NockchainAPIConfig::EnablePublicServer(public_addr);
+    let nockchain_app =
+        nockchain::run_nockchain_app(nockchain_cli, prover_hot_state.as_slice(), api_config);
+    tokio::pin!(nockchain_app);
+
+    let withdrawal_public_config =
+        bridge::withdrawal::sequencer::public_rpc::PublicWithdrawalQueryConfig {
+            base_chain_id: expected_base_chain_id,
+            nock_contract_address,
+            policy_id: withdrawal_policy.id.to_string(),
+            protocol_id: withdrawal_policy.wire_format.to_string(),
+            page_token_key: withdrawal_public_page_token_key,
+            delayed_after: withdrawal_public_delayed_after,
+            base_stale_after: Duration::from_secs(60),
+            admission_enabled: sequencer_config.public_withdrawal_admission_enabled,
+        };
+
+    let withdrawal_sequencer_start = start_withdrawal_sequencer(
         public_addr,
-        nockchain_cli.bind_private_grpc_port,
+        private_grpc_port,
         base_height_tracker.clone(),
         base_withdrawal_verifier,
+        base_activity_scanner,
+        base_activity_overlap_blocks,
+        withdrawal_recovery_activation_block,
+        withdrawal_public_grpc_addr,
+        withdrawal_public_config,
         handoff_window_blocks,
         authorized_submit_retry_after_base_blocks,
         confirmation_policy,
@@ -527,14 +856,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         withdrawal_node_pkhs,
         withdrawal_node_eth_addresses,
         journal,
+        compensated_withdrawals,
+        quote_service,
         manual_submit_approval,
-    )
-    .await?;
+    );
+    tokio::pin!(withdrawal_sequencer_start);
+    let withdrawal_sequencer_rpc_task = tokio::select! {
+        result = &mut nockchain_app => return result,
+        result = &mut withdrawal_sequencer_start => result?,
+    };
 
-    let api_config = nockchain::NockchainAPIConfig::EnablePublicServer(public_addr);
-    let nockchain_app =
-        nockchain::run_nockchain_app(nockchain_cli, prover_hot_state.as_slice(), api_config);
-    tokio::pin!(nockchain_app);
     tokio::select! {
         result = &mut nockchain_app => result,
         result = withdrawal_sequencer_rpc_task => {

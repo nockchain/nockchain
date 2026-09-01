@@ -12,6 +12,7 @@ tracing-heap = ["tracy-client"]
 [dependencies]
 bridge = { path = "../bridge" }
 clap.workspace = true
+hex.workspace = true
 nockapp.workspace = true
 nockchain.workspace = true
 nockvm.workspace = true
