@@ -1,9 +1,9 @@
-use std::cell::Cell;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, thread};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -26,9 +26,11 @@ pub const PORT_OFFSET_ENV: &str = "BRIDGE_DEV_PORT_OFFSET";
 pub const FAKENET_GENESIS_JAM_ENV: &str = "BRIDGE_DEV_FAKENET_GENESIS_JAM";
 pub const FAKENET_POW_LEN_ENV: &str = "BRIDGE_DEV_FAKENET_POW_LEN";
 pub const FAKENET_LOG_DIFFICULTY_ENV: &str = "BRIDGE_DEV_FAKENET_LOG_DIFFICULTY";
+pub const FAKENET_V1_PHASE_ENV: &str = "BRIDGE_DEV_FAKENET_V1_PHASE";
 pub const FAKENET_BYTHOS_PHASE_ENV: &str = "BRIDGE_DEV_FAKENET_BYTHOS_PHASE";
 pub const BASE_BLOCKS_CHUNK_ENV: &str = "BRIDGE_DEV_BASE_BLOCKS_CHUNK";
 pub const BRIDGE_SAVE_INTERVAL_MILLIS_ENV: &str = "BRIDGE_DEV_BRIDGE_SAVE_INTERVAL_MILLIS";
+pub const PRESERVE_RUNTIME_FILES_ENV: &str = "BRIDGE_DEV_PRESERVE_RUNTIME_FILES";
 pub const NOCK_OBSERVER_POLL_MILLIS_ENV: &str = "BRIDGE_NOCK_OBSERVER_POLL_MILLIS";
 pub const RUST_LOG_ENV: &str = "RUST_LOG";
 pub const MANUAL_SUBMIT_APPROVAL_ENV: &str = "BRIDGE_DEV_MANUAL_SUBMIT_APPROVAL";
@@ -135,11 +137,12 @@ pub struct ScenarioHarness {
     workspace_root: PathBuf,
     bridge_dev_bin: PathBuf,
     run_root: PathBuf,
+    command_run_root: PathBuf,
     port_offset: u16,
     up_child: Option<Child>,
     up_stdout: PathBuf,
     up_stderr: PathBuf,
-    preserve_run_root: Cell<bool>,
+    preserve_run_root: AtomicBool,
     resolve_artifacts: bool,
     build_artifacts: bool,
     env_overrides: Vec<(String, String)>,
@@ -211,6 +214,7 @@ impl ScenarioHarness {
         Ok(Self {
             workspace_root,
             bridge_dev_bin,
+            command_run_root: run_root.clone(),
             run_root,
             port_offset: scenario_port_offset(name)?,
             up_child: None,
@@ -219,7 +223,7 @@ impl ScenarioHarness {
             resolve_artifacts: false,
             build_artifacts: false,
             env_overrides: Vec::new(),
-            preserve_run_root: Cell::new(false),
+            preserve_run_root: AtomicBool::new(false),
             tempdir: Some(tempdir),
         })
     }
@@ -236,10 +240,18 @@ impl ScenarioHarness {
         let log_dir = run_dir.join("cluster-logs");
         fs::create_dir_all(&log_dir)
             .with_context(|| format!("failed to create {}", log_dir.display()))?;
+        let command_run_root = short_command_run_root(&run_root)?;
+        if !command_run_root.is_dir() {
+            bail!(
+                "short bridge-dev runtime alias does not resolve to {}",
+                run_root.display()
+            );
+        }
         Ok(Self {
             workspace_root,
             bridge_dev_bin,
             run_root,
+            command_run_root,
             port_offset: scenario_port_offset(name)?,
             up_child: None,
             up_stdout: log_dir.join("up.stdout.log"),
@@ -247,7 +259,7 @@ impl ScenarioHarness {
             resolve_artifacts: false,
             build_artifacts: false,
             env_overrides: Vec::new(),
-            preserve_run_root: Cell::new(true),
+            preserve_run_root: AtomicBool::new(true),
             tempdir: None,
         })
     }
@@ -267,8 +279,46 @@ impl ScenarioHarness {
         }
     }
 
+    pub fn bridge_config_path(&self, node_id: usize) -> Result<PathBuf> {
+        if node_id >= 5 {
+            bail!("invalid bridge node index {node_id}; expected 0..=4");
+        }
+        Ok(self
+            .run_root
+            .join("bridge-configs")
+            .join(format!("bridge-{node_id}-conf.toml")))
+    }
+
+    pub fn private_nockchain_endpoint(&self) -> Result<String> {
+        endpoint_with_offset(5_002, self.port_offset)
+    }
+
+    pub fn public_nockchain_endpoint(&self) -> Result<String> {
+        endpoint_with_offset(5_001, self.port_offset)
+    }
+
+    pub fn public_withdrawal_endpoint(&self) -> Result<String> {
+        endpoint_with_offset(5_202, self.port_offset)
+    }
+
+    pub fn public_withdrawal_http_endpoint(&self) -> Result<String> {
+        let base = endpoint_with_offset(5_302, self.port_offset)?;
+        Ok(format!(
+            "{base}{}",
+            bridge::withdrawal::sequencer::public_http::WITHDRAWAL_PUBLIC_HTTP_PATH
+        ))
+    }
+
+    pub fn bridge_ingress_endpoint(&self, node_id: usize) -> Result<String> {
+        let port = [8_002_u16, 8_003, 8_004, 8_005, 8_006]
+            .get(node_id)
+            .copied()
+            .ok_or_else(|| anyhow!("invalid bridge node index {node_id}; expected 0..=4"))?;
+        endpoint_with_offset(port, self.port_offset)
+    }
+
     pub fn preserve_failure_artifacts(&self) {
-        self.preserve_run_root.set(true);
+        self.preserve_run_root.store(true, Ordering::Relaxed);
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
@@ -276,8 +326,9 @@ impl ScenarioHarness {
         command
             .args(args)
             .current_dir(&self.workspace_root)
-            .env(TEST_RUN_ROOT_ENV, &self.run_root)
-            .env(PORT_OFFSET_ENV, self.port_offset.to_string());
+            .env(TEST_RUN_ROOT_ENV, &self.command_run_root)
+            .env(PORT_OFFSET_ENV, self.port_offset.to_string())
+            .env(PRESERVE_RUNTIME_FILES_ENV, "1");
         if env::var_os(FAKENET_GENESIS_JAM_ENV).is_none() {
             command.env(
                 FAKENET_GENESIS_JAM_ENV,
@@ -289,6 +340,12 @@ impl ScenarioHarness {
         }
         if env::var_os(FAKENET_LOG_DIFFICULTY_ENV).is_none() {
             command.env(FAKENET_LOG_DIFFICULTY_ENV, "1");
+        }
+        if env::var_os(FAKENET_V1_PHASE_ENV).is_none() {
+            command.env(FAKENET_V1_PHASE_ENV, "1");
+        }
+        if env::var_os(FAKENET_BYTHOS_PHASE_ENV).is_none() {
+            command.env(FAKENET_BYTHOS_PHASE_ENV, "1");
         }
         if env::var_os(BASE_BLOCKS_CHUNK_ENV).is_none() {
             command.env(BASE_BLOCKS_CHUNK_ENV, "10");
@@ -766,10 +823,16 @@ impl ScenarioHarness {
         amount_nicks: &str,
         after_nonce: Option<u64>,
     ) -> Result<ObservedDeposit> {
+        let before_height = self.current_nock_height()?;
         self.run_checked_retry(
             &["deposit", "--amount-nicks", amount_nicks],
             Duration::from_secs(E2E_DEPOSIT_SPEND_TIMEOUT_SECS),
         )?;
+        let inclusion_window = before_height
+            .checked_add(10)
+            .context("deposit inclusion height overflow")?;
+        self.wait_for_nock_height_at_least(inclusion_window, Duration::from_secs(180))?;
+        self.run_checked(&["stop", "miner"])?;
         let submitted = self.wait_for_deposit_on_node_after(
             ObservedDepositPhase::Submitted,
             0,
@@ -787,6 +850,14 @@ impl ScenarioHarness {
             &submitted, &successful, "node-0 submitted", "node-0 successful",
         )?;
         assert_successful_deposit_on_all_nodes_after(self, &successful, 360, after_nonce)?;
+        let restart_height = self.current_nock_height()?;
+        self.run_checked(&["start", "miner"])?;
+        self.wait_for_nock_height_at_least(
+            restart_height
+                .checked_add(1)
+                .context("miner restart height overflow")?,
+            Duration::from_secs(120),
+        )?;
         Ok(successful)
     }
 
@@ -988,6 +1059,8 @@ impl ScenarioHarness {
             "supervisor.log".to_string(),
             "node.stderr.log".to_string(),
             "node.stdout.log".to_string(),
+            "miner.stderr.log".to_string(),
+            "miner.stdout.log".to_string(),
         ];
         for node_id in 0..5 {
             log_names.push(format!("bridge-{node_id}.stderr.log"));
@@ -1012,6 +1085,8 @@ impl ScenarioHarness {
             current_dir.join("supervisor.log"),
             current_dir.join("node.stderr.log"),
             current_dir.join("node.stdout.log"),
+            current_dir.join("miner.stderr.log"),
+            current_dir.join("miner.stdout.log"),
         ];
         for node_id in ALL_BRIDGE_NODES {
             paths.push(current_dir.join(format!("bridge-{node_id}.stderr.log")));
@@ -1216,7 +1291,7 @@ fn observe_action_lifecycle(
 
 impl Drop for ScenarioHarness {
     fn drop(&mut self) {
-        let keep_run_root = self.preserve_run_root.get()
+        let keep_run_root = self.preserve_run_root.load(Ordering::Relaxed)
             || std::thread::panicking()
             || env::var(KEEP_RUN_ROOT_ENV).ok().as_deref() == Some("1");
         self.stop();
@@ -1279,6 +1354,37 @@ fn bridge_dev_bin() -> PathBuf {
         })
 }
 
+#[cfg(unix)]
+fn short_command_run_root(run_root: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::symlink;
+    let canonical_run_root = fs::canonicalize(run_root)
+        .with_context(|| format!("failed to canonicalize E2E run root {}", run_root.display()))?;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock precedes Unix epoch")?
+        .as_nanos();
+    for attempt in 0..16_u8 {
+        let alias = PathBuf::from(format!(
+            "/tmp/nbe2e-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        match symlink(&canonical_run_root, &alias) {
+            Ok(()) => return Ok(alias),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to link {}", alias.display()))
+            }
+        }
+    }
+    bail!("failed to allocate a short bridge-dev runtime alias")
+}
+
+#[cfg(not(unix))]
+fn short_command_run_root(run_root: &Path) -> Result<PathBuf> {
+    Ok(run_root.to_path_buf())
+}
+
 fn scenario_tempdir() -> Result<TempDir> {
     TempDirBuilder::new()
         .prefix("bd-")
@@ -1301,6 +1407,13 @@ fn scenario_port_offset(name: &str) -> Result<u16> {
         .fold(0u16, |acc, byte| acc.wrapping_add(u16::from(byte)))
         % 10;
     Ok(10_000 + ((std::process::id() % 1_000) as u16 * 10) + name_hash)
+}
+
+fn endpoint_with_offset(port: u16, offset: u16) -> Result<String> {
+    let port = port
+        .checked_add(offset)
+        .ok_or_else(|| anyhow!("port {port} overflows with offset {offset}"))?;
+    Ok(format!("http://127.0.0.1:{port}"))
 }
 
 fn checked_stdout(args: &[&str], output: Output) -> Result<String> {

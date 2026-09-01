@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 alloy = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true }
 base64 = { workspace = true }
 bridge = { path = "../bridge" }
 bs58 = { workspace = true }
@@ -42,6 +43,7 @@ tokio = { workspace = true, features = [
 ] }
 toml = { workspace = true }
 tonic = { workspace = true }
+wallet-tx-builder.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3 = { workspace = true }

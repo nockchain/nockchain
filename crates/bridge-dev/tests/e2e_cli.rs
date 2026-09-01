@@ -114,7 +114,10 @@ fn sigint_cancels_execution_and_still_runs_shutdown() -> Result<()> {
     let output = child.wait_with_output()?;
     assert!(!output.status.success());
     let report = report_from_output(&output)?;
-    assert_eq!(report.run_dir, run_dir);
+    assert_eq!(
+        fs::canonicalize(&report.run_dir)?,
+        fs::canonicalize(&run_dir)?
+    );
     assert!(report
         .errors
         .iter()

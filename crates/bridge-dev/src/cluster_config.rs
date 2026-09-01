@@ -22,6 +22,8 @@ use crate::artifacts::E2eArtifacts;
 use crate::fork_seeder::{read_contract_state, ForkContractState};
 use crate::fork_state::ForkState;
 use crate::hermetic_deploy::DeploymentFacts;
+pub const BRIDGE_DEV_IRIS_SDK_VERSION_ENV: &str = "BRIDGE_DEV_IRIS_SDK_VERSION";
+
 pub const BRIDGE_ETH_KEYS: [&str; 5] = [
     "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
     "0x5c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362319",
@@ -260,6 +262,7 @@ impl ClusterConfigGenerator {
                     my_nock_key: input.nodes[node_id].nock_private_key.clone(),
                     grpc_address: grpc_address.clone(),
                     nockchain_sequencer_api_address: Some(sequencer_address.clone()),
+
                     base_confirmation_depth: input.base_confirmation_depth,
                     nockchain_confirmation_depth: input.nockchain_confirmation_depth,
                     withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_owned(),
@@ -457,8 +460,9 @@ fn validate_input(input: &ClusterConfigInput) -> Result<(), ClusterConfigError> 
         return Err(ClusterConfigError::DeploymentStateMismatch);
     }
     for artifact in [
-        &input.artifacts.bridge, &input.artifacts.node, &input.artifacts.bridge_jam,
-        &input.artifacts.roswell_jam, &input.artifacts.fakenet_genesis_jam,
+        &input.artifacts.bridge, &input.artifacts.node, &input.artifacts.miner,
+        &input.artifacts.wallet, &input.artifacts.bridge_jam, &input.artifacts.roswell_jam,
+        &input.artifacts.fakenet_genesis_jam,
     ] {
         if !artifact.path.is_file() {
             return Err(ClusterConfigError::MissingArtifact(artifact.path.clone()));

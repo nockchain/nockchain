@@ -24,8 +24,11 @@ use crate::observability::tui::types::{
 use crate::shared::config::{NonceEpochConfig, WithdrawalActivationCutoff};
 use crate::shared::errors::BridgeError;
 use crate::shared::proposer::withdrawal_turn_proposer;
+use crate::shared::runtime::BridgeRuntimeHandle;
+use crate::shared::types::{BaseEventId, Tip5Hash};
 use crate::withdrawal::proposals::{WithdrawalProposalRegistry, WithdrawalTuiRow};
 use crate::withdrawal::submission::WithdrawalSequencerPort;
+use crate::withdrawal::types::WithdrawalId;
 
 pub mod proto {
     #[cfg(feature = "bazel_build")]
@@ -63,6 +66,7 @@ const WITHDRAWAL_TUI_QUEUE_LIMIT: usize = 21;
 #[derive(Clone)]
 pub struct WithdrawalTuiSource {
     pub registry: Arc<WithdrawalProposalRegistry>,
+    pub kernel: Arc<BridgeRuntimeHandle>,
     pub sequencer: Option<Arc<dyn WithdrawalSequencerPort>>,
     pub activation_cutoff: WithdrawalActivationCutoff,
     pub local_node_id: u64,
@@ -74,6 +78,7 @@ pub struct BridgeTuiService {
     deposit_log: Arc<DepositLog>,
     nonce_epoch: NonceEpochConfig,
     snapshot_cache: Arc<RwLock<Option<CachedSnapshot>>>,
+    withdrawal_source: Option<WithdrawalTuiSource>,
 }
 
 impl BridgeTuiService {
@@ -122,6 +127,7 @@ impl BridgeTuiService {
             deposit_log,
             nonce_epoch,
             snapshot_cache,
+            withdrawal_source,
         })
     }
 }
@@ -137,6 +143,7 @@ impl BridgeTui for BridgeTuiService {
         metrics.tui_snapshot_requests.increment();
 
         let request = request.into_inner();
+        let withdrawal_target = request.withdrawal_target;
         let view = request
             .deposit_log_view
             .map(deposit_log_view_from_proto)
@@ -195,6 +202,42 @@ impl BridgeTui for BridgeTuiService {
             metrics
                 .tui_snapshot_uncached_load_time
                 .add_timing(&uncached_started.elapsed());
+        }
+        if let Some(target) = withdrawal_target {
+            let source = self
+                .withdrawal_source
+                .as_ref()
+                .ok_or_else(|| Status::unavailable("withdrawal kernel source is not configured"))?;
+            let as_of = Tip5Hash::from_be_limb_bytes(&target.as_of).map_err(|error| {
+                Status::invalid_argument(format!("invalid target as_of: {error}"))
+            })?;
+            if target.base_event_id.len() != 32 {
+                return Err(Status::invalid_argument(
+                    "target base_event_id must be exactly 32 bytes",
+                ));
+            }
+            let id = WithdrawalId {
+                as_of,
+                base_event_id: BaseEventId(target.base_event_id),
+            };
+            let unsettled = source
+                .kernel
+                .peek_unsettled_withdrawals()
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!(
+                        "failed to query target kernel withdrawal: {error}"
+                    ))
+                })?
+                .into_iter()
+                .any(|request| request.withdrawal_id() == id);
+            response.target_withdrawal_id = Some(format!(
+                "{}:0x{}",
+                id.as_of.to_base58(),
+                hex_encode(&id.base_event_id.0)
+            ));
+            response.target_base_event_id = Some(id.base_event_id.0);
+            response.target_withdrawal_unsettled = Some(unsettled);
         }
 
         metrics
@@ -314,6 +357,9 @@ impl CachedSnapshot {
             metrics: Some(self.metrics.clone()),
             transactions: Some(self.transactions.clone()),
             withdrawals: Some(self.withdrawals.clone()),
+            target_withdrawal_id: None,
+            target_base_event_id: None,
+            target_withdrawal_unsettled: None,
         }
     }
 }

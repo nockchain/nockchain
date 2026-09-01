@@ -22,6 +22,7 @@ const PACKAGE_NAME: &str = "@nockbox/iris-sdk";
 const PACKAGE_VERSION: &str = "0.3.0";
 const REVISION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const DRIVER_PATH: &str = "dist/e2e/encode-withdrawal-e2e.js";
+const WASM_PATH: &str = "dist/e2e/iris_wasm_bg.wasm";
 
 #[tokio::test]
 async fn resolves_prebuilt_tarball_and_executes_bundled_driver() -> Result<()> {
@@ -45,6 +46,11 @@ async fn resolves_prebuilt_tarball_and_executes_bundled_driver() -> Result<()> {
     assert_eq!(artifact.facts.tarball_sha256, fixture.sha256);
     assert!(artifact.facts.driver_path.starts_with(&run_root));
     assert!(artifact.facts.driver_path.is_file());
+    assert!(artifact
+        .facts
+        .driver_path
+        .with_file_name("iris_wasm_bg.wasm")
+        .is_file());
     let response = artifact.driver.invoke_json(&json!({"probe": true})).await?;
     assert_eq!(response, json!({"ok": true, "request": {"probe": true}}));
     Ok(())
@@ -234,6 +240,7 @@ process.stdin.on('end', () => {
                 .into_bytes(),
         ),
         (DRIVER_PATH.to_owned(), driver),
+        (WASM_PATH.to_owned(), b"fixture wasm\n".to_vec()),
         (
             "test-fixtures/vector.json".to_owned(),
             b"{\"fixture\":true}\n".to_vec(),

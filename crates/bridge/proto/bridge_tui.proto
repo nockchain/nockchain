@@ -7,10 +7,16 @@ enum RunningState {
   RUNNING = 1;
   STOPPED = 2;
 }
+message WithdrawalKernelTarget {
+  bytes as_of = 1; // exactly 40 bytes
+  bytes base_event_id = 2; // exactly 32 bytes
+}
+
 
 message GetSnapshotRequest {
   DepositLogView deposit_log_view = 1;
   AlertView alert_view = 2;
+  WithdrawalKernelTarget withdrawal_target = 3;
 }
 
 message Base58Hash {
@@ -369,6 +375,9 @@ message GetSnapshotResponse {
   MetricsState metrics = 13;
   TransactionState transactions = 14;
   WithdrawalStateSnapshot withdrawals = 15;
+  optional string target_withdrawal_id = 16;
+  optional bytes target_base_event_id = 17;
+  optional bool target_withdrawal_unsettled = 18;
 }
 
 service BridgeTui {

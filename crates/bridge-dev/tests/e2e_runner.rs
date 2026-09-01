@@ -95,11 +95,13 @@ async fn artifact_resolution_failure_still_writes_safe_partial_evidence() -> Res
 fn create_artifacts(root: &Path) -> Result<bridge_dev::artifacts::E2eArtifacts> {
     let bridge = root.join("bridge");
     let node = root.join("node");
+    let miner = root.join("miner");
+    let wallet = root.join("wallet");
     let ctl = root.join("ctl");
     let bridge_jam = root.join("bridge.jam");
     let roswell_jam = root.join("roswell.jam");
     let fakenet = root.join("fakenet.jam");
-    for binary in [&bridge, &node, &ctl] {
+    for binary in [&bridge, &node, &miner, &wallet, &ctl] {
         write_binary(binary)?;
     }
     for jam in [&bridge_jam, &roswell_jam, &fakenet] {
@@ -109,6 +111,8 @@ fn create_artifacts(root: &Path) -> Result<bridge_dev::artifacts::E2eArtifacts> 
     options.require_ctl = true;
     options.overrides = ArtifactOverrides {
         bridge: Some(bridge),
+        miner: Some(miner),
+        wallet: Some(wallet),
         node: Some(node),
         sequencer_ctl: Some(ctl),
         bridge_jam: Some(bridge_jam),

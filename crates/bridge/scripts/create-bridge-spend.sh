@@ -55,9 +55,13 @@ echo "Required:  ${TOTAL_REQUIRED} nicks (amount + fee)"
 echo "Wallet mode: wallet.sh defaults"
 echo ""
 
-echo "Resetting wallet state via --new..."
-run_wallet --new show-balance >/dev/null
-
+if [[ -n "${TEST_DATA_DIR:-}" && -d "${TEST_DATA_DIR}/wallet" ]]; then
+    echo "Reusing isolated wallet state..."
+    run_wallet show-balance >/dev/null
+else
+    echo "Initializing isolated wallet state..."
+    run_wallet --new show-balance >/dev/null
+fi
 echo "Reading wallet notes..."
 LIST_NOTES_OUTPUT="$(run_wallet list-notes)"
 printf '%s\n' "$LIST_NOTES_OUTPUT"
@@ -69,7 +73,7 @@ else
 fi
 
 echo "Creating bridge-deposit transaction with planner-selected ascending inputs..."
-CREATE_OUTPUT="$(run_wallet create-tx --note-selection ascending --fee "$FEE" --recipient "$RECIPIENT_JSON")"
+CREATE_OUTPUT="$(run_wallet create-tx --index 0 --note-selection ascending --fee-nicks "$FEE" --recipient "$RECIPIENT_JSON")"
 printf '%s\n' "$CREATE_OUTPUT"
 
 TX_FILE="$(printf '%s\n' "$CREATE_OUTPUT" | grep -Eo '\./txs/[A-Za-z0-9]+\.tx' | tail -n1 || true)"

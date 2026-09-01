@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::core::loop_policy::BaseObserverLoopPolicy;
 use crate::observability::metrics;
-use crate::shared::base::{query_withdrawals_enabled, validate_base_chain_id};
+use crate::shared::base::{query_withdrawal_contract_gate, validate_base_chain_id};
 use crate::shared::errors::BridgeError;
 
 fn is_rate_limit_error<E: std::fmt::Display>(err: &E) -> bool {
@@ -155,6 +155,19 @@ fn confirmed_base_height(chain_tip: u64, confirmation_depth: u64) -> Option<u64>
     };
     (confirmed_height > 0).then_some(confirmed_height)
 }
+fn validate_observed_message_inbox(
+    expected: Option<Address>,
+    observed: Address,
+) -> Result<(), BridgeError> {
+    if let Some(expected) = expected {
+        if expected != observed {
+            return Err(BridgeError::Config(format!(
+                "public withdrawal MessageInbox mismatch: expected {expected}, observed {observed}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Polls the Base websocket for the latest confirmed height and persists that
 /// monotonic progress into the sequencer's in-memory tracker.
@@ -163,6 +176,7 @@ pub async fn run_confirmed_base_height_watcher(
     expected_chain_id: u64,
     confirmation_depth: u64,
     nock_contract_address: Address,
+    expected_message_inbox_address: Option<Address>,
     tracker: Arc<SequencerBaseHeightTracker>,
     policy: BaseObserverLoopPolicy,
 ) -> Result<(), BridgeError> {
@@ -198,8 +212,16 @@ pub async fn run_confirmed_base_height_watcher(
             }
         };
 
-        match query_withdrawals_enabled(&provider, nock_contract_address).await {
-            Ok(enabled) => tracker.record_withdrawals_enabled(Some(enabled)),
+        match query_withdrawal_contract_gate(&provider, nock_contract_address).await {
+            Ok((observed_message_inbox, enabled)) => {
+                if let Err(error) = validate_observed_message_inbox(
+                    expected_message_inbox_address, observed_message_inbox,
+                ) {
+                    tracker.record_withdrawals_enabled(None);
+                    return Err(error);
+                }
+                tracker.record_withdrawals_enabled(Some(enabled));
+            }
             Err(error) => {
                 tracker.record_withdrawals_enabled(None);
                 warn!(
@@ -241,7 +263,11 @@ pub async fn run_confirmed_base_height_watcher(
 
 #[cfg(test)]
 mod tests {
-    use super::{confirmed_base_height, SequencerBaseHeightTracker};
+    use alloy::primitives::Address;
+
+    use super::{
+        confirmed_base_height, validate_observed_message_inbox, SequencerBaseHeightTracker,
+    };
 
     #[test]
     fn confirmed_base_height_is_monotonic() {
@@ -290,6 +316,16 @@ mod tests {
         assert_eq!(tracker.withdrawals_enabled(), Some(true));
         tracker.record_withdrawals_enabled(None);
         assert_eq!(tracker.withdrawals_enabled(), None);
+    }
+
+    #[test]
+    fn configured_message_inbox_must_match_the_observed_nock_pair() {
+        let observed = Address::from([0x11; 20]);
+        assert!(validate_observed_message_inbox(None, observed).is_ok());
+        assert!(validate_observed_message_inbox(Some(observed), observed).is_ok());
+        assert!(
+            validate_observed_message_inbox(Some(Address::from([0x22; 20])), observed).is_err()
+        );
     }
 
     #[test]
