@@ -1,0 +1,30 @@
+[package]
+name = "honk-grpc"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "honkd"
+path = "src/bin/honkd.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+honk = { workspace = true }
+honk-grpc-proto = { workspace = true }
+honk-service = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tonic-reflection = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "ansi"] }
+
+[dev-dependencies]
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

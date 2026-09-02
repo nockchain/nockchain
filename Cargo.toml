@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ai-pow", "crates/ai-pow-miner", "crates/ai-pow-jets", "crates/ai-pow-zk", "crates/bridge", "crates/bridge-dev", "crates/equix-latency", "crates/habit", "crates/hatch", "crates/honc-cold-138", "crates/honk", "crates/honk-tools", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/roswell", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-bridge-sequencer", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-mining-common", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/roswell", "crates/wallet-tx-builder", "crates/zk-pow-miner", "crates/zkvm-jetpack"]
+members = ["crates/ai-pow", "crates/ai-pow-miner", "crates/ai-pow-jets", "crates/ai-pow-zk", "crates/bridge", "crates/bridge-dev", "crates/equix-latency", "crates/habit", "crates/hatch", "crates/honc-cold-138", "crates/honk", "crates/honk-grpc", "crates/honk-grpc-proto", "crates/honk-lsp", "crates/honk-service", "crates/honk-tools", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/roswell", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-bridge-sequencer", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-mining-common", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/roswell", "crates/wallet-tx-builder", "crates/zk-pow-miner", "crates/zkvm-jetpack"]
 # `pearl/` is the Rust 2024 upstream reference implementation, vendored for
 # cross-comparison only. Nockchain's Plonky3-recursion changes live in the
 # pinned public fork used by `ai-pow-zk`'s recursion feature.
@@ -86,6 +86,7 @@ criterion = { git = "https://github.com/vlovich/criterion.rs.git", rev = "9b485a
     "html_reports",
 ] }
 crossterm = "0.29"
+crossbeam-channel = "0.5.15"
 curve25519-dalek = { version = "4.1.1", default-features = false }
 dashmap = "6.1.0"
 deadpool-diesel = { version = "0.6.1", features = ["rt_tokio_1", "sqlite"] }
@@ -113,6 +114,8 @@ image = "0.24.7"
 instant-acme = "0.7.2"
 intmap = "3.1.0"
 lazy_static = "1.4.0"
+lsp-server = "0.9.0"
+lsp-types = "0.97.0"
 libc = "0.2.171"
 libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d" }
 libsqlite3-sys = { version = "0.35.0", features = ["bundled"] }
@@ -228,6 +231,7 @@ tracing-test = "0.2.5"
 tracing-tracy = { version = "0.11.4" }
 tracy-client = { version = "0.18.2" }
 unroll = "0.1.5"
+url = "2.5.4"
 uuid = { version = "1.23.1", features = ["v4"] }
 vergen = "8.3.2"
 void = "1.0.2"
@@ -280,6 +284,21 @@ path = "crates/nockvm/rust/murmur3"
 
 [workspace.dependencies.nockapp]
 path = "crates/nockapp"
+
+[workspace.dependencies.honk]
+path = "crates/honk"
+
+[workspace.dependencies.honk-grpc]
+path = "crates/honk-grpc"
+
+[workspace.dependencies.honk-grpc-proto]
+path = "crates/honk-grpc-proto"
+
+[workspace.dependencies.honk-lsp]
+path = "crates/honk-lsp"
+
+[workspace.dependencies.honk-service]
+path = "crates/honk-service"
 
 [workspace.dependencies.nockapp-grpc]
 path = "crates/nockapp-grpc"

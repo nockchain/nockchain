@@ -15,6 +15,7 @@ pub mod nasm_bridge;
 pub mod native;
 pub mod pipeline;
 pub mod types;
+pub mod workspace;
 
 use hatch::ast::hoon::Hoon;
 use nockapp::noun::slab::NounSlab;
@@ -22,7 +23,10 @@ use nockvm::noun::{Noun, NounAllocator, NounSpace, D, T};
 
 use crate::arm_map::ArmMap;
 use crate::errors::Result;
-pub use crate::errors::{CompilerErrorKind, CompilerErrorLocation, CompilerErrorMetadata};
+pub use crate::errors::{
+    CompilerErrorKind, CompilerErrorLocation, CompilerErrorMetadata, CompilerResolutionFact,
+    CompilerSemanticFact,
+};
 use crate::native::NativeCompiler;
 use crate::types::TypeNoun;
 
