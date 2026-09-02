@@ -175,6 +175,10 @@ against other long-lived allocator/cache growth. The final response sets
 `restart_required`, then the server shuts down gracefully so a client or editor
 host can relaunch it. `--max-compiles 0` disables rotation for controlled use.
 
+The reproducible editor latency and sustained-memory scenarios are documented
+in [`HONK-LSP-PERFORMANCE.md`](HONK-LSP-PERFORMANCE.md). They measure compiler
+cache hits and invalidations separately from semantic and LSP protocol work.
+
 ## Toward LSP and annotated trees
 
 The implemented first layer uses the current immutable `Hoon` tree plus stable

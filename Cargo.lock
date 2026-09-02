@@ -4804,6 +4804,7 @@ dependencies = [
  "crossbeam-channel",
  "honk",
  "honk-service",
+ "libc",
  "lsp-server",
  "lsp-types",
  "serde",

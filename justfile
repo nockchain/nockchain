@@ -138,6 +138,15 @@ honk-nockasm-serialization-bench: build-honk
     target/release/honk --new --output target/honk-nockasm-serialization/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
     HONK_KERNEL_JAM=target/honk-nockasm-serialization/dumb.jam HONK_BENCH_REPORT=target/honk-nockasm-serialization/results.txt cargo bench -p honk-tools --bench kernel_serialization
 
+# Measure editor-facing compiler checks, semantic queries, LSP responsiveness
+# under a background compiler load, and RSS across 256 invalidating edits.
+honk-lsp-performance:
+    cargo bench -p honk-lsp --bench lsp_performance -- --samples 20 --warmups 3 --sustained-checks 256
+
+# Fast correctness pass for the harness itself. Results are smoke evidence only.
+honk-lsp-performance-smoke:
+    cargo bench -p honk-lsp --bench lsp_performance -- --quick --skip-contention
+
 # Compare every honk-built kernel against the hoonc-built reference.
 # PASS requires byte equality or a dir-hash-only difference (proven by
 # substitution + rejam). See jam-diff --kernel-parity.

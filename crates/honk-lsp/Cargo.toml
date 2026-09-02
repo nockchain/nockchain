@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 name = "honk-lsp"
 path = "src/bin/honk-lsp.rs"
 
+[[bench]]
+name = "lsp_performance"
+harness = false
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
@@ -25,6 +29,7 @@ url = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
+libc = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
