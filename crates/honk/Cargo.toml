@@ -9,6 +9,12 @@ build = "build.rs"
 name = "honk"
 path = "src/bin/honk.rs"
 
+# The build-trap evaluator: fires what `honk --arbitrary` emits. Installs
+# alongside honk; downstream harnesses conventionally rename it honk-kick.
+[[bin]]
+name = "kick"
+path = "src/bin/kick.rs"
+
 [dependencies]
 blake3 = { workspace = true }
 chumsky = "0.10"

@@ -1,0 +1,47 @@
+name: honk kick
+
+# Smoke test for `kick`, the build-trap evaluator. The traps are assembled in
+# the test itself rather than compiled, so the whole suite runs in seconds and
+# needs none of the heavy Bazel machinery the parity workflow does; the wall
+# clock here is a cold cargo build of the honk crate and its dependencies.
+
+on:
+  push:
+    branches: ["master", "nightly"]
+    paths:
+      - "crates/honk/**"
+      - "crates/nockapp/**"
+      - "crates/nockvm/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/honk-kick.yml"
+  pull_request:
+    branches: ["master", "nightly"]
+    paths:
+      - "crates/honk/**"
+      - "crates/nockapp/**"
+      - "crates/nockvm/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/honk-kick.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: honk-kick-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kick-smoke:
+    name: kick smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Test kick (fire, axis, timeout, bad input)
+        run: cargo test -p honk --test kick_cli

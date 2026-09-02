@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -18,16 +17,16 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use hatch::ast::hoon::{Hoon, Limb};
 use hatch::utils::hoon_to_noun;
 use honk::build_cache::{BuildCache, CacheObjectKind, CacheRead, CacheWrite};
+use honk::eval::{catch_nock_panic, create_eval_context};
 use honk::nasm_bridge::SlabToNockasm;
 use honk::native::formula::comb;
-use honk::native::hot::native_hot_state;
 use honk::native::noun::term_to_noun;
 use honk::native::ut::{ty_noun, Ut};
 use honk::pipeline;
 use honk::pipeline::{NativeImportKind, ScopeMode};
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::noun::{BrandedEvalExt, BrandedNounSpaceExt, NounAllocatorExt};
-use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
+use nockapp::utils::NOCK_STACK_SIZE_MEDIUM;
 use nockapp::AtomExt;
 use nockvm::ext::NounExt;
 use nockvm::hamt::Hamt;
@@ -36,8 +35,7 @@ use nockvm::jets::cold::{Cold, Nounable};
 use nockvm::jets::math::util::lth_b;
 use nockvm::jets::nock::util::mook;
 use nockvm::jets::warm::Warm;
-use nockvm::jets::JetDispatchMode;
-use nockvm::mem::{AllocationError, NockStack};
+use nockvm::mem::NockStack;
 use nockvm::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
 use nockvm::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, DIRECT_MAX, T};
 use nockvm::serialization::jam as nock_jam;
@@ -4087,26 +4085,6 @@ fn jam_standard_kernel_trap_native(
     })
 }
 
-// Constant-fold evaluation interns shared mack-core copies on the eval
-// stack for the lifetime of each entry compile; 16GB fills up on
-// fold-heavy kernels (tx-engine digests), and exhaustion silently degrades
-// folds to step evaluation. The reservation is virtual, so size it well
-// above observed peaks.
-const HONK_EVAL_STACK_SIZE: usize = NOCK_STACK_SIZE_MEDIUM; // 16GB
-
-fn create_eval_context() -> Context {
-    let mut stack = NockStack::new(HONK_EVAL_STACK_SIZE, 0);
-    let cold = Cold::new(&mut stack);
-    create_context(
-        stack,
-        native_hot_state(),
-        cold,
-        None,
-        vec![],
-        JetDispatchMode::HintBlind,
-    )
-}
-
 fn eval_formula_noun_in_context(
     eval_context: &mut Context,
     formula: Noun,
@@ -4380,30 +4358,6 @@ fn slam_gate_formula<A: NounAllocator>(allocator: &mut A) -> Noun {
     let slot2 = T(allocator, &[D(0), D(2)]);
     let edit_gate = T(allocator, &[D(10), edit_axis6, slot2]);
     T(allocator, &[D(9), D(2), edit_gate])
-}
-
-fn catch_nock_panic<T>(label: impl Into<String>, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let label = label.into();
-    match panic::catch_unwind(AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(payload) => {
-            let detail = payload
-                .downcast_ref::<AllocationError>()
-                .map(|err| format!(": {err}"))
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<String>()
-                        .map(|err| format!(": {err}"))
-                })
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<&'static str>()
-                        .map(|err| format!(": {err}"))
-                })
-                .unwrap_or_default();
-            Err(format!("{label}: nock stack panic{detail}").into())
-        }
-    }
 }
 
 fn trace_native(message: impl AsRef<str>) {
