@@ -1,10 +1,5 @@
 # Nockchain
 
-Status: Active
-Owner: Nockchain Maintainers
-Last Reviewed: 2026-02-19
-Canonical/Legacy: Canonical (quickstart lane; protocol authority routes through [`PROTOCOL.md`](./PROTOCOL.md))
-
 ## What is Nockchain?
 
 Nockchain is a Proof-of-Work blockchain built around verifiable Nock
@@ -12,13 +7,6 @@ computation. Its Hoon consensus kernel runs as a NockApp on NockVM; miners prove
 block-bound Nock execution with STARKs, while nodes verify proofs and maintain a
 UTXO ledger. Applications execute offchain as sovereign NockApps and can settle
 verifiable results to the shared chain.
-
-Nockchain is intended to combine Bitcoin-like monetary discipline with a market
-for verifiable computation. Its native asset, `$NOCK`, has a fixed 2³²-unit
-supply cap; transactions use a UTXO model and size-based fees; mining rewards
-proof-producing work. The same NockApp interface is used by the chain,
-applications, wallets, miners, and operator tooling, so independently operated
-systems can exchange nouns and proofs without sharing an execution environment.
 
 For a guide to the open Rust crates, see [`TOC.md`](./TOC.md).
 
@@ -29,34 +17,63 @@ and protocol candidates. Protocol activation and consensus authority come from
 [`changelog/protocol/`](./changelog/protocol/), not from summaries in this
 README.
 
-## What Nockchain is intended to be
+## Core thesis and components
 
-The design has three connected goals:
+The [vision overview](./vision/nockchain-eli5.md) states the core thesis:
+**Private, programmable money powered by energy and Compute.**
+The product is private, programmable money. Proof-of-Work grounds it in
+expended energy, while Compute Networks organize useful computation into
+consensus security.
 
-1. **Programmable sound money.** `$NOCK` should remain scarce and
-   censorship-resistant while applications express richer outcomes offchain.
-   Nodes settle ownership and ordering; proofs attest that private or expensive
-   computation produced an acceptable result without requiring every node to
-   repeat the computation.
-2. **A market for useful proofpower.** Proof-of-Work should purchase
-   computational output that has value beyond choosing the next block.
-   ZK-PoW over NockVM execution is the first work market. The protocol is
-   intended to support additional, independently priced useful-work puzzles
-   without weakening deterministic validation or accumulated-work fork choice.
-3. **Sovereignty at the edge.** NockApps run with their own state, resources,
-   and consistency rules. They can interact locally, over the network, or with
-   the base chain through the same noun-oriented interface, then use proofs and
-   the chain for the guarantees that need shared settlement.
+That thesis has three connected components:
 
-The intended result is a compact base layer for money, ordering, and proof
-verification, surrounded by sovereign applications and competitive compute
-markets. The public [project overview](https://docs.nockchain.org/architecture/why-nockchain),
-[NockApp guide](https://docs.nockchain.org/nockapp/what-is-nockapp), and
-[tokenomics guide](https://docs.nockchain.org/usdnock-asset/overview) cover that
-direction in more depth.
+1. [**Money.**](./vision/nockchain-eli5.md#money) `NOCK` is Nockchain's native
+   money: a scarce common asset with a fixed 2³²-unit supply cap, used for
+   transfers, fees, and block rewards. NockApps make that money programmable
+   while the base asset stays simple.
+2. [**NockApps.**](./vision/nockchain-eli5.md#nockapps) NockApps are sovereign
+   applications written as Nock programs. The proposed general-purpose Nock
+   ZKVM design lets a NockApp prove a private or expensive state transition so
+   nodes can verify the result without rerunning the program or seeing its
+   private inputs.
+3. [**Compute Networks.**](./vision/nockchain-eli5.md#compute-networks) Each
+   Compute Network defines computation that can produce valid Nockchain blocks.
+   Independent providers perform the work, winning attempts earn `NOCK`, and
+   nodes combine each network's independently measured work in the chain's
+   accumulated-work fork choice.
+
+The economic loop connects the three: users and NockApps request useful
+computation; independent providers serve those requests and use the same work as
+mining attempts; winning attempts produce blocks and `NOCK` rewards; and
+Nockchain settles transfers and proven application state changes. Most attempts
+do not produce a block, but still deliver the useful result requested by the
+customer.
+
+The first two Compute Network designs show how that loop applies to specific
+workloads:
+
+- [**The ZK Compute Network**](./vision/zk-compute-network-eli5.md) currently
+  secures Nockchain with a fixed ZK puzzle. The proposed general-purpose design
+  uses customer-requested Nock proofs both for NockApp state transitions and as
+  mining attempts.
+- [**The AI Compute Network**](./vision/ai-compute-network-eli5.md) is the
+  proposed AI-inference design: independent inference miners serve customers
+  through competing aggregators and use the same matrix work as mining attempts.
+
+The current transaction engine does not yet verify general NockApp proofs.
+`NOCK` privacy, general NockApp proof verification, and the useful-work ZK and
+AI designs are proposed rather than active consensus rules. The vision documents
+explain the intended system; [`PROTOCOL.md`](./PROTOCOL.md)
+and [`changelog/protocol/`](./changelog/protocol/) remain authoritative for
+what the live protocol accepts. For more background, see the public project [overview](https://docs.nockchain.org/architecture/why-nockchain),
+the [NockApp guide](https://docs.nockchain.org/nockapp/what-is-nockapp), and the [tokenomics guide](https://docs.nockchain.org/usdnock-asset/overview).
 
 ## Choose a path
 
+- **Understand the vision:** read the
+  [Nockchain overview](./vision/nockchain-eli5.md), then the focused
+  [ZK Compute Network](./vision/zk-compute-network-eli5.md) and
+  [AI Compute Network](./vision/ai-compute-network-eli5.md) explanations.
 - **Operate a node:** use the public
   [node operator guide](https://docs.nockchain.org/architecture/why-nockchain/running-a-node)
   for the network and deployment model, then the [setup](#setup) and
@@ -103,6 +120,7 @@ wallets and applications              external miners
 
 | Area | Entry points |
 |---|---|
+| Vision and Compute Networks | [Nockchain](vision/nockchain-eli5.md), [ZK Compute Network](vision/zk-compute-network-eli5.md), [AI Compute Network](vision/ai-compute-network-eli5.md) |
 | Node and runtime | [`crates/nockchain`](crates/nockchain/), [`crates/nockapp`](crates/nockapp/), [`crates/nockvm`](crates/nockvm/) |
 | Consensus and kernels | [`hoon/apps/dumbnet`](hoon/apps/dumbnet/), [`changelog/protocol`](changelog/protocol/) |
 | Networking and APIs | [`crates/nockchain-libp2p-io`](crates/nockchain-libp2p-io/), [`crates/nockapp-grpc`](crates/nockapp-grpc/), [`crates/nockchain-api`](crates/nockchain-api/) |

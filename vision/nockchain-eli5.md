@@ -1,6 +1,6 @@
 # Nockchain
 
-**Nockchain is a protocol for programmable money powered by Compute Networks. NOCK is programmable gold, soon-to-be private. NockApps give the Nockchain economy private, programmable applications. Compute Networks turn computation into the work that secures the chain.**
+**Private, programmable money powered by energy and Compute. NOCK is programmable gold, soon-to-be private. NockApps give the Nockchain economy private, programmable applications. Compute Networks turn computation into the work that secures the chain.**
 
 The design has three parts:
 
@@ -76,7 +76,7 @@ Compute Networks turn customer demand and independent hardware into security for
 
 More demand can support more compute providers. More providers can increase useful capacity and the work that secures Nockchain.
 
-This is how Nockchain can coordinate decentralized hyperscalers without making the hyperscaler the product. The product is programmable money. The Compute Networks power it.
+This is how Nockchain can coordinate decentralized hyperscalers without making the hyperscaler the product. The product is private, programmable money. Energy and the Compute Networks power it.
 
 ## Where Participants Fit
 
@@ -105,4 +105,4 @@ flowchart TB
   T --> M
 ```
 
-NOCK is the money. NockApps make it programmable. Compute Networks power and secure the system.
+Private, programmable money powered by energy and Compute.
