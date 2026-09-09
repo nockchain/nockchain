@@ -10,7 +10,7 @@
 pub const BACKBONE_NODES: &[&str] = &[
     "/ip4/216.158.74.98/udp/33000/quic-v1", "/ip4/23.252.122.178/udp/33000/quic-v1",
     "/ip4/173.231.48.98/udp/33000/quic-v1", "/dnsaddr/nockchain-backbone.nockbox.org",
-    "/dnsaddr/public.nockblocks.com", "/ip4/23.252.122.18/udp/33000/quic-v1",
+    "/dnsaddr/public.nockblocks.com", "/ip4/216.158.95.10/udp/33000/quic-v1",
     "/ip4/34.150.94.224/udp/3006/quic-v1",
 ];
 

@@ -134,7 +134,7 @@ All four checks must pass without suppressed errors. Confirm that the steady-sta
 1. Build the GPU image for Linux/amd64 with CUDA 12.8 and `sm_120` support.
 2. Start an RTX 5090 Runpod instance with a persistent container command.
 3. Confirm the allocated device with `nvidia-smi`.
-4. Run the image with `NODE_ADDR=http://23.252.122.18:5556`. Do not override
+4. Run the image with `NODE_ADDR=http://216.158.95.10:5556`. Do not override
    the image's default `MINING_PKH`,
    `2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j`.
 5. Submit proofs to the mainnet API node maintained by the sibling `solo/`
@@ -178,7 +178,7 @@ zero-target, adjacent-batch, template-replacement, scalar-winner, recursive
 proof, production-verifier, and proof-wire checks pass.
 
 Runpod proof-submission validation uses the public mainnet API node maintained
-by the sibling `solo/` Ansible directory at `http://23.252.122.18:5556`. The
+by the sibling `solo/` Ansible directory at `http://216.158.95.10:5556`. The
 container uses its default Docker mining key. A Runpod validation must not
 start or connect to a fakenet. One-device and two-device RTX 5090 sessions have
 completed the production startup and search gates.

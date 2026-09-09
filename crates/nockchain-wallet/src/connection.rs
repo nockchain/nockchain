@@ -9,6 +9,8 @@ use wallet_tx_builder::adapter::NormalizedSnapshot;
 use crate::command::ClientType;
 use crate::Wallet;
 
+const DEFAULT_PUBLIC_GRPC_SERVER_ADDR: &str = "216.158.95.10:5556";
+
 #[derive(Args, Debug, Clone)]
 pub(crate) struct ConnectionCli {
     /// Which client to connect to: public or private
@@ -20,7 +22,7 @@ pub(crate) struct ConnectionCli {
     pub private_grpc_server_port: u16,
 
     /// Address of the public server (host[:port] or URI)
-    #[arg(long, value_parser = GrpcEndpoint::parse, default_value = "23.252.122.18:5556", global = true)]
+    #[arg(long, value_parser = GrpcEndpoint::parse, default_value = DEFAULT_PUBLIC_GRPC_SERVER_ADDR, global = true)]
     pub public_grpc_server_addr: GrpcEndpoint,
 }
 
@@ -198,7 +200,12 @@ fn connection_error<E: std::fmt::Display>(kind: &str, endpoint: &str, err: E) ->
 
 #[cfg(test)]
 mod tests {
-    use super::GrpcEndpoint;
+    use super::{GrpcEndpoint, DEFAULT_PUBLIC_GRPC_SERVER_ADDR};
+    #[test]
+    fn default_public_endpoint_targets_community_api() {
+        let parsed = GrpcEndpoint::parse(DEFAULT_PUBLIC_GRPC_SERVER_ADDR).unwrap();
+        assert_eq!(parsed.to_string(), "http://216.158.95.10:5556");
+    }
 
     #[test]
     fn accepts_explicit_http_host_and_port() {

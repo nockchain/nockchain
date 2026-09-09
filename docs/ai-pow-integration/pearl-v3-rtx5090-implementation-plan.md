@@ -202,7 +202,7 @@ Gate on every available device count:
 ## Stage 9: Runpod production flow
 
 Build a CUDA 12.8 or newer Linux/amd64 image for `sm_120`. Start RTX 5090 pods
-with only `NODE_ADDR=http://23.252.122.18:5556` and the production mining key.
+with only `NODE_ADDR=http://216.158.95.10:5556` and the production mining key.
 Do not start or connect to a fakenet.
 
 Verify:
