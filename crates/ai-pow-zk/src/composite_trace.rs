@@ -731,7 +731,7 @@ impl CompositeTrace {
                 } else {
                     &[]
                 };
-                let cv_source = (b > 0).then_some(row - 1);
+                let cv_source = (b > 0).then(|| row - 1);
                 chunk_cv = self.place_blake3_hash_with_selectors_and_cv_source(
                     row,
                     &message,
@@ -976,7 +976,7 @@ impl CompositeTrace {
                 &[]
             };
             let cr = *row; // the round-0 (IS_NEW_BLAKE) row of this block
-            let cv_source = (b > 0).then_some(cr - 1);
+            let cv_source = (b > 0).then(|| cr - 1);
             cv = self.place_blake3_hash_with_selectors_and_cv_source(
                 cr,
                 &message,
