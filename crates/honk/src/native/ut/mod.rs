@@ -54,6 +54,7 @@ use crate::native::noun::{noun_eq_direct, noun_pair};
 mod find;
 mod fire;
 mod repo;
+mod semantic;
 #[cfg(test)]
 pub mod test;
 pub mod types;
@@ -275,6 +276,9 @@ impl Drop for HoonAstScope<'_, '_, '_> {
 
 type SemanticLocationKey = (String, u64, u64, u64, u64);
 type SemanticResolutionKey = (SemanticLocationKey, SemanticLocationKey, String);
+/// A hold's editor name and, failing one, the head of the call its arm
+/// body makes; see `Ut::semantic_hold_name`.
+type SemanticHoldName = (Option<Arc<str>>, Option<Arc<str>>);
 pub struct Ut<'a> {
     pub slab: &'a mut NounSlab,
     // Canonical Nock formula graph. Formula-producing compiler paths migrate to
@@ -301,6 +305,11 @@ pub struct Ut<'a> {
     semantic_type_fact_keys: HashSet<SemanticLocationKey>,
     semantic_resolution_facts: Vec<CompilerResolutionFact>,
     semantic_resolution_fact_keys: HashSet<SemanticResolutionKey>,
+    // Editor names for interned holds, keyed by arena id (stable for this
+    // compile context, like `hold_repo_fan_leg_id_by_ptr`), and the mold
+    // each normalizing gate was built for, keyed by its `$` arm body noun.
+    semantic_hold_names: FastHashMap<u32, SemanticHoldName>,
+    semantic_factory_molds: FastHashMap<u64, Arc<str>>,
     // Memoization tables. New cache keys should derive semantic/memo state from the helper
     // accessors below rather than hand-assembling context tuples at each cache surface.
     // Recursion / in-progress guards. These are not caches; they constrain valid memo reuse and
@@ -2145,6 +2154,8 @@ impl<'a> Ut<'a> {
             semantic_type_fact_keys: HashSet::new(),
             semantic_resolution_facts: Vec::new(),
             semantic_resolution_fact_keys: HashSet::new(),
+            semantic_hold_names: Default::default(),
+            semantic_factory_molds: Default::default(),
             arm_in_progress: HashSet::new(),
             arm_goal_in_progress: Vec::new(),
             arm_placeholder_play_in_progress: HashSet::new(),
@@ -4267,8 +4278,8 @@ impl<'a> Ut<'a> {
         let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
             if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
-                if let Hoon::Dbug(spot, _) = gen {
-                    self.record_semantic_type(spot, &cached.0);
+                if let Hoon::Dbug(spot, inner) = gen {
+                    self.record_semantic_type(spot, &cached.0, inner);
                 }
                 return Ok(cached);
             }
@@ -4534,25 +4545,6 @@ impl<'a> Ut<'a> {
         Some(node)
     }
 
-    const SEMANTIC_FACT_LIMIT: usize = 100_000;
-
-    fn record_semantic_type(&mut self, spot: &Spot, ty: &NRc<NTy>) {
-        if !self.semantic_recording || self.semantic_type_facts.len() >= Self::SEMANTIC_FACT_LIMIT {
-            return;
-        }
-        let location = Self::location_from_spot(spot);
-        let Some(key) = Self::semantic_location_key(&location) else {
-            return;
-        };
-        if !self.semantic_type_fact_keys.insert(key) {
-            return;
-        }
-        self.semantic_type_facts.push(CompilerSemanticFact {
-            location,
-            type_summary: Self::semantic_type_summary(ty, 0),
-        });
-    }
-
     fn record_semantic_resolution(&mut self, name: &str, definition: Noun) {
         if !self.semantic_recording
             || self.semantic_resolution_facts.len() >= Self::SEMANTIC_FACT_LIMIT
@@ -4604,53 +4596,6 @@ impl<'a> Ut<'a> {
             location.end_line?,
             location.end_col?,
         ))
-    }
-
-    fn semantic_type_summary(ty: &NRc<NTy>, depth: usize) -> String {
-        if depth >= 4 {
-            return "…".to_string();
-        }
-        match &**ty {
-            NTy::Void => "%void".to_string(),
-            NTy::Noun => "*".to_string(),
-            NTy::Atom { aura, .. } => Self::semantic_leaf_term(aura)
-                .filter(|aura| !aura.is_empty())
-                .map_or_else(|| "@".to_string(), |aura| format!("@{aura}")),
-            NTy::Cell(head, tail) => format!(
-                "[{} {}]",
-                Self::semantic_type_summary(head, depth + 1),
-                Self::semantic_type_summary(tail, depth + 1)
-            ),
-            NTy::Core { payload, garb, .. } => {
-                let payload = Self::semantic_type_summary(payload, depth + 1);
-                garb.nym.as_deref().map_or_else(
-                    || format!("core({payload})"),
-                    |name| format!("{name}({payload})"),
-                )
-            }
-            NTy::Face { tool, inner } => {
-                let inner = Self::semantic_type_summary(inner, depth + 1);
-                Self::semantic_leaf_term(tool).map_or_else(
-                    || format!("face({inner})"),
-                    |name| format!("{name}={inner}"),
-                )
-            }
-            NTy::Hint { payload, .. } => Self::semantic_type_summary(payload, depth + 1),
-            NTy::Fork { .. } => "%fork".to_string(),
-            NTy::Hold { .. } => "%hold".to_string(),
-        }
-    }
-
-    fn semantic_leaf_term(leaf: &Leaf) -> Option<String> {
-        let Leaf::Direct(value) = leaf else {
-            return None;
-        };
-        let bytes = value.to_le_bytes();
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        std::str::from_utf8(&bytes[..end]).ok().map(str::to_string)
     }
 
     fn decorate_error(&self, err: CompilerError) -> CompilerError {
@@ -5750,7 +5695,9 @@ impl<'a> Ut<'a> {
         spec: &Spec,
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let opened = self.spec_factory_open_cached(spec);
-        self.mint(sut, gol, opened.as_ref())
+        let minted = self.mint(sut, gol, opened.as_ref())?;
+        self.note_factory_mold(spec, &minted.0);
+        Ok(minted)
     }
 
     fn mint_ktsg(
@@ -7126,7 +7073,9 @@ impl<'a> Ut<'a> {
 
     fn play_ktcl(&mut self, sut: NRc<NTy>, spec: &Spec) -> Result<NRc<NTy>> {
         let gen = Hoon::KetCol(Box::new(spec.clone()));
-        self.play_opened(sut, &gen)
+        let played = self.play_opened(sut, &gen)?;
+        self.note_factory_mold(spec, &played);
+        Ok(played)
     }
 
     fn play_dtls(&mut self, _sut: NRc<NTy>, _p: &Hoon) -> Result<NRc<NTy>> {
@@ -8662,7 +8611,7 @@ impl<'a> Ut<'a> {
         let result = self.mint(sut, gol, inner);
         self.dbug_locations.pop();
         let (ty, formula) = result?;
-        self.record_semantic_type(spot, &ty);
+        self.record_semantic_type(spot, &ty, inner);
         let spot_noun = spot_to_noun(self.slab, spot)?;
         let hint_inner = T(self.slab, &[D(1), spot_noun]);
         let spot_tag = term_to_noun(self.slab, "spot");
