@@ -1006,10 +1006,17 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
                             ));
                         }
                         Todo10::Edit => {
-                            res = edit_with_space(
+                            // Invalid edit axes (0, or descending into an atom) bail like slot —
+                            // Deterministic Exit, not unwinding panic via .expect().
+                            match edit_with_space(
                                 &mut context.stack, diet.axis, res, diet.tree, &space,
-                            );
-                            context.stack.pop::<NockWork>();
+                            ) {
+                                Some(edited) => {
+                                    res = edited;
+                                    context.stack.pop::<NockWork>();
+                                }
+                                None => break BAIL_EXIT,
+                            }
                         }
                     }
                 }
@@ -1779,7 +1786,7 @@ fn edit_with_space(
     patch: Noun,
     mut tree: Noun,
     space: &NounSpace,
-) -> Noun {
+) -> Option<Noun> {
     use either::{Left, Right};
 
     use crate::noun::{DirectAxisIterator, IndirectAxisIterator};
@@ -1789,14 +1796,11 @@ fn edit_with_space(
 
     match edit_axis.as_either() {
         Left(direct) => {
-            let mut axis_iter =
-                DirectAxisIterator::new(direct.data()).expect("0 is not allowed as an edit axis");
+            // Axis 0 is not a valid edit axis (mirrors DirectAxisIterator::new → None).
+            let mut axis_iter = DirectAxisIterator::new(direct.data())?;
 
             while let Some(descend_tail) = axis_iter.next() {
-                let tree_cell = tree
-                    .in_space(space)
-                    .as_cell()
-                    .expect("Invalid axis for edit");
+                let tree_cell = tree.in_space(space).as_cell().ok()?;
                 if descend_tail {
                     unsafe {
                         let (cell, cellmem) = Cell::new_raw_mut(stack);
@@ -1821,14 +1825,10 @@ fn edit_with_space(
             let indirect_slice = unsafe {
                 std::slice::from_raw_parts(indirect_handle.data_pointer(), indirect_handle.size())
             };
-            let mut axis_iter = IndirectAxisIterator::new(indirect_slice)
-                .expect("0 is not allowed as an edit axis");
+            let mut axis_iter = IndirectAxisIterator::new(indirect_slice)?;
 
             while let Some(descend_tail) = axis_iter.next() {
-                let tree_cell = tree
-                    .in_space(space)
-                    .as_cell()
-                    .expect("Invalid axis for edit");
+                let tree_cell = tree.in_space(space).as_cell().ok()?;
                 if descend_tail {
                     unsafe {
                         let (cell, cellmem) = Cell::new_raw_mut(stack);
@@ -1853,7 +1853,7 @@ fn edit_with_space(
     unsafe {
         *dest = patch;
     }
-    res
+    Some(res)
 }
 
 pub fn inc(stack: &mut NockStack, atom: Atom) -> Atom {
@@ -2270,5 +2270,107 @@ mod debug {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ibig::UBig;
+
+    use super::*;
+    use crate::jets::util::test::{assert_noun_eq, init_context, A};
+    use crate::noun::{D, T};
+
+    // Regression coverage for opcode 10 (edit): before this patch, an invalid edit axis
+    // (axis 0, or an axis descending into an atom) unwound via `.expect()` in
+    // `edit_with_space` instead of bailing deterministically like the analogous slot
+    // (opcode 0) path already does. See docs/FINDING-nockvm-edit-invalid-axis.md in
+    // nockchain/pure-nock-lean and diff/corpus/known-divergences.nock for the witnesses
+    // these three tests mirror.
+
+    #[test]
+    fn edit_valid_axis_replaces_value() {
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+
+        // *[0 10 [2 [1 99]] [1 [4 5]]] = [99 5]
+        let original = T(stack, &[D(4), D(5)]);
+        let tree_formula = T(stack, &[D(1), original]);
+        let patch_formula = T(stack, &[D(1), D(99)]);
+        let axis_patch = T(stack, &[D(2), patch_formula]);
+        let arg = T(stack, &[axis_patch, tree_formula]);
+        let formula = T(stack, &[D(10), arg]);
+        let subject = D(0);
+
+        let result = interpret(context, subject, formula).expect("valid edit must not error");
+        let expected = T(&mut context.stack, &[D(99), D(5)]);
+        assert_noun_eq(&mut context.stack, result, expected);
+    }
+
+    #[test]
+    fn edit_axis_zero_on_atom_bails_instead_of_panicking() {
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+
+        // [42 10 [0 [1 99]] 0 1] — axis 0 is never a valid edit axis.
+        let patch_formula = T(stack, &[D(1), D(99)]);
+        let axis_patch = T(stack, &[D(0), patch_formula]);
+        let tree_formula = T(stack, &[D(0), D(1)]);
+        let arg = T(stack, &[axis_patch, tree_formula]);
+        let formula = T(stack, &[D(10), arg]);
+        let subject = D(42);
+
+        let result = interpret(context, subject, formula);
+        assert!(
+            matches!(result, Err(Error::Deterministic(Mote::Exit, _))),
+            "expected deterministic BAIL_EXIT, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn edit_axis_descending_into_atom_bails_instead_of_panicking() {
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+
+        // [[1 2] 10 [4 [1 99]] 0 1] — axis 4 descends into the atom `1`, which has no cell.
+        let patch_formula = T(stack, &[D(1), D(99)]);
+        let axis_patch = T(stack, &[D(4), patch_formula]);
+        let tree_formula = T(stack, &[D(0), D(1)]);
+        let arg = T(stack, &[axis_patch, tree_formula]);
+        let formula = T(stack, &[D(10), arg]);
+        let subject = T(stack, &[D(1), D(2)]);
+
+        let result = interpret(context, subject, formula);
+        assert!(
+            matches!(result, Err(Error::Deterministic(Mote::Exit, _))),
+            "expected deterministic BAIL_EXIT, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn edit_indirect_axis_descending_into_atom_bails_instead_of_panicking() {
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+
+        // Same shape as edit_axis_descending_into_atom_bails_instead_of_panicking, but the
+        // axis atom itself is forced into the indirect (bignum) representation, to exercise
+        // `IndirectAxisIterator` — the Right(indirect) branch of edit_with_space, which the
+        // patch changes identically to the Left(direct) branch but which none of the other
+        // tests here reach (D() atoms are always direct: DIRECT_MAX = u64::MAX >> 1).
+        let huge_axis = UBig::from(u64::MAX) << 8; // far above DIRECT_MAX either way
+        let axis = A(stack, &huge_axis);
+
+        let patch_formula = T(stack, &[D(1), D(99)]);
+        let axis_patch = T(stack, &[axis, patch_formula]);
+        let tree_formula = T(stack, &[D(0), D(1)]);
+        let arg = T(stack, &[axis_patch, tree_formula]);
+        let formula = T(stack, &[D(10), arg]);
+        let subject = T(stack, &[D(1), D(2)]);
+
+        let result = interpret(context, subject, formula);
+        assert!(
+            matches!(result, Err(Error::Deterministic(Mote::Exit, _))),
+            "expected deterministic BAIL_EXIT, got {result:?}"
+        );
     }
 }
