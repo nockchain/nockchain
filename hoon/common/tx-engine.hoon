@@ -381,23 +381,20 @@
   ::  and validation (+block-compute-work) both go through it, so a candidate
   ::  can never store an accumulated-work that validation then rejects.
   ::
-  ::  Before AI activation this is the unchanged ZK formula on the block's own
-  ::  target, so every block already on the chain keeps the work it was
-  ::  accepted with. From activation on it is the EXPECTED work at the block's
+  ::  Before the dual-puzzle phase this is the unchanged ZK formula on the
+  ::  block's own target, so every historical block keeps the work it was
+  ::  accepted with. From that phase on it is the EXPECTED work at the block's
   ::  own target for the producing puzzle, priced in ZKPoW-attempt-equivalents:
   ::
   ::  - %dumb-zkpow: 2^320/(target+1) attempts -- identical to the
   ::    pre-activation formula, so ZK weight is continuous across the boundary.
-  ::  - %ai-pow: 2^256/(target+1) MAC-equivalents, converted at
-  ::    +mac-equivalents-per-zk-attempt.
+  ::  - %ai-pow: 2^256/(target+1) MAC-equivalents, converted at the
+  ::    height-selected cross-puzzle exchange rate.
   ::
-  ::  Heaviness therefore scales inversely with target for both puzzles. A
-  ::  branch whose branch-local ASERT drives its target to the ceiling earns
-  ::  proportionally less fork-choice credit per block and cannot win by
-  ::  count. At the launch anchors both lanes produce the same heaviness per
-  ::  second (each anchor prices ~120 5090 GPUs at its ideal cadence), so
-  ::  steady-state puzzle shares still track block rate, without letting a
-  ::  discounted target subsidize a reorg.
+  ::  Heaviness therefore scales inversely with target for both puzzles. The
+  ::  Logos exchange rate is retained below +zk-pow-v5-phase so historical
+  ::  accumulated work remains valid; version %5 switches to Tip5 hash-grinding
+  ::  pricing at the activation height.
   ++  block-work-at
     |=  [height=page-number puzzle=?(%dumb-zkpow %ai-pow) target-bn=bignum:bn]
     ^-  bignum:bn
@@ -405,29 +402,69 @@
       (compute-work:page:v0 target-bn)
     ?-  puzzle
       %dumb-zkpow  (compute-work:page:v0 target-bn)
-      %ai-pow      (ai-pow-work target-bn)
+      %ai-pow      (ai-pow-work height target-bn)
     ==
   ::
   ::  +ai-pow-work: expected MAC-equivalents of matmul work at `target-bn`
-  ::  (2^256/(target+1)), priced in ZKPoW-attempt-equivalents. Mirrors
-  ::  +compute-work:page:v0's GetBlockProof convention, floored at 1.
+  ::  (2^256/(target+1)), priced in ZKPoW-attempt-equivalents at `height`.
+  ::  Mirrors +compute-work:page:v0's GetBlockProof convention, floored at 1.
   ++  ai-pow-work
-    |=  target-bn=bignum:bn
+    |=  [height=page-number target-bn=bignum:bn]
     ^-  bignum:bn
     =/  target-atom=@  (merge:bignum target-bn)
-    =/  raw=@  (div (bex 256) (mul mac-equivalents-per-zk-attempt +(target-atom)))
+    =/  exchange-rate=@  (mac-equivalents-per-zk-attempt-at height)
+    =/  raw=@  (div (bex 256) (mul exchange-rate +(target-atom)))
     (chunk:bignum ?:(=(0 raw) 1 raw))
   ::
-  ::  +mac-equivalents-per-zk-attempt: the cross-puzzle exchange rate, from a
-  ::  2026-07 co-benchmark of the ZK prover and the Pearl mining kernel on one
-  ::  reference consumer GPU (RTX 5090 class): measured MAC-equivalent
-  ::  throughput per measured attempt throughput. The prover-side throughput
-  ::  figure is deliberately not published; the AI side is public via Pearl
-  ::  pool rates. Consensus-critical: every node must use the same value. It
-  ::  need only be stable and roughly track the real hardware ratio; if the
-  ::  ratio drifts, revise it at an upgrade.
-  ++  mac-equivalents-per-zk-attempt
+  ::  Logos priced one ZK prover attempt as 25.75 billion Pearl
+  ::  MAC-equivalents. Keep that value below height 147,500: changing it
+  ::  retroactively would change historical accumulated work.
+  ++  logos-mac-equivalents-per-zk-attempt
     ^~  25.750.000.000
+  ::
+  ::  Version %5 grinds Tip5 hashes rather than complete proof attempts. Public
+  ::  Neptune/OXZD RTX 5090 data measures 388.8 million Tip5 guesses/s; the
+  ::  Pearl reference rate is 400 trillion MAC/s. Rounded to the nearest integer:
+  ::    400,000,000,000,000 / 388,800,000 = 1,028,806.584...
+  ++  mac-equivalents-per-zk-attempt
+    ^~  1.028.807
+  ::
+  ++  mac-equivalents-per-zk-attempt-at
+    |=  height=page-number
+    ^-  @
+    ?:  (lth height zk-pow-v5-phase)
+      logos-mac-equivalents-per-zk-attempt
+    mac-equivalents-per-zk-attempt
+  ::
+  ++  zk-pow-v5-phase
+    ^-  page-number
+    147.500
+  ::
+  ::  Integer ideals target 70.028% AI / 29.972% ZK and a 149.86s combined
+  ::  cadence: AI rate 1/214, ZK rate 1/500.
+  ++  zk-pow-v5-ai-ideal-block-time  ^~  214
+  ++  zk-pow-v5-zk-ideal-block-time  ^~  500
+  ::
+  ::  Anchor each version-%5 ASERT lane to its explicit reference network:
+  ::  2,000 RTX 5090s at 388.8 million Tip5 hashes/s for ZK, and
+  ::  10 ExaMAC/s (10 * 10^18 MAC/s) for AI.
+  ++  zk-pow-v5-reference-zk-gpu-count  ^~  2.000
+  ++  zk-pow-v5-reference-zk-hashes-per-gpu-second  ^~  388.800.000
+  ::
+  ++  zk-pow-v5-reference-zk-hashes-per-second
+    ^-  @
+    (mul zk-pow-v5-reference-zk-gpu-count zk-pow-v5-reference-zk-hashes-per-gpu-second)
+  ::
+  ++  zk-pow-v5-reference-ai-macs-per-second
+    ^~  10.000.000.000.000.000.000
+  ::
+  ++  zk-pow-v5-ai-anchor-target
+    ^-  @
+    (div (bex 256) (mul zk-pow-v5-reference-ai-macs-per-second zk-pow-v5-ai-ideal-block-time))
+  ::
+  ++  zk-pow-v5-zk-anchor-target
+    ^-  @
+    (div max-target-atom (mul zk-pow-v5-reference-zk-hashes-per-second zk-pow-v5-zk-ideal-block-time))
   ::
   ::  +dual-puzzle-phase: the height at which the dual-puzzle regime begins, and
   ::  therefore the first height at which heaviness is priced per puzzle.

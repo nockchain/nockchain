@@ -107,4 +107,16 @@
             ?=(~ heaviest-block.c.loaded)
             ~(wyt h-by blocks.c.loaded)
         ==
+++  test-anthropos-zk-v5-activation-preserves-ai-v4-discriminator
+  =/  v5-start=page-number:t  proof-version-5-start:dcon
+  %+  expect-eq
+    !>([147.500 %3 %5 %5 %ai-pow %dumb-zkpow])
+  !>  :*  v5-start
+          (height-to-proof-version-legacy:dcon (dec v5-start))
+          (height-to-proof-version-legacy:dcon v5-start)
+          (height-to-proof-version-legacy:dcon +(v5-start))
+          (version-to-puzzle-type:dcon %4)
+          (version-to-puzzle-type:dcon %5)
+      ==
+::
 --

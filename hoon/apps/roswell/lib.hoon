@@ -34,6 +34,7 @@
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
       %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 -:puzzle +:puzzle len]
     ==
   (prove:prv in)
 ::
@@ -49,6 +50,7 @@
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
       %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 -:puzzle +:puzzle len]
     ==
   (snapshot:prv in)
 ::
@@ -64,6 +66,7 @@
       %2  [%2 header nonce len]
       %3  [%3 header nonce len]
       %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 header nonce len]
     ==
   (snapshot:prv in)
 ::
@@ -78,6 +81,7 @@
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
       %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 -:puzzle +:puzzle len]
     ==
   (make-proof-stream-window:prv in range)
 ::
@@ -102,11 +106,28 @@
       %2  [%2 header nonce len]
       %3  [%3 header nonce len]
       %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 header nonce len]
     ==
   =/  res  (prove:prv in)
   ?>  ?=(%& -.res)
   ~&  %verifying
-  (verify:vrf proof.p.res override 0)
+  =/  verified=?  (verify:vrf proof.p.res override 0)
+  ?.  =(%5 v)  verified
+  ::  Version %5's proof statement and Fiat-Shamir transcript exclude the
+  ::  mining nonce. Replacing only that field must preserve full verification
+  ::  while producing a different PoW digest.
+  =/  objects=(list proof-data:sp)  objects.proof.p.res
+  ?>  ?=(^ objects)
+  =/  puzzle=proof-data:sp  i.objects
+  ?>  ?=(%puzzle -.puzzle)
+  =/  changed-first=@  ?:(=(0 -:nonce.puzzle) 1 0)
+  =/  changed-nonce=noun-digest:tip5  nonce.puzzle(- changed-first)
+  =/  changed-puzzle=proof-data:sp  puzzle(nonce changed-nonce)
+  =/  changed-proof=proof:sp  [%5 [changed-puzzle t.objects] ~ 0]
+  ?&  verified
+      !=((proof-to-pow:sp proof.p.res) (proof-to-pow:sp changed-proof))
+      (verify:vrf changed-proof override 0)
+  ==
 ::
 ::
 ++  compute

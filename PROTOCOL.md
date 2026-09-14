@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-08-03
+Last Reviewed: 2026-09-14
 Canonical/Legacy: Canonical (protocol authority entrypoint for the nockchain repository)
 
 This is the canonical protocol index for the nockchain repository.
@@ -16,7 +16,8 @@ If protocol guidance conflicts with workflow or crate docs, this page and the li
 
 ## Current Release Track
 
-- Proposed dual proof-of-work activation: [`016-logos.md`](./changelog/protocol/016-logos.md), version `0.1.16`, activation height `126000`, target unset.
+- Proposed ZK-PoW `%5` and 70/30 puzzle allocation: [`017-anthropos.md`](./changelog/protocol/017-anthropos.md), version `0.1.17`, activation height `147500`, target unset.
+- Most recently activated dual proof-of-work upgrade: [`016-logos.md`](./changelog/protocol/016-logos.md), version `0.1.16`, activation height `126000`.
 - Proposed emergency proof/ASERT activation: [`015-zoe.md`](./changelog/protocol/015-zoe.md), version `0.1.15`, activation height `119400`, target `2026-08-06`.
 - Next scheduled activation: [`013-nous.md`](./changelog/protocol/013-nous.md), version `1.0.0`, target `2026-Q2`, rollout-gated (non-consensus, `activation_height = 0`).
 
@@ -30,7 +31,8 @@ Legend:
 
 | Seq | Codename                                 | Version | Status     | Activation Height | Activation Target | Spec                                                                                                  |
 | --- | ---------------------------------------- | ------- | ---------- | ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
-| 016 | Logos                                    | 0.1.16  | draft      | 126000            | -                 | [`016-logos.md`](./changelog/protocol/016-logos.md)                                                   |
+| 017 | Anthropos                                | 0.1.17  | draft      | 147500            | -                 | [`017-anthropos.md`](./changelog/protocol/017-anthropos.md)                                           |
+| 016 | Logos                                    | 0.1.16  | activated  | 126000            | -                 | [`016-logos.md`](./changelog/protocol/016-logos.md)                                                   |
 | 015 | Zoe                                      | 0.1.15  | draft      | 119400            | 2026-08-06        | [`015-zoe.md`](./changelog/protocol/015-zoe.md)                                                       |
 | 014 | Aletheia                                 | 0.1.14  | draft      | 65500             | -                 | [`014-aletheia.md`](./changelog/protocol/014-aletheia.md)                                             |
 | 013 | Nous                                     | 1.0.0   | final      | 0                 | 2026-Q2           | [`013-nous.md`](./changelog/protocol/013-nous.md)                                                     |

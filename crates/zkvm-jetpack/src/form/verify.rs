@@ -430,7 +430,12 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     // Materialize the puzzle nouns only after the cheap public metadata checks above.
     // This keeps malformed puzzle lengths/heights from driving large allocations first.
     let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
-    let (subject, formula) = build_puzzle_subjects(&mut stack, &puzzle)?;
+    let proof_nonce = if version == ProofVersion::V5 {
+        [0; 5]
+    } else {
+        puzzle.nonce
+    };
+    let (subject, formula) = build_puzzle_subjects(&mut stack, &puzzle, &proof_nonce)?;
     let space = stack.noun_space();
     let product = reassemble_noun(&mut stack, &puzzle.leaf, &puzzle.dyck)
         .map_err(|_| VerifyError::Invalid("invalid puzzle leaf/dyck word"))?;
@@ -488,7 +493,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     )?;
     let degrees = preprocess_degrees(&version, &heights);
     let extra_comp_bpoly = read_poly(&mut stream)?;
-    if version == ProofVersion::V3 {
+    if version.has_hardened_transcript() {
         let expected_len = degrees
             .extra
             .fri_degree_bound
@@ -561,7 +566,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let comp_weight_map =
         build_weight_map(&comp_weights, &preprocess.count_map, heights.len(), false)?;
     let (comp_root, num_comp_pieces) = read_comp_root(&mut stream)?;
-    if version == ProofVersion::V3
+    if version.has_hardened_transcript()
         && num_comp_pieces != expected_composition_piece_count(preprocess)
     {
         return Err(VerifyError::Invalid(
@@ -580,10 +585,10 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         &trace_evaluations.0, "trace evaluations contain non-based elements",
     )?;
 
-    // V3 rechecks the extra composition polynomial at a challenge sampled
-    // only after the trace and composition codewords have been committed.
-    // V0-V2 deliberately keep their historical verification semantics.
-    if version == ProofVersion::V3 {
+    // Hardened ZK versions recheck the extra composition polynomial at a
+    // challenge sampled only after the trace and composition codewords have
+    // been committed. V0-V2 retain their historical verification semantics.
+    if version.has_hardened_transcript() {
         let extra_composition_deep_eval = eval_composition(
             &PolySlice(trace_evaluations.as_slice()),
             &heights,
@@ -642,7 +647,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let base_deep_weights_len = trace_evaluations.0.len()
         + extra_trace_evaluations.0.len()
         + composition_piece_evaluations.0.len();
-    let deep_weights_len = if version == ProofVersion::V3 {
+    let deep_weights_len = if version.has_hardened_transcript() {
         base_deep_weights_len
             .checked_add(total_cols)
             .ok_or(VerifyError::Invalid("deep weight count overflow"))?
@@ -652,7 +657,12 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let deep_weights = PolyVec(felts(&mut rng, deep_weights_len as u32));
 
     let deep_root = expect_mroot(&mut stream, "deep composition commitment")?;
-    let fri_output = fri_verify(&calc, &mut stream, deep_root, version == ProofVersion::V3)?;
+    let fri_output = fri_verify(
+        &calc,
+        &mut stream,
+        deep_root,
+        version.has_hardened_transcript(),
+    )?;
 
     let mut merks = fri_output.merks;
     let mut elems = Vec::with_capacity(fri_output.indices.len());
@@ -679,7 +689,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
             path: comp_path,
         } = read_mpathbf(&mut stream)?;
 
-        if version == ProofVersion::V3
+        if version.has_hardened_transcript()
             && comp_leaf.0.len()
                 != usize::try_from(num_comp_pieces)
                     .map_err(|_| VerifyError::Invalid("composition opening length overflow"))?
@@ -740,7 +750,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         });
     }
 
-    if !verify_merk_proofs(&merks, verifier_eny, version == ProofVersion::V3) {
+    if !verify_merk_proofs(&merks, verifier_eny, version.has_hardened_transcript()) {
         return Err(VerifyError::Invalid("failed to verify merkle proofs"));
     }
 
@@ -764,7 +774,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
             &deep_challenge,
             &extra_comp_eval_point,
         )?;
-        if version == ProofVersion::V3 {
+        if version.has_hardened_transcript() {
             let x = fmul_(&Felt::lift(calc.fri.generator), &fpow_(&omega, elem.idx));
             let degree_eval = evaluate_trace_degree_normalization(
                 &elem.trace_elems,
@@ -1007,9 +1017,10 @@ fn validate_heights(heights: &[u64]) -> Result<(), VerifyError> {
 fn build_puzzle_subjects(
     stack: &mut NockStack,
     puzzle: &PuzzleSnapshot,
+    proof_nonce: &[u64; 5],
 ) -> Result<(Noun, Noun), VerifyError> {
     validate_puzzle_metadata(puzzle)?;
-    let leaves = sample_puzzle_leaves(&puzzle.commitment, &puzzle.nonce, puzzle.len)?;
+    let leaves = sample_puzzle_leaves(&puzzle.commitment, proof_nonce, puzzle.len)?;
     let subject = build_balanced_tree(stack, &leaves)?;
     let formula = build_powork(stack, puzzle.len)?;
     Ok((subject, formula))
@@ -1565,11 +1576,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v2_transcript_relabelled_as_v3() {
+    fn hardened_versions_reject_v2_transcript() {
+        for version in [crate::form::proof::ProofVersion::V3, crate::form::proof::ProofVersion::V5]
+        {
+            let mut proof = decode_proof(include_bytes!(
+                "../../../roswell/tests/fixtures/proof-v2-len1.jam"
+            ));
+            proof.version = version;
+            let result = verify(VerifyArgs {
+                proof,
+                table_override: None,
+                verifier_eny: 0,
+            });
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn v5_rejects_a_v3_nonce_bound_statement() {
         let mut proof = decode_proof(include_bytes!(
-            "../../../roswell/tests/fixtures/proof-v2-len1.jam"
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
         ));
-        proof.version = crate::form::proof::ProofVersion::V3;
+        proof.version = crate::form::proof::ProofVersion::V5;
         let result = verify(VerifyArgs {
             proof,
             table_override: None,

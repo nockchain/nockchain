@@ -24,9 +24,9 @@
 +$  proof-objects  (list proof-data)
 ::
 ::  Keep %2 first so the bunt/default remains backward-compatible.
-::  %0 through %3 are ZK proof-stream versions; %4 identifies the structured
-::  AI artifact and is never valid as a proof-stream payload.
-+$  proof-version  ?(%2 %4 %3 %1 %0)
+::  %0 through %3 and %5 are ZK proof-stream versions. %4 identifies the
+::  structured AI artifact and is never valid as a proof-stream payload.
++$  proof-version  ?(%2 %5 %4 %3 %1 %0)
 +$  proof
   $%  $:  version=%2
           objects=proof-objects
@@ -35,6 +35,12 @@
       ==
     ::
       $:  version=%3
+          objects=proof-objects
+          hashes=(list noun-digest:tip5)
+          read-index=@
+      ==
+    ::
+      $:  version=%5
           objects=proof-objects
           hashes=(list noun-digest:tip5)
           read-index=@
@@ -58,8 +64,8 @@
 ::  hashes both, so accepting a mismatch gives the prover transcript entropy
 ::  that later arithmetic may ignore.  Merkle siblings must also be based
 ::  before a hash jet sees them; relying on a check inside the Hoon hash arm can
-::  diverge when the arm is replaced by a release jet.  Version 3 validates the
-::  complete representation before any proof object is absorbed.
+::  diverge when the arm is replaced by a release jet. Hardened versions %3
+::  and %5 validate the complete representation before any object is absorbed.
 ++  proof-digest-based
   |=  [a=belt b=belt c=belt d=belt e=belt]
   ^-  ?
@@ -95,14 +101,17 @@
 ::
 +$  tip5-hash-atom  @ux
 ::
-::  number of items in proof used for pow
+::  number of proof objects used for PoW before version 5
 ++  pow-items  7
-::  extract pow from proof
+::  Extract the proof prefix committed by PoW. Version 5 commits only to
+::  object 0, the block-bound puzzle object; older ZK versions retain objects
+::  0 through 6 exactly.
 ++  get-pow
   ~/  %get-pow
   |=  p=proof
   ^-  proof
-  p(objects (scag pow-items objects.p))
+  =/  count=@  ?:(=(%5 version.p) 1 pow-items)
+  p(objects (scag count objects.p))
 ::
 ++  proof-to-pow
   ~/  %proof-to-pow
@@ -112,6 +121,9 @@
   =?  pow-digest  =(%3 version.proof)
     %-  hash-hashable:tip5
     [leaf+%zkpow-v3 hash+pow-digest]
+  =?  pow-digest  =(%5 version.proof)
+    %-  hash-hashable:tip5
+    [leaf+%zkpow-v5 hash+pow-digest]
   (digest-to-atom:tip5 pow-digest)
 ::
 ++  hashable-proof-objects
@@ -129,21 +141,21 @@
   =-  ?>  ?=(noun-digest:tip5 -)  -
   (list-to-tuple:tip5 lis)
 ::
-::  Hash a complete proof for inclusion in a block ID.  Historical proof
-::  versions retain their object-only digest.  Version 3 also binds its tag and
-::  proof-stream bookkeeping, so changing any verifier-visible proof field
-::  cannot preserve the block ID.
+::  Hash a complete proof for inclusion in a block ID. Historical proof
+::  versions retain their object-only digest. Versions 3 and 5 also bind their
+::  tag and proof-stream bookkeeping, so changing any verifier-visible proof
+::  field cannot preserve the block ID.
 ++  hash-proof-for-block
   ~/  %hash-proof-for-block
   |=  p=proof
   ^-  noun-digest:tip5
   =/  proof-digest=noun-digest:tip5  (hash-proof p)
-  ?.  =(%3 version.p)
+  ?:  ?=(?(%0 %1 %2) version.p)
     proof-digest
   %-  hash-hashable:tip5
-  ::  Keep the domain atom within one base-field element.  The Tip5 leaf
+  ::  Keep the domain atom within one base-field element. The Tip5 leaf
   ::  encoder rejects wider atoms rather than reducing them modulo the field.
-  :*  leaf+%zkblk-v3
+  :*  leaf+?:(=(%3 version.p) %zkblk-v3 %zkblk-v5)
       leaf+version.p
       hash+proof-digest
       (hashable-noun-digests:tip5 hashes.p)

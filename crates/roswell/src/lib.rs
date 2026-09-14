@@ -594,6 +594,7 @@ pub fn proof_version_atom(version: ProofVersion) -> u64 {
         ProofVersion::V1 => 1,
         ProofVersion::V2 => 2,
         ProofVersion::V3 => 3,
+        ProofVersion::V5 => 5,
     }
 }
 

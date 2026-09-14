@@ -67,6 +67,13 @@ pub enum ProofVersion {
     V1,
     V2,
     V3,
+    V5,
+}
+
+impl ProofVersion {
+    pub(crate) const fn has_hardened_transcript(self) -> bool {
+        matches!(self, Self::V3 | Self::V5)
+    }
 }
 
 fn proof_arrays_have_exact_shape(objects_noun: Noun, space: &NounSpace) -> bool {
@@ -109,9 +116,10 @@ impl NounDecode for Proof {
     fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         let [version_noun, objects_noun, hashes_noun, read_index_noun] = noun.uncell(space)?;
         let version = ProofVersion::from_noun(&version_noun, space)?;
-        if version == ProofVersion::V3 && !proof_arrays_have_exact_shape(objects_noun, space) {
+        if version.has_hardened_transcript() && !proof_arrays_have_exact_shape(objects_noun, space)
+        {
             return Err(NounDecodeError::Custom(
-                "v3 proof contains a noncanonical array encoding".to_string(),
+                "hardened proof contains a noncanonical array encoding".to_string(),
             ));
         }
         Ok(Self {
@@ -960,7 +968,9 @@ impl<'a> ProofStream<'a> {
             let object = &self.proof.objects[self.committed];
             self.proof
                 .hashes
-                .push(crate::form::tog::hash_proof_data(object));
+                .push(crate::form::tog::hash_proof_data_for_transcript(
+                    self.proof.version, object,
+                ));
             self.committed += 1;
         }
     }
@@ -1192,6 +1202,7 @@ impl NounDecode for ProofVersion {
             1 => Ok(ProofVersion::V1),
             2 => Ok(ProofVersion::V2),
             3 => Ok(ProofVersion::V3),
+            5 => Ok(ProofVersion::V5),
             _ => Err(NounDecodeError::InvalidEnumVariant),
         }
     }
@@ -1204,6 +1215,7 @@ impl NounEncode for ProofVersion {
             ProofVersion::V1 => Atom::new(allocator, 1).as_noun(),
             ProofVersion::V2 => Atom::new(allocator, 2).as_noun(),
             ProofVersion::V3 => Atom::new(allocator, 3).as_noun(),
+            ProofVersion::V5 => Atom::new(allocator, 5).as_noun(),
         }
     }
 }
@@ -1325,12 +1337,15 @@ mod tests {
     }
 
     #[test]
-    fn proof_version_v3_round_trips() {
-        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
-        let encoded = ProofVersion::V3.to_noun(&mut stack);
-        let space = stack.noun_space();
-        let decoded = ProofVersion::from_noun(&encoded, &space).expect("v3 should decode");
-        assert_eq!(decoded, ProofVersion::V3);
+    fn hardened_proof_versions_round_trip() {
+        for version in [ProofVersion::V3, ProofVersion::V5] {
+            let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+            let encoded = version.to_noun(&mut stack);
+            let space = stack.noun_space();
+            let decoded =
+                ProofVersion::from_noun(&encoded, &space).expect("proof version should decode");
+            assert_eq!(decoded, version);
+        }
     }
 
     #[test]
@@ -1342,10 +1357,12 @@ mod tests {
     }
 
     #[test]
-    fn v3_decode_rejects_noncanonical_terminal_marker() {
-        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
-        let noun = proof_with_noncanonical_marker(&mut stack, 3);
-        let space = stack.noun_space();
-        assert!(Proof::from_noun(&noun, &space).is_err());
+    fn hardened_versions_reject_noncanonical_terminal_marker() {
+        for version in [3, 5] {
+            let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+            let noun = proof_with_noncanonical_marker(&mut stack, version);
+            let space = stack.noun_space();
+            assert!(Proof::from_noun(&noun, &space).is_err());
+        }
     }
 }

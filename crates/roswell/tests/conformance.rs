@@ -306,6 +306,7 @@ fn generates_stream_windows_for_public_proof_versions() {
         (1, ProofVersion::V1),
         (2, ProofVersion::V2),
         (3, ProofVersion::V3),
+        (5, ProofVersion::V5),
     ] {
         let path = generate_stream_window(version_arg, 1, 0, Some(1), "stream-version");
         let bytes = fs::read(&path).expect("read stream window");

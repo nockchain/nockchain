@@ -1203,7 +1203,8 @@
           %1  [%mine-zk %1 commit zk-target pow-len:t]
           %2  [%mine-zk %2 commit zk-target pow-len:t]
           %3  [%mine-zk %3 commit zk-target pow-len:t]
-          %4  ~|(%unexpected-v4-in-zk-candidate !!)
+          %4  ~|(%unexpected-v4-ai-in-zk-candidate !!)
+          %5  [%mine-zk %5 commit zk-target pow-len:t]
         ==
       ?:  (gte candidate-height ai-pow-activation-height.constants.k)
         =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
@@ -2305,7 +2306,8 @@
             %1  [%1 commit zk-target pow-len:t]
             %2  [%2 commit zk-target pow-len:t]
             %3  [%3 commit zk-target pow-len:t]
-            %4  ~|(%unexpected-v4-in-zk-mine-start !!)
+            %4  ~|(%unexpected-v4-ai-in-zk-mine-start !!)
+            %5  [%5 commit zk-target pow-len:t]
           ==
         =/  zk-effect  [%mine-zk zk-mine-start]
         :_  k

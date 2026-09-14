@@ -12865,6 +12865,7 @@ dependencies = [
  "nockchain-mining-common",
  "nockvm",
  "nockvm_macros",
+ "noun-serde",
  "num_cpus",
  "once_cell",
  "rand 0.9.4",

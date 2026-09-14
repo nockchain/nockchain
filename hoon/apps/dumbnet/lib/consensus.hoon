@@ -106,6 +106,8 @@
 ++  height-to-proof-version-legacy
   |=  height=page-number:t
   ^-  proof-version:sp
+  ?:  (gte height proof-version-5-start)
+    %5
   ?:  (gte height proof-version-3-start)
     %3
   ?:  (gte height proof-version-2-start)
@@ -185,6 +187,7 @@
       ?=([%1 * * *] pow)
       ?=([%2 * * *] pow)
       ?=([%3 * * *] pow)
+      ?=([%5 * * *] pow)
   ==
 ::
 ::  Custom networks may deliberately disable PoW in tests and persist
@@ -203,6 +206,8 @@
         (check-digest:page:t pag)
     ==
   (checkpoint-page-valid [height expected pag])
+::  What block to start using ZK proof version 5
+++  proof-version-5-start  147.500
 ::  What block to start using proof version 3
 ++  proof-version-3-start  119.400
 :: What block to start using proof version 2
@@ -210,8 +215,8 @@
 ::  What block to start using proof version 1
 ++  proof-version-1-start  6.750
 ::
-::  Persisted version %4 identifies the structured AI artifact.  ZK proof
-::  streams retain versions %0 through %3, including Zoe's hardened %3 path.
+::  Persisted version %4 identifies the structured AI artifact. ZK proof
+::  streams use versions %0 through %3 and %5.
 ++  version-to-puzzle-type
   |=  version=proof-version:sp
   ^-  ?(%dumb-zkpow %ai-pow)
@@ -239,18 +244,17 @@
 ::
 ::  +block-compute-work: a block's heaviness contribution.
 ::
-::  Before AI activation this is the ZK work formula on the block's own target,
-::  unchanged, so every block already on the chain keeps the accumulated work it
-::  was accepted with.
-::
-::  From AI activation on, heaviness is the expected work at the block's own
-::  target for the puzzle named by its pow artifact, priced in
-::  ZKPoW-attempt-equivalents at the +mac-equivalents-per-zk-attempt exchange
-::  rate. It therefore reads the pow artifact: a block whose target is cheap
-::  for its puzzle earns proportionally less, so neither puzzle's ASERT
-::  discount can subsidize a reorg. At the launch anchors both puzzles produce
-::  the same heaviness per second, so steady-state shares still track block
-::  rate as under the previous equal-weight rule.
+:::  Before the dual-puzzle phase this is the ZK work formula on the block's own
+:::  target, unchanged, so every historical block keeps the accumulated work it
+:::  was accepted with.
+:::
+:::  From the dual-puzzle phase on, heaviness is the expected work at the block's
+:::  own target for the puzzle named by its pow artifact, priced in
+:::  ZKPoW-attempt-equivalents at the height-selected exchange rate. It therefore
+:::  reads the pow artifact: a block whose target is cheap for its puzzle earns
+:::  proportionally less, so neither puzzle's ASERT discount can subsidize a
+:::  reorg. ASERT block shares follow each lane's ideal interval, while
+:::  normalized work rates follow the declared capacity anchors.
 ::
 ::  Single source of truth for a block's work: validation heaviness AND the
 ::  finalized block's stored accumulated-work MUST both use it.
@@ -421,15 +425,17 @@
 :::
 ++  zk-asert-anchor-schedule
   ^-  (list asert-anchor)
-  :~  [phase.zk-asert-post-ai.blockchain-constants anchor-target-atom.zk-asert-post-ai.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert-post-ai.blockchain-constants) ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+  :~  [proof-version-5-start zk-pow-v5-zk-anchor-target:page:t ~ zk-pow-v5-zk-ideal-block-time:page:t half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+      [phase.zk-asert-post-ai.blockchain-constants anchor-target-atom.zk-asert-post-ai.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert-post-ai.blockchain-constants) ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
       [proof-version-3-start (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert.blockchain-constants) ~ ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
       [112.500 (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert.blockchain-constants) ~ ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
       [phase.zk-asert.blockchain-constants anchor-target-atom.zk-asert.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert.blockchain-constants) ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
   ==
-:::
+::::
 ++  ai-asert-anchor-schedule
   ^-  (list asert-anchor)
-  :~  [phase.ai-asert.blockchain-constants anchor-target-atom.ai-asert.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.ai-asert.blockchain-constants) ideal-block-time.ai-asert.blockchain-constants half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
+  :~  [proof-version-5-start zk-pow-v5-ai-anchor-target:page:t ~ zk-pow-v5-ai-ideal-block-time:page:t half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
+      [phase.ai-asert.blockchain-constants anchor-target-atom.ai-asert.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.ai-asert.blockchain-constants) ideal-block-time.ai-asert.blockchain-constants half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
   ==
 :::
 ++  asert-anchor-schedules
@@ -459,20 +465,22 @@
     $(best `anchor, anchors t.anchors)
   $(anchors t.anchors)
 :::
-::  Dynamic ASERT re-pins resolve only through the O(1), puzzle-keyed branch
-::  cache populated during block acceptance. A missing entry is incomplete
-::  consensus state, not permission to scan ancestors.
+:::  Dynamic ASERT re-pins resolve through the O(1), puzzle-keyed branch cache.
+:::  The exact anchor block may be read directly so a node upgraded while parked
+:::  at the predecessor can seed the new cache without replaying that block.
 ++  get-asert-anchor-min-timestamp
   |=  [puzzle-type=@tas anchor-height=@ block-id=block-id:t]
   ^-  @
   =/  timestamps=(unit (h-map block-id:t @))
     (~(get by asert-anchor-min-timestamps.c) puzzle-type)
-  ?~  timestamps
-    ~|  %missing-asert-anchor-timestamp-cache  !!
-  =/  timestamp=(unit @)  (~(get h-by u.timestamps) block-id)
-  ?~  timestamp
-    ~|  %missing-asert-anchor-timestamp-cache  !!
-  u.timestamp
+  =/  timestamp=(unit @)
+    ?~  timestamps  ~
+    (~(get h-by u.timestamps) block-id)
+  ?^  timestamp  u.timestamp
+  =/  block=local-page:t  (~(got h-by blocks.c) block-id)
+  ?:  =(anchor-height ~(height get:local-page:t block))
+    (~(got h-by min-timestamps.c) block-id)
+  ~|  %missing-asert-anchor-timestamp-cache  !!
 :::
 ++  delete-asert-anchor-min-timestamps
   |=  [block-id=block-id:t timestamps=(map @tas (h-map block-id:t @))]
@@ -505,7 +513,10 @@
   ^-  bignum:bignum:t
   ?.  (gte child-height phase.zk-asert-post-ai.blockchain-constants)
     (compute-target-asert %zk child-height parent-digest)
-  =/  state  (post-ai-parent-state parent-digest)
+  =/  state
+    ?:  =(child-height proof-version-5-start)
+      *puzzle-asert-state:dk
+    (post-ai-parent-state parent-digest)
   =/  current-min-ts=(unit @)
     ?~  zk-head.state  ~
     `(~(got h-by min-timestamps.c) u.zk-head.state)
@@ -551,7 +562,10 @@
 ++  compute-target-ai-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
-  =/  state  (post-ai-parent-state parent-digest)
+  =/  state
+    ?:  =(child-height proof-version-5-start)
+      *puzzle-asert-state:dk
+    (post-ai-parent-state parent-digest)
   =/  current-min-ts=(unit @)
     ?~  ai-head.state  ~
     `(~(got h-by min-timestamps.c) u.ai-head.state)

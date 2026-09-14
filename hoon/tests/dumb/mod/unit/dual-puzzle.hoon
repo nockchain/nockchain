@@ -1,15 +1,13 @@
 ::  tests/dumb/mod/unit/dual-puzzle.hoon
 ::
-::    Dual-puzzle (ZK-PoW %3 + AI-PoW %4) consensus mechanism tests.
+::    Dual-puzzle (ZK-PoW + AI-PoW %4) consensus mechanism tests.
 ::
-::    Focus: fork choice must not favour either puzzle at calibration and must
-::    not reward a discount. Once both are live every block contributes the
-::    expected work at its own target, priced per puzzle in
-::    ZKPoW-attempt-equivalents at the +mac-equivalents-per-zk-attempt
-::    exchange rate. At the launch anchors both lanes produce the same heaviness
-::    per second, so a block of one is worth a block of the other; a block
-::    whose target is cheap for its puzzle earns proportionally less, so an
-::    ASERT discount can never subsidize a reorg.
+::    Focus: fork choice must price both puzzles in shared hardware units and
+::    must not reward a difficulty discount. Once both are live every block
+::    contributes expected work at its own target, priced per puzzle in
+::    ZKPoW-attempt-equivalents at the height-selected hardware exchange rate.
+::    ASERT block shares follow each lane's ideal interval, while normalized
+::    work rates follow the declared capacity anchors.
 ::
 /=  helpers  /tests/dumb/helpers
 /=  dcon     /apps/dumbnet/lib/consensus
@@ -48,7 +46,7 @@
     !>((merge:bignum (compute-work:page:pt ~(target get:page:t tip.zk-built))))
     ::  AI contributes its MAC-equivalents in attempt-equivalents
     %+  expect-eq  !>(ai-w)
-    !>((merge:bignum (ai-pow-work:page:pt ~(target get:page:t tip.ai-built))))
+    !>((merge:bignum (ai-pow-work:page:pt ~(height get:page:t tip.ai-built) ~(target get:page:t tip.ai-built))))
   ==
 ::
 ::  ...and the weight tracks difficulty: of two AI blocks whose ASERT targets
@@ -98,7 +96,7 @@
     ::  height 1 (pre-phase): the ZK formula on the block's own target
     (expect-eq !>(w1) !>((merge:bignum (compute-work:page:pt ~(target get:page:t h1)))))
     ::  height 2 (post-phase): MAC-equivalents over the exchange rate
-    (expect-eq !>(w2) !>((merge:bignum (ai-pow-work:page:pt ~(target get:page:t tip.built)))))
+    (expect-eq !>(w2) !>((merge:bignum (ai-pow-work:page:pt ~(height get:page:t tip.built) ~(target get:page:t tip.built)))))
     ::  ...and the two rules genuinely differ here, so both pins are meaningful
     (expect-eq !>(%.y) !>(!=(w1 w2)))
   ==
@@ -119,6 +117,55 @@
     (expect-eq !>(125.999) !>(anchor-height.ai-asert.mainnet))
     (expect-eq !>(500) !>(ideal-block-time.ai-asert.mainnet))
     (expect-eq !>((bex 192)) !>(anchor-target-atom.ai-asert.mainnet))
+  ==
+::
+::  Version %5 re-anchors both lanes at height 147,500. AI and ZK swap their
+::  Logos ideal intervals: 214s AI / 500s ZK gives 70.028% / 29.972% and keeps
+::  the combined cadence at 149.86s.
+++  test-mainnet-v5-dual-puzzle-schedule
+  ^-  tang
+  =/  mainnet  *blockchain-constants:txe
+  =/  mt  ~(. txe mainnet)
+  =/  dc  ~(. dcon *consensus-state *derived-state mainnet)
+  =/  zk-before  (need (active-asert-anchor:dc %zk 147.499))
+  =/  ai-before  (need (active-asert-anchor:dc %ai 147.499))
+  =/  zk-v5  (need (active-asert-anchor:dc %zk 147.500))
+  =/  ai-v5  (need (active-asert-anchor:dc %ai 147.500))
+  ;:  weld
+    (expect-eq !>(147.500) !>(zk-pow-v5-phase:page:mt))
+    (expect-eq !>(214) !>(ideal-block-time.zk-before))
+    (expect-eq !>(500) !>(ideal-block-time.zk-v5))
+    (expect-eq !>(500) !>(ideal-block-time.ai-before))
+    (expect-eq !>(214) !>(ideal-block-time.ai-v5))
+    (expect-eq !>(147.500) !>(activation-height.zk-v5))
+    (expect-eq !>(147.500) !>(activation-height.ai-v5))
+  ==
+::
+::  The version-%5 ASERT anchors price 2,000 RTX 5090 ZK miners and
+::  10 ExaMAC/s of AI-PoW capacity.
+++  test-mainnet-v5-anchor-calibration
+  ^-  tang
+  =/  mt  ~(. txe *blockchain-constants:txe)
+  =/  zk-work=@
+    %-  merge:bignum
+    (block-work-at:page:mt 147.500 %dumb-zkpow (chunk:bignum zk-pow-v5-zk-anchor-target:page:mt))
+  =/  ai-work=@
+    %-  merge:bignum
+    (block-work-at:page:mt 147.500 %ai-pow (chunk:bignum zk-pow-v5-ai-anchor-target:page:mt))
+  ;:  weld
+    (expect-eq !>(1.028.807) !>(mac-equivalents-per-zk-attempt:page:mt))
+    (expect-eq !>(2.000) !>(zk-pow-v5-reference-zk-gpu-count:page:mt))
+    (expect-eq !>(388.800.000) !>(zk-pow-v5-reference-zk-hashes-per-gpu-second:page:mt))
+    (expect-eq !>(777.600.000.000) !>(zk-pow-v5-reference-zk-hashes-per-second:page:mt))
+    (expect-eq !>(10.000.000.000.000.000.000) !>(zk-pow-v5-reference-ai-macs-per-second:page:mt))
+    %+  expect-eq
+      !>(5.493.793.810.273.389.665.851.259.858.908.398.676.672.107.719.039.465.617.368.341.183.437.285.024.349.963.580)
+    !>(zk-pow-v5-zk-anchor-target:page:mt)
+    %+  expect-eq
+      !>(54.108.452.914.633.736.179.238.778.041.442.947.594.985.974.142.822.693.476)
+    !>(zk-pow-v5-ai-anchor-target:page:mt)
+    (expect-eq !>(777.599.999.999) !>((div zk-work 500)))
+    (expect-eq !>(9.719.996.073.121) !>((div ai-work 214)))
   ==
 ::
 :::  ZK weight is continuous across the activation boundary: a post-activation
@@ -257,15 +304,17 @@
     (expect-eq !>(%.y) !>((lth ai-cap-w zk-anchor-w)))
   ==
 ::
-::  Per-block work at the launch anchors, in ZKPoW-attempt-equivalents. The
-::  exchange rate is +mac-equivalents-per-zk-attempt, from the reference-GPU
-::  co-benchmark (see tx-engine).
+::  Per-block work at the Logos anchors uses the historical exchange rate.
+::  Version %5 switches only blocks at and above height 147,500 to the public
+::  Tip5-hash calibration.
 ++  test-anchor-work-is-exchange-rate-priced
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
   =/  mainnet  *blockchain-constants:txe
   ;:  weld
-    (expect-eq !>(25.750.000.000) !>(mac-equivalents-per-zk-attempt:page:mt))
+    (expect-eq !>(25.750.000.000) !>(logos-mac-equivalents-per-zk-attempt:page:mt))
+    (expect-eq !>(25.750.000.000) !>((mac-equivalents-per-zk-attempt-at:page:mt 147.499)))
+    (expect-eq !>(1.028.807) !>((mac-equivalents-per-zk-attempt-at:page:mt 147.500)))
     %+  expect-eq  !>(306.374.333)
     !>((merge:bignum (block-work-at:page:mt 126.000 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet))))
     %+  expect-eq  !>(716.378.410)
@@ -330,7 +379,7 @@
   =/  expected-target
     (~(compute-target-ai-asert dcon con der.built bc-dual-post:helpers) ~(height get:page:t zk-cand) ~(parent get:page:t zk-cand))
   =/  parent-work  (merge:bignum ~(accumulated-work get:page:t tip.built))
-  =/  expected-work  (add parent-work (merge:bignum (ai-pow-work:page:t expected-target)))
+  =/  expected-work  (add parent-work (merge:bignum (ai-pow-work:page:t ~(height get:page:t ai-cand) expected-target)))
   %+  expect-eq
     !>([(merge:bignum expected-target) expected-work])
   !>  :-  (merge:bignum ~(target get:page:t ai-cand))

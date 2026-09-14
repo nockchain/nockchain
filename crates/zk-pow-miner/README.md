@@ -16,6 +16,7 @@ The node and miner are separate processes. `nockchain-mining-common` owns candid
 ## Maintained invariants
 
 - Work is bound to the candidate's version, block commitment, target, and proof length.
+- For version `%5`, each worker caches one full proof by block commitment and proof length; later nonce attempts replace only proof object `0`. A different candidate or legacy proof version invalidates that cache.
 - Workers receive immutable jobs. Replacement candidates cancel or supersede stale work rather than mutating a job in place.
 - Worker results are associated with the job that produced them; a late result cannot be submitted as a solution to a newer commitment.
 - The miner's `%pow` wire source remains distinct from `%ai-pow` and other kernel commands.
@@ -32,6 +33,7 @@ The miner is a liveness component, not a consensus authority. A faulty miner can
 
 ```sh
 cargo test -p zk-pow-miner
+cargo test -p zk-pow-miner --lib --release serf_worker_reuses_v5_proof_for_multiple_nonces -- --ignored
 cargo run --release -p zk-pow-miner --bin zk-pow-mine -- --help
 ```
 

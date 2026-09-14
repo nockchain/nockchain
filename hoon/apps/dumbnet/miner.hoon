@@ -19,12 +19,16 @@
         nonce=noun-digest:tip5
     ==
   +$  effect  [%mine-result (each [hash=noun-digest:tip5 mine-success] dig=noun-digest:tip5)]
-  +$  kernel-state  [%state version=%1]
+  ::  Version %5 proofs exclude the nonce from the proven statement and
+  ::  transcript. Keep one immutable suffix per candidate in each worker.
+  +$  proof-cache  [header=noun-digest:tip5 pow-len=@ prf=proof:sp]
+  +$  kernel-state  [%state version=%2 cache=(unit proof-cache)]
   +$  cause
     $%  [%0 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
         [%1 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
         [%2 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
         [%3 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
+        [%5 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
     ==
   --
 |%
@@ -55,11 +59,26 @@
         %1  [%1 header.cause nonce.cause pow-len.cause]
         %2  [%2 header.cause nonce.cause pow-len.cause]
         %3  [%3 header.cause nonce.cause pow-len.cause]
+        %5  [%5 header.cause nonce.cause pow-len.cause]
       ==
-    :: XX TODO set up stark config, construct effect
+    =/  reuse=?
+      ?.  =(%5 -.cause)  %.n
+      ?~  cache.k  %.n
+      ?&  =(header.cause header.u.cache.k)
+          =(pow-len.cause pow-len.u.cache.k)
+      ==
     =/  [prf=proof:sp dig=tip5-hash-atom]
+      ?:  reuse
+        ?~  cache.k  !!
+        =/  reused=proof:sp
+          (set-v5-proof-nonce:mine prf.u.cache.k nonce.cause)
+        [reused (proof-to-pow:sp reused)]
       (prove-block-inner:mine input)
-    :_  k
+    =/  next-cache=(unit proof-cache)
+      ?:  =(%5 -.cause)
+        (some [header.cause pow-len.cause prf])
+      ~
+    :_  k(cache next-cache)
     ?:  (check-target:mine dig target.cause)
       [%mine-result %& (atom-to-digest:tip5 dig) %command %pow %dumb-zkpow prf dig header.cause nonce.cause]~
     [%mine-result %| (atom-to-digest:tip5 dig)]~

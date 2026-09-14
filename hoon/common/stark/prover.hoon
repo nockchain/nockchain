@@ -40,6 +40,12 @@
           nonce=noun-digest:tip5
           pow-len=@
       ==
+  ::
+      $:  version=%5
+          header=noun-digest:tip5
+          nonce=noun-digest:tip5
+          pow-len=@
+      ==
   ==
 ::
 +$  prove-result  (each =proof err=prove-err)
@@ -98,8 +104,8 @@
   ==
 ::
 ::
-::  Keep version construction and v3 polynomial preparation outside the large
-::  +prove-door core.  Besides making the invariants reusable, this avoids
+::  Keep version construction and hardened-polynomial preparation outside the
+::  large +prove-door core. Besides making the invariants reusable, this avoids
 ::  growing +generate-proof's subject axes past the native compiler's current
 ::  64-bit axis representation.
 ++  empty-proof-for-version
@@ -111,6 +117,7 @@
     %2  [%2 ~ ~ 0]
     %3  [%3 ~ ~ 0]
     %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+    %5  [%5 ~ ~ 0]
   ==
 ::
 ++  prepare-extra-composition-poly
@@ -120,7 +127,7 @@
           extra=bpoly
       ==
   ^-  bpoly
-  ?.  =(%3 version)  extra
+  ?.  ?=(?(%3 %5) version)  extra
   =/  canonical  (bpcan extra)
   =/  extra-dp  (degree-processing heights constraint-map %.y)
   ?>  (lte len.canonical (add 1 fri-deg-bound.extra-dp))
@@ -133,7 +140,8 @@
   ~/  %prove
   |=  prover-input
   ^-  prove-result
-  =/  [s=* f=*]  (puzzle-nock header nonce pow-len)
+  =/  proof-nonce=noun-digest:tip5  ?:(=(%5 version) *noun-digest:tip5 nonce)
+  =/  [s=* f=*]  (puzzle-nock header proof-nonce pow-len)
   =/  [prod=* return=fock-return]  (fink:fock [s f])
   =/  nock-common=_nock-common-v0-v1
     ?-  version
@@ -141,6 +149,7 @@
       %1  nock-common-v0-v1
       %2  nock-common-v2
       %3  nock-common-v2
+      %5  nock-common-v2
     ==
   =/  compute-funcs=table-funcs
     ?-  version
@@ -148,6 +157,7 @@
       %1  funcs:compute-table-v0-v1
       %2  funcs:compute-table-v2
       %3  funcs:compute-table-v2
+      %5  funcs:compute-table-v2
     ==
   =/  compute-common=static-table-common
     ?-  version
@@ -155,6 +165,7 @@
       %1  static:common:compute-table-v0-v1
       %2  static:common:compute-table-v2
       %3  static:common:compute-table-v2
+      %5  static:common:compute-table-v2
     ==
   =/  memory-funcs=table-funcs
     ?-  version
@@ -162,6 +173,7 @@
       %1  funcs:memory-table-v0-v1
       %2  funcs:memory-table-v2
       %3  funcs:memory-table-v2
+      %5  funcs:memory-table-v2
     ==
   =/  memory-common=static-table-common
     ?-  version
@@ -169,6 +181,7 @@
       %1  static:common:memory-table-v0-v1
       %2  static:common:memory-table-v2
       %3  static:common:memory-table-v2
+      %5  static:common:memory-table-v2
     ==
   =/  pre=preprocess-data
     ?-  version
@@ -176,6 +189,7 @@
       %1  p.pre-0-1.prep.stark-config
       %2  p.pre-2.prep.stark-config
       %3  p.pre-2.prep.stark-config
+      %5  p.pre-2.prep.stark-config
     ==
   %-  %~  generate-proof
         prove-door
@@ -192,7 +206,8 @@
   ~/  %snapshot
   |=  prover-input
   ^-  proof-snapshot
-  =/  [s=* f=*]  (puzzle-nock header nonce pow-len)
+  =/  proof-nonce=noun-digest:tip5  ?:(=(%5 version) *noun-digest:tip5 nonce)
+  =/  [s=* f=*]  (puzzle-nock header proof-nonce pow-len)
   =/  [prod=* return=fock-return]  (fink:fock [s f])
   =/  nock-common=_nock-common-v0-v1
     ?-  version
@@ -200,6 +215,7 @@
       %1  nock-common-v0-v1
       %2  nock-common-v2
       %3  nock-common-v2
+      %5  nock-common-v2
     ==
   =/  compute-funcs=table-funcs
     ?-  version
@@ -207,6 +223,7 @@
       %1  funcs:compute-table-v0-v1
       %2  funcs:compute-table-v2
       %3  funcs:compute-table-v2
+      %5  funcs:compute-table-v2
     ==
   =/  compute-common=static-table-common
     ?-  version
@@ -214,6 +231,7 @@
       %1  static:common:compute-table-v0-v1
       %2  static:common:compute-table-v2
       %3  static:common:compute-table-v2
+      %5  static:common:compute-table-v2
     ==
   =/  memory-funcs=table-funcs
     ?-  version
@@ -221,6 +239,7 @@
       %1  funcs:memory-table-v0-v1
       %2  funcs:memory-table-v2
       %3  funcs:memory-table-v2
+      %5  funcs:memory-table-v2
     ==
   =/  memory-common=static-table-common
     ?-  version
@@ -228,6 +247,7 @@
       %1  static:common:memory-table-v0-v1
       %2  static:common:memory-table-v2
       %3  static:common:memory-table-v2
+      %5  static:common:memory-table-v2
     ==
   =/  pre=preprocess-data
     ?-  version
@@ -235,6 +255,7 @@
       %1  p.pre-0-1.prep.stark-config
       %2  p.pre-2.prep.stark-config
       %3  p.pre-2.prep.stark-config
+      %5  p.pre-2.prep.stark-config
     ==
   %-  %~  make-proof-snapshot
         prove-door
@@ -279,6 +300,7 @@
         %2  [%2 objects ~ 0]
         %3  [%3 objects ~ 0]
         %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+        %5  [%5 objects ~ 0]
       ==
     ?.  =(digest.ctx (hash-proof proof))  [%| [%invalid-stream ~]]
     [%& proof]
@@ -807,7 +829,7 @@
     =/  num-base-deep-weights=@
       (add (mul 4 total-cols) max-constraint-degree)
     =/  num-deep-weights=@
-      ?:  =(%3 original-version)
+      ?:  ?=(?(%3 %5) original-version)
         (add num-base-deep-weights total-cols)
       num-base-deep-weights
     =^  deep-weights=fpoly  rng
@@ -829,11 +851,11 @@
             deep-challenge
             extra-comp-eval-point
         ==
-      ?.  =(%3 original-version)
+      ?.  ?=(?(%3 %5) original-version)
         base-deep-poly
-      ::  Version 3 batches every trace column against its declared table
-      ::  degree.  An honest table-height-h column has degree <h, so
-      ::  X^(H-h)*T(X) has degree <H.  Adding a multiple of X^h-1 reaches
+      ::  Hardened ZK versions batch every trace column against its declared
+      ::  table degree. An honest table-height-h column has degree <h, so
+      ::  X^(H-h)*T(X) has degree <H. Adding a multiple of X^h-1 reaches
       ::  degree H and is rejected by the existing strict FRI bound.
       =/  trace-degree-weights=fpoly
         (~(slag fop deep-weights) num-base-deep-weights)
@@ -916,6 +938,7 @@
       %2  [%& %2 objects.proof ~ 0]
       %3  [%& %3 objects.proof ~ 0]
       %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%& %5 objects.proof ~ 0]
     ==
   ::
   ::

@@ -1,6 +1,7 @@
 /=  *  /common/zeke
 /=  sp  /common/stark/prover
 /=  *  /common/test
+/=  mine  /common/pow
 /=  *  /common/tx-engine
 /=  bp  /tests/loki/bad-pow
 /=  nv  /common/nock-verifier
@@ -16,10 +17,12 @@
   =/  res  (verify:vrf pf ~ 4)
   (expect !>(res))
 ::
-++  test-v2-proof-relabelled-v3-is-bad
+++  test-v2-proof-relabelled-hardened-versions-are-bad
   =/  v3=proof  [%3 objects.pf ~ 0]
-  =/  res  (verify:vrf v3 ~ 4)
-  (expect !>(!res))
+  =/  v5=proof  [%5 objects.pf ~ 0]
+  =/  v3-res  (verify:vrf v3 ~ 4)
+  =/  v5-res  (verify:vrf v5 ~ 4)
+  (expect !>(?&(!v3-res !v5-res)))
 ::
 ++  test-v3-pow-is-domain-separated-from-fiat-shamir
   =/  v2=proof  [%2 objects.pf ~ 0]
@@ -31,17 +34,37 @@
   !>  :_  =((proof-to-pow v3) raw-pow)
       =((proof-to-pow v2) raw-pow)
 ::
-++  test-v3-version-is-bound-only-in-block-proof-digest
+++  test-v5-pow-commits-only-to-first-proof-object
+  =/  v5=proof  [%5 objects.pf ~ 0]
+  =/  heights=proof-data  (grab-proof-entry:bp v5 %heights 1)
+  ?>  ?=(%heights -.heights)
+  =/  changed-tail=proof
+    (replace-proof-entry:bp v5 %heights heights(p [0 p.heights]) 1)
+  =/  puzzle=proof-data  (grab-proof-entry:bp v5 %puzzle 1)
+  ?>  ?=(%puzzle -.puzzle)
+  =/  changed-nonce=proof
+    (set-v5-proof-nonce:mine v5 (twiddle-digest:bp nonce.puzzle))
+  %+  expect-eq
+    !>([%.y %.n %.n])
+  !>  :*  =((proof-to-pow v5) (proof-to-pow changed-tail))
+          =((hash-proof v5) (hash-proof changed-tail))
+          =((proof-to-pow v5) (proof-to-pow changed-nonce))
+      ==
+::
+++  test-hardened-versions-bind-full-block-proof-digest
   =/  v2=proof  [%2 objects.pf ~ 0]
   =/  v3=proof  [%3 objects.pf ~ 0]
-  =/  v3-hashes=proof  v3(hashes ~[*noun-digest:tip5])
-  =/  v3-index=proof  v3(read-index 1)
+  =/  v5=proof  [%5 objects.pf ~ 0]
+  =/  v5-hashes=proof  v5(hashes ~[*noun-digest:tip5])
+  =/  v5-index=proof  v5(read-index 1)
   %+  expect-eq
-    !>([%.y %.n %.n %.n])
+    !>([%.y %.n %.n %.n %.n %.n])
   !>  :*  =((hash-proof v2) (hash-proof v3))
           =((hash-proof-for-block v2) (hash-proof-for-block v3))
-          =((hash-proof-for-block v3) (hash-proof-for-block v3-hashes))
-          =((hash-proof-for-block v3) (hash-proof-for-block v3-index))
+          =((hash-proof v3) (hash-proof v5))
+          =((hash-proof-for-block v3) (hash-proof-for-block v5))
+          =((hash-proof-for-block v5) (hash-proof-for-block v5-hashes))
+          =((hash-proof-for-block v5) (hash-proof-for-block v5-index))
       ==
 ::
 ++  test-bad-proof-empty-proof

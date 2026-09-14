@@ -195,7 +195,7 @@
     ::  Verify that the last codeword is low degree
     ~|  "last codeword len is not correct"
     ?>  =(len.last-codeword last-codeword-len)
-    ?>  ?|  !=(%3 original-version)
+    ?>  ?|  !?=(?(%3 %5) original-version)
             ~(cank fop last-codeword)
         ==
     =/  poly  (fp-ifft last-codeword)
@@ -226,7 +226,7 @@
       ::  read opening for index from proof
       =^  opening=proof-path  stream
         =^(o stream ~(pull proof-stream stream) ?>(?=(%m-path -.o) p.o^stream))
-      ?>  ?|  !=(%3 original-version)
+      ?>  ?|  !?=(?(%3 %5) original-version)
               ?&  =(len.leaf.opening folding-deg)
                   ~(cank fop leaf.opening)
               ==
@@ -271,7 +271,7 @@
       ::  read opening for index from proof
       =^  opening=proof-path  stream
         =^(o stream ~(pull proof-stream stream) ?>(?=(%m-path -.o) p.o^stream))
-      ?>  ?|  !=(%3 original-version)
+      ?>  ?|  !?=(?(%3 %5) original-version)
               ?&  =(len.leaf.opening folding-deg)
                   ~(cank fop leaf.opening)
               ==

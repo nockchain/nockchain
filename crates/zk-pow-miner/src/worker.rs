@@ -417,59 +417,83 @@ mod tests {
         }
     }
 
-    /// Integration test: spawn a real SerfWorker, hand it a trivial-target
-    /// candidate (target = max bignum so any digest passes), assert
-    /// `MineResult::Success` on the first attempt.
+    /// Integration test: spawn a real SerfWorker, mine two version-5 nonces for
+    /// one trivial-target candidate, and assert that the second submission
+    /// changes only proof object 0. The persistent miner kernel must serve the
+    /// second poke from its cached proof suffix.
     ///
-    /// Marked `#[ignore]` because spawning a Nock VM + running the STARK
-    /// is heavy (~10s+ wall clock). Run with:
-    ///   cargo test -p zk-pow-miner --lib -- --ignored serf_worker
+    /// Marked `#[ignore]` because spawning a Nock VM + running the first STARK
+    /// is heavy. Run with:
+    ///   cargo test -p zk-pow-miner --lib --release -- --ignored serf_worker
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
-    async fn serf_worker_mines_trivial_target() {
+    async fn serf_worker_reuses_v5_proof_for_multiple_nonces() {
         use ibig::UBig;
+        use nockvm::noun::NounAllocator;
+        use noun_serde::NounDecode;
+        use zkvm_jetpack::form::{Proof, ProofVersion};
         use zkvm_jetpack::hot::produce_prover_hot_state;
+
+        fn nonce(value: u64) -> NounSlab {
+            let mut slab = NounSlab::new();
+            let noun = T(&mut slab, &[D(value), D(0), D(0), D(0), D(0)]);
+            slab.set_root(noun);
+            slab
+        }
+
+        fn submitted_proof(poke_slab: &NounSlab) -> Proof {
+            let space = poke_slab.noun_space();
+            let root = unsafe { *poke_slab.root() };
+            let fields = root
+                .in_space(&space)
+                .uncell::<7>()
+                .expect("submitted poke is a 7-tuple");
+            let proof_noun = fields[3].noun();
+            Proof::from_noun(&proof_noun, &space).expect("submitted proof decodes")
+        }
 
         let hot_state = produce_prover_hot_state();
         let worker = SerfWorker::spawn(0, hot_state).await.expect("spawn worker");
-
-        // Target = 2^400 — comfortably above max-tip5-atom (the merged
-        // 5-belt tip5 hash atom; the chain checks `(lte proof-hash
-        // max-tip5-atom)` first, then `(lte proof-hash target)`). With
-        // target this large, every proof passes.
         let candidate = synth_trivial_candidate(UBig::from(1u64) << 400, 2);
-        let mut attempts = 0u32;
-        let mut nonce = random_nonce();
-        let started = std::time::Instant::now();
-        // Allow a small handful of attempts as a guardrail — in
-        // practice with target=2^400 the very first attempt should hit.
-        let result = loop {
-            attempts += 1;
-            let poke = build_candidate_poke(&candidate, nonce);
-            let r = worker.mine_attempt(poke).await.expect("mine_attempt");
-            match r {
-                MineResult::Success { .. } => break r,
-                MineResult::Retry { next_nonce } => {
-                    if attempts >= 4 {
-                        panic!(
-                            "trivial-target candidate should succeed within 4 attempts; \
-                             got {attempts} retries"
-                        );
-                    }
-                    nonce = next_nonce;
-                }
-            }
+
+        let first_started = std::time::Instant::now();
+        let first_poke = match worker
+            .mine_attempt(build_candidate_poke(&candidate, nonce(1)))
+            .await
+            .expect("first mine_attempt")
+        {
+            MineResult::Success { poke_slab, .. } => poke_slab,
+            MineResult::Retry { .. } => panic!("trivial target rejected first nonce"),
         };
-        let elapsed = started.elapsed();
-        eprintln!("serf_worker_mines_trivial_target: {attempts} attempt(s) in {elapsed:?}");
-        assert!(matches!(result, MineResult::Success { .. }));
+        let first_elapsed = first_started.elapsed();
+
+        let second_started = std::time::Instant::now();
+        let second_poke = match worker
+            .mine_attempt(build_candidate_poke(&candidate, nonce(2)))
+            .await
+            .expect("cached mine_attempt")
+        {
+            MineResult::Success { poke_slab, .. } => poke_slab,
+            MineResult::Retry { .. } => panic!("trivial target rejected second nonce"),
+        };
+        let second_elapsed = second_started.elapsed();
+
+        let first = submitted_proof(&first_poke);
+        let second = submitted_proof(&second_poke);
+        assert_eq!(first.version, ProofVersion::V5);
+        assert_eq!(second.version, ProofVersion::V5);
+        assert_ne!(first.objects[0], second.objects[0]);
+        assert_eq!(&first.objects[1..], &second.objects[1..]);
+        assert_eq!(first.hashes, second.hashes);
+        assert_eq!(first.read_index, second.read_index);
+        eprintln!("v5 first proof: {first_elapsed:?}; cached nonce attempt: {second_elapsed:?}");
     }
 
     /// Helper: synth a trivial-difficulty candidate (max-bignum target).
     #[cfg(test)]
     fn synth_trivial_candidate(target_value: ibig::UBig, pow_len: u64) -> MiningCandidate {
         let mut version = NounSlab::new();
-        version.set_root(D(0)); // %0
+        version.set_root(D(5)); // %5
         let mut block_header = NounSlab::new();
         let h = T(&mut block_header, &[D(0), D(0), D(0), D(0), D(0)]);
         block_header.set_root(h);
