@@ -129,11 +129,21 @@
   =/  changed-nonce=noun-digest:tip5  nonce.puzzle(- changed-first)
   =/  changed-puzzle=proof-data:sp  puzzle(nonce changed-nonce)
   =/  changed-proof=proof:sp  [%5 [changed-puzzle t.objects] ~ 0]
+  =/  changed-commitment-first=@
+    ?:(=(0 -:commitment.puzzle) 1 0)
+  =/  changed-commitment=noun-digest:tip5
+    commitment.puzzle(- changed-commitment-first)
+  =/  other-block-puzzle=proof-data:sp
+    puzzle(commitment changed-commitment)
+  =/  other-block-proof=proof:sp
+    [%5 [other-block-puzzle t.objects] ~ 0]
   ?&  verified
       =(object-zero puzzle)
       =(preflight-pow (proof-to-pow:sp proof.p.res))
       !=((proof-to-pow:sp proof.p.res) (proof-to-pow:sp changed-proof))
       !(verify:vrf changed-proof override 0)
+      !=((proof-to-pow:sp proof.p.res) (proof-to-pow:sp other-block-proof))
+      !(verify:vrf other-block-proof override 0)
   ==
 ::
 ::

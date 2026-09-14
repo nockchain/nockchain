@@ -43,17 +43,24 @@
   ?>  ?=(%puzzle -.puzzle)
   =/  changed-nonce=proof
     (replace-proof-entry:bp v5 %puzzle puzzle(nonce (twiddle-digest:bp nonce.puzzle)) 1)
+  =/  changed-commitment=proof
+    (replace-proof-entry:bp v5 %puzzle puzzle(commitment (twiddle-digest:bp commitment.puzzle)) 1)
   =/  base-page=form:page:tx1  *form:page:tx1
   =/  original-page=form:page:tx1  base-page(pow `v5)
-  =/  changed-page=form:page:tx1  base-page(pow `changed-nonce)
+  =/  changed-nonce-page=form:page:tx1  base-page(pow `changed-nonce)
+  =/  changed-commitment-page=form:page:tx1  base-page(pow `changed-commitment)
   %+  expect-eq
-    !>([%.y %.n %.n %.n %.n %.n])
+    !>([%.y %.n %.n %.n %.n %.n %.n %.n %.n %.n])
   !>  :*  =((proof-to-pow v5) (proof-to-pow changed-tail))
           =((hash-proof v5) (hash-proof changed-tail))
           =((proof-to-pow v5) (proof-to-pow changed-nonce))
+          =((proof-to-pow v5) (proof-to-pow changed-commitment))
           =((hash-proof v5) (hash-proof changed-nonce))
+          =((hash-proof v5) (hash-proof changed-commitment))
           =((hash-proof-for-block v5) (hash-proof-for-block changed-nonce))
-          =((compute-digest:page:tx1 original-page) (compute-digest:page:tx1 changed-page))
+          =((hash-proof-for-block v5) (hash-proof-for-block changed-commitment))
+          =((compute-digest:page:tx1 original-page) (compute-digest:page:tx1 changed-nonce-page))
+          =((compute-digest:page:tx1 original-page) (compute-digest:page:tx1 changed-commitment-page))
       ==
 ::
 ++  test-hardened-versions-bind-full-block-proof-digest

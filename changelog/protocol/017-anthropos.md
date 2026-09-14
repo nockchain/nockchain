@@ -222,8 +222,10 @@ change.
 - Full proof verification remains mandatory. The shortened mining projection is
   not a shortened proof and does not bypass transcript, Merkle, DEEP, or FRI
   checks.
-- Proof object `0` includes the block commitment and nonce. A winning digest
-  cannot be transplanted to a different candidate block.
+- Proof object `0` includes the candidate block commitment and nonce. The
+  commitment covers the parent and all candidate contents except `.pow`, so
+  sibling candidates sharing one parent derive different work from the same raw
+  nonce and cannot reuse its winning digest or proof.
 - `hash-proof-for-block` commits the `%5` domain and version, every proof object
   including the nonce, and the proof-stream bookkeeping. Both page encodings
   include that digest in the block ID. Any final-proof field mutation therefore

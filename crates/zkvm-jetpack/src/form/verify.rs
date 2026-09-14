@@ -1596,6 +1596,31 @@ mod tests {
     }
 
     #[test]
+    fn v5_proof_cannot_be_reused_for_another_candidate_commitment() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
+        ));
+        proof.version = crate::form::proof::ProofVersion::V5;
+        let original = verify(VerifyArgs {
+            proof: proof.clone(),
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(original.is_ok());
+
+        match &mut proof.objects[0] {
+            ProofData::Puzzle { com, .. } => com[0] = if com[0] == 0 { 1 } else { 0 },
+            object => panic!("first v5 proof object is not a puzzle: {object:?}"),
+        }
+        let transplanted = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(transplanted.is_err());
+    }
+
+    #[test]
     fn rejects_v3_extra_composition_trailing_zero() {
         let mut proof = decode_proof(include_bytes!(
             "../../../roswell/tests/fixtures/proof-v3-len1.jam"

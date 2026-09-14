@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_fiat_shamir_binds_the_mining_nonce() {
+    fn v5_fiat_shamir_binds_candidate_commitment_and_nonce() {
         let puzzle = ProofData::Puzzle {
             com: [1, 2, 3, 4, 5],
             nonce: [6, 7, 8, 9, 10],
@@ -410,7 +410,7 @@ mod tests {
             leaf: vec![11],
             dyck: vec![1],
         };
-        let mut proof = Proof {
+        let proof = Proof {
             version: ProofVersion::V5,
             objects: vec![puzzle],
             hashes: vec![],
@@ -419,13 +419,26 @@ mod tests {
         let before = verifier_fiat_shamir(&proof)
             .expect("v5 transcript should hash")
             .sponge;
-        match &mut proof.objects[0] {
+
+        let mut changed_nonce = proof.clone();
+        match &mut changed_nonce.objects[0] {
             ProofData::Puzzle { nonce, .. } => nonce[0] += 1,
             _ => unreachable!(),
         }
-        let after = verifier_fiat_shamir(&proof)
+        let after_nonce = verifier_fiat_shamir(&changed_nonce)
             .expect("v5 transcript should hash after nonce change")
             .sponge;
-        assert_ne!(before, after);
+
+        let mut changed_commitment = proof;
+        match &mut changed_commitment.objects[0] {
+            ProofData::Puzzle { com, .. } => com[0] = if com[0] == 0 { 1 } else { 0 },
+            _ => unreachable!(),
+        }
+        let after_commitment = verifier_fiat_shamir(&changed_commitment)
+            .expect("v5 transcript should hash after candidate commitment change")
+            .sponge;
+
+        assert_ne!(before, after_nonce);
+        assert_ne!(before, after_commitment);
     }
 }
