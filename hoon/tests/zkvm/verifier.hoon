@@ -1,6 +1,7 @@
 /=  *  /common/zeke
 /=  sp  /common/stark/prover
 /=  *  /common/test
+/=  tx0  /common/tx-engine-0
 /=  tx1  /common/tx-engine-1
 /=  bp  /tests/loki/bad-pow
 /=  nv  /common/nock-verifier
@@ -33,7 +34,7 @@
   !>  :_  =((proof-to-pow v3) raw-pow)
       =((proof-to-pow v2) raw-pow)
 ::
-++  test-v5-pow-commits-only-to-first-proof-object
+++  test-v5-work-and-block-id-commit-to-object-zero-not-witness
   =/  v5=proof  [%5 objects.pf ~ 0]
   =/  heights=proof-data  (grab-proof-entry:bp v5 %heights 1)
   ?>  ?=(%heights -.heights)
@@ -45,32 +46,41 @@
     (replace-proof-entry:bp v5 %puzzle puzzle(nonce (twiddle-digest:bp nonce.puzzle)) 1)
   =/  changed-commitment=proof
     (replace-proof-entry:bp v5 %puzzle puzzle(commitment (twiddle-digest:bp commitment.puzzle)) 1)
-  =/  base-page=form:page:tx1  *form:page:tx1
-  =/  original-page=form:page:tx1  base-page(pow `v5)
-  =/  changed-nonce-page=form:page:tx1  base-page(pow `changed-nonce)
-  =/  changed-commitment-page=form:page:tx1  base-page(pow `changed-commitment)
+  =/  base-page-v0=form:page:tx0  *form:page:tx0
+  =/  original-page-v0=form:page:tx0  base-page-v0(pow `v5)
+  =/  changed-tail-page-v0=form:page:tx0  base-page-v0(pow `changed-tail)
+  =/  changed-nonce-page-v0=form:page:tx0  base-page-v0(pow `changed-nonce)
+  =/  changed-commitment-page-v0=form:page:tx0  base-page-v0(pow `changed-commitment)
+  =/  base-page-v1=form:page:tx1  *form:page:tx1
+  =/  original-page-v1=form:page:tx1  base-page-v1(pow `v5)
+  =/  changed-tail-page-v1=form:page:tx1  base-page-v1(pow `changed-tail)
+  =/  changed-nonce-page-v1=form:page:tx1  base-page-v1(pow `changed-nonce)
+  =/  changed-commitment-page-v1=form:page:tx1  base-page-v1(pow `changed-commitment)
   %+  expect-eq
-    !>([%.y %.n %.n %.n %.n %.n %.n %.n %.n %.n])
+    !>([%.y %.n %.y %.y %.y %.n %.n %.n %.n %.n %.n %.n %.n])
   !>  :*  =((proof-to-pow v5) (proof-to-pow changed-tail))
           =((hash-proof v5) (hash-proof changed-tail))
+          =((hash-proof-for-block v5) (hash-proof-for-block changed-tail))
+          =((compute-digest:page:tx0 original-page-v0) (compute-digest:page:tx0 changed-tail-page-v0))
+          =((compute-digest:page:tx1 original-page-v1) (compute-digest:page:tx1 changed-tail-page-v1))
           =((proof-to-pow v5) (proof-to-pow changed-nonce))
-          =((proof-to-pow v5) (proof-to-pow changed-commitment))
-          =((hash-proof v5) (hash-proof changed-nonce))
-          =((hash-proof v5) (hash-proof changed-commitment))
           =((hash-proof-for-block v5) (hash-proof-for-block changed-nonce))
+          =((compute-digest:page:tx0 original-page-v0) (compute-digest:page:tx0 changed-nonce-page-v0))
+          =((compute-digest:page:tx1 original-page-v1) (compute-digest:page:tx1 changed-nonce-page-v1))
+          =((proof-to-pow v5) (proof-to-pow changed-commitment))
           =((hash-proof-for-block v5) (hash-proof-for-block changed-commitment))
-          =((compute-digest:page:tx1 original-page) (compute-digest:page:tx1 changed-nonce-page))
-          =((compute-digest:page:tx1 original-page) (compute-digest:page:tx1 changed-commitment-page))
+          =((compute-digest:page:tx0 original-page-v0) (compute-digest:page:tx0 changed-commitment-page-v0))
+          =((compute-digest:page:tx1 original-page-v1) (compute-digest:page:tx1 changed-commitment-page-v1))
       ==
 ::
-++  test-hardened-versions-bind-full-block-proof-digest
+++  test-v5-block-id-excludes-proof-stream-bookkeeping
   =/  v2=proof  [%2 objects.pf ~ 0]
   =/  v3=proof  [%3 objects.pf ~ 0]
   =/  v5=proof  [%5 objects.pf ~ 0]
   =/  v5-hashes=proof  v5(hashes ~[*noun-digest:tip5])
   =/  v5-index=proof  v5(read-index 1)
   %+  expect-eq
-    !>([%.y %.n %.n %.n %.n %.n])
+    !>([%.y %.n %.n %.n %.y %.y])
   !>  :*  =((hash-proof v2) (hash-proof v3))
           =((hash-proof-for-block v2) (hash-proof-for-block v3))
           =((hash-proof v3) (hash-proof v5))

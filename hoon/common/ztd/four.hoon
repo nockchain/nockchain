@@ -141,21 +141,25 @@
   =-  ?>  ?=(noun-digest:tip5 -)  -
   (list-to-tuple:tip5 lis)
 ::
-::  Hash a complete proof for inclusion in a block ID. Historical proof
-::  versions retain their object-only digest. Versions 3 and 5 also bind their
-::  tag and proof-stream bookkeeping, so changing any verifier-visible proof
-::  field cannot preserve the block ID.
+::  Hash the proof-derived identity committed by a block ID. Version 5 treats
+::  objects after the mining projection as a witness envelope: they remain
+::  mandatory for admission, but alternate valid witnesses for the same object
+::  0 identify the same block. Historical versions retain their existing rules.
 ++  hash-proof-for-block
   ~/  %hash-proof-for-block
   |=  p=proof
   ^-  noun-digest:tip5
+  ?:  =(%5 version.p)
+    %-  hash-hashable:tip5
+    :*  leaf+%zkblk-v5
+        leaf+version.p
+        hash+(hash-proof (get-pow p))
+    ==
   =/  proof-digest=noun-digest:tip5  (hash-proof p)
   ?:  ?=(?(%0 %1 %2) version.p)
     proof-digest
   %-  hash-hashable:tip5
-  ::  Keep the domain atom within one base-field element. The Tip5 leaf
-  ::  encoder rejects wider atoms rather than reducing them modulo the field.
-  :*  leaf+?:(=(%3 version.p) %zkblk-v3 %zkblk-v5)
+  :*  leaf+%zkblk-v3
       leaf+version.p
       hash+proof-digest
       (hashable-noun-digests:tip5 hashes.p)
