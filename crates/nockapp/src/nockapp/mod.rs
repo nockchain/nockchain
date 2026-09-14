@@ -10,6 +10,7 @@ pub mod test;
 pub mod wire;
 
 use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -348,6 +349,27 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
 
     pub async fn export(&self) -> Result<crate::kernel::form::LoadState, NockAppError> {
         Ok(self.kernel.export().await?)
+    }
+
+    /// Export the current kernel state to `path` in [`ExportedState`]
+    /// format. The resulting file can be loaded back into a fresh
+    /// `NockApp` via the boot `Cli`'s `state_jam` field.
+    ///
+    /// Differs from `boot::setup` with `cli.export_state_jam`: that
+    /// path runs at boot and exits after writing. This method exports
+    /// from a live, running app and leaves it intact, so callers can
+    /// snapshot mid-lifecycle without losing the runtime.
+    ///
+    /// [`ExportedState`]: crate::nockapp::export::ExportedState
+    pub async fn export_state(&self, path: &Path) -> Result<(), NockAppError> {
+        let kernel_state = self.kernel.export().await?;
+        let exported_state =
+            crate::nockapp::export::ExportedState::from_loadstate::<J>(kernel_state);
+        let state_bytes = exported_state.encode()?;
+        tokio::fs::write(path, state_bytes)
+            .await
+            .map_err(NockAppError::SaveError)?;
+        Ok(())
     }
 
     pub async fn poke_timeout(
