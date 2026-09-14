@@ -384,10 +384,11 @@
   ::  Before the dual-puzzle phase this is the unchanged ZK formula on the
   ::  block's own target, so every historical block keeps the work it was
   ::  accepted with. From that phase on it is the EXPECTED work at the block's
-  ::  own target for the producing puzzle, priced in ZKPoW-attempt-equivalents:
+  ::  own target for the producing puzzle, priced in the ZK work unit active at
+  ::  that height:
   ::
-  ::  - %dumb-zkpow: 2^320/(target+1) attempts -- identical to the
-  ::    pre-activation formula, so ZK weight is continuous across the boundary.
+  ::  - %dumb-zkpow: 2^320/(target+1) work units -- complete-proof attempts
+  ::    before version %5 and Tip5-hash attempts from version %5 onward.
   ::  - %ai-pow: 2^256/(target+1) MAC-equivalents, converted at the
   ::    height-selected cross-puzzle exchange rate.
   ::
@@ -406,35 +407,35 @@
     ==
   ::
   ::  +ai-pow-work: expected MAC-equivalents of matmul work at `target-bn`
-  ::  (2^256/(target+1)), priced in ZKPoW-attempt-equivalents at `height`.
+  ::  (2^256/(target+1)), priced in height-selected ZK work-unit equivalents.
   ::  Mirrors +compute-work:page:v0's GetBlockProof convention, floored at 1.
   ++  ai-pow-work
     |=  [height=page-number target-bn=bignum:bn]
     ^-  bignum:bn
     =/  target-atom=@  (merge:bignum target-bn)
-    =/  exchange-rate=@  (mac-equivalents-per-zk-attempt-at height)
+    =/  exchange-rate=@  (mac-equivalents-per-zk-work-unit-at height)
     =/  raw=@  (div (bex 256) (mul exchange-rate +(target-atom)))
     (chunk:bignum ?:(=(0 raw) 1 raw))
   ::
-  ::  Logos priced one ZK prover attempt as 25.75 billion Pearl
-  ::  MAC-equivalents. Keep that value below height 147,500: changing it
-  ::  retroactively would change historical accumulated work.
-  ++  logos-mac-equivalents-per-zk-attempt
+  ::  Logos priced one complete ZK proof attempt as 25.75 billion Pearl
+  ::  MAC-equivalents. Keep the original public constant and value below
+  ::  height 147,500: repricing historical blocks would change fork choice.
+  ++  mac-equivalents-per-zk-attempt
     ^~  25.750.000.000
   ::
   ::  Version %5 grinds Tip5 hashes rather than complete proof attempts. Public
   ::  Neptune/OXZD RTX 5090 data measures 388.8 million Tip5 guesses/s; the
   ::  Pearl reference rate is 400 trillion MAC/s. Rounded to the nearest integer:
   ::    400,000,000,000,000 / 388,800,000 = 1,028,806.584...
-  ++  mac-equivalents-per-zk-attempt
+  ++  zk-pow-v5-mac-equivalents-per-zk-hash
     ^~  1.028.807
   ::
-  ++  mac-equivalents-per-zk-attempt-at
+  ++  mac-equivalents-per-zk-work-unit-at
     |=  height=page-number
     ^-  @
     ?:  (lth height zk-pow-v5-phase)
-      logos-mac-equivalents-per-zk-attempt
-    mac-equivalents-per-zk-attempt
+      mac-equivalents-per-zk-attempt
+    zk-pow-v5-mac-equivalents-per-zk-hash
   ::
   ++  zk-pow-v5-phase
     ^-  page-number

@@ -11,7 +11,7 @@ published = "2026-07-17"
 activation_target = ""
 
 # People
-authors = ["Nock Community Co"]
+authors = ["Logan Allen (National Compute Co)"]
 reviewers = ["@nockchain-core"]
 
 supersedes = "0.1.15"

@@ -84,12 +84,12 @@ Four constants encode this and must move together:
 
 From `+dual-puzzle-phase` on, a block's heaviness is the expected work at its
 own target for the puzzle named by its pow artifact, priced in
-ZKPoW-attempt-equivalents (`+block-work-at`):
+height-selected ZK work-unit equivalents (`+block-work-at`):
 
-- `%dumb-zkpow`: `2^320 / (T+1)` attempts — the unchanged pre-activation
-  formula, so every ZK block already on the chain keeps its weight.
+- `%dumb-zkpow`: `2^320 / (T+1)` work units — complete-proof attempts below
+  version `%5` and Tip5-hash attempts from version `%5` onward.
 - `%ai-pow`: `2^256 / (T+1)` MAC-equivalents (I2), converted by
-  `+mac-equivalents-per-zk-attempt-at(height)`.
+  `+mac-equivalents-per-zk-work-unit-at(height)`.
 
 Heaviness therefore scales inversely with target for both puzzles: a branch
 whose ASERT lets its target drift to a ceiling earns proportionally less
@@ -122,7 +122,7 @@ The Logos regime at heights 126,000–147,499 keeps its original co-benchmarked
 rate:
 
 ```
-logos-mac-equivalents-per-zk-attempt = 25,750,000,000
+mac-equivalents-per-zk-attempt = 25,750,000,000
 ```
 
 Keeping this historical value is consensus-critical: repricing an old AI block
@@ -139,7 +139,7 @@ to the nearest integer:
 400,000,000,000,000 MAC/s / 388,800,000 hashes/s
   = 1,028,806.584... MAC/hash
 
-mac-equivalents-per-zk-attempt = 1,028,807
+zk-pow-v5-mac-equivalents-per-zk-hash = 1,028,807
 ```
 
 Both values are frozen consensus constants. They need not predict every miner;
@@ -151,7 +151,7 @@ height-gated protocol revision, never a retroactive replacement.
 (`floor(375 · 2^291 / 214)`) prices 306,374,333 proof attempts per block; the AI
 anchor (`2^192`) prices `2^64` MAC-equivalents per block. At their 214 s ZK and
 500 s AI ideals, both lanes produce about 1.43 × 10⁶
-attempt-equivalents of heaviness per second.
+proof-attempt-equivalents of heaviness per second.
 
 **Version-%5 anchor cross-check.** The two ASERT lanes start from independent
 reference-network capacities:
@@ -169,7 +169,7 @@ AI target = floor(2^256 / (10,000,000,000,000,000,000 × 214))
 ```
 
 Their normalized work rates are 777,599,999,999 ZK and 9,719,996,073,121 AI
-attempt-equivalents/s after integer flooring. The independent capacity anchors
+Tip5-hash-equivalents/s after integer flooring. The independent capacity anchors
 therefore make the AI rate about 12.5 times the ZK rate. This affects
 fork-choice weight, not the independently scheduled block shares: the 500 s ZK
 / 214 s AI ideals still target 29.972% ZK / 70.028% AI and a 149.86 s combined

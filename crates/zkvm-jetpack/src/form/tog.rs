@@ -152,41 +152,6 @@ fn hash_noun_digests(list: &[[u64; 5]]) -> [u64; 5] {
     hash_belts_list(&dat)
 }
 
-fn hash_puzzle_data(
-    com: &[u64; 5],
-    nonce: &[u64; 5],
-    len: u64,
-    leaf: &[u64],
-    dyck: &[u64],
-) -> [u64; 5] {
-    let term_hash = hash_term(b"puzzle");
-    let len_hash = hash_belt(len);
-
-    let size = leaf.len();
-    let mut dat = vec![0; leaf.len() + dyck.len() + 1];
-    dat[0] = size as u64;
-    dat[1..leaf.len() + 1].copy_from_slice(leaf);
-    dat[(leaf.len() + 1)..].copy_from_slice(dyck);
-    let p_hash = hash_belts_list(&dat);
-
-    let mut ten_cell = [0; 10];
-    ten_cell[..5].copy_from_slice(&len_hash);
-    ten_cell[5..].copy_from_slice(&p_hash);
-    let hash = hash_ten_cell(ten_cell);
-
-    ten_cell[..5].copy_from_slice(nonce);
-    ten_cell[5..].copy_from_slice(&hash);
-    let hash = hash_ten_cell(ten_cell);
-
-    ten_cell[..5].copy_from_slice(com);
-    ten_cell[5..].copy_from_slice(&hash);
-    let hash = hash_ten_cell(ten_cell);
-
-    ten_cell[..5].copy_from_slice(&term_hash);
-    ten_cell[5..].copy_from_slice(&hash);
-    hash_ten_cell(ten_cell)
-}
-
 pub fn hash_proof_data(data: &ProofData) -> [u64; 5] {
     match data {
         ProofData::MRoot { p } => {
@@ -203,7 +168,35 @@ pub fn hash_proof_data(data: &ProofData) -> [u64; 5] {
             len,
             leaf,
             dyck,
-        } => hash_puzzle_data(com, nonce, *len, leaf, dyck),
+        } => {
+            let term_hash = hash_term(b"puzzle");
+            let len_hash = hash_belt(*len);
+
+            // hash p using precomputed leaf and dyck
+            let size = leaf.len();
+            let mut dat = vec![0; leaf.len() + dyck.len() + 1];
+            dat[0] = size as u64;
+            dat[1..leaf.len() + 1].copy_from_slice(leaf);
+            dat[(leaf.len() + 1)..].copy_from_slice(dyck);
+            let p_hash = hash_belts_list(&dat);
+
+            let mut ten_cell: [u64; 10] = [0; 10];
+            ten_cell[..5].copy_from_slice(&len_hash);
+            ten_cell[5..].copy_from_slice(&p_hash);
+            let hash = hash_ten_cell(ten_cell);
+
+            ten_cell[..5].copy_from_slice(nonce);
+            ten_cell[5..].copy_from_slice(&hash);
+            let hash = hash_ten_cell(ten_cell);
+
+            ten_cell[..5].copy_from_slice(com);
+            ten_cell[5..].copy_from_slice(&hash);
+            let hash = hash_ten_cell(ten_cell);
+
+            ten_cell[..5].copy_from_slice(&term_hash);
+            ten_cell[5..].copy_from_slice(&hash);
+            hash_ten_cell(ten_cell)
+        }
         ProofData::CompM { p, num } => {
             let term_hash = hash_term(b"comp-m");
             let num_hash = hash_belt(*num);

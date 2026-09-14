@@ -109,7 +109,7 @@
         ==
 ++  test-anthropos-zk-v5-activation-preserves-ai-v4-discriminator
   =/  con=consensus-state  *consensus-state
-  =/  v5-start=page-number:t  proof-version-5-start:dcon
+  =/  v5-start=page-number:t  zk-pow-v5-phase:page:t
   %+  expect-eq
     !>([147.500 %3 %5 %5 %ai-pow %dumb-zkpow %.y %.n %.n %.y %.y %.y])
   !>  :*  v5-start

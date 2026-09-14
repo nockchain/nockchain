@@ -71,7 +71,7 @@ pub enum ProofVersion {
 }
 
 impl ProofVersion {
-    pub(crate) const fn has_hardened_transcript(self) -> bool {
+    pub(crate) const fn uses_hardened_rules(self) -> bool {
         matches!(self, Self::V3 | Self::V5)
     }
 }
@@ -116,8 +116,7 @@ impl NounDecode for Proof {
     fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         let [version_noun, objects_noun, hashes_noun, read_index_noun] = noun.uncell(space)?;
         let version = ProofVersion::from_noun(&version_noun, space)?;
-        if version.has_hardened_transcript() && !proof_arrays_have_exact_shape(objects_noun, space)
-        {
+        if version.uses_hardened_rules() && !proof_arrays_have_exact_shape(objects_noun, space) {
             return Err(NounDecodeError::Custom(
                 "hardened proof contains a noncanonical array encoding".to_string(),
             ));

@@ -5,7 +5,7 @@
 ::    Focus: fork choice must price both puzzles in shared hardware units and
 ::    must not reward a difficulty discount. Once both are live every block
 ::    contributes expected work at its own target, priced per puzzle in
-::    ZKPoW-attempt-equivalents at the height-selected hardware exchange rate.
+::    height-selected ZK work-unit equivalents.
 ::    ASERT block shares follow each lane's ideal interval, while normalized
 ::    work rates follow the declared capacity anchors.
 ::
@@ -26,9 +26,9 @@
 ++  ht  ~(. helpers bc-tandem:helpers)
 ::
 ::  Post-activation heaviness is the expected work at the block's own target,
-::  priced per puzzle in ZKPoW-attempt-equivalents. ZK blocks keep the
-::  pre-activation formula exactly; AI blocks contribute 2^256/(target+1)
-::  MAC-equivalents over the +mac-equivalents-per-zk-attempt exchange rate.
+::  priced per puzzle in height-selected ZK work-unit equivalents. ZK blocks
+::  keep the pre-activation formula exactly; AI blocks contribute
+::  2^256/(target+1) MAC-equivalents over the selected exchange rate.
 ++  test-post-activation-work-is-puzzle-priced
   ^-  tang
   =/  pt  ~(. txe bc-dual-post:helpers)
@@ -45,7 +45,7 @@
     ::  ZK keeps the pre-activation formula on its own target
     %+  expect-eq  !>(zk-w)
     !>((merge:bignum (compute-work:page:pt ~(target get:page:t tip.zk-built))))
-    ::  AI contributes its MAC-equivalents in attempt-equivalents
+    ::  AI contributes its MAC-equivalents in ZK work-unit equivalents
     %+  expect-eq  !>(ai-w)
     !>((merge:bignum (ai-pow-work:page:pt ~(height get:page:t tip.ai-built) ~(target get:page:t tip.ai-built))))
   ==
@@ -238,7 +238,7 @@
     %-  merge:bignum
     (block-work-at:page:mt 147.500 %ai-pow (chunk:bignum zk-pow-v5-ai-anchor-target:page:mt))
   ;:  weld
-    (expect-eq !>(1.028.807) !>(mac-equivalents-per-zk-attempt:page:mt))
+    (expect-eq !>(1.028.807) !>(zk-pow-v5-mac-equivalents-per-zk-hash:page:mt))
     (expect-eq !>(2.000) !>(zk-pow-v5-reference-zk-gpu-count:page:mt))
     (expect-eq !>(388.800.000) !>(zk-pow-v5-reference-zk-hashes-per-gpu-second:page:mt))
     (expect-eq !>(777.600.000.000) !>(zk-pow-v5-reference-zk-hashes-per-second:page:mt))
@@ -397,9 +397,9 @@
   =/  mt  ~(. txe *blockchain-constants:txe)
   =/  mainnet  *blockchain-constants:txe
   ;:  weld
-    (expect-eq !>(25.750.000.000) !>(logos-mac-equivalents-per-zk-attempt:page:mt))
-    (expect-eq !>(25.750.000.000) !>((mac-equivalents-per-zk-attempt-at:page:mt 147.499)))
-    (expect-eq !>(1.028.807) !>((mac-equivalents-per-zk-attempt-at:page:mt 147.500)))
+    (expect-eq !>(25.750.000.000) !>(mac-equivalents-per-zk-attempt:page:mt))
+    (expect-eq !>(25.750.000.000) !>((mac-equivalents-per-zk-work-unit-at:page:mt 147.499)))
+    (expect-eq !>(1.028.807) !>((mac-equivalents-per-zk-work-unit-at:page:mt 147.500)))
     %+  expect-eq  !>(306.374.333)
     !>((merge:bignum (block-work-at:page:mt 126.000 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet))))
     %+  expect-eq  !>(716.378.410)
