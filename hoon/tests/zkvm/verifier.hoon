@@ -1,8 +1,7 @@
 /=  *  /common/zeke
 /=  sp  /common/stark/prover
 /=  *  /common/test
-/=  mine  /common/pow
-/=  *  /common/tx-engine
+/=  tx1  /common/tx-engine-1
 /=  bp  /tests/loki/bad-pow
 /=  nv  /common/nock-verifier
 /=  np  /common/nock-prover
@@ -43,12 +42,18 @@
   =/  puzzle=proof-data  (grab-proof-entry:bp v5 %puzzle 1)
   ?>  ?=(%puzzle -.puzzle)
   =/  changed-nonce=proof
-    (set-v5-proof-nonce:mine v5 (twiddle-digest:bp nonce.puzzle))
+    (replace-proof-entry:bp v5 %puzzle puzzle(nonce (twiddle-digest:bp nonce.puzzle)) 1)
+  =/  base-page=form:page:tx1  *form:page:tx1
+  =/  original-page=form:page:tx1  base-page(pow `v5)
+  =/  changed-page=form:page:tx1  base-page(pow `changed-nonce)
   %+  expect-eq
-    !>([%.y %.n %.n])
+    !>([%.y %.n %.n %.n %.n %.n])
   !>  :*  =((proof-to-pow v5) (proof-to-pow changed-tail))
           =((hash-proof v5) (hash-proof changed-tail))
           =((proof-to-pow v5) (proof-to-pow changed-nonce))
+          =((hash-proof v5) (hash-proof changed-nonce))
+          =((hash-proof-for-block v5) (hash-proof-for-block changed-nonce))
+          =((compute-digest:page:tx1 original-page) (compute-digest:page:tx1 changed-page))
       ==
 ::
 ++  test-hardened-versions-bind-full-block-proof-digest

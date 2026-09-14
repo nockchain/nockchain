@@ -134,15 +134,28 @@
   ?>  ~(cank bop canonical)
   canonical
 ::
+++  evaluate-puzzle
+  |=  [header=noun-digest:tip5 nonce=noun-digest:tip5 pow-len=@]
+  ^-  [s=* f=* prod=* return=fock-return]
+  =/  [s=* f=*]  (puzzle-nock header nonce pow-len)
+  =/  [prod=* return=fock-return]  (fink:fock [s f])
+  [s f prod return]
+::
+++  puzzle-proof-data
+  |=  [header=noun-digest:tip5 nonce=noun-digest:tip5 pow-len=@]
+  ^-  proof-data
+  =/  [s=* f=* prod=* return=fock-return]
+    (evaluate-puzzle header nonce pow-len)
+  [%puzzle header nonce pow-len prod]
+::
 ::
 ::  +prove: prove the Nock computation [s f]
 ++  prove
   ~/  %prove
   |=  prover-input
   ^-  prove-result
-  =/  proof-nonce=noun-digest:tip5  ?:(=(%5 version) *noun-digest:tip5 nonce)
-  =/  [s=* f=*]  (puzzle-nock header proof-nonce pow-len)
-  =/  [prod=* return=fock-return]  (fink:fock [s f])
+  =/  [s=* f=* prod=* return=fock-return]
+    (evaluate-puzzle header nonce pow-len)
   =/  nock-common=_nock-common-v0-v1
     ?-  version
       %0  nock-common-v0-v1
@@ -206,9 +219,8 @@
   ~/  %snapshot
   |=  prover-input
   ^-  proof-snapshot
-  =/  proof-nonce=noun-digest:tip5  ?:(=(%5 version) *noun-digest:tip5 nonce)
-  =/  [s=* f=*]  (puzzle-nock header proof-nonce pow-len)
-  =/  [prod=* return=fock-return]  (fink:fock [s f])
+  =/  [s=* f=* prod=* return=fock-return]
+    (evaluate-puzzle header nonce pow-len)
   =/  nock-common=_nock-common-v0-v1
     ?-  version
       %0  nock-common-v0-v1

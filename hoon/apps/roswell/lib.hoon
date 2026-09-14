@@ -1,6 +1,7 @@
 /=  *  /common/zeke
 /=  sp  /common/stark/prover
 /=  np  /common/nock-prover
+/=  mine  /common/pow
 /=  nv  /common/nock-verifier
 |%
 ++  prv  np
@@ -108,14 +109,18 @@
       %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
       %5  [%5 header nonce len]
     ==
+  =/  preflight=(unit [object-zero=proof-data:sp digest=tip5-hash-atom])
+    ?:  =(%5 v)
+      (some (v5-nonce-pow:mine header nonce len))
+    ~
   =/  res  (prove:prv in)
   ?>  ?=(%& -.res)
   ~&  %verifying
   =/  verified=?  (verify:vrf proof.p.res override 0)
   ?.  =(%5 v)  verified
-  ::  Version %5's proof statement and Fiat-Shamir transcript exclude the
-  ::  mining nonce. Replacing only that field must preserve full verification
-  ::  while producing a different PoW digest.
+  ?>  ?=(^ preflight)
+  =/  [object-zero=proof-data:sp preflight-pow=tip5-hash-atom]
+    u.preflight
   =/  objects=(list proof-data:sp)  objects.proof.p.res
   ?>  ?=(^ objects)
   =/  puzzle=proof-data:sp  i.objects
@@ -125,8 +130,10 @@
   =/  changed-puzzle=proof-data:sp  puzzle(nonce changed-nonce)
   =/  changed-proof=proof:sp  [%5 [changed-puzzle t.objects] ~ 0]
   ?&  verified
+      =(object-zero puzzle)
+      =(preflight-pow (proof-to-pow:sp proof.p.res))
       !=((proof-to-pow:sp proof.p.res) (proof-to-pow:sp changed-proof))
-      (verify:vrf changed-proof override 0)
+      !(verify:vrf changed-proof override 0)
   ==
 ::
 ::

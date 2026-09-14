@@ -32,10 +32,11 @@ proof version and its verifier, mining kernel, and proof encoding do not change.
 
 ## Motivation
 
-ZK proof versions `%0` through `%3` derive their mining digest from all seven
-proof objects. A miner must therefore regenerate the complete proof before it
-can test another nonce. Version `%5` separates those jobs: generate and verify
-the full proof once, then grind the block-bound `%puzzle` object with Tip5.
+ZK proof versions `%0` through `%3` derive their mining digest from proof
+objects `0` through `6`. A miner must therefore regenerate the complete proof
+before it can test another nonce. Version `%5` separates those jobs:
+evaluate proof object `0` and its Tip5 digest for each nonce, then construct one
+complete proof only after a nonce meets the target.
 
 That changes the hardware unit represented by one ZK attempt. The Logos
 exchange rate compared Pearl MAC throughput with complete ZK proof throughput;
@@ -63,16 +64,16 @@ miners, and verifiers reject `%4` rather than interpreting it as a ZK proof.
 
 ### Version `%5` proof and mining digest
 
-Version `%5` uses the version `%3` AIR, preprocessing tables, seven-object proof
+Version `%5` uses the version `%3` AIR, preprocessing tables, proof-object
 sequence, canonical encodings, hardened DEEP post-commitment equation, Merkle
 authentication, and FRI verification.
 
-The submitted `%puzzle` object retains its actual nonce, but the `%5` prover and
-verifier replace that nonce with zero when evaluating the puzzle statement and
-when absorbing object `0` into the Fiat-Shamir transcript. Consequently the
-proof suffix is independent of the mining nonce and remains valid while a miner
-changes only object `0`'s nonce. Block admission still verifies the complete
-proof and returns the submitted block commitment and nonce.
+The submitted `%puzzle` object retains its actual nonce. The `%5` prover and
+verifier use that nonce when evaluating the puzzle statement and when absorbing
+object `0` into the Fiat-Shamir transcript. The complete proof is therefore
+bound to the winning nonce and cannot be reused for another nonce. Miners can
+still evaluate object `0` and its mining digest before constructing the
+remaining proof objects.
 
 The mining projection hashes the raw submitted object `0` and discards objects
 `1` through `6`:
@@ -82,12 +83,12 @@ object-0 = %puzzle [block-commitment actual-nonce len p]
 pow-v5   = Tip5([leaf+%zkpow-v5 hash+hash-proof([%5 [object-0] ~ 0])])
 ```
 
-The winning digest therefore remains bound to both the candidate block and the
-actual nonce. Mutating the nonce changes `pow-v5` without invalidating the
-reusable proof suffix. Mutating any suffix object does not change `pow-v5`, but
-admission still rejects an invalid suffix. The block ID independently commits
-to the complete submitted proof envelope under the `%zkblk-v5` domain, so
-accepted suffix changes cannot create an unbound or identifier-malleable block.
+The winning digest therefore remains bound to the candidate block, actual
+nonce, and puzzle result. Mutating the nonce changes `pow-v5` and invalidates
+the proof. Mutating any suffix object does not change `pow-v5`, but admission
+still rejects an invalid suffix. The block ID independently commits to the
+complete submitted proof envelope under the `%zkblk-v5` domain, so accepted
+suffix changes cannot create an unbound or identifier-malleable block.
 
 ### Height-gated cross-puzzle work
 
@@ -223,9 +224,10 @@ change.
   checks.
 - Proof object `0` includes the block commitment and nonce. A winning digest
   cannot be transplanted to a different candidate block.
-- The complete proof remains block-ID-bound under `%zkblk-v5`; proof suffixes
-  cannot be changed without changing the block ID, and invalid suffixes fail
-  verification.
+- `hash-proof-for-block` commits the `%5` domain and version, every proof object
+  including the nonce, and the proof-stream bookkeeping. Both page encodings
+  include that digest in the block ID. Any final-proof field mutation therefore
+  changes the block ID; an invalid proof also fails admission.
 - `%4` is not accepted by the ZK codec. This preserves an unambiguous wire-level
   distinction between AI-PoW and ZK-PoW.
 - The old work rate remains active below height 147,500. Historical chainwork is
@@ -233,11 +235,11 @@ change.
 
 ## Operational Impact
 
-ZK miners no longer regenerate a complete proof for each nonce attempt. They
-should generate one valid nonce-independent proof envelope, repeatedly replace
-object `0`'s nonce while grinding its raw Tip5 digest, and submit the complete
-proof with the winning object. Pools must update job/version negotiation and
-must not submit `%3` at or after activation.
+For each `%5` nonce, a ZK miner evaluates the block-bound `%puzzle` object and
+checks its Tip5 digest against the target. A miss returns immediately. Only
+after a nonce meets the target does the miner construct and submit one complete
+proof for that exact nonce. Pools must update job/version negotiation and must
+not submit `%3` at or after activation.
 
 Operators should monitor the first `%5` block, invalid-version and invalid-proof
 rates, both ASERT targets, and convergence toward the 70% AI / 30% ZK target.
@@ -246,14 +248,16 @@ The combined target cadence remains approximately 150 seconds.
 ## Testing and Validation
 
 - Hoon proof tests pin that changing object `1` leaves `%5` PoW unchanged,
-  changing object `0` changes it, and full block hashing binds every object.
-  The Roswell proving scenario additionally verifies one complete `%5` proof,
-  replaces object `0`'s nonce, and verifies the same proof suffix again.
+  changing object `0` changes it, and full proof hashing binds every object.
+  The Roswell proving scenario additionally verifies that the preflight object
+  exactly matches the complete proof's object `0` and that changing its nonce
+  invalidates the proof.
 - Rust codec tests pin `%5` noun round trips and canonical array encoding.
-- Rust verifier tests reject `%2` and `%3` nonce-bound transcripts relabelled as
-  `%5`; transcript tests pin that `%5` Fiat-Shamir excludes the mining nonce.
-- The reference-miner worker test submits two `%5` nonce attempts for one
-  candidate and pins identical proof suffixes and transcript hashes.
+- Rust verifier and transcript tests pin that `%5` preserves the `%3`
+  nonce-bound statement and that Fiat-Shamir absorbs the actual mining nonce.
+- The reference-miner worker test rejects a losing nonce before full proof
+  construction, proves a winning nonce once, and verifies the submitted proof
+  natively.
 - Consensus boundary tests pin `%3` immediately before height 147,500, `%5` at
   and after it, and `%4` as AI-only.
 - Dual-puzzle tests pin the historical/new exchange-rate boundary, the new ASERT

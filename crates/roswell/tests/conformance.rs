@@ -665,6 +665,12 @@ fn rejects_non_power_of_two_puzzle_length() {
 }
 
 #[test]
+fn v5_preflight_matches_the_nonce_bound_full_proof() {
+    let output = run_roswell(&["test-puzzle", "5", "1"]);
+    assert_success(output, "preflight, prove, and verify v5 proof");
+}
+
+#[test]
 fn help_exposes_only_public_puzzle_commands() {
     let output = Command::new(roswell_bin())
         .arg("--help")

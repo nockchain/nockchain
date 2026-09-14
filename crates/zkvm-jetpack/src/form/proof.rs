@@ -968,9 +968,7 @@ impl<'a> ProofStream<'a> {
             let object = &self.proof.objects[self.committed];
             self.proof
                 .hashes
-                .push(crate::form::tog::hash_proof_data_for_transcript(
-                    self.proof.version, object,
-                ));
+                .push(crate::form::tog::hash_proof_data(object));
             self.committed += 1;
         }
     }

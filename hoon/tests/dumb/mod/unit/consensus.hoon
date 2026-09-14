@@ -108,15 +108,22 @@
             ~(wyt h-by blocks.c.loaded)
         ==
 ++  test-anthropos-zk-v5-activation-preserves-ai-v4-discriminator
+  =/  con=consensus-state  *consensus-state
   =/  v5-start=page-number:t  proof-version-5-start:dcon
   %+  expect-eq
-    !>([147.500 %3 %5 %5 %ai-pow %dumb-zkpow])
+    !>([147.500 %3 %5 %5 %ai-pow %dumb-zkpow %.y %.n %.n %.y %.y %.y])
   !>  :*  v5-start
           (height-to-proof-version-legacy:dcon (dec v5-start))
           (height-to-proof-version-legacy:dcon v5-start)
           (height-to-proof-version-legacy:dcon +(v5-start))
           (version-to-puzzle-type:dcon %4)
           (version-to-puzzle-type:dcon %5)
+          (~(proof-version-valid-at-height dcon con der constants) %3 (dec v5-start))
+          (~(proof-version-valid-at-height dcon con der constants) %5 (dec v5-start))
+          (~(proof-version-valid-at-height dcon con der constants) %3 v5-start)
+          (~(proof-version-valid-at-height dcon con der constants) %5 v5-start)
+          (~(proof-version-valid-at-height dcon con der constants) %4 (dec v5-start))
+          (~(proof-version-valid-at-height dcon con der constants) %4 v5-start)
       ==
 ::
 --

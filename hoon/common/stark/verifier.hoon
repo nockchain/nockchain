@@ -59,9 +59,7 @@
     ?>  =(~ hashes.proof)
     =^  puzzle  proof
       =^(c proof ~(pull proof-stream proof) ?>(?=(%puzzle -.c) c^proof))
-    =/  proof-nonce=noun-digest:tip5
-      ?:(=(%5 version.proof) *noun-digest:tip5 nonce.puzzle)
-    =/  [s=* f=*]  (puzzle-nock commitment.puzzle proof-nonce len.puzzle)
+    =/  [s=* f=*]  (puzzle-nock commitment.puzzle nonce.puzzle len.puzzle)
     ::
     ::  get computation in raw noun form
     ?>  (based-noun p.puzzle)

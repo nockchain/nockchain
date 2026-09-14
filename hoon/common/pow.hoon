@@ -48,15 +48,12 @@
   =/  proof-hash=tip5-hash-atom  (proof-to-pow proof)
   [proof proof-hash]
 ::
-::  Replace only version %5's mining nonce. The proof statement and transcript
-::  canonicalize this field to zero, so every other proof object and cached
-::  transcript hash remains valid across nonce attempts.
-++  set-v5-proof-nonce
-  |=  [prf=proof:sp new-nonce=noun-digest:tip5]
-  ^-  proof:sp
-  ?>  =(%5 version.prf)
-  ?>  ?=(^ objects.prf)
-  =/  puzzle=proof-data:sp  i.objects.prf
-  ?>  ?=(%puzzle -.puzzle)
-  [%5 [puzzle(nonce new-nonce) t.objects.prf] hashes.prf read-index.prf]
+++  v5-nonce-pow
+  |=  [header=noun-digest:tip5 nonce=noun-digest:tip5 pow-len=@]
+  ^-  [object-zero=proof-data:sp digest=tip5-hash-atom]
+  =/  object-zero=proof-data:sp
+    (puzzle-proof-data:sp header nonce pow-len)
+  =/  probe=proof:sp
+    [%5 [object-zero ~] ~ 0]
+  [object-zero (proof-to-pow:sp probe)]
 --

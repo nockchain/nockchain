@@ -768,7 +768,7 @@
       [%3 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       ::  %4 identifies the AI-PoW artifact emitted only through %mine-ai.
       [%4 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
-      ::  %5 is the post-126000 ZK proof version.
+      ::  %5 is the post-147500 ZK proof version.
       [%5 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
   ==
 ::

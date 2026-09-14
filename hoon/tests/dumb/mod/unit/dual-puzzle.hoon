@@ -11,6 +11,7 @@
 ::
 /=  helpers  /tests/dumb/helpers
 /=  dcon     /apps/dumbnet/lib/consensus
+/=  dder     /apps/dumbnet/lib/derived
 /=  asert    /apps/dumbnet/lib/asert
 /=  txe      /common/tx-engine
 /=  *        /apps/dumbnet/lib/types
@@ -140,6 +141,90 @@
     (expect-eq !>(147.500) !>(activation-height.zk-v5))
     (expect-eq !>(147.500) !>(activation-height.ai-v5))
   ==
+::
+::  The first child at the version-%5 boundary starts both ASERT lineages at
+::  their new anchor target. No pre-cutover derived lineage is required, but
+::  the shared predecessor's puzzle-keyed median timestamp must be present.
+++  test-mainnet-v5-first-child-uses-new-asert-anchors
+  ^-  tang
+  =/  mainnet  *blockchain-constants:txe
+  =/  mt  ~(. txe mainnet)
+  =/  parent-id=block-id:t  *block-id:t
+  =/  anchor-min-ts=@  123.456
+  =/  timestamps=(h-map block-id:t @)
+    (~(put h-by *(h-map block-id:t @)) parent-id anchor-min-ts)
+  =/  caches=(map @tas (h-map block-id:t @))
+    *(map @tas (h-map block-id:t @))
+  =.  caches  (~(put by caches) %zk timestamps)
+  =.  caches  (~(put by caches) %ai timestamps)
+  =/  con=consensus-state  *consensus-state
+  =.  asert-anchor-min-timestamps.con  caches
+  =/  dc  ~(. dcon con *derived-state mainnet)
+  =/  zk-target=@
+    (merge:bignum (compute-target-zk-asert:dc 147.500 parent-id))
+  =/  ai-target=@
+    (merge:bignum (compute-target-ai-asert:dc 147.500 parent-id))
+  %+  expect-eq
+    !>([zk-pow-v5-zk-anchor-target:page:mt zk-pow-v5-ai-anchor-target:page:mt])
+  !>([zk-target ai-target])
+::
+::  Accepting either puzzle at height 147,500 discards all Logos lineage
+::  counters and heads. The reset happens once: height 147,501 extends the
+::  freshly-created branch-local state rather than zeroing it again.
+++  test-mainnet-v5-derived-lineages-reset-once
+  ^-  tang
+  =/  mainnet  *blockchain-constants:txe
+  =/  mt  ~(. txe mainnet)
+  =/  hm  ~(. helpers mainnet)
+  =/  parent=page:t  default-genesis-page:hm
+  =.  parent
+    ?^  -.parent
+      parent(height 147.499, digest *block-id:t)
+    parent(height 147.499, digest *block-id:t)
+  =/  parent-id=block-id:t  ~(digest get:page:mt parent)
+  =/  con=consensus-state  *consensus-state
+  =.  blocks.con
+    (~(put h-by blocks.con) parent-id (to-local-page:page:mt parent))
+  =/  prior-state=puzzle-asert-state
+    [zk-count=91 ai-count=73 zk-head=`parent-id ai-head=`parent-id]
+  =/  prior=derived-state  *derived-state
+  =.  puzzle-asert-states.prior
+    (~(put h-by puzzle-asert-states.prior) parent-id prior-state)
+  =/  zk-page=page:t  (make-empty-page:hm parent)
+  =/  zk-id=block-id:t  ~(digest get:page:mt zk-page)
+  =/  zk-derived=derived-state
+    (~(update-puzzle-asert-state dder prior mainnet) con zk-page)
+  =/  zk-state=puzzle-asert-state
+    (~(got h-by puzzle-asert-states.zk-derived) zk-id)
+  =/  ai-page=page:t  (make-empty-page:hm parent)
+  =.  ai-page
+    ?^  -.ai-page
+      ai-page
+    ai-page(pow `(sample-ai-pow-artifact:hm 4))
+  =.  ai-page
+    ?^  -.ai-page
+      ai-page(digest (compute-digest:page:mt ai-page))
+    ai-page(digest (compute-digest:page:mt ai-page))
+  =/  ai-id=block-id:t  ~(digest get:page:mt ai-page)
+  =/  ai-derived=derived-state
+    (~(update-puzzle-asert-state dder prior mainnet) con ai-page)
+  =/  ai-state=puzzle-asert-state
+    (~(got h-by puzzle-asert-states.ai-derived) ai-id)
+  =/  after-con=consensus-state  con
+  =.  blocks.after-con
+    (~(put h-by blocks.after-con) ai-id (to-local-page:page:mt ai-page))
+  =/  after-page=page:t  (make-empty-page:hm ai-page)
+  =/  after-id=block-id:t  ~(digest get:page:mt after-page)
+  =/  after-derived=derived-state
+    (~(update-puzzle-asert-state dder ai-derived mainnet) after-con after-page)
+  =/  after-state=puzzle-asert-state
+    (~(got h-by puzzle-asert-states.after-derived) after-id)
+  %+  expect-eq
+    !>  :*  [1 0 `zk-id ~]
+            [0 1 ~ `ai-id]
+            [1 1 `after-id `ai-id]
+        ==
+  !>  [zk-state ai-state after-state]
 ::
 ::  The version-%5 ASERT anchors price 2,000 RTX 5090 ZK miners and
 ::  10 ExaMAC/s of AI-PoW capacity.

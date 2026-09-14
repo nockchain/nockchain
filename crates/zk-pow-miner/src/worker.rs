@@ -417,21 +417,23 @@ mod tests {
         }
     }
 
-    /// Integration test: spawn a real SerfWorker, mine two version-5 nonces for
-    /// one trivial-target candidate, and assert that the second submission
-    /// changes only proof object 0. The persistent miner kernel must serve the
-    /// second poke from its cached proof suffix.
+    /// Integration test: a losing version-5 nonce returns after its puzzle
+    /// object misses the target; only a winning nonce triggers full STARK
+    /// construction. The timing ratio catches proof-first or cached-proof
+    /// implementations, while decoding and native verification bind the
+    /// winning nonce to the submitted proof.
     ///
-    /// Marked `#[ignore]` because spawning a Nock VM + running the first STARK
-    /// is heavy. Run with:
+    /// Marked `#[ignore]` because spawning a Nock VM and constructing the
+    /// winning STARK is heavy. Run with:
     ///   cargo test -p zk-pow-miner --lib --release -- --ignored serf_worker
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
-    async fn serf_worker_reuses_v5_proof_for_multiple_nonces() {
+    async fn serf_worker_proves_only_after_v5_nonce_meets_target() {
         use ibig::UBig;
         use nockvm::noun::NounAllocator;
         use noun_serde::NounDecode;
-        use zkvm_jetpack::form::{Proof, ProofVersion};
+        use zkvm_jetpack::form::verify::{verify, VerifyArgs};
+        use zkvm_jetpack::form::{Proof, ProofData, ProofVersion};
         use zkvm_jetpack::hot::produce_prover_hot_state;
 
         fn nonce(value: u64) -> NounSlab {
@@ -454,44 +456,52 @@ mod tests {
 
         let hot_state = produce_prover_hot_state();
         let worker = SerfWorker::spawn(0, hot_state).await.expect("spawn worker");
-        let candidate = synth_trivial_candidate(UBig::from(1u64) << 400, 2);
+        let losing_candidate = synth_v5_candidate(UBig::from(0u8), 2);
+        let winning_candidate = synth_v5_candidate(UBig::from(1u8) << 400, 2);
 
-        let first_started = std::time::Instant::now();
-        let first_poke = match worker
-            .mine_attempt(build_candidate_poke(&candidate, nonce(1)))
+        let losing_started = std::time::Instant::now();
+        match worker
+            .mine_attempt(build_candidate_poke(&losing_candidate, nonce(1)))
             .await
-            .expect("first mine_attempt")
+            .expect("losing mine_attempt")
+        {
+            MineResult::Retry { .. } => {}
+            MineResult::Success { .. } => panic!("zero target accepted losing nonce"),
+        }
+        let losing_elapsed = losing_started.elapsed();
+
+        let winning_started = std::time::Instant::now();
+        let winning_poke = match worker
+            .mine_attempt(build_candidate_poke(&winning_candidate, nonce(2)))
+            .await
+            .expect("winning mine_attempt")
         {
             MineResult::Success { poke_slab, .. } => poke_slab,
-            MineResult::Retry { .. } => panic!("trivial target rejected first nonce"),
+            MineResult::Retry { .. } => panic!("trivial target rejected winning nonce"),
         };
-        let first_elapsed = first_started.elapsed();
+        let winning_elapsed = winning_started.elapsed();
 
-        let second_started = std::time::Instant::now();
-        let second_poke = match worker
-            .mine_attempt(build_candidate_poke(&candidate, nonce(2)))
-            .await
-            .expect("cached mine_attempt")
-        {
-            MineResult::Success { poke_slab, .. } => poke_slab,
-            MineResult::Retry { .. } => panic!("trivial target rejected second nonce"),
-        };
-        let second_elapsed = second_started.elapsed();
-
-        let first = submitted_proof(&first_poke);
-        let second = submitted_proof(&second_poke);
-        assert_eq!(first.version, ProofVersion::V5);
-        assert_eq!(second.version, ProofVersion::V5);
-        assert_ne!(first.objects[0], second.objects[0]);
-        assert_eq!(&first.objects[1..], &second.objects[1..]);
-        assert_eq!(first.hashes, second.hashes);
-        assert_eq!(first.read_index, second.read_index);
-        eprintln!("v5 first proof: {first_elapsed:?}; cached nonce attempt: {second_elapsed:?}");
+        let proof = submitted_proof(&winning_poke);
+        assert_eq!(proof.version, ProofVersion::V5);
+        match &proof.objects[0] {
+            ProofData::Puzzle { nonce, .. } => assert_eq!(*nonce, [2, 0, 0, 0, 0]),
+            object => panic!("first v5 proof object is not a puzzle: {object:?}"),
+        }
+        verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        })
+        .expect("winning nonce proof must verify natively");
+        assert!(
+            winning_elapsed > losing_elapsed.saturating_mul(2),
+            "losing nonce should skip full proof construction: losing={losing_elapsed:?}, winning={winning_elapsed:?}",
+        );
     }
 
-    /// Helper: synth a trivial-difficulty candidate (max-bignum target).
+    /// Helper: synthesize a version-5 candidate with the requested target.
     #[cfg(test)]
-    fn synth_trivial_candidate(target_value: ibig::UBig, pow_len: u64) -> MiningCandidate {
+    fn synth_v5_candidate(target_value: ibig::UBig, pow_len: u64) -> MiningCandidate {
         let mut version = NounSlab::new();
         version.set_root(D(5)); // %5
         let mut block_header = NounSlab::new();

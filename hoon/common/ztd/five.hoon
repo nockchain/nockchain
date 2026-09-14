@@ -6,17 +6,6 @@
 ++  proof-stream  ::  /lib/proof-stream
   ~%  %proof-stream  +>  ~
   |_  proof
-  ::  Version %5 treats the nonce as mining-only data. Canonicalize it out of
-  ::  the Fiat-Shamir transcript so one fully verified proof can be reused
-  ::  while miners grind different nonces in proof object 0.
-  ++  transcript-proof-data
-    |=  dat=proof-data
-    ^-  proof-data
-    ?:  ?&  =(%5 version)
-            ?=(%puzzle -.dat)
-        ==
-      [%puzzle commitment.dat *noun-digest:tip5 len.dat p.dat]
-    dat
   ::
   ++  push
     ~/  %push
@@ -26,7 +15,7 @@
     ::  and v5 FRI verifiers use this tag after earlier objects are consumed.
     =/  new-objects  (snoc objects dat)
     =/  new-hashes
-      (snoc hashes (hash-hashable:tip5 (hashable-proof-data (transcript-proof-data dat))))
+      (snoc hashes (hash-hashable:tip5 (hashable-proof-data dat)))
     ?-  version
       %0  [%0 new-objects new-hashes read-index]
       %1  [%1 new-objects new-hashes read-index]
@@ -40,7 +29,7 @@
     ?>  (lth read-index (lent objects))
     =/  dat  (snag read-index objects)
     =/  new-hashes
-      (snoc hashes (hash-hashable:tip5 (hashable-proof-data (transcript-proof-data dat))))
+      (snoc hashes (hash-hashable:tip5 (hashable-proof-data dat)))
     =/  new-read-index  +(read-index)
     :-  dat
     ?-  version

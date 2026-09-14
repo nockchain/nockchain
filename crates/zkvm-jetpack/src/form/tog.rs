@@ -9,7 +9,7 @@ use nockvm::jets::JetErr;
 
 use crate::based;
 use crate::form::felt::Felt;
-use crate::form::proof::{Proof, ProofData, ProofVersion};
+use crate::form::proof::{Proof, ProofData};
 
 pub struct Tog {
     pub sponge: [u64; STATE_SIZE],
@@ -64,7 +64,7 @@ fn squeeze(sponge: &mut [u64; STATE_SIZE]) -> [u64; RATE] {
 
 pub fn verifier_fiat_shamir(proof: &Proof) -> Result<Tog, JetErr> {
     let (objs, hashes) = consumed_verifier_transcript(proof);
-    absorb_proof_objects_for_version(proof.version, objs, hashes)
+    absorb_proof_objects(objs, hashes)
 }
 
 /// Returns the consumed verifier transcript objects in an easy-to-audit form.
@@ -86,29 +86,6 @@ pub fn absorb_proof_objects(objs: &[ProofData], hashes: &[[u64; 5]]) -> Result<T
     let hashes = &hashes[..cached_hashes];
 
     let new_hashes = objs.iter().map(hash_proof_data).collect::<Vec<_>>();
-
-    let mut sponge = [0; STATE_SIZE];
-    for hash in hashes {
-        absorb(&mut sponge, &hash[..]);
-    }
-    for hash in new_hashes {
-        absorb(&mut sponge, &hash[..]);
-    }
-    Ok(Tog { sponge })
-}
-
-fn absorb_proof_objects_for_version(
-    version: ProofVersion,
-    objs: &[ProofData],
-    hashes: &[[u64; 5]],
-) -> Result<Tog, JetErr> {
-    let cached_hashes = hashes.len().min(objs.len());
-    let objs = &objs[cached_hashes..];
-    let hashes = &hashes[..cached_hashes];
-    let new_hashes = objs
-        .iter()
-        .map(|data| hash_proof_data_for_transcript(version, data))
-        .collect::<Vec<_>>();
 
     let mut sponge = [0; STATE_SIZE];
     for hash in hashes {
@@ -173,22 +150,6 @@ fn hash_noun_digests(list: &[[u64; 5]]) -> [u64; 5] {
     // dyck
     dat[(5 * list.len()) + 2..].copy_from_slice(&[0, 0, 1, 0, 1, 0, 1, 0, 1, 1].repeat(list.len()));
     hash_belts_list(&dat)
-}
-
-pub(crate) fn hash_proof_data_for_transcript(version: ProofVersion, data: &ProofData) -> [u64; 5] {
-    match (version, data) {
-        (
-            ProofVersion::V5,
-            ProofData::Puzzle {
-                com,
-                len,
-                leaf,
-                dyck,
-                ..
-            },
-        ) => hash_puzzle_data(com, &[0; 5], *len, leaf, dyck),
-        _ => hash_proof_data(data),
-    }
 }
 
 fn hash_puzzle_data(
@@ -448,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_fiat_shamir_excludes_the_mining_nonce() {
+    fn v5_fiat_shamir_binds_the_mining_nonce() {
         let puzzle = ProofData::Puzzle {
             com: [1, 2, 3, 4, 5],
             nonce: [6, 7, 8, 9, 10],
@@ -472,19 +433,6 @@ mod tests {
         let after = verifier_fiat_shamir(&proof)
             .expect("v5 transcript should hash after nonce change")
             .sponge;
-        assert_eq!(before, after);
-
-        proof.version = ProofVersion::V3;
-        let v3_after = verifier_fiat_shamir(&proof)
-            .expect("v3 transcript should hash")
-            .sponge;
-        match &mut proof.objects[0] {
-            ProofData::Puzzle { nonce, .. } => nonce[0] -= 1,
-            _ => unreachable!(),
-        }
-        let v3_before = verifier_fiat_shamir(&proof)
-            .expect("v3 transcript should hash before nonce change")
-            .sponge;
-        assert_ne!(v3_before, v3_after);
+        assert_ne!(before, after);
     }
 }

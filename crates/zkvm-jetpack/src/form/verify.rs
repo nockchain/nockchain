@@ -430,12 +430,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     // Materialize the puzzle nouns only after the cheap public metadata checks above.
     // This keeps malformed puzzle lengths/heights from driving large allocations first.
     let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
-    let proof_nonce = if version == ProofVersion::V5 {
-        [0; 5]
-    } else {
-        puzzle.nonce
-    };
-    let (subject, formula) = build_puzzle_subjects(&mut stack, &puzzle, &proof_nonce)?;
+    let (subject, formula) = build_puzzle_subjects(&mut stack, &puzzle, &puzzle.nonce)?;
     let space = stack.noun_space();
     let product = reassemble_noun(&mut stack, &puzzle.leaf, &puzzle.dyck)
         .map_err(|_| VerifyError::Invalid("invalid puzzle leaf/dyck word"))?;
@@ -1593,7 +1588,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_rejects_a_v3_nonce_bound_statement() {
+    fn v5_preserves_the_v3_nonce_bound_statement() {
         let mut proof = decode_proof(include_bytes!(
             "../../../roswell/tests/fixtures/proof-v3-len1.jam"
         ));
@@ -1603,7 +1598,7 @@ mod tests {
             table_override: None,
             verifier_eny: 0,
         });
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
