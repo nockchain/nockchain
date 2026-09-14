@@ -85,10 +85,17 @@ pow-v5   = Tip5([leaf+%zkpow-v5 hash+hash-proof([%5 [object-0] ~ 0])])
 
 The winning digest therefore remains bound to the candidate block, actual
 nonce, and puzzle result. Mutating the nonce changes `pow-v5` and invalidates
-the proof. Mutating any suffix object does not change `pow-v5`, but admission
-still rejects an invalid suffix. The block ID independently commits to the
-complete submitted proof envelope under the `%zkblk-v5` domain, so accepted
-suffix changes cannot create an unbound or identifier-malleable block.
+the proof. Mutating any suffix object does not change `pow-v5` or the v5 block
+ID. Objects after object `0` are a mandatory witness envelope: invalid suffixes
+fail admission, while alternate accepted suffixes identify the same semantic
+block and contribute work only once.
+
+For `%5`, `hash-proof-for-block` hashes the version and the object-`0` mining
+projection under the `%zkblk-v5` domain. The page digest separately includes the
+candidate block commitment, so the resulting block ID is bound to both the full
+candidate contents and the exact target-qualifying work object without assuming
+that a valid STARK witness is unique. Versions `%0` through `%3` retain their
+historical block-ID rules.
 
 ### Height-gated cross-puzzle work
 
@@ -226,10 +233,15 @@ change.
   commitment covers the parent and all candidate contents except `.pow`, so
   sibling candidates sharing one parent derive different work from the same raw
   nonce and cannot reuse its winning digest or proof.
-- `hash-proof-for-block` commits the `%5` domain and version, every proof object
-  including the nonce, and the proof-stream bookkeeping. Both page encodings
-  include that digest in the block ID. Any final-proof field mutation therefore
-  changes the block ID; an invalid proof also fails admission.
+- For `%5`, `hash-proof-for-block` commits the `%5` domain, version, and object-0
+  mining projection. Both page encodings include that digest and the candidate
+  commitment in the block ID. Suffix mutations therefore cannot create new
+  block identities or duplicate work, while invalid suffixes still fail full
+  proof verification.
+- A failed `%5` witness is attributed to the sending peer rather than poisoning
+  the shared block ID. A later valid envelope for the same object `0` remains
+  admissible; after one valid envelope is accepted, ordinary block-ID duplicate
+  handling collapses all alternates.
 - `%4` is not accepted by the ZK codec. This preserves an unambiguous wire-level
   distinction between AI-PoW and ZK-PoW.
 - The old work rate remains active below height 147,500. Historical chainwork is
@@ -249,8 +261,8 @@ The combined target cadence remains approximately 150 seconds.
 
 ## Testing and Validation
 
-- Hoon proof tests pin that changing object `1` leaves `%5` PoW unchanged,
-  changing object `0` changes it, and full proof hashing binds every object.
+- Hoon proof tests pin that changing object `1` leaves `%5` PoW and both page
+  encodings' block IDs unchanged, while changing object `0` changes both.
   The Roswell proving scenario additionally verifies that the preflight object
   exactly matches the complete proof's object `0` and that changing its nonce
   invalidates the proof.
