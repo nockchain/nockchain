@@ -340,7 +340,7 @@ fn withdrawal_happy_path_reaches_executed() -> Result<()> {
     assert_cluster_available(&status)?;
     scenario.complete_deposit_on_all_nodes()?;
     scenario.request_withdrawal_after_mint()?;
-    scenario.wait_for_withdrawal_execution()?;
+    scenario.wait_for_withdrawal_sequencer_confirmation()?;
     let status = scenario.wait_for_status(Duration::from_secs(120))?;
     assert_cluster_available(&status)?;
     assert_sequencer_idle(&status)?;
@@ -378,7 +378,7 @@ fn withdrawal_happy_path_spends_pre_bythos_bridge_deposit() -> Result<()> {
 
     scenario.wait_for_nock_height_at_least(bythos_phase, Duration::from_secs(600))?;
     scenario.request_withdrawal_after_mint()?;
-    scenario.wait_for_withdrawal_execution()?;
+    scenario.wait_for_withdrawal_sequencer_confirmation()?;
     let status = scenario.wait_for_status(Duration::from_secs(120))?;
     assert_cluster_available(&status)?;
     assert_sequencer_idle(&status)?;
@@ -426,7 +426,7 @@ fn withdrawal_happy_path_spends_mixed_pre_and_post_bythos_bridge_deposits() -> R
     }
 
     scenario.request_withdrawal_after_mint_amount(E2E_MIXED_INPUT_WITHDRAWAL_AMOUNT_NOCK)?;
-    scenario.wait_for_withdrawal_execution()?;
+    scenario.wait_for_withdrawal_sequencer_confirmation()?;
     scenario.assert_withdrawal_build_selected_input_count(2)?;
     let status = scenario.wait_for_status(Duration::from_secs(120))?;
     assert_cluster_available(&status)?;
@@ -629,7 +629,7 @@ fn withdrawal_catches_up_after_all_bridge_processes_were_down() -> Result<()> {
     scenario.run_checked(&["start", "bridge-0", "bridge-1", "bridge-2", "bridge-3", "bridge-4"])?;
     let status = scenario.wait_for_status(Duration::from_secs(240))?;
     assert_cluster_available(&status)?;
-    scenario.wait_for_withdrawal_execution()?;
+    scenario.wait_for_withdrawal_sequencer_confirmation()?;
     let status = scenario.wait_for_status(Duration::from_secs(120))?;
     assert_cluster_available(&status)?;
     assert_sequencer_idle(&status)
@@ -650,7 +650,7 @@ fn two_node_degraded_withdrawal_still_executes() -> Result<()> {
     let status = scenario.wait_for_process_status(Duration::from_secs(120))?;
     assert_processes_not_running(&status, &["bridge-3", "bridge-4"])?;
     scenario.request_withdrawal_after_mint()?;
-    scenario.wait_for_withdrawal_execution()?;
+    scenario.wait_for_withdrawal_sequencer_confirmation()?;
     scenario.run_checked(&["start", "bridge-3", "bridge-4"])?;
     let status = scenario.wait_for_status(Duration::from_secs(120))?;
     assert_cluster_available(&status)?;

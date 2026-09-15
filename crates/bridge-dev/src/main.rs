@@ -34,10 +34,14 @@ use bridge::shared::signing::BridgeSigner;
 use bridge::shared::types::WITHDRAWAL_POLICY_V1_ID;
 use bridge::withdrawal::transport::withdrawal_id_from_proto;
 use bridge_dev::artifacts::{ArtifactResolveOptions, ArtifactResolver, E2eArtifacts};
+use bridge_dev::cluster_config::{
+    BRIDGE_ETH_ADDRS, BRIDGE_ETH_KEYS, BRIDGE_NOCK_KEYS, BRIDGE_NOCK_PKHS,
+};
 use bridge_dev::e2e::{
     E2eBaseMode, E2eClientMode, E2eRunConfig, E2eRunner, E2eScenarioExecutor, ScriptedE2eExecutor,
     ScriptedPlan, UnavailableE2eExecutor,
 };
+use bridge_dev::iris_artifact::IrisArtifactInput;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ibig::UBig;
 use nockapp_grpc::pb::common::v2::note;
@@ -85,30 +89,6 @@ const FAKENET_MINING_PKH: &str = "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8Kjz
 const BRIDGE_DEV_DEFAULT_SEQUENCER_JOURNAL_SIGNING_KEY: &str =
     "0x59c6995e998f97a5a0044966f09453892d69e3f67122e7bd1c4ef5e6d8e0e6df";
 const BRIDGE_INGRESS_PORTS: [u16; 5] = [8002, 8003, 8004, 8005, 8006];
-const BRIDGE_ETH_KEYS: [&str; 5] = [
-    "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
-    "0x5c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362319",
-    "0x6c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36231a",
-    "0x7c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36231b",
-    "0x8c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36231c",
-];
-const BRIDGE_ETH_ADDRS: [&str; 5] = [
-    "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23", "0x0EE156f080d9cB3BaA3C0DB53D07f13D69CEf4C9",
-    "0x274BD645de480C325D618c60c661F11275eB77F1", "0x6dc59eb20f7928935c47A391e35545a2CEC51013",
-    "0xcaB10dA05fC0aDBb7e91Eadc30f224bcDF601375",
-];
-const BRIDGE_NOCK_KEYS: [&str; 5] = [
-    "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8T", "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8U",
-    "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8V", "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8W",
-    "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8X",
-];
-const BRIDGE_NOCK_PKHS: [&str; 5] = [
-    "A47ZMEQ2U2x1h3bVMUNdkutKYNiyXFWMVTQZC8BWgXBmS5mc6ysAhLZ",
-    "BYp766x6Zhu7DHbewMHu7ajsAenRMm1M7rgmpxUwY83BJy4RGMAG2z8",
-    "2f7BtZpaaKVb9mCUFgMuYjcQXhrexfqCJs4h1es5t9jQrqdmhVgYLU6",
-    "BLCg8KPPKDJPJ8hhdHSGsurxgKwBorqpF1qrHsCiojsPf96GEzwsFQ",
-    "AeZ1jsSHoAg7bjBr2k4kMeRERsx85Bp68tfTMiiYZtjFRCtc4gexNWc",
-];
 const NICKS_PER_NOCK: u64 = 65_536;
 const NOCK_BASE_PER_NICK: u128 = 152_587_890_625;
 
@@ -446,6 +426,16 @@ struct WithdrawalE2eArgs {
     artifacts: Option<PathBuf>,
     #[arg(long, help = "Base Sepolia archive RPC URL; never written to reports")]
     archive_rpc_url: Option<String>,
+    #[arg(long, help = "Clean Iris SDK checkout to build and pack for this run")]
+    iris_checkout: Option<PathBuf>,
+    #[arg(long, help = "Prebuilt immutable Iris npm tarball")]
+    iris_tarball: Option<PathBuf>,
+    #[arg(long, help = "Metadata JSON accompanying --iris-tarball")]
+    iris_metadata: Option<PathBuf>,
+    #[arg(long, help = "Required full Iris git revision")]
+    iris_revision: Option<String>,
+    #[arg(long, help = "Required Iris package version")]
+    iris_version: Option<String>,
     #[arg(long)]
     keep_artifacts: bool,
     #[arg(long, help = "Parent directory for the isolated run directory")]
@@ -1486,6 +1476,39 @@ async fn run_e2e(paths: Paths, args: E2eArgs) -> Result<()> {
         }
         _ => {}
     }
+    let iris_artifact = match client {
+        E2eClientMode::Iris => match (
+            args.iris_checkout.clone(),
+            args.iris_tarball.clone(),
+            args.iris_metadata.clone(),
+        ) {
+            (Some(path), None, None) => Some(IrisArtifactInput::Checkout {
+                path,
+                expected_revision: args.iris_revision.clone(),
+                expected_version: args.iris_version.clone(),
+            }),
+            (None, Some(path), Some(metadata_path)) => Some(IrisArtifactInput::Tarball {
+                path,
+                metadata_path,
+                expected_revision: args.iris_revision.clone(),
+                expected_version: args.iris_version.clone(),
+            }),
+            _ => bail!(
+                "--client iris requires exactly --iris-checkout or --iris-tarball with --iris-metadata"
+            ),
+        },
+        E2eClientMode::RustReference => {
+            if args.iris_checkout.is_some()
+                || args.iris_tarball.is_some()
+                || args.iris_metadata.is_some()
+                || args.iris_revision.is_some()
+                || args.iris_version.is_some()
+            {
+                bail!("Iris artifact options require --client iris");
+            }
+            None
+        }
+    };
     let plan = std::env::var("BRIDGE_DEV_E2E_SCRIPTED_PLAN").ok();
     let mut executor: Box<dyn E2eScenarioExecutor> = match plan.as_deref() {
         Some("success") => Box::new(ScriptedE2eExecutor::new(ScriptedPlan::Success)),
@@ -1513,6 +1536,8 @@ async fn run_e2e(paths: Paths, args: E2eArgs) -> Result<()> {
         keep_artifacts: args.keep_artifacts,
         timeout: Duration::from_secs(args.timeout_secs),
         base,
+        archive_rpc_url: args.archive_rpc_url,
+        iris_artifact,
         client,
         seed: args.seed,
     };
