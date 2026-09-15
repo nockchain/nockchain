@@ -318,6 +318,8 @@ fn artifacts(hash: &str) -> E2eArtifacts {
     E2eArtifacts {
         bridge: artifact(ArtifactRole::BridgeBinary, "bridge", hash),
         node: artifact(ArtifactRole::NodeBinary, "node", hash),
+        miner: artifact(ArtifactRole::MinerBinary, "miner", hash),
+        wallet: artifact(ArtifactRole::WalletBinary, "wallet", hash),
         sequencer_ctl: Some(artifact(ArtifactRole::SequencerCtlBinary, "ctl", hash)),
         bridge_jam: artifact(ArtifactRole::BridgeJam, "bridge.jam", hash),
         roswell_jam: artifact(ArtifactRole::RoswellJam, "roswell.jam", hash),

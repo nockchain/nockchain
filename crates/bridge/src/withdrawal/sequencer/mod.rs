@@ -5,6 +5,7 @@ pub mod base_incidents;
 pub mod base_verifier;
 pub mod client;
 pub mod journal;
+pub mod public_http;
 pub mod public_rpc;
 pub mod rpc;
 pub mod schema;

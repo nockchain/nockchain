@@ -1419,6 +1419,15 @@ impl WithdrawalSequencerStore {
     ) -> Result<Vec<WithdrawalSubmissionEventRecord>, BridgeError> {
         self.with_conn(load_events).await
     }
+    /// Loads the latest durable confirmation event for one withdrawal.
+    pub async fn latest_confirmation_event(
+        &self,
+        id: &WithdrawalId,
+    ) -> Result<Option<WithdrawalSubmissionEventRecord>, BridgeError> {
+        let base_event_id = id.base_event_id.0.clone();
+        self.with_conn(move |conn| load_latest_confirmation_event(conn, &base_event_id))
+            .await
+    }
 
     /// Returns a deployment-wide revision suitable for public cache ordering.
     pub async fn public_projection_revision(&self) -> Result<u64, BridgeError> {
@@ -9102,6 +9111,24 @@ fn load_events(
         .map(try_into_submission_event_record)
         .collect()
 }
+fn load_latest_confirmation_event(
+    conn: &mut SqliteConnection,
+    base_event_id: &[u8],
+) -> Result<Option<WithdrawalSubmissionEventRecord>, BridgeError> {
+    use crate::withdrawal::sequencer::schema::withdrawal_submission_events::dsl as events;
+
+    withdrawal_submission_events::table
+        .filter(events::withdrawal_id_base_event_id.eq(base_event_id.to_vec()))
+        .filter(events::event_type.eq(WithdrawalSubmissionEventType::TxConfirmed.as_str()))
+        .order(events::event_id.desc())
+        .first::<WithdrawalSubmissionEventRow>(conn)
+        .optional()
+        .map_err(|err| {
+            BridgeError::Runtime(format!("withdrawal confirmation event load failed: {err}"))
+        })?
+        .map(try_into_submission_event_record)
+        .transpose()
+}
 
 /// Converts a raw SQLite event row into the typed debug record.
 fn try_into_submission_event_record(
@@ -14039,6 +14066,21 @@ mod tests {
             .expect("fetch sequenced withdrawal")
             .expect("sequenced withdrawal exists");
         assert_eq!(sequenced.state, WithdrawalState::Confirmed);
+        let confirmation = service
+            .latest_confirmation_event(&proposal.id)
+            .await
+            .expect("load durable confirmation evidence")
+            .expect("confirmation evidence exists");
+        assert!(confirmation.event_id > 0);
+        assert_eq!(
+            confirmation.event_type,
+            WithdrawalSubmissionEventType::TxConfirmed
+        );
+        assert_eq!(confirmation.confirmed_height, Some(777));
+        assert_eq!(
+            confirmation.confirmed_block_id.as_ref(),
+            Some(&confirmed_block_id)
+        );
 
         let event_types = service
             .list_submission_events()

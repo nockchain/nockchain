@@ -2003,6 +2003,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 });
             Ok(())
         }
@@ -2042,6 +2043,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 });
             Ok(())
         }
@@ -2130,6 +2132,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 }))
         }
 
@@ -2630,6 +2633,7 @@ mod tests {
                     current_confirmed_base_height: None,
                     handoff_window_blocks: 0,
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         let context = WithdrawalAssemblyContext {
@@ -3967,6 +3971,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         let context = WithdrawalAssemblyContext {
@@ -4032,6 +4037,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         let context = WithdrawalAssemblyContext {
@@ -4127,6 +4133,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         let mut planner = planner_config(bridge_lock_root);
@@ -5117,6 +5124,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         sequencer
@@ -5216,6 +5224,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         sequencer
@@ -5299,6 +5308,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         sequencer
@@ -5409,6 +5419,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         sequencer
@@ -5497,6 +5508,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
             statuses.insert(
@@ -5516,6 +5528,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
             statuses.insert(
@@ -5535,6 +5548,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         }

@@ -157,6 +157,8 @@ pub fn resolve_replay_artifacts(
     options.require_ctl = selected.sequencer_ctl.is_some();
     options.overrides = ArtifactOverrides {
         bridge: Some(selected.bridge.path.clone()),
+        miner: Some(selected.miner.path.clone()),
+        wallet: Some(selected.wallet.path.clone()),
         node: Some(selected.node.path.clone()),
         sequencer_ctl: selected
             .sequencer_ctl

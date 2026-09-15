@@ -132,6 +132,7 @@ async fn miner_finds_and_submits_block_against_mock_node() {
     // ── 3. Run the miner against the mock node.
     let cfg = MinerConfig {
         node_addr: server_url,
+        mining_key_configs: Vec::new(),
         mining_pkh_configs: vec![MiningPkhConfig {
             share: 1,
             pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),

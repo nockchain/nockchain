@@ -2115,6 +2115,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 });
             Ok(())
         }
@@ -2179,6 +2180,7 @@ mod tests {
                         handoff_window_blocks: 0,
 
                         blocks_until_handoff: None,
+                        ..Default::default()
                     },
                 );
             Ok(())
@@ -2222,6 +2224,7 @@ mod tests {
                             handoff_window_blocks: 0,
 
                             blocks_until_handoff: None,
+                            ..Default::default()
                         },
                     );
             }
@@ -2290,6 +2293,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 }))
         }
     }
@@ -2384,6 +2388,7 @@ mod tests {
                     current_confirmed_base_height: None,
                     handoff_window_blocks: 0,
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         let context = WithdrawalSubmissionContext {
@@ -2989,6 +2994,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
 
@@ -3164,6 +3170,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         sequencer
@@ -3188,6 +3195,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         let context = WithdrawalSubmissionContext {
@@ -3291,6 +3299,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         sequencer
@@ -3315,6 +3324,7 @@ mod tests {
                     handoff_window_blocks: 0,
 
                     blocks_until_handoff: None,
+                    ..Default::default()
                 },
             );
         let context = WithdrawalSubmissionContext {

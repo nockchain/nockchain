@@ -77,6 +77,25 @@ impl PublicWithdrawalQueryService {
             config,
         }
     }
+    pub fn deployment(&self) -> proto::PublicWithdrawalDeployment {
+        self.deployment_proto()
+    }
+
+    pub async fn rejected_burns_by_burner(
+        &self,
+        burner: Address,
+        limit: u32,
+    ) -> Result<Vec<RejectedBaseWithdrawalBurn>, BridgeError> {
+        self.incidents
+            .list_rejected_burns_by_burner(
+                self.config.base_chain_id, self.config.nock_contract_address, burner, limit,
+            )
+            .await
+    }
+
+    pub async fn projection_revision(&self) -> Result<u64, BridgeError> {
+        self.store.public_projection_revision().await
+    }
 
     fn deployment_proto(&self) -> proto::PublicWithdrawalDeployment {
         proto::PublicWithdrawalDeployment {
@@ -960,6 +979,7 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             .current_nockchain_tip_height()
             .await
             .unwrap_or_default();
+        let contract_gate_enabled = self.base_height_tracker.withdrawals_enabled();
         let mut reasons = Vec::new();
         let indexed_base_height = activity_cursor
             .as_ref()
@@ -972,8 +992,10 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             reasons.push(proto::PublicWithdrawalReadinessReason::BaseScannerBehind as i32);
         }
         if reconciliation.as_ref().is_none_or(|frontier| {
-            Some(frontier.base_block) != indexed_base_height
-                || frontier.journal_sequence != projection_revision
+            !base_reconciliation_frontier_is_current(
+                frontier.base_block, frontier.journal_sequence, indexed_base_height,
+                projection_revision,
+            )
         }) {
             reasons.push(proto::PublicWithdrawalReadinessReason::JournalReconciling as i32);
         }
@@ -986,9 +1008,7 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
         if observed_nockchain_height.is_none() {
             reasons.push(proto::PublicWithdrawalReadinessReason::NockchainUnavailable as i32);
         }
-        if !self.config.admission_enabled
-            || self.base_height_tracker.withdrawals_enabled() != Some(true)
-        {
+        if !self.config.admission_enabled || contract_gate_enabled != Some(true) {
             reasons.push(proto::PublicWithdrawalReadinessReason::WithdrawalsPaused as i32);
         }
         if reasons.is_empty() {
@@ -1036,6 +1056,8 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             base_units_per_nick: policy.base_units_per_nick.to_string(),
             maximum_nicks: policy.maximum_nicks.to_string(),
             bridge_fee_nicks_per_started_nock: policy.bridge_fee_nicks_per_started_nock.to_string(),
+            operator_admission_enabled: self.config.admission_enabled,
+            contract_gate_enabled,
         }))
     }
     async fn get_withdrawal_quote(
@@ -1072,24 +1094,39 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             unix_now_secs().map_err(|error| self.internal_status("quote time", error))?,
         )
         .map_err(|error| self.internal_status("quote timestamp", error))?;
+        let observed_at_unix_ms_u64 = u64::try_from(observed_at_unix_ms)
+            .map_err(|error| Status::internal(format!("quote timestamp is negative: {error}")))?;
+        let base_stale_after_ms =
+            u64::try_from(self.config.base_stale_after.as_millis()).map_err(|error| {
+                Status::internal(format!("Base freshness window overflow: {error}"))
+            })?;
+        let base_fresh = self
+            .base_height_tracker
+            .latest_confirmed_base_observation()
+            .is_some_and(|(_, observed_at)| {
+                observed_at_unix_ms_u64.saturating_sub(observed_at) <= base_stale_after_ms
+            });
         let bridge_fee_nicks = wallet_tx_builder::fee::compute_bridge_fee(
             gross_amount_nicks, policy.bridge_fee_nicks_per_started_nock,
         );
         if !self.config.admission_enabled
             || self.base_height_tracker.withdrawals_enabled() != Some(true)
+            || !base_fresh
         {
             return Ok(Response::new(proto::GetPublicWithdrawalQuoteResponse {
                 available: false,
                 gross_amount_nicks: gross_amount_nicks.to_string(),
                 bridge_fee_nicks: bridge_fee_nicks.to_string(),
-                transaction_fee_nicks: String::new(),
-                net_payout_nicks: String::new(),
+                transaction_fee_nicks: "0".to_owned(),
+                net_payout_nicks: "0".to_owned(),
                 snapshot_height: None,
                 snapshot_block_id: None,
                 reserved_input_count: 0,
                 observed_at_unix_ms,
                 revision,
-                reason: "Withdrawal admission is paused; do not submit a burn.".to_string(),
+                reason:
+                    "Withdrawal admission is paused or Base observation is stale; do not submit a burn."
+                        .to_string(),
             }));
         }
         let reserved_inputs = self
@@ -1102,19 +1139,27 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             .quote(gross_amount_nicks, destination_lock_root, &reserved_inputs)
             .await
         {
-            Ok(quote) => Ok(Response::new(proto::GetPublicWithdrawalQuoteResponse {
-                available: quote.net_payout_nicks > 0,
-                gross_amount_nicks: quote.gross_amount_nicks.to_string(),
-                bridge_fee_nicks: quote.bridge_fee_nicks.to_string(),
-                transaction_fee_nicks: quote.transaction_fee_nicks.to_string(),
-                net_payout_nicks: quote.net_payout_nicks.to_string(),
-                snapshot_height: Some(quote.snapshot_height),
-                snapshot_block_id: Some(quote.snapshot_block_id.to_be_limb_bytes().to_vec()),
-                reserved_input_count: quote.reserved_input_count,
-                observed_at_unix_ms: quote.observed_at_unix_ms,
-                revision,
-                reason: String::new(),
-            })),
+            Ok(quote) => {
+                let available = quote.net_payout_nicks > 0;
+                Ok(Response::new(proto::GetPublicWithdrawalQuoteResponse {
+                    available,
+                    gross_amount_nicks: quote.gross_amount_nicks.to_string(),
+                    bridge_fee_nicks: quote.bridge_fee_nicks.to_string(),
+                    transaction_fee_nicks: quote.transaction_fee_nicks.to_string(),
+                    net_payout_nicks: quote.net_payout_nicks.to_string(),
+                    snapshot_height: Some(quote.snapshot_height),
+                    snapshot_block_id: Some(quote.snapshot_block_id.to_be_limb_bytes().to_vec()),
+                    reserved_input_count: quote.reserved_input_count,
+                    observed_at_unix_ms: quote.observed_at_unix_ms,
+                    revision,
+                    reason: if available {
+                        String::new()
+                    } else {
+                        "Authoritative quote has no positive payout; do not submit a burn."
+                            .to_owned()
+                    },
+                }))
+            }
             Err(error) => {
                 warn!(
                     target: "bridge.withdrawal.public",
@@ -1126,8 +1171,8 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
                     available: false,
                     gross_amount_nicks: gross_amount_nicks.to_string(),
                     bridge_fee_nicks: bridge_fee_nicks.to_string(),
-                    transaction_fee_nicks: String::new(),
-                    net_payout_nicks: String::new(),
+                    transaction_fee_nicks: "0".to_owned(),
+                    net_payout_nicks: "0".to_owned(),
                     snapshot_height: None,
                     snapshot_block_id: None,
                     reserved_input_count: u64::try_from(reserved_inputs.len()).map_err(|error| {
@@ -1155,6 +1200,16 @@ fn seconds_i64_to_millis(seconds: i64) -> Result<i64, BridgeError> {
     seconds.checked_mul(1_000).ok_or_else(|| {
         BridgeError::ValueConversion("public timestamp milliseconds overflow".into())
     })
+}
+
+fn base_reconciliation_frontier_is_current(
+    reconciled_base_block: u64,
+    reconciled_journal_sequence: u64,
+    indexed_base_height: Option<u64>,
+    projection_revision: u64,
+) -> bool {
+    Some(reconciled_base_block) == indexed_base_height
+        && reconciled_journal_sequence <= projection_revision
 }
 
 fn seconds_u64_to_millis_i64(seconds: u64) -> Result<i64, BridgeError> {
@@ -1245,6 +1300,28 @@ mod tests {
         WithdrawalNetworkSubmitStatus, WithdrawalSubmitAttemptStatus,
     };
     use crate::withdrawal::types::{WithdrawalProposalData, WithdrawalSnapshot};
+    #[test]
+    fn nock_only_projection_progress_does_not_stale_base_reconciliation() {
+        assert!(base_reconciliation_frontier_is_current(
+            568,
+            10,
+            Some(568),
+            11,
+        ));
+        assert!(!base_reconciliation_frontier_is_current(
+            567,
+            10,
+            Some(568),
+            11,
+        ));
+        assert!(!base_reconciliation_frontier_is_current(
+            568,
+            12,
+            Some(568),
+            11,
+        ));
+    }
+
     struct PublicQueryNockchain {
         tip: Option<u64>,
     }
@@ -1625,11 +1702,18 @@ mod tests {
             proto::PublicWithdrawalReadiness::Ready as i32
         );
         assert!(readiness.accepting_new_withdrawals);
+        assert!(readiness.operator_admission_enabled);
+        assert_eq!(readiness.contract_gate_enabled, Some(true));
         assert_eq!(
             readiness.reasons,
             vec![proto::PublicWithdrawalReadinessReason::Healthy as i32]
         );
         assert_eq!(readiness.minimum_gross_nocks, "100000");
+        assert_eq!(readiness.minimum_gross_nicks, "6553600000");
+        assert_eq!(readiness.minimum_gross_base_units, "1000000000000000000000");
+        assert_eq!(readiness.base_units_per_nock, "10000000000000000");
+        assert_eq!(readiness.base_units_per_nick, "152587890625");
+        assert_eq!(readiness.maximum_nicks, u64::MAX.to_string());
         assert_eq!(readiness.nicks_per_nock, "65536");
         assert_eq!(readiness.bridge_fee_nicks_per_started_nock, "195");
         assert!(readiness.base_observed_at_unix_ms.is_some());
@@ -1779,6 +1863,8 @@ mod tests {
             .expect("operator-paused readiness")
             .into_inner();
         assert!(!paused.accepting_new_withdrawals);
+        assert!(!paused.operator_admission_enabled);
+        assert_eq!(paused.contract_gate_enabled, Some(true));
         assert!(paused
             .reasons
             .contains(&(proto::PublicWithdrawalReadinessReason::WithdrawalsPaused as i32)));
@@ -1786,9 +1872,9 @@ mod tests {
         let stale_tracker = Arc::new(SequencerBaseHeightTracker::default());
         assert!(stale_tracker.record_confirmed_base_observation(199, 1));
         stale_tracker.record_withdrawals_enabled(Some(true));
-        let mut stale = fixture.service.clone();
-        stale.base_height_tracker = stale_tracker;
-        let stale = stale
+        let mut stale_service = fixture.service.clone();
+        stale_service.base_height_tracker = stale_tracker;
+        let stale = stale_service
             .get_withdrawal_readiness(Request::new(proto::GetPublicWithdrawalReadinessRequest {
                 deployment: Some(fixture.deployment()),
             }))
@@ -1800,6 +1886,22 @@ mod tests {
             .reasons
             .contains(&(proto::PublicWithdrawalReadinessReason::BaseScannerBehind as i32)));
         assert_eq!(stale.base_observed_at_unix_ms, Some(1));
+        assert!(stale.operator_admission_enabled);
+        assert_eq!(stale.contract_gate_enabled, Some(true));
+        let stale_quote = stale_service
+            .get_withdrawal_quote(Request::new(proto::GetPublicWithdrawalQuoteRequest {
+                deployment: Some(fixture.deployment()),
+                gross_amount_nicks: fixture.burns[1].amount_nicks.to_string(),
+                destination_lock_root: fixture.burns[1].lock_root.to_be_limb_bytes().to_vec(),
+            }))
+            .await
+            .expect("stale quote response")
+            .into_inner();
+        assert!(!stale_quote.available);
+        assert!(stale_quote.reason.contains("stale"));
+
+        assert_eq!(stale_quote.transaction_fee_nicks, "0");
+        assert_eq!(stale_quote.net_payout_nicks, "0");
 
         let contract_paused_tracker = Arc::new(SequencerBaseHeightTracker::default());
         contract_paused_tracker.record_confirmed_base_height(199);
@@ -1814,6 +1916,8 @@ mod tests {
             .expect("contract-paused readiness")
             .into_inner();
         assert!(!contract_paused.accepting_new_withdrawals);
+        assert!(contract_paused.operator_admission_enabled);
+        assert_eq!(contract_paused.contract_gate_enabled, Some(false));
         assert!(contract_paused
             .reasons
             .contains(&(proto::PublicWithdrawalReadinessReason::WithdrawalsPaused as i32)));

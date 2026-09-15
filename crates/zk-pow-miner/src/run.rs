@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use nockapp::nockapp::wire::Wire;
-use nockchain_mining_common::{MiningCandidate, MiningPkhConfig, NodeClient, NodeClientError};
+use nockchain_mining_common::{
+    MiningCandidate, MiningKeyConfig, MiningPkhConfig, NodeClient, NodeClientError,
+};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -37,6 +39,8 @@ use crate::worker::{build_candidate_poke, random_nonce, MineResult, SerfWorker, 
 pub struct MinerConfig {
     /// `http://127.0.0.1:5555` by default.
     pub node_addr: String,
+    /// Optional legacy v0 reward configs for pre-v1 fakenet blocks.
+    pub mining_key_configs: Vec<MiningKeyConfig>,
     /// v1 pubkey-hash reward configs. Required.
     pub mining_pkh_configs: Vec<MiningPkhConfig>,
     /// Worker pool size.
@@ -53,6 +57,7 @@ impl MinerConfig {
         let num_threads = num_cpus::get().saturating_sub(1).max(1) as u64;
         Self {
             node_addr,
+            mining_key_configs: Vec::new(),
             mining_pkh_configs,
             num_threads,
             reconnect_backoff_initial: Duration::from_secs(1),
@@ -180,7 +185,7 @@ pub async fn run_with_pool(
         if let Err(e) = client
             .set_mining_key(
                 ZkPowMinerWire::SetPubKey.to_wire(),
-                Vec::new(),
+                cfg.mining_key_configs.clone(),
                 cfg.mining_pkh_configs.clone(),
             )
             .await
@@ -575,6 +580,7 @@ mod tests {
         use nockchain_mining_common::MiningPkhConfig;
         MinerConfig {
             node_addr,
+            mining_key_configs: Vec::new(),
             mining_pkh_configs: vec![MiningPkhConfig {
                 share: 1,
                 pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
@@ -845,6 +851,7 @@ mod tests {
         drop(listener);
         let cfg = MinerConfig {
             node_addr: format!("http://{addr}"),
+            mining_key_configs: Vec::new(),
             mining_pkh_configs: vec![nockchain_mining_common::MiningPkhConfig {
                 share: 1,
                 pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),

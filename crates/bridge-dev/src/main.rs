@@ -37,11 +37,12 @@ use bridge::withdrawal::transport::withdrawal_id_from_proto;
 use bridge_dev::actions::{execute_fault_trace, FaultTraceExecution};
 use bridge_dev::artifacts::{ArtifactResolveOptions, ArtifactResolver, E2eArtifacts};
 use bridge_dev::cluster_config::{
-    BRIDGE_ETH_ADDRS, BRIDGE_ETH_KEYS, BRIDGE_NOCK_KEYS, BRIDGE_NOCK_PKHS,
+    BRIDGE_DEV_IRIS_SDK_VERSION_ENV, BRIDGE_ETH_ADDRS, BRIDGE_ETH_KEYS, BRIDGE_NOCK_KEYS,
+    BRIDGE_NOCK_PKHS,
 };
 use bridge_dev::e2e::{
     E2eBaseMode, E2eClientMode, E2eRunConfig, E2eRunner, E2eScenarioExecutor, ScriptedE2eExecutor,
-    ScriptedPlan, UnavailableE2eExecutor,
+    ScriptedPlan,
 };
 use bridge_dev::evidence::{
     EvidenceArtifacts, EvidenceAssertion, EvidenceEnvironmentFacts, EvidenceEnvironmentMode,
@@ -56,6 +57,7 @@ use bridge_dev::generated_scenario::{
     generate_scenario, write_minimized_trace, GeneratedScenarioOptions,
 };
 use bridge_dev::iris_artifact::IrisArtifactInput;
+use bridge_dev::live_e2e::{LiveE2eExecutor, LiveE2eOptions};
 use bridge_dev::model_trace::{check_model_trace, map_fault_trace};
 use bridge_dev::replay::{
     resolve_replay_artifacts, run_replay, ReplayExecutionContext, ReplayExecutor, ReplaySource,
@@ -84,6 +86,10 @@ const NODE_BIND_PORT: u16 = 3005;
 const NODE_PUBLIC_GRPC_PORT: u16 = 5001;
 const NODE_PRIVATE_GRPC_PORT: u16 = 5002;
 const WITHDRAWAL_SEQUENCER_API_PORT_DELTA: u16 = 100;
+const WITHDRAWAL_PUBLIC_API_PORT_DELTA: u16 = 200;
+const WITHDRAWAL_PUBLIC_HTTP_PORT_DELTA: u16 = 300;
+const NOCKSWAP_WEB_PORT: u16 = 3_000;
+const BRIDGE_DEV_PUBLIC_HTTP_REQUESTS_PER_MINUTE: u32 = 10_000;
 const STATUS_BALANCE_TIMEOUT: Duration = Duration::from_secs(3);
 const NODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const BRIDGE_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -98,14 +104,16 @@ const BRIDGE_DEV_WITHDRAWAL_ACTIVATION_NOCK_NEXT_HEIGHT_ENV: &str =
 const BRIDGE_DEV_MANUAL_SUBMIT_APPROVAL_ENV: &str = "BRIDGE_DEV_MANUAL_SUBMIT_APPROVAL";
 const BRIDGE_DEV_FAKENET_POW_LEN_ENV: &str = "BRIDGE_DEV_FAKENET_POW_LEN";
 const BRIDGE_DEV_FAKENET_LOG_DIFFICULTY_ENV: &str = "BRIDGE_DEV_FAKENET_LOG_DIFFICULTY";
+const BRIDGE_DEV_FAKENET_V1_PHASE_ENV: &str = "BRIDGE_DEV_FAKENET_V1_PHASE";
 const BRIDGE_DEV_FAKENET_BYTHOS_PHASE_ENV: &str = "BRIDGE_DEV_FAKENET_BYTHOS_PHASE";
 const BRIDGE_DEV_BASE_BLOCKS_CHUNK_ENV: &str = "BRIDGE_DEV_BASE_BLOCKS_CHUNK";
 const BRIDGE_DEV_BRIDGE_SAVE_INTERVAL_MILLIS_ENV: &str = "BRIDGE_DEV_BRIDGE_SAVE_INTERVAL_MILLIS";
 const BRIDGE_DEV_AI_POW_CACHE_DIR_ENV: &str = "BRIDGE_DEV_AI_POW_CACHE_DIR";
+const BRIDGE_DEV_PRESERVE_RUNTIME_FILES_ENV: &str = "BRIDGE_DEV_PRESERVE_RUNTIME_FILES";
 const FAKENET_POW_LEN: u64 = 64;
 const FAKENET_LOG_DIFFICULTY: u64 = 2;
 const CHILD_SIGINT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
-const FAKENET_MINING_PKH: &str = "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt";
+const FAKENET_MINING_PKH: &str = "BiDNejcR2zcPpEVAw2En7JC8c6JALMg4NGPJKYdvSaPjG3XYMxCGCpv";
 const BRIDGE_DEV_DEFAULT_SEQUENCER_JOURNAL_SIGNING_KEY: &str =
     "0x59c6995e998f97a5a0044966f09453892d69e3f67122e7bd1c4ef5e6d8e0e6df";
 const BRIDGE_INGRESS_PORTS: [u16; 5] = [8002, 8003, 8004, 8005, 8006];
@@ -249,6 +257,45 @@ fn sequencer_api_port() -> Result<u16> {
     sequencer_api_port_with_offset(bridge_dev_port_offset()?)
 }
 
+fn withdrawal_public_api_port_with_offset(offset: u16) -> Result<u16> {
+    let base_port = NODE_PRIVATE_GRPC_PORT
+        .checked_add(WITHDRAWAL_PUBLIC_API_PORT_DELTA)
+        .expect("bridge-dev public withdrawal base port must fit in u16");
+    offset_port_with_offset("public withdrawal API", base_port, offset)
+}
+
+fn withdrawal_public_api_port() -> Result<u16> {
+    withdrawal_public_api_port_with_offset(bridge_dev_port_offset()?)
+}
+
+fn withdrawal_public_http_port_with_offset(offset: u16) -> Result<u16> {
+    let base_port = NODE_PRIVATE_GRPC_PORT
+        .checked_add(WITHDRAWAL_PUBLIC_HTTP_PORT_DELTA)
+        .expect("bridge-dev public withdrawal HTTP base port must fit in u16");
+    offset_port_with_offset("public withdrawal HTTP", base_port, offset)
+}
+
+fn withdrawal_public_http_port() -> Result<u16> {
+    withdrawal_public_http_port_with_offset(bridge_dev_port_offset()?)
+}
+
+fn nockswap_web_origin() -> Result<String> {
+    Ok(format!(
+        "http://127.0.0.1:{}",
+        offset_port("NockSwap web", NOCKSWAP_WEB_PORT)?
+    ))
+}
+
+fn bridge_dev_iris_sdk_version() -> Result<String> {
+    let value =
+        optional_env_string(BRIDGE_DEV_IRIS_SDK_VERSION_ENV)?.unwrap_or_else(|| "0.3.3".to_owned());
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{BRIDGE_DEV_IRIS_SDK_VERSION_ENV} must not be empty");
+    }
+    Ok(value.to_owned())
+}
+
 fn bridge_ingress_port_with_offset(node_id: usize, offset: u16) -> Result<u16> {
     let port = BRIDGE_INGRESS_PORTS
         .get(node_id)
@@ -331,6 +378,10 @@ fn fakenet_pow_len() -> Result<u64> {
 
 fn fakenet_log_difficulty() -> Result<u64> {
     Ok(optional_u64_env(BRIDGE_DEV_FAKENET_LOG_DIFFICULTY_ENV)?.unwrap_or(FAKENET_LOG_DIFFICULTY))
+}
+
+fn fakenet_v1_phase() -> Result<Option<u64>> {
+    optional_u64_env(BRIDGE_DEV_FAKENET_V1_PHASE_ENV)
 }
 
 fn fakenet_bythos_phase() -> Result<Option<u64>> {
@@ -455,6 +506,10 @@ struct WithdrawalE2eArgs {
     archive_rpc_url: Option<String>,
     #[arg(long, help = "Clean Iris SDK checkout to build and pack for this run")]
     iris_checkout: Option<PathBuf>,
+    #[arg(long, help = "NockSwap checkout used by the real Iris browser driver")]
+    nockswap_checkout: Option<PathBuf>,
+    #[arg(long, default_value_t = 900)]
+    browser_timeout_secs: u64,
     #[arg(long, help = "Prebuilt immutable Iris npm tarball")]
     iris_tarball: Option<PathBuf>,
     #[arg(long, help = "Metadata JSON accompanying --iris-tarball")]
@@ -1394,6 +1449,7 @@ impl ManagedChild {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComponentTarget {
     Node,
+    Miner,
     Bridge(usize),
 }
 
@@ -1401,6 +1457,7 @@ impl ComponentTarget {
     fn parse(raw: &str) -> Result<Self> {
         match raw {
             "node" => Ok(Self::Node),
+            "miner" => Ok(Self::Miner),
             "bridge-0" => Ok(Self::Bridge(0)),
             "bridge-1" => Ok(Self::Bridge(1)),
             "bridge-2" => Ok(Self::Bridge(2)),
@@ -1413,6 +1470,7 @@ impl ComponentTarget {
     fn name(self) -> String {
         match self {
             Self::Node => "node".to_string(),
+            Self::Miner => "miner".to_string(),
             Self::Bridge(node_id) => format!("bridge-{node_id}"),
         }
     }
@@ -1638,7 +1696,26 @@ async fn run_withdrawal_e2e(paths: Paths, args: WithdrawalE2eArgs) -> Result<()>
         Some("zero-steps") => Box::new(ScriptedE2eExecutor::new(ScriptedPlan::ZeroSteps)),
         Some("wait") => Box::new(ScriptedE2eExecutor::new(ScriptedPlan::WaitForCancellation)),
         Some(other) => bail!("unknown BRIDGE_DEV_E2E_SCRIPTED_PLAN value {other:?}"),
-        None => Box::new(UnavailableE2eExecutor),
+        None => {
+            if client == E2eClientMode::Iris && args.nockswap_checkout.is_none() {
+                bail!("--nockswap-checkout is required for a real --client iris withdrawal")
+            }
+            if client == E2eClientMode::Iris
+                && (args.browser_timeout_secs == 0
+                    || args.browser_timeout_secs >= args.timeout_secs)
+            {
+                bail!("--browser-timeout-secs must be positive and below --timeout-secs")
+            }
+            if client == E2eClientMode::RustReference && args.nockswap_checkout.is_some() {
+                bail!("--nockswap-checkout is valid only for --client iris")
+            }
+            Box::new(LiveE2eExecutor::new(LiveE2eOptions {
+                bridge_dev_binary: std::env::current_exe()
+                    .context("failed to resolve the bridge-dev executable")?,
+                nockswap_checkout: args.nockswap_checkout.clone(),
+                browser_timeout: Duration::from_secs(args.browser_timeout_secs),
+            }))
+        }
     };
     let config = E2eRunConfig {
         workspace_root: paths.workspace_root,
@@ -2055,6 +2132,7 @@ async fn run_up(
             &paths, &artifacts, node_id, config_path, needs_fresh_state, args.start,
         )?);
     }
+    children.push(spawn_miner(&paths, &artifacts)?);
 
     println!("bridge-dev is running");
     println!("run dir: {}", paths.current_dir.display());
@@ -2088,7 +2166,9 @@ async fn run_up(
         },
     )?;
     shutdown_children(&mut children).await?;
-    let _ = fs::remove_file(&paths.control_socket);
+    if !bool_env(BRIDGE_DEV_PRESERVE_RUNTIME_FILES_ENV)? {
+        let _ = fs::remove_file(&paths.control_socket);
+    }
     Ok(())
 }
 
@@ -2699,6 +2779,7 @@ fn run_logs(paths: Paths, args: LogsArgs) -> Result<()> {
     let log_paths = match args.target.as_str() {
         "supervisor" => vec![paths.supervisor_log],
         "node" => vec![paths.stdout_log("node"), paths.stderr_log("node")],
+        "miner" => vec![paths.stdout_log("miner"), paths.stderr_log("miner")],
         "bridge-0" | "bridge-1" | "bridge-2" | "bridge-3" | "bridge-4" => {
             vec![paths.stdout_log(&args.target), paths.stderr_log(&args.target)]
         }
@@ -3495,6 +3576,7 @@ fn write_bridge_configs(
             my_nock_key: BRIDGE_NOCK_KEYS[node_id].to_string(),
             grpc_address: grpc_address.clone(),
             nockchain_sequencer_api_address: Some(sequencer_api_address.clone()),
+
             base_confirmation_depth: profile.cluster.base_confirmation_depth,
             nockchain_confirmation_depth: profile.cluster.nockchain_confirmation_depth,
             withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
@@ -3659,9 +3741,6 @@ async fn spawn_node(
         fakenet_pow_len()?.to_string(),
         "--fakenet-log-difficulty".to_string(),
         fakenet_log_difficulty()?.to_string(),
-        "--mine".to_string(),
-        "--mining-pkh".to_string(),
-        FAKENET_MINING_PKH.to_string(),
         "--bind".to_string(),
         node_bind_addr()?,
         "--bind-public-grpc-addr".to_string(),
@@ -3676,7 +3755,23 @@ async fn spawn_node(
         BRIDGE_DEV_WITHDRAWAL_HANDOFF_WINDOW_BLOCKS.to_string(),
         "--sequencer-config-path".to_string(),
         sequencer_config_path.display().to_string(),
+        "--withdrawal-recovery-activation-block".to_string(),
+        manifest.vnet.base_start_height.to_string(),
+        "--withdrawal-public-grpc-addr".to_string(),
+        format!("127.0.0.1:{}", withdrawal_public_api_port()?),
+        "--withdrawal-public-http-addr".to_string(),
+        format!("127.0.0.1:{}", withdrawal_public_http_port()?),
+        "--withdrawal-public-http-message-inbox".to_string(),
+        manifest.vnet.inbox_contract_address.clone(),
+        "--withdrawal-public-http-iris-sdk-version".to_string(),
+        bridge_dev_iris_sdk_version()?,
+        "--withdrawal-public-http-requests-per-minute".to_string(),
+        BRIDGE_DEV_PUBLIC_HTTP_REQUESTS_PER_MINUTE.to_string(),
     ];
+    if let Some(v1_phase) = fakenet_v1_phase()? {
+        args.push("--fakenet-v1-phase".to_string());
+        args.push(v1_phase.to_string());
+    }
     if let Some(bythos_phase) = fakenet_bythos_phase()? {
         args.push("--fakenet-bythos-phase".to_string());
         args.push(bythos_phase.to_string());
@@ -3688,6 +3783,14 @@ async fn spawn_node(
     envs.extend(bridge_dev_sequencer_journal_envs(
         &sequencer_config.sequencer_journal,
     )?);
+    envs.push((
+        "WITHDRAWAL_PUBLIC_PAGE_TOKEN_KEY",
+        format!("0x{}", hex::encode(rand::random::<[u8; 32]>())),
+    ));
+    envs.push((
+        "WITHDRAWAL_PUBLIC_HTTP_ALLOWED_ORIGINS",
+        nockswap_web_origin()?,
+    ));
     spawn_process(
         "node",
         &artifacts.node.path,
@@ -3696,6 +3799,28 @@ async fn spawn_node(
         &envs,
         &paths.stdout_log("node"),
         &paths.stderr_log("node"),
+    )
+}
+
+fn spawn_miner(paths: &Paths, artifacts: &E2eArtifacts) -> Result<ManagedChild> {
+    let args = vec![
+        "--node-addr".to_string(),
+        format!("http://{}", node_private_grpc_addr()?),
+        "--mining-pkh".to_string(),
+        FAKENET_MINING_PKH.to_string(),
+        "--num-threads".to_string(),
+        "1".to_string(),
+        "--reconnect-max-attempts".to_string(),
+        "30".to_string(),
+    ];
+    spawn_process(
+        "miner",
+        &artifacts.miner.path,
+        &args,
+        &paths.node_dir(),
+        &[("RUST_LOG", "info,zk_pow_miner=info".to_string())],
+        &paths.stdout_log("miner"),
+        &paths.stderr_log("miner"),
     )
 }
 
@@ -3931,6 +4056,7 @@ async fn update_component(
 fn component_startup_timeout(target: ComponentTarget) -> Duration {
     match target {
         ComponentTarget::Node => NODE_STARTUP_TIMEOUT,
+        ComponentTarget::Miner => BRIDGE_STARTUP_TIMEOUT,
         ComponentTarget::Bridge(_) => BRIDGE_STARTUP_TIMEOUT,
     }
 }
@@ -3938,6 +4064,7 @@ fn component_startup_timeout(target: ComponentTarget) -> Duration {
 fn component_index(target: ComponentTarget) -> usize {
     match target {
         ComponentTarget::Node => 0,
+        ComponentTarget::Miner => 6,
         ComponentTarget::Bridge(node_id) => node_id + 1,
     }
 }
@@ -4001,6 +4128,7 @@ async fn spawn_component(
             )
             .await
         }
+        ComponentTarget::Miner => spawn_miner(paths, &artifacts),
         ComponentTarget::Bridge(node_id) => spawn_bridge(
             paths,
             &artifacts,
@@ -4129,6 +4257,7 @@ async fn wait_for_private_node_blockchain_constants(timeout: Duration) -> Result
 async fn wait_for_component(target: ComponentTarget, timeout: Duration) -> Result<()> {
     match target {
         ComponentTarget::Node => wait_for_port(SocketTarget::PrivateNodeGrpc, timeout).await,
+        ComponentTarget::Miner => Ok(()),
         ComponentTarget::Bridge(node_id) => {
             wait_for_port(SocketTarget::BridgeIngress(node_id), timeout).await
         }
@@ -4287,6 +4416,7 @@ async fn fetch_stable_snapshot_for_node(node_id: usize) -> Result<StableSnapshot
                 limit: 0,
             }),
             alert_view: Some(tui_proto::AlertView { limit: 0 }),
+            withdrawal_target: None,
         }))
         .await
         .with_context(|| format!("failed to query bridge-{node_id} TUI snapshot at {endpoint}"))?
@@ -5315,6 +5445,14 @@ mod tests {
         assert_eq!(bridge_ingress_port_with_offset(0, offset).unwrap(), 8042);
         assert_eq!(bridge_ingress_port_with_offset(4, offset).unwrap(), 8046);
         assert_eq!(sequencer_api_port_with_offset(offset).unwrap(), 5142);
+        assert_eq!(
+            withdrawal_public_api_port_with_offset(offset).unwrap(),
+            5242
+        );
+        assert_eq!(
+            withdrawal_public_http_port_with_offset(offset).unwrap(),
+            5342
+        );
     }
 
     #[test]
@@ -5432,6 +5570,10 @@ mod tests {
         assert_eq!(
             ComponentTarget::parse("node").unwrap(),
             ComponentTarget::Node
+        );
+        assert_eq!(
+            ComponentTarget::parse("miner").unwrap(),
+            ComponentTarget::Miner
         );
         assert_eq!(
             ComponentTarget::parse("bridge-4").unwrap(),
@@ -5935,6 +6077,9 @@ mod tests {
                     last_error: None,
                 }),
             }),
+            target_withdrawal_id: None,
+            target_base_event_id: None,
+            target_withdrawal_unsettled: None,
         })
         .unwrap();
 

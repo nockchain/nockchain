@@ -22,6 +22,8 @@ fn resolves_and_hashes_explicit_artifacts() -> Result<()> {
     assert_eq!(first, second);
     assert_eq!(first.bridge.sha256.len(), 64);
     assert_eq!(first.bridge.architecture, Some(host_architecture()));
+    assert_eq!(first.miner.architecture, Some(host_architecture()));
+    assert_eq!(first.wallet.architecture, Some(host_architecture()));
     assert_eq!(first.bridge_jam.size_bytes, 32);
     assert_eq!(
         first.sequencer_ctl.as_ref().map(|file| &file.path),
@@ -43,6 +45,8 @@ fn autodiscovers_cargo_and_bazel_layouts() -> Result<()> {
         let artifacts = ArtifactResolver::resolve(&options)?;
         assert_eq!(artifacts.bridge.path, fixture.bridge);
         assert_eq!(artifacts.node.path, fixture.node);
+        assert_eq!(artifacts.miner.path, fixture.miner);
+        assert_eq!(artifacts.wallet.path, fixture.wallet);
         assert!(artifacts.sequencer_ctl.is_none());
         assert_eq!(artifacts.fakenet_genesis_jam.path, fixture.fakenet);
     }
@@ -65,8 +69,8 @@ fn aggregates_missing_and_invalid_artifacts_with_one_remediation() -> Result<()>
     let error = ArtifactResolver::resolve(&options).expect_err("invalid fixture must fail");
     let rendered = error.to_string();
     for label in [
-        "bridge binary", "sequencer/node binary", "sequencer ctl binary", "bridge jam",
-        "roswell jam", "fakenet genesis jam",
+        "bridge binary", "sequencer/node binary", "miner binary", "wallet binary",
+        "sequencer ctl binary", "bridge jam", "roswell jam", "fakenet genesis jam",
     ] {
         assert!(rendered.contains(label), "missing aggregate entry {label}");
     }
@@ -91,7 +95,9 @@ fn build_option_runs_one_command_then_resolves_outputs() -> Result<()> {
     fs::write(
         &builder,
         format!(
-            "#!/bin/sh\nset -eu\nprintf run >> build-count\nmkdir -p target/release assets crates/nockchain/jams\ncp '{}' target/release/bridge\ncp '{}' target/release/nockchain-bridge-sequencer\ncp '{}' target/release/nockchain-bridge-sequencer-ctl\ncp '{}' assets/bridge.jam\ncp '{}' assets/roswell.jam\ncp '{}' crates/nockchain/jams/fakenet-genesis-pow-2-bex-1.jam\n",
+            "#!/bin/sh\nset -eu\nprintf run >> build-count\nmkdir -p target/release assets crates/nockchain/jams\ncp '{}' target/release/bridge\ncp '{}' target/release/nockchain-bridge-sequencer\ncp '{}' target/release/zk-pow-mine\ncp '{}' target/release/nockchain-wallet\ncp '{}' target/release/nockchain-bridge-sequencer-ctl\ncp '{}' assets/bridge.jam\ncp '{}' assets/roswell.jam\ncp '{}' crates/nockchain/jams/fakenet-genesis-pow-2-bex-1.jam\n",
+            binary_template.display(),
+            binary_template.display(),
             binary_template.display(),
             binary_template.display(),
             binary_template.display(),
@@ -107,7 +113,9 @@ fn build_option_runs_one_command_then_resolves_outputs() -> Result<()> {
     options.build_command = ArtifactBuildCommand {
         program: builder,
         args: Vec::new(),
+        env: Vec::new(),
     };
+    options.supplemental_build_commands.clear();
 
     let artifacts = ArtifactResolver::resolve(&options)?;
     assert!(artifacts.bridge.path.is_file());
@@ -126,6 +134,8 @@ struct ArtifactFixture {
     root: PathBuf,
     bridge: PathBuf,
     node: PathBuf,
+    miner: PathBuf,
+    wallet: PathBuf,
     ctl: PathBuf,
     bridge_jam: PathBuf,
     roswell_jam: PathBuf,
@@ -152,9 +162,13 @@ impl ArtifactFixture {
                 root.join("bazel-bin/assets/roswell.jam"),
             ),
         };
+        let miner = root.join("target/release/zk-pow-mine");
+        let wallet = root.join("target/release/nockchain-wallet");
         let fakenet = root.join("crates/nockchain/jams/fakenet-genesis-pow-2-bex-1.jam");
         write_binary(&bridge, host_architecture(), true)?;
         write_binary(&node, host_architecture(), true)?;
+        write_binary(&miner, host_architecture(), true)?;
+        write_binary(&wallet, host_architecture(), true)?;
         if include_ctl {
             write_binary(&ctl, host_architecture(), true)?;
         }
@@ -165,6 +179,8 @@ impl ArtifactFixture {
             root,
             bridge,
             node,
+            miner,
+            wallet,
             ctl,
             bridge_jam,
             roswell_jam,
@@ -176,6 +192,8 @@ impl ArtifactFixture {
         ArtifactOverrides {
             bridge: Some(self.bridge.clone()),
             node: Some(self.node.clone()),
+            miner: Some(self.miner.clone()),
+            wallet: Some(self.wallet.clone()),
             sequencer_ctl: Some(self.ctl.clone()),
             bridge_jam: Some(self.bridge_jam.clone()),
             roswell_jam: Some(self.roswell_jam.clone()),

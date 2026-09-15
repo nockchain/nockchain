@@ -471,10 +471,10 @@ pub(crate) async fn validate_base_chain_id(
     Ok(observed_chain_id)
 }
 
-pub(crate) async fn query_withdrawals_enabled(
+pub(crate) async fn query_withdrawal_contract_gate(
     provider: &DynProvider<Optimism>,
     nock_contract_address: Address,
-) -> Result<bool, BridgeError> {
+) -> Result<(Address, bool), BridgeError> {
     let nock = Nock::new(nock_contract_address, provider);
     let inbox_contract_address = nock.inbox().call().await.map_err(|error| {
         BridgeError::BaseBridgeMonitoring(format!("failed to read Nock.inbox: {error}"))
@@ -488,11 +488,12 @@ pub(crate) async fn query_withdrawals_enabled(
             "MessageInbox.nock mismatch: expected {nock_contract_address}, observed {paired_nock}"
         )));
     }
-    inbox.withdrawalsEnabled().call().await.map_err(|error| {
+    let enabled = inbox.withdrawalsEnabled().call().await.map_err(|error| {
         BridgeError::BaseBridgeMonitoring(format!(
             "failed to read MessageInbox.withdrawalsEnabled: {error}"
         ))
-    })
+    })?;
+    Ok((inbox_contract_address, enabled))
 }
 
 impl BaseBridge {

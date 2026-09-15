@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -72,6 +72,19 @@ fn withdrawal_public_page_token_key() -> Result<[u8; 32], BridgeError> {
         ))
     })
 }
+fn withdrawal_public_http_allowed_origins() -> Result<HashSet<String>, BridgeError> {
+    let raw = std::env::var("WITHDRAWAL_PUBLIC_HTTP_ALLOWED_ORIGINS").map_err(|_| {
+        BridgeError::Config(
+            "WITHDRAWAL_PUBLIC_HTTP_ALLOWED_ORIGINS is required when public HTTP is enabled".into(),
+        )
+    })?;
+    Ok(raw
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
 
 // The verifier setup releases multi-gigabyte contexts through jemalloc.
 #[cfg(not(feature = "tracing-heap"))]
@@ -127,6 +140,30 @@ struct NockchainBridgeSequencerCli {
         help = "Seconds before a still-pending public withdrawal is reported as delayed."
     )]
     withdrawal_public_delayed_after_secs: u64,
+    #[arg(
+        long,
+        help = "Optional production HTTP listen address for browser withdrawal readiness, status, history, and quote queries."
+    )]
+    withdrawal_public_http_addr: Option<SocketAddr>,
+
+    #[arg(
+        long,
+        default_value_t = 120,
+        help = "Maximum public withdrawal HTTP requests per client IP per minute."
+    )]
+    withdrawal_public_http_requests_per_minute: u32,
+
+    #[arg(
+        long,
+        help = "MessageInbox address published by the browser readiness adapter; required with --withdrawal-public-http-addr."
+    )]
+    withdrawal_public_http_message_inbox: Option<String>,
+
+    #[arg(
+        long,
+        help = "Iris SDK version published by the browser readiness adapter; required with --withdrawal-public-http-addr."
+    )]
+    withdrawal_public_http_iris_sdk_version: Option<String>,
 
     #[arg(
         long,
@@ -394,6 +431,9 @@ async fn start_withdrawal_sequencer(
         bridge::withdrawal::sequencer::base_verifier::SequencerBaseRpcWithdrawalVerifier,
     >,
     base_activity_overlap_blocks: u64,
+    withdrawal_public_http_config: Option<
+        bridge::withdrawal::sequencer::public_http::PublicWithdrawalHttpConfig,
+    >,
     withdrawal_recovery_activation_block: u64,
     withdrawal_public_grpc_addr: SocketAddr,
     withdrawal_public_config:
@@ -579,6 +619,15 @@ async fn start_withdrawal_sequencer(
             quote_service,
             withdrawal_public_config,
         );
+    let public_http_task = withdrawal_public_http_config.map(|config| {
+        let service = public_query_service.clone();
+        tokio::spawn(async move {
+            bridge::withdrawal::sequencer::public_http::serve_public_withdrawal_http(
+                config, service,
+            )
+            .await
+        })
+    });
     tokio::spawn(async move {
         bridge::withdrawal::sequencer::base_verifier::run_confirmed_base_burn_tail_scanner(
             recurring_base_activity_scanner,
@@ -606,6 +655,17 @@ async fn start_withdrawal_sequencer(
         .await
     });
     let rpc_task = tokio::spawn(async move {
+        let public_http = async move {
+            match public_http_task {
+                Some(task) => match task.await {
+                    Ok(result) => result,
+                    Err(err) => Err(BridgeError::Runtime(format!(
+                        "public withdrawal HTTP task failed: {err}"
+                    ))),
+                },
+                None => std::future::pending::<Result<(), BridgeError>>().await,
+            }
+        };
         tokio::select! {
             result = private_rpc_task => match result {
                 Ok(result) => result,
@@ -619,6 +679,7 @@ async fn start_withdrawal_sequencer(
                     "public withdrawal query RPC task failed: {err}"
                 ))),
             },
+            result = public_http => result,
         }
     });
     tokio::spawn(async move {
@@ -687,6 +748,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let withdrawal_public_grpc_addr = cli.withdrawal_public_grpc_addr;
     let withdrawal_public_delayed_after =
         Duration::from_secs(cli.withdrawal_public_delayed_after_secs);
+    let withdrawal_public_http_message_inbox = cli
+        .withdrawal_public_http_message_inbox
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|error| format!("invalid --withdrawal-public-http-message-inbox: {error}"))?;
+    if cli.withdrawal_public_http_addr.is_none()
+        && (cli.withdrawal_public_http_message_inbox.is_some()
+            || cli.withdrawal_public_http_iris_sdk_version.is_some())
+    {
+        return Err(
+            "withdrawal public HTTP identity arguments require --withdrawal-public-http-addr"
+                .into(),
+        );
+    }
     let withdrawal_public_page_token_key = withdrawal_public_page_token_key()?;
     let handoff_window_blocks = cli.withdrawal_handoff_window_blocks;
     let authorized_submit_retry_after_base_blocks = cli.authorized_submit_retry_after_base_blocks;
@@ -728,6 +804,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .into(),
         );
     }
+    if let Some(http_addr) = cli.withdrawal_public_http_addr {
+        if http_addr.port() == public_addr.port()
+            || http_addr.port() == private_sequencer_port
+            || http_addr.port() == withdrawal_public_grpc_addr.port()
+        {
+            return Err(
+                "withdrawal public HTTP port must differ from Nockchain public, private sequencer, and public withdrawal gRPC ports"
+                    .into(),
+            );
+        }
+    }
     if withdrawal_recovery_activation_block < bridge_constants.base_start_height {
         return Err(format!(
             "withdrawal recovery activation block {} precedes configured Base start height {}",
@@ -762,30 +849,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .enumerate()
         .map(|(idx, node)| (idx as u64, node.eth_address))
         .collect::<HashMap<_, _>>();
+    let watcher_expected_message_inbox = withdrawal_public_http_message_inbox;
     let watcher_base_height_tracker = base_height_tracker.clone();
-    tokio::spawn(async move {
-        if let Err(err) =
-            bridge::withdrawal::sequencer::base_height::run_confirmed_base_height_watcher(
-                base_ws_url,
-                expected_base_chain_id,
-                base_confirmation_depth,
-                nock_contract_address,
-                watcher_base_height_tracker,
-                BaseObserverLoopPolicy::default(),
-            )
-            .await
-        {
+    let mut base_height_watcher_task = tokio::spawn(async move {
+        let result = bridge::withdrawal::sequencer::base_height::run_confirmed_base_height_watcher(
+            base_ws_url,
+            expected_base_chain_id,
+            base_confirmation_depth,
+            nock_contract_address,
+            watcher_expected_message_inbox,
+            watcher_base_height_tracker,
+            BaseObserverLoopPolicy::default(),
+        )
+        .await;
+        if let Err(err) = &result {
             error!(
                 target: "nockchain.withdrawal_sequencer",
                 error = %err,
                 "sequencer base height watcher exited"
             );
         }
+        result
     });
 
-    let initial_confirmed_base_height = base_height_tracker
-        .wait_for_initial_confirmed_base_height()
-        .await;
+    let initial_confirmed_base_height = tokio::select! {
+        confirmed_height = base_height_tracker.wait_for_initial_confirmed_base_height() => {
+            confirmed_height
+        }
+        watcher_result = &mut base_height_watcher_task => {
+            match watcher_result {
+                Ok(Ok(())) => {
+                    return Err(Box::new(BridgeError::Runtime(
+                        "sequencer Base height watcher exited before initial observation".into(),
+                    )) as Box<dyn Error>);
+                }
+                Ok(Err(error)) => return Err(Box::new(error) as Box<dyn Error>),
+                Err(error) => return Err(Box::new(error) as Box<dyn Error>),
+            }
+        }
+    };
     info!(
         target: "nockchain.withdrawal_sequencer",
         confirmed_base_height = initial_confirmed_base_height,
@@ -839,6 +941,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
             base_stale_after: Duration::from_secs(60),
             admission_enabled: sequencer_config.public_withdrawal_admission_enabled,
         };
+    let withdrawal_public_http_config = match cli.withdrawal_public_http_addr {
+        Some(listen_addr) => {
+            let message_inbox = withdrawal_public_http_message_inbox.ok_or(
+                "--withdrawal-public-http-message-inbox is required with --withdrawal-public-http-addr",
+            )?;
+            let iris_sdk_version = cli
+                .withdrawal_public_http_iris_sdk_version
+                .clone()
+                .ok_or(
+                    "--withdrawal-public-http-iris-sdk-version is required with --withdrawal-public-http-addr",
+                )?;
+            let config = bridge::withdrawal::sequencer::public_http::PublicWithdrawalHttpConfig {
+                listen_addr,
+                allowed_origins: withdrawal_public_http_allowed_origins()?,
+                requests_per_minute: cli.withdrawal_public_http_requests_per_minute,
+
+                message_inbox_address: message_inbox,
+                bridge_signer_pkhs: withdrawal_node_pkhs
+                    .iter()
+                    .map(|pkh| pkh.to_base58())
+                    .collect(),
+                bridge_threshold: bridge_constants.min_signers,
+                iris_sdk_version,
+            };
+            config.validate()?;
+            Some(config)
+        }
+        None => None,
+    };
 
     let withdrawal_sequencer_start = start_withdrawal_sequencer(
         public_addr,
@@ -847,6 +978,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         base_withdrawal_verifier,
         base_activity_scanner,
         base_activity_overlap_blocks,
+        withdrawal_public_http_config,
         withdrawal_recovery_activation_block,
         withdrawal_public_grpc_addr,
         withdrawal_public_config,

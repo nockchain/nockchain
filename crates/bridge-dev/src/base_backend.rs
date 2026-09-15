@@ -196,6 +196,26 @@ impl BaseBackend {
             .await?;
         decode_hex_bytes("contract code", &output)
     }
+    pub async fn log_count(
+        &self,
+        address: Address,
+        topic0: B256,
+        from_block: u64,
+    ) -> Result<usize, BaseBackendError> {
+        let logs: Vec<Value> = self
+            .rpc
+            .call(
+                "eth_getLogs",
+                json!([{
+                    "address": format!("{address:#x}"),
+                    "fromBlock": format!("0x{from_block:x}"),
+                    "toBlock": "latest",
+                    "topics": [format!("{topic0:#x}")],
+                }]),
+            )
+            .await?;
+        Ok(logs.len())
+    }
 
     pub async fn storage_at(
         &self,

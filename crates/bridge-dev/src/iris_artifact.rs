@@ -16,10 +16,12 @@ use tokio::process::Command;
 
 const EXPECTED_PACKAGE_NAME: &str = "@nockbox/iris-sdk";
 const EXPECTED_DRIVER_PATH: &str = "dist/e2e/encode-withdrawal-e2e.js";
+const EXPECTED_WASM_PATH: &str = "dist/e2e/iris_wasm_bg.wasm";
 const MAX_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PACKAGE_FILES: usize = 10_000;
 const MAX_DRIVER_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_WASM_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum IrisArtifactInput {
@@ -335,6 +337,21 @@ impl IrisArtifactResolver {
                 .await
                 .map_err(IrisArtifactError::Filesystem)?;
         }
+        let wasm_path = driver_dir.join("iris_wasm_bg.wasm");
+        let mut wasm_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&wasm_path)
+            .await
+            .map_err(IrisArtifactError::Filesystem)?;
+        wasm_file
+            .write_all(&inspection.wasm)
+            .await
+            .map_err(IrisArtifactError::Filesystem)?;
+        wasm_file
+            .flush()
+            .await
+            .map_err(IrisArtifactError::Filesystem)?;
 
         let facts = IrisArtifactFacts {
             package_name: metadata.package_name,
@@ -363,6 +380,7 @@ impl IrisArtifactResolver {
 struct TarballInspection {
     files: BTreeMap<String, u64>,
     driver: Vec<u8>,
+    wasm: Vec<u8>,
 }
 
 fn inspect_tarball(bytes: &[u8]) -> Result<TarballInspection, IrisArtifactError> {
@@ -370,6 +388,7 @@ fn inspect_tarball(bytes: &[u8]) -> Result<TarballInspection, IrisArtifactError>
     let mut archive = Archive::new(decoder);
     let mut files = BTreeMap::new();
     let mut driver = None;
+    let mut wasm = None;
     let mut total_size = 0_u64;
     for entry in archive
         .entries()
@@ -415,12 +434,30 @@ fn inspect_tarball(bytes: &[u8]) -> Result<TarballInspection, IrisArtifactError>
                 .read_to_end(&mut contents)
                 .map_err(|error| IrisArtifactError::InvalidTarball(error.to_string()))?;
             driver = Some(contents);
+        } else if normalized == EXPECTED_WASM_PATH {
+            if size == 0 || size > MAX_WASM_BYTES {
+                return Err(IrisArtifactError::InvalidTarball(
+                    "bundled WASM size is outside the accepted range".to_owned(),
+                ));
+            }
+            let mut contents = Vec::with_capacity(size as usize);
+            entry
+                .read_to_end(&mut contents)
+                .map_err(|error| IrisArtifactError::InvalidTarball(error.to_string()))?;
+            wasm = Some(contents);
         }
     }
     let driver = driver.ok_or_else(|| {
         IrisArtifactError::InvalidTarball("archive is missing the bundled driver".to_owned())
     })?;
-    Ok(TarballInspection { files, driver })
+    let wasm = wasm.ok_or_else(|| {
+        IrisArtifactError::InvalidTarball("archive is missing the bundled WASM".to_owned())
+    })?;
+    Ok(TarballInspection {
+        files,
+        driver,
+        wasm,
+    })
 }
 
 fn normalize_tar_path(path: &Path) -> Result<String, IrisArtifactError> {

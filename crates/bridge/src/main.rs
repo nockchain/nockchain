@@ -966,6 +966,7 @@ async fn main() -> Result<(), BridgeError> {
         withdrawal_processing_enabled.then(|| withdrawal_transport.clone());
     let ingress_withdrawal_tui_source = Some(WithdrawalTuiSource {
         registry: withdrawal_registry.clone(),
+        kernel: runtime_handle.clone(),
         sequencer: Some(withdrawal_sequencer_client.clone()),
         activation_cutoff: withdrawal_activation_cutoff,
         local_node_id: node_config.node_id,

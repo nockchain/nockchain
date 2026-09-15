@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 
 pub const BRIDGE_BIN_ENV: &str = "BRIDGE_E2E_BRIDGE_BIN";
 pub const NODE_BIN_ENV: &str = "BRIDGE_E2E_NODE_BIN";
+pub const MINER_BIN_ENV: &str = "BRIDGE_E2E_MINER_BIN";
+pub const WALLET_BIN_ENV: &str = "BRIDGE_E2E_WALLET_BIN";
 pub const CTL_BIN_ENV: &str = "BRIDGE_E2E_CTL_BIN";
 pub const BRIDGE_JAM_ENV: &str = "BRIDGE_E2E_BRIDGE_JAM";
 pub const ROSWELL_JAM_ENV: &str = "BRIDGE_E2E_ROSWELL_JAM";
@@ -20,14 +22,16 @@ const DEFAULT_BUILD_ARGS: &[&str] = &[
     "build", "//crates/bridge:bridge-bin",
     "//crates/nockchain-bridge-sequencer:nockchain-bridge-sequencer",
     "//crates/nockchain-bridge-sequencer:nockchain-bridge-sequencer-ctl", "//assets:bridge",
-    "//assets:roswell",
+    "//assets:dumb", "//assets:miner", "//assets:wal", "//assets:roswell",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactRole {
     BridgeBinary,
+    MinerBinary,
     NodeBinary,
+    WalletBinary,
     SequencerCtlBinary,
     BridgeJam,
     RoswellJam,
@@ -39,6 +43,8 @@ impl ArtifactRole {
         match self {
             Self::BridgeBinary => "bridge binary",
             Self::NodeBinary => "sequencer/node binary",
+            Self::MinerBinary => "miner binary",
+            Self::WalletBinary => "wallet binary",
             Self::SequencerCtlBinary => "sequencer ctl binary",
             Self::BridgeJam => "bridge jam",
             Self::RoswellJam => "roswell jam",
@@ -49,7 +55,11 @@ impl ArtifactRole {
     fn is_binary(self) -> bool {
         matches!(
             self,
-            Self::BridgeBinary | Self::NodeBinary | Self::SequencerCtlBinary
+            Self::BridgeBinary
+                | Self::NodeBinary
+                | Self::MinerBinary
+                | Self::WalletBinary
+                | Self::SequencerCtlBinary
         )
     }
 }
@@ -98,6 +108,8 @@ pub struct ArtifactBuildMetadata {
 pub struct E2eArtifacts {
     pub bridge: ArtifactFile,
     pub node: ArtifactFile,
+    pub miner: ArtifactFile,
+    pub wallet: ArtifactFile,
     pub sequencer_ctl: Option<ArtifactFile>,
     pub bridge_jam: ArtifactFile,
     pub roswell_jam: ArtifactFile,
@@ -110,6 +122,8 @@ impl E2eArtifacts {
         let mut values = vec![
             env_path(BRIDGE_BIN_ENV, &self.bridge.path),
             env_path(NODE_BIN_ENV, &self.node.path),
+            env_path(MINER_BIN_ENV, &self.miner.path),
+            env_path(WALLET_BIN_ENV, &self.wallet.path),
             env_path(BRIDGE_JAM_ENV, &self.bridge_jam.path),
             env_path(ROSWELL_JAM_ENV, &self.roswell_jam.path),
             env_path(FAKENET_GENESIS_ENV, &self.fakenet_genesis_jam.path),
@@ -128,7 +142,9 @@ fn env_path(name: &str, path: &Path) -> (String, String) {
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactOverrides {
     pub bridge: Option<PathBuf>,
+    pub miner: Option<PathBuf>,
     pub node: Option<PathBuf>,
+    pub wallet: Option<PathBuf>,
     pub sequencer_ctl: Option<PathBuf>,
     pub bridge_jam: Option<PathBuf>,
     pub roswell_jam: Option<PathBuf>,
@@ -139,7 +155,9 @@ impl ArtifactOverrides {
     pub fn from_env() -> Self {
         Self {
             bridge: env_path_override(BRIDGE_BIN_ENV),
+            miner: env_path_override(MINER_BIN_ENV),
             node: env_path_override(NODE_BIN_ENV),
+            wallet: env_path_override(WALLET_BIN_ENV),
             sequencer_ctl: env_path_override(CTL_BIN_ENV),
             bridge_jam: env_path_override(BRIDGE_JAM_ENV),
             roswell_jam: env_path_override(ROSWELL_JAM_ENV),
@@ -158,6 +176,7 @@ fn env_path_override(name: &str) -> Option<PathBuf> {
 pub struct ArtifactBuildCommand {
     pub program: PathBuf,
     pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
 }
 
 impl Default for ArtifactBuildCommand {
@@ -165,6 +184,7 @@ impl Default for ArtifactBuildCommand {
         Self {
             program: PathBuf::from(DEFAULT_BUILD_PROGRAM),
             args: DEFAULT_BUILD_ARGS.iter().map(OsString::from).collect(),
+            env: Vec::new(),
         }
     }
 }
@@ -186,16 +206,72 @@ pub struct ArtifactResolveOptions {
     pub require_ctl: bool,
     pub build: bool,
     pub build_command: ArtifactBuildCommand,
+    pub supplemental_build_commands: Vec<ArtifactBuildCommand>,
 }
 
 impl ArtifactResolveOptions {
     pub fn new(workspace_root: PathBuf) -> Self {
+        let source_dumb_jam = workspace_root.join("assets/dumb.jam");
+        let dumb_jam = if source_dumb_jam.is_file() {
+            source_dumb_jam
+        } else {
+            workspace_root.join("bazel-bin/assets/dumb.jam")
+        };
+        let source_wallet_jam = workspace_root.join("assets/wal.jam");
+        let wallet_jam = if source_wallet_jam.is_file() {
+            source_wallet_jam
+        } else {
+            workspace_root.join("bazel-bin/assets/wal.jam")
+        };
+        let source_miner_jam = workspace_root.join("assets/miner.jam");
+        let miner_jam = if source_miner_jam.is_file() {
+            source_miner_jam
+        } else {
+            workspace_root.join("bazel-bin/assets/miner.jam")
+        };
         Self {
             workspace_root,
             overrides: ArtifactOverrides::from_env(),
             require_ctl: false,
             build: false,
             build_command: ArtifactBuildCommand::default(),
+            supplemental_build_commands: vec![
+                ArtifactBuildCommand {
+                    program: PathBuf::from("cargo"),
+                    args: [
+                        "build", "--release", "-p", "nockchain-bridge-sequencer", "--bin",
+                        "nockchain-bridge-sequencer",
+                    ]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                    env: vec![(OsString::from("KERNEL_JAM_PATH"), dumb_jam.into_os_string())],
+                },
+                ArtifactBuildCommand {
+                    program: PathBuf::from("cargo"),
+                    args: [
+                        "build", "--release", "-p", "nockchain-wallet", "--bin", "nockchain-wallet",
+                    ]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                    env: vec![(
+                        OsString::from("KERNEL_JAM_PATH"),
+                        wallet_jam.into_os_string(),
+                    )],
+                },
+                ArtifactBuildCommand {
+                    program: PathBuf::from("cargo"),
+                    args: ["build", "--release", "-p", "zk-pow-miner", "--bin", "zk-pow-mine"]
+                        .into_iter()
+                        .map(OsString::from)
+                        .collect(),
+                    env: vec![(
+                        OsString::from("KERNEL_JAM_PATH"),
+                        miner_jam.into_os_string(),
+                    )],
+                },
+            ],
         }
     }
 }
@@ -204,16 +280,14 @@ pub struct ArtifactResolver;
 
 impl ArtifactResolver {
     pub fn resolve(options: &ArtifactResolveOptions) -> Result<E2eArtifacts, ArtifactResolveError> {
-        match resolve_once(options) {
-            Ok(artifacts) => Ok(artifacts),
-            Err(_) if options.build => {
-                run_build(options)?;
-                resolve_once(options).map_err(|mut after| {
-                    after.build_attempted = true;
-                    after
-                })
-            }
-            Err(error) => Err(error),
+        if options.build {
+            run_build(options)?;
+            resolve_once(options).map_err(|mut error| {
+                error.build_attempted = true;
+                error
+            })
+        } else {
+            resolve_once(options)
         }
     }
 }
@@ -237,6 +311,18 @@ fn resolve_once(options: &ArtifactResolveOptions) -> Result<E2eArtifacts, Artifa
             root.join("target/release/nockchain-bridge-sequencer"),
             root.join("bazel-bin/crates/nockchain-bridge-sequencer/nockchain-bridge-sequencer"),
         ],
+        &mut problems,
+    );
+    let miner = resolve_required(
+        ArtifactRole::MinerBinary,
+        options.overrides.miner.as_ref(),
+        &[root.join("target/release/zk-pow-mine")],
+        &mut problems,
+    );
+    let wallet = resolve_required(
+        ArtifactRole::WalletBinary,
+        options.overrides.wallet.as_ref(),
+        &[root.join("target/release/nockchain-wallet")],
         &mut problems,
     );
     let ctl_candidates = [
@@ -283,7 +369,7 @@ fn resolve_once(options: &ArtifactResolveOptions) -> Result<E2eArtifacts, Artifa
     if !problems.is_empty() {
         return Err(ArtifactResolveError {
             problems,
-            remediation: options.build_command.display(),
+            remediation: build_remediation(options),
             build_attempted: false,
             build_failure: None,
         });
@@ -291,6 +377,8 @@ fn resolve_once(options: &ArtifactResolveOptions) -> Result<E2eArtifacts, Artifa
 
     let bridge = require_resolved(bridge, ArtifactRole::BridgeBinary, options)?;
     let node = require_resolved(node, ArtifactRole::NodeBinary, options)?;
+    let miner = require_resolved(miner, ArtifactRole::MinerBinary, options)?;
+    let wallet = require_resolved(wallet, ArtifactRole::WalletBinary, options)?;
     let bridge_jam = require_resolved(bridge_jam, ArtifactRole::BridgeJam, options)?;
     let roswell_jam = require_resolved(roswell_jam, ArtifactRole::RoswellJam, options)?;
     let fakenet_genesis_jam = require_resolved(
@@ -301,6 +389,8 @@ fn resolve_once(options: &ArtifactResolveOptions) -> Result<E2eArtifacts, Artifa
     Ok(E2eArtifacts {
         bridge,
         node,
+        miner,
+        wallet,
         sequencer_ctl,
         bridge_jam,
         roswell_jam,
@@ -327,7 +417,7 @@ fn require_resolved(
             attempted_paths: Vec::new(),
             reasons: vec!["resolver lost a required artifact".to_owned()],
         }],
-        remediation: options.build_command.display(),
+        remediation: build_remediation(options),
         build_attempted: false,
         build_failure: None,
     })
@@ -482,30 +572,46 @@ fn hash_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn build_remediation(options: &ArtifactResolveOptions) -> String {
+    std::iter::once(&options.build_command)
+        .chain(options.supplemental_build_commands.iter())
+        .map(ArtifactBuildCommand::display)
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
 fn run_build(options: &ArtifactResolveOptions) -> Result<(), ArtifactResolveError> {
-    let output = Command::new(&options.build_command.program)
-        .args(&options.build_command.args)
-        .current_dir(&options.workspace_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| ArtifactResolveError {
-            problems: Vec::new(),
-            remediation: options.build_command.display(),
-            build_attempted: true,
-            build_failure: Some(error.to_string()),
-        })?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(ArtifactResolveError {
-            problems: Vec::new(),
-            remediation: options.build_command.display(),
-            build_attempted: true,
-            build_failure: Some(format!("build exited with {}", output.status)),
-        })
+    for command in
+        std::iter::once(&options.build_command).chain(options.supplemental_build_commands.iter())
+    {
+        let output = Command::new(&command.program)
+            .args(&command.args)
+            .current_dir(&options.workspace_root)
+            .stdin(Stdio::null())
+            .envs(command.env.iter().cloned())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| ArtifactResolveError {
+                problems: Vec::new(),
+                remediation: build_remediation(options),
+                build_attempted: true,
+                build_failure: Some(format!("{}: {error}", command.display())),
+            })?;
+        if !output.status.success() {
+            return Err(ArtifactResolveError {
+                problems: Vec::new(),
+                remediation: build_remediation(options),
+                build_attempted: true,
+                build_failure: Some(format!(
+                    "{} exited with {}",
+                    command.display(),
+                    output.status
+                )),
+            });
+        }
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

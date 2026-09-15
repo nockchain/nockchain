@@ -49,6 +49,7 @@ source "$SCRIPT_DIR/lib/layout.sh"
 bridge_resolve_layout
 
 BIN_DIR="$BRIDGE_BIN_DIR"
+WALLET_BIN="${BRIDGE_E2E_WALLET_BIN:-$BIN_DIR/nockchain-wallet}"
 TEST_DATA_DIR="${TEST_DATA_DIR:-${BRIDGE_DIR}/test_run_data}"
 WALLET_DIR="${TEST_DATA_DIR}/wallet"
 
@@ -126,33 +127,36 @@ else
     )
 fi
 
-if [ ! -f "$BIN_DIR/nockchain-wallet" ]; then
-    echo "Error: nockchain-wallet not found. Run: cargo build --release -p nockchain-wallet"
+if [ ! -x "$WALLET_BIN" ]; then
+    echo "Error: nockchain-wallet not found or not executable: $WALLET_BIN. Run: cargo build --release -p nockchain-wallet"
     exit 1
 fi
 
-if [ "$NEW_WALLET" = true ]; then
-    rm -rf "$WALLET_DIR"
+if [ "$NEW_WALLET" = true ] && [ -e "$WALLET_DIR" ]; then
+    echo "Error: refusing --new because wallet state already exists: $WALLET_DIR"
+    exit 1
 fi
 mkdir -p "$WALLET_DIR"
 
 if [ "$NEW_WALLET" = true ]; then
-    # Reset wallet state and import deterministic fakenet keys.
+    # Initialize wallet state and import deterministic fakenet keys.
     # Keep the v1 bridge address active by default after also importing the
     # legacy v0 key needed to spend pre-v1 coinbase notes.
-    NOCKAPP_HOME="$TEST_DATA_DIR" "$BIN_DIR/nockchain-wallet" --new \
+    NOCKAPP_HOME="$TEST_DATA_DIR" "$WALLET_BIN" --new \
         "${COMMON_WALLET_ARGS[@]}" import-keys \
         --seedphrase "$FAKENET_V1_SEED" --version 1
-    NOCKAPP_HOME="$TEST_DATA_DIR" "$BIN_DIR/nockchain-wallet" \
+    NOCKAPP_HOME="$TEST_DATA_DIR" "$WALLET_BIN" \
+        "${COMMON_WALLET_ARGS[@]}" derive-child 0
+    NOCKAPP_HOME="$TEST_DATA_DIR" "$WALLET_BIN" \
         "${COMMON_WALLET_ARGS[@]}" import-keys \
         --seedphrase "$FAKENET_V0_SEED" --version 0
-    NOCKAPP_HOME="$TEST_DATA_DIR" "$BIN_DIR/nockchain-wallet" \
+    NOCKAPP_HOME="$TEST_DATA_DIR" "$WALLET_BIN" \
         "${COMMON_WALLET_ARGS[@]}" set-active-master-address "$FAKENET_V1_ACTIVE_MASTER"
 fi
 
 # Run the wallet command
 export NOCKAPP_HOME="$TEST_DATA_DIR"
-exec "$BIN_DIR/nockchain-wallet" \
+exec "$WALLET_BIN" \
     "${CLIENT_ARGS[@]}" \
     "${COMMON_WALLET_ARGS[@]}" \
     "${PASSTHRU_ARGS[@]}"

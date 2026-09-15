@@ -300,6 +300,8 @@ fn artifacts() -> E2eArtifacts {
     E2eArtifacts {
         bridge: artifact(ArtifactRole::BridgeBinary, "/volatile/bridge", "11"),
         node: artifact(ArtifactRole::NodeBinary, "/volatile/node", "22"),
+        miner: artifact(ArtifactRole::MinerBinary, "/volatile/miner", "77"),
+        wallet: artifact(ArtifactRole::WalletBinary, "/volatile/wallet", "88"),
         sequencer_ctl: Some(artifact(
             ArtifactRole::SequencerCtlBinary,
             "/volatile/ctl",

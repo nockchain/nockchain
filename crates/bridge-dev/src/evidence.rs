@@ -76,7 +76,9 @@ impl EvidenceArtifactIdentity {
     fn from_artifact(file: &ArtifactFile) -> Self {
         let role = match file.role {
             ArtifactRole::BridgeBinary => "bridge_binary",
+            ArtifactRole::MinerBinary => "miner_binary",
             ArtifactRole::NodeBinary => "node_binary",
+            ArtifactRole::WalletBinary => "wallet_binary",
             ArtifactRole::SequencerCtlBinary => "sequencer_ctl_binary",
             ArtifactRole::BridgeJam => "bridge_jam",
             ArtifactRole::RoswellJam => "roswell_jam",

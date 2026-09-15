@@ -257,6 +257,7 @@ pub fn snapshot_request_from_view(view: DepositLogView) -> proto::GetSnapshotReq
     proto::GetSnapshotRequest {
         deposit_log_view: Some(deposit_log_view_to_proto(view)),
         alert_view: None,
+        withdrawal_target: None,
     }
 }
 
@@ -269,6 +270,7 @@ pub fn snapshot_request_with_alert_limit(
         alert_view: Some(proto::AlertView {
             limit: u32::try_from(alert_limit).unwrap_or(u32::MAX),
         }),
+        withdrawal_target: None,
     }
 }
 
@@ -899,6 +901,9 @@ mod tests {
             last_submitted_deposit: None,
             last_successful_deposit: None,
             withdrawals: None,
+            target_withdrawal_id: None,
+            target_base_event_id: None,
+            target_withdrawal_unsettled: None,
         };
 
         let snapshot = BridgeTuiSnapshot::from_proto(response);
@@ -1096,6 +1101,9 @@ mod tests {
                     last_error: None,
                 }),
             }),
+            target_withdrawal_id: None,
+            target_base_event_id: None,
+            target_withdrawal_unsettled: None,
         };
 
         let snapshot = BridgeTuiSnapshot::from_proto(response);
