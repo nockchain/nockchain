@@ -1644,7 +1644,7 @@ async fn handle_effect_with_dispatcher(
             }
         }
         EffectType::LiarPeer => {
-            let peer_id = {
+            let (peer_id, failed_pow_witness) = {
                 let space = noun_slab.noun_space();
                 let effect_cell = unsafe { *noun_slab.root() }.in_space(&space).as_cell()?;
                 let liar_peer_cell = effect_cell.tail().as_cell().map_err(|_| {
@@ -1668,11 +1668,27 @@ async fn handle_effect_with_dispatcher(
                     NockAppError::IoError(std::io::Error::other("Invalid UTF-8 in peer ID"))
                 })?;
 
-                PeerId::from_str(&peer_id_str).map_err(|_| {
+                let peer_id = PeerId::from_str(&peer_id_str).map_err(|_| {
                     NockAppError::IoError(std::io::Error::other("Invalid peer ID format"))
-                })?
+                })?;
+                (
+                    peer_id,
+                    liar_peer_cell.tail().eq_bytes(b"failed-pow-witness"),
+                )
             };
 
+            // A v5 witness failure is objective cryptographic misbehavior, but
+            // unlike `%failed-pow-check` it cannot poison the semantic block ID:
+            // another proof envelope for that ID may be valid. Escalate the
+            // sender through the address/IP abuse path so rotating peer IDs on
+            // one endpoint cannot buy an unbounded sequence of full verifier
+            // runs. Other liar-peer causes remain peer-scoped because protocol
+            // skew around an upgrade boundary can produce them honestly.
+            let severity = if failed_pow_witness {
+                LocalPeerAbuseSeverity::Strong
+            } else {
+                LocalPeerAbuseSeverity::Weak
+            };
             record_local_peer_abuse_with_dispatcher(
                 swarm_actions,
                 &driver_state,
@@ -1682,7 +1698,7 @@ async fn handle_effect_with_dispatcher(
                 None,
                 None,
                 LocalPeerAbuseKind::LiarPeer,
-                LocalPeerAbuseSeverity::Weak,
+                severity,
                 true,
             )
             .await?;

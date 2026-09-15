@@ -8702,6 +8702,71 @@ async fn test_liar_peer_effect() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)] // ibig has a memory leak so miri fails this test
+async fn failed_pow_witness_liar_peer_creates_address_exclusion() {
+    let peer = PeerId::random();
+    let metrics = Arc::new(
+        NockchainP2PMetrics::register(gnort::global_metrics_registry()).expect("register metrics"),
+    );
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    {
+        let mut state_guard = state.lock().await;
+        seed_connected_peer(&mut state_guard, peer, 904);
+    }
+
+    let mut effect_slab = NounSlab::new();
+    let effect_tag = make_tas(&mut effect_slab, "liar-peer");
+    let peer_id =
+        Atom::from_value(&mut effect_slab, peer.to_base58()).expect("failed witness peer ID atom");
+    let effect_cause = make_tas(&mut effect_slab, "failed-pow-witness");
+    let effect = T(
+        &mut effect_slab,
+        &[effect_tag.as_noun(), peer_id.as_noun(), effect_cause.as_noun()],
+    );
+    effect_slab.set_root(effect);
+
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(10);
+    let mut swarm_actions = SwarmActionDispatcher::Channel(&swarm_tx);
+    handle_effect_with_dispatcher(
+        effect_slab,
+        &mut swarm_actions,
+        Vec::new(),
+        false,
+        PrefetchConfig::disabled(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        state.clone(),
+        metrics,
+        PeerExclusions::default(),
+    )
+    .await
+    .expect("handle failed v5 witness liar effect");
+
+    let mut blocked = false;
+    let mut excluded = false;
+    while let Ok(action) = swarm_rx.try_recv() {
+        match action {
+            SwarmAction::BlockPeer { peer_id } => blocked |= peer_id == peer,
+            SwarmAction::RecordExclusionOutcome { outcome, .. } => {
+                excluded |= outcome.address_cooldown.is_some();
+            }
+            other => panic!("unexpected swarm action: {other:?}"),
+        }
+    }
+    assert!(blocked, "the invalid witness sender must be peer-blocked");
+    assert!(
+        excluded,
+        "an invalid v5 witness must create an address exclusion"
+    );
+    assert!(
+        state.lock().await.rejected_pow_blocks.is_empty(),
+        "a witness-specific failure must not poison the semantic block ID"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // ibig has a memory leak so miri fails this test
 async fn test_track_add_effect() {
     use tokio::sync::mpsc;
 
