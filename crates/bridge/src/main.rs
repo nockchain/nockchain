@@ -17,7 +17,7 @@ use bridge::observability::health::{
 use bridge::observability::status::{run_hourly_rotation, BridgeStatus, BridgeStatusState};
 use bridge::observability::tui::{cleanup_old_logs, init_bridge_tracing};
 use bridge::observability::tui_api::WithdrawalTuiSource;
-use bridge::shared::base::BaseBridge;
+use bridge::shared::base::{BaseBridge, CompensatedWithdrawalRegistry};
 use bridge::shared::config::{
     canonical_testing_bridge_lock_root, derive_bridge_spend_authority_from_nodes, NonceEpochConfig,
 };
@@ -769,9 +769,12 @@ async fn main() -> Result<(), BridgeError> {
         base_confirmation_depth, nockchain_confirmation_depth
     );
 
+    let compensated_withdrawals =
+        CompensatedWithdrawalRegistry::from_config(&config_toml.compensated_withdrawals)?;
     let base_bridge = Arc::new(
         BaseBridge::new(
             config_toml.base_ws_url().to_string(),
+            config_toml.base_chain_id()?,
             config_toml.inbox_contract_address()?,
             config_toml.nock_contract_address()?,
             config_toml.my_eth_key_hex().to_string(),
@@ -779,9 +782,14 @@ async fn main() -> Result<(), BridgeError> {
             base_blocks_chunk,
             base_confirmation_depth,
             stop_handle.clone(),
+            compensated_withdrawals,
         )
         .await?,
     );
+    let withdrawal_node_eth_addresses = extract_bridge_node_eth_addresses(&node_config);
+    base_bridge
+        .validate_contract_readiness(&withdrawal_node_eth_addresses, bridge_constants.min_signers)
+        .await?;
 
     let withdrawal_projection_store = Arc::new(
         WithdrawalProjectionStore::open(data_dir.join("withdrawal-local-state.sqlite")).await?,
@@ -876,7 +884,6 @@ async fn main() -> Result<(), BridgeError> {
         .iter()
         .map(|node| node.nock_pkh.clone())
         .collect();
-    let withdrawal_node_eth_addresses = extract_bridge_node_eth_addresses(&node_config);
     let withdrawal_sequencer_client = Arc::new(GrpcWithdrawalSequencerClient::new(
         config_toml.nockchain_sequencer_api_address()?,
     ));
@@ -1330,6 +1337,7 @@ mod tests {
         BridgeConfigToml {
             node_id: 0,
             base_ws_url: "wss://example.invalid".to_string(),
+            base_chain_id: Some(84_532),
             bridge_lock_root: DEFAULT_BRIDGE_WITHDRAWAL_LOCK_ROOT_B58.to_string(),
             inbox_contract_address: None,
             nock_contract_address: None,
@@ -1341,6 +1349,7 @@ mod tests {
             base_confirmation_depth: 1,
             nockchain_confirmation_depth: 1,
             withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
+            compensated_withdrawals: Vec::new(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,

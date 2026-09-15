@@ -1,0 +1,38 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "ai-pow-jets",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**/*.rs"],
+    ),
+    aliases = aliases(),
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/ai-pow",
+        "//crates/ai-pow-miner",
+        "//crates/ai-pow-zk",
+        "//crates/nockvm/rust/nockvm",
+    ] + all_crate_deps(),
+)
+
+rust_binary(
+    name = "ai-pow-setup-cache",
+    srcs = ["src/bin/ai_pow_setup_cache.rs"],
+    aliases = aliases(),
+    edition = "2021",
+    deps = [
+        ":ai-pow-jets",
+    ] + all_crate_deps(),
+)

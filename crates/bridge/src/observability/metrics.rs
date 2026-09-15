@@ -391,6 +391,10 @@ metrics_struct![
         "sequencer.withdrawal.base_verifier.verify_time", TimingCount
     ),
     (
+        sequencer_withdrawal_base_activity_rejected, "sequencer.withdrawal.base_activity.rejected",
+        Count
+    ),
+    (
         sequencer_withdrawal_canonicalize_requests, "sequencer.withdrawal.canonicalize.requests",
         Count
     ),

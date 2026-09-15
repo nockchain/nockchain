@@ -4,12 +4,16 @@
 
 # Address of the NOCK token contract on Base L2.
 nock_contract_address = "0x..."
+base_chain_id = 8453
 
 # Nockchain confirmations required before sequencer settlement observations are final.
 nockchain_confirmation_depth = 400
 
 # Must match every bridge node's versioned withdrawal policy.
 withdrawal_policy = "withdrawal-policy-v1"
+# Second fail-closed gate for public readiness. Set true only during certified
+# cutover; the on-chain MessageInbox gate must independently be true.
+public_withdrawal_admission_enabled = false
 
 # Optional manual operator approval gate for authorized withdrawal submission.
 manual_submit_approval = false
@@ -44,6 +48,16 @@ nicks_fee_per_nock = 195
 base_blocks_chunk = 100
 base_start_height = 33387036
 nockchain_start_height = 25
+
+# Governance-approved compensation tombstones. These must exactly match every
+# bridge node's rendered configuration and are persisted into sequencer SQLite.
+[[compensated_withdrawals]]
+base_event_id = "0x45cfbf831f2abf377164f857a2bc47338fcaa8f4f12a5986a3ba9bef35afeabd"
+transaction_hash = "0xfa0b8e4134a387440a99544114578397d52542cea306d6b9adea801407e3123f"
+log_index = 243
+reason = "legacy operator refund completed before WithdrawalWireV1 activation"
+evidence_reference = "base-mainnet:fa0b8e4134a387440a99544114578397d52542cea306d6b9adea801407e3123f:243"
+recorded_at_unix_secs = 0
 
 # All 5 bridge signer public facts.
 # The standalone sequencer does not need bridge private keys or peer ingress IPs.

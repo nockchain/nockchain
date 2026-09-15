@@ -19,9 +19,23 @@ use crate::shared::types::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompensatedWithdrawalToml {
+    pub base_event_id: String,
+    pub transaction_hash: String,
+    pub log_index: u64,
+    pub reason: String,
+    pub recorded_at_unix_secs: i64,
+    pub evidence_reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfigToml {
     pub node_id: u64,
     pub base_ws_url: String,
+    /// Expected Base chain id. Required before any Base observation or submission.
+    #[serde(default)]
+    pub base_chain_id: Option<u64>,
     pub bridge_lock_root: String,
     #[serde(default)]
     pub inbox_contract_address: Option<String>,
@@ -41,6 +55,11 @@ pub struct BridgeConfigToml {
     /// Versioned withdrawal amount and wire policy.
     #[serde(default = "default_withdrawal_policy_id")]
     pub withdrawal_policy: String,
+    /// Governance-approved burns that were compensated outside normal payout.
+    /// Entries are immutable identities and must be rendered identically for
+    /// bridge nodes and the sequencer.
+    #[serde(default)]
+    pub compensated_withdrawals: Vec<CompensatedWithdrawalToml>,
     /// Base contract lastDepositNonce at the time the deposit nonce epoch is activated.
     ///
     /// When non-zero, this must equal the nonce of the anchor deposit identified by
@@ -99,9 +118,19 @@ pub struct NodeInfoToml {
 pub struct SequencerConfigToml {
     pub nock_contract_address: String,
     pub nockchain_confirmation_depth: u64,
+    /// Expected Base chain id. Required before sequencer observation or RPC service.
+    #[serde(default)]
+    pub base_chain_id: Option<u64>,
     /// Versioned withdrawal amount and wire policy.
     #[serde(default = "default_withdrawal_policy_id")]
     pub withdrawal_policy: String,
+    /// Governance-approved burns that must never enter sequencer ordering.
+    #[serde(default)]
+    pub compensated_withdrawals: Vec<CompensatedWithdrawalToml>,
+    /// Explicit operator admission gate for the public burn-readiness surface.
+    /// Defaults false; it is independent from the on-chain contract gate.
+    #[serde(default)]
+    pub public_withdrawal_admission_enabled: bool,
     #[serde(default)]
     pub manual_submit_approval: bool,
     #[serde(default)]
@@ -266,6 +295,13 @@ fn default_sequencer_journal_region() -> String {
 }
 fn default_sequencer_journal_prefix() -> String {
     "withdrawal-sequencer".to_string()
+}
+fn require_base_chain_id(value: Option<u64>, config_name: &str) -> Result<u64, BridgeError> {
+    value.filter(|chain_id| *chain_id > 0).ok_or_else(|| {
+        BridgeError::Config(format!(
+            "{config_name} requires an explicit positive base_chain_id"
+        ))
+    })
 }
 fn default_sequencer_journal_id() -> String {
     "default".to_string()
@@ -538,6 +574,10 @@ impl BridgeConfigToml {
         &self.base_ws_url
     }
 
+    pub fn base_chain_id(&self) -> Result<u64, BridgeError> {
+        require_base_chain_id(self.base_chain_id, "bridge config")
+    }
+
     /// Returns the configured private Nockchain gRPC endpoint.
     pub fn grpc_address(&self) -> &str {
         &self.grpc_address
@@ -630,6 +670,10 @@ impl SequencerConfigToml {
     pub fn nock_contract_address(&self) -> Result<Address, BridgeError> {
         Address::from_str(&self.nock_contract_address)
             .map_err(|e| BridgeError::Config(format!("Invalid nock_contract_address: {}", e)))
+    }
+
+    pub fn base_chain_id(&self) -> Result<u64, BridgeError> {
+        require_base_chain_id(self.base_chain_id, "sequencer config")
     }
 
     /// Get bridge constants and verify they match the selected withdrawal policy.
@@ -945,6 +989,16 @@ mod tests {
         assert_eq!(config.object_store.region, "auto");
         assert_eq!(config.object_store.prefix, "withdrawal-sequencer");
         assert_eq!(config.object_store.journal_id, "default");
+    }
+
+    #[test]
+    fn base_chain_id_is_required_and_positive() {
+        assert_eq!(
+            require_base_chain_id(Some(8_453), "test config").expect("valid chain id"),
+            8_453
+        );
+        assert!(require_base_chain_id(None, "test config").is_err());
+        assert!(require_base_chain_id(Some(0), "test config").is_err());
     }
 
     #[test]
