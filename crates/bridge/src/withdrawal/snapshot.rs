@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -147,7 +147,8 @@ impl BridgeNoteSnapshotSource for PrivateNockAppSnapshotSource {
 }
 
 struct SnapshotCache {
-    generation: u64,
+    latest_started_generation: u64,
+    committed_generation: u64,
     snapshot: Option<ConfirmedBridgeNoteSnapshot>,
 }
 
@@ -158,7 +159,6 @@ pub struct BridgeNoteSnapshotService {
     cache: Arc<RwLock<SnapshotCache>>,
     nockchain_confirmation_depth: u64,
     background_refresh_state: Arc<AtomicU8>,
-    next_refresh_generation: Arc<AtomicU64>,
 }
 
 impl Clone for BridgeNoteSnapshotService {
@@ -170,7 +170,6 @@ impl Clone for BridgeNoteSnapshotService {
             cache: self.cache.clone(),
             nockchain_confirmation_depth: self.nockchain_confirmation_depth,
             background_refresh_state: self.background_refresh_state.clone(),
-            next_refresh_generation: self.next_refresh_generation.clone(),
         }
     }
 }
@@ -186,12 +185,12 @@ impl BridgeNoteSnapshotService {
             selectors: selectors.normalized(),
             stale_after,
             cache: Arc::new(RwLock::new(SnapshotCache {
-                generation: 0,
+                latest_started_generation: 0,
+                committed_generation: 0,
                 snapshot: None,
             })),
             nockchain_confirmation_depth: 0,
             background_refresh_state: Arc::new(AtomicU8::new(BACKGROUND_REFRESH_IDLE)),
-            next_refresh_generation: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -217,14 +216,16 @@ impl BridgeNoteSnapshotService {
     }
 
     pub fn snapshot(&self) -> Option<ConfirmedBridgeNoteSnapshot> {
-        self.cache
-            .read()
-            .ok()
-            .and_then(|guard| guard.snapshot.clone())
+        self.cache.read().ok().and_then(|guard| {
+            if guard.committed_generation != guard.latest_started_generation {
+                return None;
+            }
+            guard.snapshot.clone()
+        })
     }
 
     pub async fn refresh(&self) -> Result<Option<ConfirmedBridgeNoteSnapshot>, BridgeError> {
-        let generation = self.next_refresh_generation.fetch_add(1, Ordering::Relaxed);
+        let generation = self.begin_refresh()?;
         if self.selectors.is_empty() {
             return Ok(self.commit_snapshot(generation, None));
         }
@@ -384,17 +385,31 @@ impl BridgeNoteSnapshotService {
         )
     }
 
+    fn begin_refresh(&self) -> Result<u64, BridgeError> {
+        let mut cache = self.cache.write().map_err(|_| {
+            BridgeError::Runtime("bridge note snapshot cache lock is poisoned".into())
+        })?;
+        cache.latest_started_generation = cache
+            .latest_started_generation
+            .checked_add(1)
+            .ok_or_else(|| BridgeError::Runtime("snapshot refresh generation overflow".into()))?;
+        Ok(cache.latest_started_generation)
+    }
+
     fn commit_snapshot(
         &self,
         generation: u64,
         snapshot: Option<ConfirmedBridgeNoteSnapshot>,
     ) -> Option<ConfirmedBridgeNoteSnapshot> {
         let Ok(mut cache) = self.cache.write() else {
-            return snapshot;
+            return None;
         };
-        if generation > cache.generation {
-            cache.generation = generation;
+        if generation == cache.latest_started_generation {
+            cache.committed_generation = generation;
             cache.snapshot = snapshot;
+        }
+        if cache.committed_generation != cache.latest_started_generation {
+            return None;
         }
         cache.snapshot.clone()
     }
@@ -609,7 +624,9 @@ mod tests {
     struct OutOfOrderSnapshotSource {
         calls: AtomicUsize,
         first_started: Notify,
+        second_started: Notify,
         release_first: Notify,
+        release_second: Notify,
         first: Vec<BalanceUpdate>,
         second: Vec<BalanceUpdate>,
     }
@@ -626,7 +643,11 @@ mod tests {
                     self.release_first.notified().await;
                     Ok(self.first.clone())
                 }
-                1 => Ok(self.second.clone()),
+                1 => {
+                    self.second_started.notify_one();
+                    self.release_second.notified().await;
+                    Ok(self.second.clone())
+                }
                 call => panic!("unexpected snapshot fetch call {call}"),
             }
         }
@@ -880,7 +901,9 @@ mod tests {
         let source = Arc::new(OutOfOrderSnapshotSource {
             calls: AtomicUsize::new(0),
             first_started: Notify::new(),
+            second_started: Notify::new(),
             release_first: Notify::new(),
+            release_second: Notify::new(),
             first: vec![page(30, 300, Vec::new())],
             second: vec![page(31, 301, Vec::new())],
         });
@@ -891,9 +914,16 @@ mod tests {
         timeout(Duration::from_secs(5), source.first_started.notified())
             .await
             .expect("background refresh starts");
-        let newer = service
-            .refresh()
+        let refresh_service = service.clone();
+        let newer_refresh = tokio::spawn(async move { refresh_service.refresh().await });
+        timeout(Duration::from_secs(5), source.second_started.notified())
             .await
+            .expect("newer refresh starts");
+        source.release_second.notify_one();
+        let newer = timeout(Duration::from_secs(5), newer_refresh)
+            .await
+            .expect("newer refresh completes")
+            .expect("newer refresh task")
             .expect("newer refresh succeeds")
             .expect("newer snapshot");
         assert_eq!(newer.height(), 31);
@@ -915,6 +945,59 @@ mod tests {
         let cached = service.snapshot().expect("cached snapshot");
         assert_eq!(cached.height(), 31);
         assert!(!cached.is_stale(SystemTime::now(), Duration::from_secs(300)));
+    }
+
+    #[tokio::test]
+    async fn older_refresh_cannot_become_fresh_while_newer_refresh_is_running() {
+        let source = Arc::new(OutOfOrderSnapshotSource {
+            calls: AtomicUsize::new(0),
+            first_started: Notify::new(),
+            second_started: Notify::new(),
+            release_first: Notify::new(),
+            release_second: Notify::new(),
+            first: vec![page(30, 300, Vec::new())],
+            second: vec![page(31, 301, Vec::new())],
+        });
+        let service =
+            BridgeNoteSnapshotService::new(source.clone(), selectors(), Duration::from_secs(300));
+
+        service.refresh_in_background();
+        timeout(Duration::from_secs(5), source.first_started.notified())
+            .await
+            .expect("background refresh starts");
+        let refresh_service = service.clone();
+        let newer_refresh = tokio::spawn(async move { refresh_service.refresh().await });
+        timeout(Duration::from_secs(5), source.second_started.notified())
+            .await
+            .expect("newer refresh starts");
+
+        source.release_first.notify_one();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if service.background_refresh_state.load(Ordering::Acquire)
+                    == BACKGROUND_REFRESH_IDLE
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("older background refresh completes");
+        assert!(
+            service.snapshot().is_none(),
+            "older refresh became visible while a newer refresh was still running"
+        );
+
+        source.release_second.notify_one();
+        let newer = timeout(Duration::from_secs(5), newer_refresh)
+            .await
+            .expect("newer refresh completes")
+            .expect("newer refresh task")
+            .expect("newer refresh succeeds")
+            .expect("newer snapshot");
+        assert_eq!(newer.height(), 31);
+        assert_eq!(service.snapshot().expect("cached snapshot").height(), 31);
     }
 
     #[tokio::test]

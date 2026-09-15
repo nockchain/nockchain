@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Display;
 use std::future::Future;
 use std::sync::Arc;
@@ -327,13 +327,13 @@ fn retain_hydratable_prefix(blocks: &mut Vec<NockBlockEvent>) -> Option<&mut Noc
     }
 }
 
-fn buffered_transaction_requires_tip_refresh(
+fn buffered_block_requires_tip_refresh(
     blocks: &VecDeque<NockBlockEvent>,
     next_needed_height: Option<u64>,
 ) -> bool {
-    blocks.front().is_some_and(|block| {
-        Some(block.block.height) == next_needed_height && !block.block.tx_ids.is_empty()
-    })
+    blocks
+        .front()
+        .is_some_and(|block| Some(block.block.height) == next_needed_height)
 }
 
 #[async_trait]
@@ -499,12 +499,11 @@ impl NockGrpcSource {
             client, &block.block.digest, &block.block.tx_ids, request_timeout,
         )
         .await?;
-        let complete = txs.len() == block.block.tx_ids.len()
-            && block
-                .block
-                .tx_ids
-                .iter()
-                .all(|expected| txs.iter().any(|(actual, _)| actual == expected));
+        let expected_ids = block.block.tx_ids.iter().collect::<HashSet<_>>();
+        let returned_ids = txs.iter().map(|(actual, _)| actual).collect::<HashSet<_>>();
+        let complete = expected_ids.len() == block.block.tx_ids.len()
+            && returned_ids.len() == txs.len()
+            && expected_ids == returned_ids;
         if !complete {
             return Err(BridgeError::EventMonitoring(format!(
                 "block transaction map does not match page at height {}: expected {} transactions, got {}",
@@ -858,9 +857,7 @@ impl NockchainWatcher {
                 self.config.confirmation_depth,
             );
             let tip_refresh_due = prefetched_blocks.is_empty()
-                || buffered_transaction_requires_tip_refresh(
-                    &prefetched_blocks, next_needed_height,
-                )
+                || buffered_block_requires_tip_refresh(&prefetched_blocks, next_needed_height)
                 || tip_refreshed_at
                     .map(|refreshed_at| refreshed_at.elapsed() >= NOCK_TIP_REFRESH_INTERVAL)
                     .unwrap_or(true);
@@ -1513,21 +1510,15 @@ mod tests {
     }
 
     #[test]
-    fn buffered_transaction_boundary_requires_fresh_tip() {
+    fn buffered_block_boundary_requires_fresh_tip() {
         let mut blocks =
             VecDeque::from([sample_block_event(10, false), sample_block_event(11, true)]);
 
-        assert!(!buffered_transaction_requires_tip_refresh(
-            &blocks,
-            Some(10)
-        ));
+        assert!(buffered_block_requires_tip_refresh(&blocks, Some(10)));
         blocks.pop_front();
-        assert!(buffered_transaction_requires_tip_refresh(&blocks, Some(11)));
-        assert!(!buffered_transaction_requires_tip_refresh(
-            &blocks,
-            Some(12)
-        ));
-        assert!(!buffered_transaction_requires_tip_refresh(&blocks, None));
+        assert!(buffered_block_requires_tip_refresh(&blocks, Some(11)));
+        assert!(!buffered_block_requires_tip_refresh(&blocks, Some(12)));
+        assert!(!buffered_block_requires_tip_refresh(&blocks, None));
     }
 
     #[test]
