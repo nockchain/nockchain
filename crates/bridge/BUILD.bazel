@@ -35,6 +35,7 @@ genrule(
     name = "build_contracts",
     srcs = [
         ":contracts_inputs",
+        ":test_fixtures",
         "@forge_std//:all_files",
         "@forge_std//:root_marker",
         "@openzeppelin_contracts//:all_files",
@@ -45,18 +46,22 @@ genrule(
     outs = [
         "contracts/out/MessageInbox.sol/MessageInbox.json",
         "contracts/out/Nock.sol/Nock.json",
+        "contracts/out/forge-test-summary.txt",
     ],
     cmd = """
     set -e
 
     # Set up the contracts directory structure in the sandbox
     FORGE=$$(realpath $(location //tools/foundry:forge))
-    WORK_DIR=$$(mktemp -d)
+    WORK_ROOT=$$(mktemp -d)
+    WORK_DIR=$$WORK_ROOT/contracts
+    mkdir -p $$WORK_DIR
     export HOME=$$WORK_DIR
     export SVM_HOME=$$WORK_DIR/.svm
     export FOUNDRY_CACHE_PATH=$$WORK_DIR/.foundry/cache
     mkdir -p $$SVM_HOME $$FOUNDRY_CACHE_PATH
     OUT_DIR=$$PWD/$(@D)
+    mkdir -p $$OUT_DIR/contracts/out
     EXEC_ROOT=$$PWD
 
     # Resolve external repo roots before leaving the execroot
@@ -79,6 +84,14 @@ genrule(
       fi
     done
 
+    # Solidity reads the same canonical fixture consumed by Rust and Iris.
+    mkdir -p "$$WORK_ROOT/test-fixtures"
+    for f in $(locations :test_fixtures); do
+      rel=$${f#*test-fixtures/}
+      mkdir -p "$$WORK_ROOT/test-fixtures/$$(dirname $$rel)"
+      cp "$$f" "$$WORK_ROOT/test-fixtures/$$rel"
+    done
+
     # Wire Foundry deps from Bazel external repos
     mkdir -p "$$WORK_DIR/lib/forge-std" "$$WORK_DIR/lib/openzeppelin-contracts" "$$WORK_DIR/lib/openzeppelin-contracts-upgradeable"
     cp -R "$$FORGE_STD_ROOT"/. "$$WORK_DIR/lib/forge-std"
@@ -88,8 +101,18 @@ genrule(
 
     cd $$WORK_DIR
 
-    # Run forge build
+    # Contract artifacts and every Forge test use the same pinned v1.5.1
+    # binary and hermetic dependency tree.
     $$FORGE build --force --via-ir 2>&1
+    set +e
+    TEST_OUTPUT=$$($$FORGE test --force --via-ir 2>&1)
+    TEST_STATUS=$$?
+    set -e
+    printf '%s\n' "$$TEST_OUTPUT"
+    if [ "$$TEST_STATUS" -ne 0 ]; then
+      exit "$$TEST_STATUS"
+    fi
+    printf '%s\n' "$$TEST_OUTPUT" > "$$OUT_DIR/contracts/out/forge-test-summary.txt"
 
     # Copy the generated artifacts to Bazel's expected output locations
     # $$OUT_DIR is Bazel's output directory for this genrule
@@ -98,10 +121,14 @@ genrule(
     cp $$WORK_DIR/out/MessageInbox.sol/MessageInbox.json "$$OUT_DIR/contracts/out/MessageInbox.sol/MessageInbox.json"
     cp $$WORK_DIR/out/Nock.sol/Nock.json "$$OUT_DIR/contracts/out/Nock.sol/Nock.json"
 
-    # Clean up
-    rm -rf $$WORK_DIR
+    # Bazel owns the sandbox and its temporary contract workspace.
     """,
     tools = ["//tools/foundry:forge"],
+)
+
+filegroup(
+    name = "withdrawal_contract_conformance",
+    srcs = [":contracts/out/forge-test-summary.txt"],
 )
 
 # Build-time code generator for proto files
@@ -381,6 +408,11 @@ _BRIDGE_WITHDRAWAL_TEST_SRCS = glob(
     allow_empty = True,
 )
 
+_BRIDGE_REORG_TEST_SRCS = glob(
+    ["tests/reorg_recovery_tests.rs"],
+    allow_empty = True,
+)
+
 # Roswell kernel harness for integration tests that avoid mocks.
 [
     rust_library(
@@ -425,6 +457,7 @@ rust_test_suite(
             "tests/roswell_harness.rs",
             "tests/test_harness.rs",
             "tests/withdrawal_tests.rs",
+            "tests/reorg_recovery_tests.rs",
         ],
     ),
     compile_data = ["bridge-conf.example.toml"],
@@ -532,6 +565,43 @@ rust_test_suite(
         ),
     )
     for _ in _BRIDGE_WITHDRAWAL_TEST_SRCS
+]
+
+# reorg_recovery_tests.rs drives the real Roswell kernel through stop, start,
+# and retry transitions, so give the compiled Hoon suite a moderate timeout.
+[
+    rust_test(
+        name = "reorg_recovery_tests_test",
+        timeout = "moderate",
+        srcs = _BRIDGE_REORG_TEST_SRCS,
+        crate_features = ["bazel_build"],
+        crate_root = "tests/reorg_recovery_tests.rs",
+        data = [
+            ":contracts/out/MessageInbox.sol/MessageInbox.json",
+            ":contracts/out/Nock.sol/Nock.json",
+        ],
+        edition = "2021",
+        proc_macro_deps = all_crate_deps(
+            proc_macro = True,
+            proc_macro_dev = True,
+        ),
+        rustc_env = {
+            "MESSAGE_INBOX_JSON": "$(execpath :contracts/out/MessageInbox.sol/MessageInbox.json)",
+            "NOCK_JSON": "$(execpath :contracts/out/Nock.sol/Nock.json)",
+        },
+        deps = [
+            ":bridge",
+            ":bridge_roswell_harness",
+            ":bridge_test_harness",
+            "//crates/nockchain-math",
+            "//crates/nockchain-types",
+            "//crates/nockvm/rust/ibig",
+        ] + all_crate_deps(
+            normal = True,
+            normal_dev = True,
+        ),
+    )
+    for _ in _BRIDGE_REORG_TEST_SRCS
 ]
 
 # core_runner_integration.rs depends on tests/harness/in_memory_ports.rs as a module.

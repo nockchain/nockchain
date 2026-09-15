@@ -524,6 +524,20 @@ impl WithdrawalProjectionStore {
         .await
     }
 
+    pub async fn reconcile_base_reorg_state(
+        &self,
+        id: &WithdrawalId,
+        sequencer_epoch: u64,
+        hold: bool,
+    ) -> Result<bool, BridgeError> {
+        let id = id.clone();
+        let updated_at = now_unix_secs()?;
+        self.with_conn(move |conn| {
+            reconcile_base_reorg_state(conn, &id, sequencer_epoch, hold, updated_at)
+        })
+        .await
+    }
+
     async fn validate_and_stage_prepared(
         &self,
         proposal: WithdrawalProposalData,
@@ -981,6 +995,22 @@ impl WithdrawalProposalRegistry {
             .reconcile_prepared_with_pending_sequencer(
                 id, sequencer_epoch, sequencer_handoff_index, sequencer_turn_started_base_height,
             )
+            .await?;
+        if changed {
+            self.clear_cache();
+        }
+        Ok(changed)
+    }
+
+    pub async fn reconcile_base_reorg_state(
+        &self,
+        id: &WithdrawalId,
+        sequencer_epoch: u64,
+        hold: bool,
+    ) -> Result<bool, BridgeError> {
+        let changed = self
+            .store
+            .reconcile_base_reorg_state(id, sequencer_epoch, hold)
             .await?;
         if changed {
             self.clear_cache();
@@ -1915,12 +1945,16 @@ fn reconcile_pending_epoch(
     let Some(existing) = find_withdrawal_row(conn, id)? else {
         return Ok(false);
     };
-    if parse_state_tag(&existing.state)? != WithdrawalState::Pending {
+    let state = parse_state_tag(&existing.state)?;
+    if !matches!(
+        state,
+        WithdrawalState::Pending | WithdrawalState::Invalidated
+    ) {
         return Ok(false);
     }
     let current_epoch = u64::try_from(existing.current_epoch)
         .map_err(|err| BridgeError::ValueConversion(format!("current_epoch overflow: {err}")))?;
-    if current_epoch == sequencer_epoch {
+    if state == WithdrawalState::Pending && current_epoch == sequencer_epoch {
         return Ok(false);
     }
 
@@ -1936,6 +1970,7 @@ fn reconcile_pending_epoch(
             withdrawals::submitted_at.eq::<Option<i64>>(None),
             withdrawals::confirmed_height.eq::<Option<i64>>(None),
             withdrawals::confirmed_block_id.eq::<Option<Vec<u8>>>(None),
+            withdrawals::state.eq(state_tag(WithdrawalState::Pending).to_string()),
             withdrawals::updated_at.eq(updated_at),
         ))
         .execute(conn)
@@ -1990,6 +2025,77 @@ fn reconcile_prepared_with_pending_sequencer(
     Ok(true)
 }
 
+fn reconcile_base_reorg_state(
+    conn: &mut SqliteConnection,
+    id: &WithdrawalId,
+    sequencer_epoch: u64,
+    hold: bool,
+    updated_at: i64,
+) -> Result<bool, BridgeError> {
+    let Some(existing) = find_withdrawal_row(conn, id)? else {
+        return Ok(false);
+    };
+    let state = parse_state_tag(&existing.state)?;
+    let target = if hold {
+        WithdrawalState::ReorgHold
+    } else {
+        WithdrawalState::Invalidated
+    };
+    if state == target {
+        return Ok(false);
+    }
+    if !hold
+        && matches!(
+            state,
+            WithdrawalState::Authorized
+                | WithdrawalState::MempoolAccepted
+                | WithdrawalState::Confirmed
+                | WithdrawalState::ReorgHold
+        )
+    {
+        return Err(BridgeError::Runtime(format!(
+            "sequencer invalidated Base burn {:?} while local lifecycle is {}",
+            id,
+            state.as_str()
+        )));
+    }
+    let epoch = i64::try_from(sequencer_epoch)
+        .map_err(|err| BridgeError::ValueConversion(format!("epoch too large: {err}")))?;
+    if hold {
+        diesel::update(withdrawals::table.find(existing.id))
+            .set((
+                withdrawals::current_epoch.eq(epoch),
+                withdrawals::state.eq(state_tag(target).to_string()),
+                withdrawals::updated_at.eq(updated_at),
+            ))
+            .execute(conn)
+            .map_err(|err| {
+                BridgeError::Runtime(format!("withdrawal Base reorg hold update failed: {err}"))
+            })?;
+    } else {
+        diesel::update(withdrawals::table.find(existing.id))
+            .set((
+                withdrawals::current_epoch.eq(epoch),
+                withdrawals::proposal_hash.eq::<Option<String>>(None),
+                withdrawals::peer_commit_certificate.eq::<Option<Vec<u8>>>(None),
+                withdrawals::state.eq(state_tag(target).to_string()),
+                withdrawals::turn_started_base_height.eq::<Option<i64>>(None),
+                withdrawals::submitted_tx_name.eq::<Option<String>>(None),
+                withdrawals::submitted_tx_hash.eq::<Option<String>>(None),
+                withdrawals::submitted_at.eq::<Option<i64>>(None),
+                withdrawals::confirmed_height.eq::<Option<i64>>(None),
+                withdrawals::confirmed_block_id.eq::<Option<Vec<u8>>>(None),
+                withdrawals::updated_at.eq(updated_at),
+            ))
+            .execute(conn)
+            .map_err(|err| {
+                BridgeError::Runtime(format!(
+                    "withdrawal Base reorg invalidation update failed: {err}"
+                ))
+            })?;
+    }
+    Ok(true)
+}
 fn expire_prepared_row(
     conn: &mut SqliteConnection,
     row_id: i64,
@@ -2240,6 +2346,7 @@ fn count_withdrawals(
     }
     if exclude_confirmed {
         query = query.filter(withdrawal_dsl::state.ne(state_tag(WithdrawalState::Confirmed)));
+        query = query.filter(withdrawal_dsl::state.ne(state_tag(WithdrawalState::Invalidated)));
     }
     let count = query
         .select(diesel::dsl::count_star())
@@ -2258,6 +2365,7 @@ fn count_ordering_blocking_withdrawals(conn: &mut SqliteConnection) -> Result<u6
         state_tag(WithdrawalState::Prepared).to_string(),
         state_tag(WithdrawalState::PeerCanonical).to_string(),
         state_tag(WithdrawalState::Authorized).to_string(),
+        state_tag(WithdrawalState::ReorgHold).to_string(),
     ];
     let count = withdrawals::table
         .filter(withdrawal_dsl::state.eq_any(blocking_states))
@@ -2283,6 +2391,7 @@ fn count_relative_to_frontier(
         .map_err(|err| BridgeError::ValueConversion(format!("withdrawal nonce overflow: {err}")))?;
     let mut query = withdrawals::table
         .filter(withdrawal_dsl::state.ne(state_tag(WithdrawalState::Confirmed)))
+        .filter(withdrawal_dsl::state.ne(state_tag(WithdrawalState::Invalidated)))
         .into_boxed::<diesel::sqlite::Sqlite>();
     query = if below {
         query.filter(withdrawal_dsl::withdrawal_nonce.lt(frontier_nonce))
@@ -2397,9 +2506,12 @@ fn build_live_withdrawal_view(
 fn has_active_operator_attempt(state: WithdrawalState) -> bool {
     // "Live" is intentionally narrower than "tracked": a Pending row is a
     // durable Base burn fact waiting for assembly, while a Confirmed row is
-    // terminal. Live rows are only active operator attempts:
-    // Assembling, Prepared, PeerCanonical, Authorized, or MempoolAccepted.
-    !matches!(state, WithdrawalState::Pending | WithdrawalState::Confirmed)
+    // terminal/inactive. Live rows are active operator attempts or a reorg
+    // hold that must continue blocking later work.
+    !matches!(
+        state,
+        WithdrawalState::Pending | WithdrawalState::Confirmed | WithdrawalState::Invalidated
+    )
 }
 
 fn now_unix_secs() -> Result<i64, BridgeError> {
@@ -3046,5 +3158,57 @@ mod tests {
         assert_eq!(counts.confirmed_count, 1);
         assert_eq!(counts.below_frontier_count, 1);
         assert_eq!(counts.above_frontier_count, 1);
+    }
+    #[tokio::test]
+    async fn base_reorg_invalidation_clears_local_proposal_and_live_state() {
+        let (_dir, registry) = open_registry().await;
+        let request = sample_request();
+        registry
+            .track_withdrawal_request(&request)
+            .await
+            .expect("track");
+        let proposal = sample_proposal(0);
+        registry
+            .validate_and_cache_prepared(&proposal)
+            .await
+            .expect("prepare");
+        assert!(registry
+            .reconcile_base_reorg_state(&proposal.id, proposal.epoch, false)
+            .await
+            .expect("reconcile Base invalidation"));
+        assert!(registry
+            .fetch_cached_proposal(proposal.id.clone(), proposal.epoch)
+            .await
+            .expect("cached proposal")
+            .is_none());
+        assert!(registry
+            .fetch_live_withdrawal(&proposal.id)
+            .await
+            .expect("live withdrawal")
+            .is_none());
+        let rows = registry
+            .load_tui_rows_around_nonce(Some(1), 10)
+            .await
+            .expect("TUI rows");
+        assert_eq!(rows[0].state, WithdrawalState::Invalidated);
+        let counts = registry.load_tui_counts(Some(1)).await.expect("counts");
+        assert_eq!(counts.live_count, 0);
+        assert_eq!(counts.ordering_blocking_count, 0);
+        assert!(registry
+            .reconcile_pending_epoch(&proposal.id, 1)
+            .await
+            .expect("reconcile canonical Base re-admission"));
+        let rows = registry
+            .load_tui_rows_around_nonce(Some(1), 10)
+            .await
+            .expect("readmitted TUI rows");
+        assert_eq!(rows[0].state, WithdrawalState::Pending);
+        assert_eq!(rows[0].current_epoch, 1);
+        let counts = registry
+            .load_tui_counts(Some(1))
+            .await
+            .expect("readmitted counts");
+        assert_eq!(counts.pending_count, 1);
+        assert_eq!(counts.ordering_blocking_count, 1);
     }
 }

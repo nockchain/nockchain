@@ -1469,6 +1469,25 @@ the certified manual recovery procedure satisfies the same safety invariant.
 Missing kernel assets, live credentials, or a tested recovery procedure block
 launch. Mocks do not satisfy these gates.
 
+The focused recovery proof matrix is:
+
+```sh
+bazel build --jobs=1 //assets/native:roswell_native
+KERNEL_JAM_PATH="$PWD/bazel-bin/assets/native/roswell_native.jam" \
+  cargo test --locked -p bridge reorg -- --test-threads=1
+```
+
+It runs the real Roswell bridge kernel plus the Rust recovery tests. The Hoon
+fixtures bypass the configured confirmation depths and prove the fail-stop
+boundary if already-accepted Base or Nockchain history changes: the old
+hashchain remains, a retry fails identically, and an orphaned withdrawal stays
+in kernel state. The Rust cases prove bounded invalidation and readmission,
+unsafe-value holds, durable replay, exact Nock transaction recovery,
+reservation restoration, mutation refusal, public status regression, and
+fail-closed readiness. This matrix covers a post-confirmation assumption
+violation; it does not show that ordinary shallow forks reach Hoon or that
+automatic in-place rewind is required for launch.
+
 ## Component Ownership
 
 ### Hoon kernel

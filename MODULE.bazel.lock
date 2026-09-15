@@ -448,7 +448,7 @@
         "bzlTransitiveDigest": "BLNa1u0y13qLgDKGij8ls2b7sXaZEmc8AvRIqdW6N0Q=",
         "usagesDigest": "4HMANCe1hCsY10ISmZRF/nHKN88kNTZQ+cqdS97Aprc=",
         "recordedFileInputs": {
-          "@@//Cargo.lock": "16ad9b969cf124caac76c35f19d50ef6e6d483104dbe8df6bd808ac9a29a29da",
+          "@@//Cargo.lock": "5db2c17fa6c6ac5cf856fb182a97319b10e7438f728a7b77a149e702fc67cfa5",
           "@@//Cargo.toml": "97e65884564bb51f90557648826350a88ea9052093fe1baab96abb513528c161",
           "@@//crates/ai-pow-jets/Cargo.toml": "a89d44bbbdc6a7e8a09162233d9bb94f275e268497c90c714422204cddfd49c6",
           "@@//crates/ai-pow-miner/Cargo.toml": "3255003bb0c301d292e18f7b41bea72110361ab356b4c1e02825dcca39ae6bcf",

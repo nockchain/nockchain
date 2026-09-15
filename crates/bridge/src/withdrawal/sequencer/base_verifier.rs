@@ -15,15 +15,17 @@ use tracing::{info, info_span, warn, Instrument};
 
 use crate::core::loop_policy::BaseObserverLoopPolicy;
 use crate::shared::base::{
-    burn_for_withdrawal_signature_hash, compute_base_event_id, decode_burn_for_withdrawal_event,
-    decode_burn_for_withdrawal_log_with_calldata, fetch_base_block_info, validate_base_chain_id,
-    validate_base_log_block_hash, BurnForWithdrawalDecodeError,
+    base_automatic_reorg_rewind_depth, burn_for_withdrawal_signature_hash, compute_base_event_id,
+    decode_burn_for_withdrawal_event, decode_burn_for_withdrawal_log_with_calldata,
+    fetch_base_block_info, validate_base_chain_id, validate_base_log_block_hash,
+    BurnForWithdrawalDecodeError,
 };
 use crate::shared::errors::BridgeError;
 use crate::shared::types::{BaseEventId, WITHDRAWAL_POLICY_V1_ID, WITHDRAWAL_WIRE_V1_ID};
 use crate::withdrawal::proposals::TrackedWithdrawalRequest;
 use crate::withdrawal::sequencer::base_activity::{
-    current_unix_timestamp_secs, BaseActivityCursor, BaseActivityStore, VerifiedBaseWithdrawalBurn,
+    current_unix_timestamp_secs, BaseActivityCursor, BaseActivityHeaderCheckpoint,
+    BaseActivityReorgPlan, BaseActivityStore, VerifiedBaseWithdrawalBurn,
 };
 use crate::withdrawal::sequencer::base_height::SequencerBaseHeightTracker;
 use crate::withdrawal::sequencer::base_incidents::RejectedBaseWithdrawalBurn;
@@ -228,6 +230,7 @@ pub struct SequencerBaseRpcWithdrawalVerifier {
     base_start_height: u64,
     base_height_tracker: Arc<SequencerBaseHeightTracker>,
     base_blocks_chunk: u64,
+    automatic_rewind_depth: u64,
     nock_contract_address: Address,
     log_source: Arc<dyn SequencerBaseLogSource>,
 }
@@ -240,6 +243,7 @@ impl SequencerBaseRpcWithdrawalVerifier {
         base_height_tracker: Arc<SequencerBaseHeightTracker>,
         base_start_height: u64,
         base_blocks_chunk: u64,
+        base_confirmation_depth: u64,
     ) -> Result<Self, BridgeError> {
         if base_blocks_chunk == 0 {
             return Err(BridgeError::Config(
@@ -270,7 +274,7 @@ impl SequencerBaseRpcWithdrawalVerifier {
                 ))
             })?;
         validate_base_chain_id(&provider, expected_chain_id, "sequencer Base verifier").await?;
-        Ok(Self::with_log_source(
+        let mut verifier = Self::with_log_source(
             expected_chain_id,
             base_start_height,
             base_height_tracker,
@@ -280,7 +284,10 @@ impl SequencerBaseRpcWithdrawalVerifier {
                 provider,
                 nock_contract_address,
             }),
-        ))
+        );
+        verifier.automatic_rewind_depth =
+            base_automatic_reorg_rewind_depth(base_confirmation_depth);
+        Ok(verifier)
     }
 
     fn with_log_source(
@@ -296,6 +303,7 @@ impl SequencerBaseRpcWithdrawalVerifier {
             base_start_height,
             base_height_tracker,
             base_blocks_chunk,
+            automatic_rewind_depth: crate::shared::base::BASE_MAX_AUTOMATIC_REORG_REWIND_BLOCKS,
             nock_contract_address,
             log_source,
         }
@@ -375,11 +383,11 @@ impl SequencerBaseRpcWithdrawalVerifier {
         let verified_at = current_unix_timestamp_secs()?;
         let mut pending_records = Vec::new();
         let mut pending_rejections = Vec::new();
+        let mut pending_headers = Vec::new();
         let mut chunk_start = scan_start;
         while chunk_start <= confirmed_tip {
             let chunk_end = chunk_start
-                .checked_add(self.base_blocks_chunk.saturating_sub(1))
-                .unwrap_or(u64::MAX)
+                .saturating_add(self.base_blocks_chunk.saturating_sub(1))
                 .min(confirmed_tip);
             let chunk = self
                 .log_source
@@ -388,6 +396,17 @@ impl SequencerBaseRpcWithdrawalVerifier {
             validate_activity_chunk_headers(
                 &chunk, chunk_start, chunk_end, previous_chunk_end_hash,
             )?;
+            pending_headers.extend(chunk.headers.iter().map(|header| {
+                BaseActivityHeaderCheckpoint {
+                    chain_id: self.chain_id,
+                    nock_contract_address: self.nock_contract_address,
+                    block_number: header.number,
+                    block_hash: header.hash,
+                    parent_hash: header.parent_hash,
+                    block_timestamp: header.timestamp,
+                    verified_at,
+                }
+            }));
             if let Some(cursor) = &existing_cursor {
                 if cursor.last_verified_block >= chunk_start
                     && cursor.last_verified_block <= chunk_end
@@ -446,9 +465,18 @@ impl SequencerBaseRpcWithdrawalVerifier {
                         .record_rejected_burns(std::mem::take(&mut pending_rejections))
                         .await?,
                 );
+                let retained_from_block = cursor
+                    .last_verified_block
+                    .saturating_sub(self.automatic_rewind_depth)
+                    .max(self.base_start_height);
                 report.burns_inserted = report.burns_inserted.saturating_add(
                     store
-                        .apply_verified_chunk(std::mem::take(&mut pending_records), cursor)
+                        .apply_verified_chunk_with_headers(
+                            std::mem::take(&mut pending_records),
+                            std::mem::take(&mut pending_headers),
+                            cursor,
+                            retained_from_block,
+                        )
                         .await?,
                 );
             }
@@ -586,6 +614,133 @@ impl SequencerBaseRpcWithdrawalVerifier {
         }))
     }
 
+    async fn plan_confirmed_activity_reorg(
+        &self,
+        store: &BaseActivityStore,
+        activation_block: u64,
+    ) -> Result<Option<BaseActivityReorgPlan>, BridgeError> {
+        let Some(cursor) = store
+            .load_cursor(self.chain_id, self.nock_contract_address)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let checkpoint_start = cursor
+            .last_verified_block
+            .saturating_sub(self.automatic_rewind_depth)
+            .max(self.base_start_height);
+        let checkpoints = store
+            .load_header_checkpoints(
+                self.chain_id, self.nock_contract_address, checkpoint_start,
+                cursor.last_verified_block,
+            )
+            .await?;
+        if checkpoints.is_empty() {
+            // Legacy cursors acquire a bounded checkpoint window on their next
+            // successful overlap scan. Until then the existing fail-closed
+            // cursor comparison remains authoritative.
+            return Ok(None);
+        }
+        let (Some(oldest), Some(newest)) = (checkpoints.first(), checkpoints.last()) else {
+            return Ok(None);
+        };
+        if newest.block_number != cursor.last_verified_block
+            || newest.block_hash != cursor.last_verified_block_hash
+        {
+            return Err(BridgeError::Runtime(format!(
+                "Base reorg checkpoint/cursor mismatch: cursor {} {:?}, newest checkpoint {} {:?}",
+                cursor.last_verified_block,
+                cursor.last_verified_block_hash,
+                newest.block_number,
+                newest.block_hash
+            )));
+        }
+        let confirmed_tip = self
+            .base_height_tracker
+            .latest_confirmed_base_height()
+            .ok_or_else(|| {
+                BridgeError::Runtime("confirmed Base height unavailable for reorg planning".into())
+            })?;
+        if confirmed_tip < cursor.last_verified_block {
+            return Err(BridgeError::BaseBridgeMonitoring(format!(
+                "deep Base reorg: confirmed tip {confirmed_tip} is behind cursor {} {:?}; retained checkpoint range {}..={} max_depth={}",
+                cursor.last_verified_block,
+                cursor.last_verified_block_hash,
+                oldest.block_number,
+                newest.block_number,
+                self.automatic_rewind_depth
+            )));
+        }
+        let canonical = self
+            .log_source
+            .burn_log_chunk(checkpoint_start, cursor.last_verified_block)
+            .await?;
+        validate_activity_chunk_headers(
+            &canonical, checkpoint_start, cursor.last_verified_block, None,
+        )?;
+        let canonical_cursor = header_at(&canonical, cursor.last_verified_block)?;
+        if canonical_cursor.hash == cursor.last_verified_block_hash {
+            return Ok(None);
+        }
+        let common_ancestor = checkpoints.iter().rev().find_map(|checkpoint| {
+            let canonical_header = header_at(&canonical, checkpoint.block_number).ok()?;
+            (canonical_header.hash == checkpoint.block_hash).then_some(checkpoint.clone())
+        });
+        let Some(common_ancestor) = common_ancestor else {
+            return Err(BridgeError::BaseBridgeMonitoring(format!(
+                "deep Base reorg: no common ancestor in retained checkpoint range {}..={}; cursor_hash={:?} canonical_cursor_hash={:?} max_depth={} activation_block={activation_block}",
+                oldest.block_number,
+                newest.block_number,
+                cursor.last_verified_block_hash,
+                canonical_cursor.hash,
+                self.automatic_rewind_depth
+            )));
+        };
+        let rewind_depth = cursor
+            .last_verified_block
+            .saturating_sub(common_ancestor.block_number);
+        if rewind_depth > self.automatic_rewind_depth {
+            return Err(BridgeError::BaseBridgeMonitoring(format!(
+                "deep Base reorg: cursor={} ancestor={} depth={} exceeds max_depth={}; cursor_hash={:?} ancestor_hash={:?}",
+                cursor.last_verified_block,
+                common_ancestor.block_number,
+                rewind_depth,
+                self.automatic_rewind_depth,
+                cursor.last_verified_block_hash,
+                common_ancestor.block_hash
+            )));
+        }
+        if common_ancestor.block_number < activation_block
+            && cursor.last_verified_block >= activation_block
+        {
+            return Err(BridgeError::BaseBridgeMonitoring(format!(
+                "Base reorg crosses withdrawal activation boundary: cursor={} ancestor={} activation_block={} depth={}",
+                cursor.last_verified_block,
+                common_ancestor.block_number,
+                activation_block,
+                rewind_depth
+            )));
+        }
+        let detected_at = current_unix_timestamp_secs()?;
+        Ok(Some(BaseActivityReorgPlan {
+            chain_id: self.chain_id,
+            nock_contract_address: self.nock_contract_address,
+            old_cursor: cursor,
+            common_ancestor,
+            canonical_cursor_header: BaseActivityHeaderCheckpoint {
+                chain_id: self.chain_id,
+                nock_contract_address: self.nock_contract_address,
+                block_number: canonical_cursor.number,
+                block_hash: canonical_cursor.hash,
+                parent_hash: canonical_cursor.parent_hash,
+                block_timestamp: canonical_cursor.timestamp,
+                verified_at: detected_at,
+            },
+            rewind_depth,
+            detected_at,
+        }))
+    }
+
     pub async fn scan_and_recover_confirmed_burns(
         &self,
         activity_store: &BaseActivityStore,
@@ -593,6 +748,42 @@ impl SequencerBaseRpcWithdrawalVerifier {
         overlap_blocks: u64,
         activation_block: u64,
     ) -> Result<SequencerBaseRecoveryPassReport, BridgeError> {
+        sequencer_store.ensure_reorg_ready().await?;
+        let plan = match self
+            .plan_confirmed_activity_reorg(activity_store, activation_block)
+            .await
+        {
+            Ok(plan) => plan,
+            Err(error)
+                if error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("base reorg") =>
+            {
+                sequencer_store
+                    .activate_base_reorg_guard(
+                        self.chain_id,
+                        self.nock_contract_address,
+                        error.to_string(),
+                    )
+                    .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(plan) = plan {
+            let report = sequencer_store.apply_base_activity_reorg(plan).await?;
+            warn!(
+                target: "nockchain.withdrawal_sequencer.base_activity",
+                generation = report.generation,
+                old_cursor_block = report.old_cursor_block,
+                common_ancestor_block = report.common_ancestor_block,
+                rewind_depth = report.rewind_depth,
+                burns_invalidated = report.burns_invalidated,
+                lifecycle_rows_invalidated = report.lifecycle_rows_invalidated,
+                "completed bounded Base activity rewind"
+            );
+        }
         let scan = self
             .scan_confirmed_burn_tail(activity_store, overlap_blocks)
             .await?;
@@ -1023,6 +1214,7 @@ mod tests {
         error: Mutex<Option<String>>,
         requests: Mutex<Vec<(u64, u64)>>,
         header_hash_offset: Mutex<u64>,
+        fork_from: Mutex<Option<u64>>,
         omitted_header: Mutex<Option<u64>>,
         filter_logs_to_range: bool,
     }
@@ -1045,17 +1237,31 @@ mod tests {
                 .header_hash_offset
                 .lock()
                 .expect("mock header offset lock");
+            let fork_from = *self.fork_from.lock().expect("mock fork start lock");
             let omitted_header = *self
                 .omitted_header
                 .lock()
                 .expect("mock omitted header lock");
             let headers = (batch_start..=batch_end)
                 .filter(|number| Some(*number) != omitted_header)
-                .map(|number| SequencerBaseHeader {
-                    number,
-                    hash: mock_block_hash(number, offset),
-                    parent_hash: mock_block_hash(number.saturating_sub(1), offset),
-                    timestamp: 1_700_000_000u64.saturating_add(number),
+                .map(|number| {
+                    let hash_offset = if fork_from.is_some_and(|fork| number >= fork) {
+                        offset
+                    } else {
+                        0
+                    };
+                    let parent_number = number.saturating_sub(1);
+                    let parent_offset = if fork_from.is_some_and(|fork| parent_number >= fork) {
+                        offset
+                    } else {
+                        0
+                    };
+                    SequencerBaseHeader {
+                        number,
+                        hash: mock_block_hash(number, hash_offset),
+                        parent_hash: mock_block_hash(parent_number, parent_offset),
+                        timestamp: 1_700_000_000u64.saturating_add(number),
+                    }
                 })
                 .collect();
             let logs = self.logs.lock().expect("mock logs lock");
@@ -1085,6 +1291,7 @@ mod tests {
             error: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
             header_hash_offset: Mutex::new(0),
+            fork_from: Mutex::new(Some(0)),
             omitted_header: Mutex::new(None),
             filter_logs_to_range,
         })
@@ -1733,5 +1940,186 @@ mod tests {
             .expect("idempotent scan and recovery");
         assert_eq!(second.scan.burns_inserted, 0);
         assert_eq!(second.recovery, BaseBurnRecoveryReport::default());
+    }
+    #[tokio::test]
+    async fn shallow_base_reorg_invalidates_orphan_and_readmits_only_canonical_burn() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let path = directory.path().join("sequencer.sqlite");
+        let sequencer = WithdrawalSequencerStore::open(path.clone())
+            .await
+            .expect("open withdrawal state store");
+        let activity = sequencer.base_activity_store();
+        let policy = crate::shared::types::WithdrawalPolicy::v1();
+        let amount_nicks = policy
+            .minimum_gross_nocks
+            .checked_mul(policy.nicks_per_nock)
+            .expect("minimum withdrawal nicks");
+        let original = burn_log(
+            105,
+            U256::from(amount_nicks) * U256::from(NOCK_BASE_PER_NICK),
+            b256_from_u64(0x2468),
+        );
+        let base_event_id = compute_base_event_id(&original.transaction_hash, original.log_index);
+        let source = mock_scanner_source(vec![original.clone()]);
+        let scanner = scanner_with_source(109, 10, source.clone());
+        scanner
+            .scan_and_recover_confirmed_burns(&activity, &sequencer, 10, 100)
+            .await
+            .expect("initial burn recovery");
+
+        *source.fork_from.lock().expect("mock fork start lock") = Some(105);
+        *source
+            .header_hash_offset
+            .lock()
+            .expect("mock header offset lock") = 1_000;
+        source.logs.lock().expect("mock logs lock").clear();
+        let recovered = scanner
+            .scan_and_recover_confirmed_burns(&activity, &sequencer, 10, 100)
+            .await
+            .expect("shallow Base rewind");
+        assert_eq!(recovered.recovery, BaseBurnRecoveryReport::default());
+        let id = WithdrawalId {
+            as_of: crate::shared::types::zero_tip5_hash(),
+            base_event_id: base_event_id.clone(),
+        };
+        let row = sequencer
+            .fetch_sequenced_withdrawal(&id)
+            .await
+            .expect("fetch invalidated withdrawal")
+            .expect("invalidated withdrawal row");
+        assert_eq!(
+            row.state,
+            crate::withdrawal::state::WithdrawalState::Invalidated
+        );
+        assert_eq!(
+            sequencer
+                .current_live_withdrawal_nonce()
+                .await
+                .expect("current live nonce"),
+            None
+        );
+        assert!(activity
+            .load_verified_burn(8_453, Address::ZERO, &base_event_id)
+            .await
+            .expect("load orphaned burn")
+            .is_none());
+
+        let restarted = WithdrawalSequencerStore::open(path)
+            .await
+            .expect("restart withdrawal state store");
+        let restarted_activity = restarted.base_activity_store();
+        assert_eq!(
+            restarted
+                .fetch_sequenced_withdrawal(&id)
+                .await
+                .expect("fetch invalidated withdrawal after restart")
+                .expect("invalidated row after restart")
+                .state,
+            crate::withdrawal::state::WithdrawalState::Invalidated
+        );
+
+        let mut canonical = original;
+        canonical.block_hash = mock_block_hash(105, 1_000);
+        canonical.parent_hash = mock_block_hash(104, 0);
+        source.logs.lock().expect("mock logs lock").push(canonical);
+        let readmitted = scanner
+            .scan_and_recover_confirmed_burns(&restarted_activity, &restarted, 10, 100)
+            .await
+            .expect("canonical burn re-admission");
+        assert_eq!(readmitted.recovery.recovered_pending, 1);
+        let row = restarted
+            .fetch_sequenced_withdrawal(&id)
+            .await
+            .expect("fetch readmitted withdrawal")
+            .expect("readmitted withdrawal row");
+        assert_eq!(
+            row.state,
+            crate::withdrawal::state::WithdrawalState::Pending
+        );
+        assert_eq!(row.current_epoch, 1);
+        assert_eq!(row.withdrawal_nonce, Some(1));
+    }
+
+    #[tokio::test]
+    async fn deep_base_reorg_reports_exact_retained_checkpoint_evidence() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let sequencer = WithdrawalSequencerStore::open(directory.path().join("sequencer.sqlite"))
+            .await
+            .expect("open withdrawal state store");
+        let activity = sequencer.base_activity_store();
+        let source = mock_scanner_source(Vec::new());
+        let scanner = scanner_with_source(109, 10, source.clone());
+        scanner
+            .scan_and_recover_confirmed_burns(&activity, &sequencer, 10, 100)
+            .await
+            .expect("initial checkpoint scan");
+        let cursor = activity
+            .load_cursor(8_453, Address::ZERO)
+            .await
+            .expect("load initial cursor")
+            .expect("initial cursor");
+        *source
+            .header_hash_offset
+            .lock()
+            .expect("mock header offset lock") = 10_000;
+        *source.fork_from.lock().expect("mock fork start lock") = Some(100);
+
+        let error = scanner
+            .scan_and_recover_confirmed_burns(&activity, &sequencer, 10, 100)
+            .await
+            .expect_err("deep fork must fail with checkpoint evidence");
+        let message = error.to_string();
+        assert!(message.contains("no common ancestor"));
+        assert!(message.contains("100..=109"));
+        assert!(message.contains("max_depth=64"));
+        let guard = sequencer
+            .ensure_reorg_ready()
+            .await
+            .expect_err("deep reorg must activate guard");
+        assert!(guard.to_string().contains("100..=109"));
+        assert_eq!(
+            activity
+                .load_cursor(8_453, Address::ZERO)
+                .await
+                .expect("load retained cursor"),
+            Some(cursor)
+        );
+    }
+    #[tokio::test]
+    async fn base_reorg_crossing_activation_boundary_fails_without_rewind() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let sequencer = WithdrawalSequencerStore::open(directory.path().join("sequencer.sqlite"))
+            .await
+            .expect("open withdrawal state store");
+        let activity = sequencer.base_activity_store();
+        let source = mock_scanner_source(Vec::new());
+        let scanner = scanner_with_source(109, 10, source.clone());
+        scanner
+            .scan_and_recover_confirmed_burns(&activity, &sequencer, 10, 100)
+            .await
+            .expect("initial checkpoint scan");
+        *source.fork_from.lock().expect("mock fork start lock") = Some(105);
+        *source
+            .header_hash_offset
+            .lock()
+            .expect("mock header offset lock") = 1_000;
+
+        let error = scanner
+            .scan_and_recover_confirmed_burns(&activity, &sequencer, 10, 107)
+            .await
+            .expect_err("activation-crossing fork must fail");
+        assert!(error
+            .to_string()
+            .contains("crosses withdrawal activation boundary"));
+        assert!(sequencer.ensure_reorg_ready().await.is_err());
+        assert_eq!(
+            activity
+                .load_cursor(8_453, Address::ZERO)
+                .await
+                .expect("load retained cursor")
+                .expect("retained cursor")
+                .last_verified_block,
+            109
+        );
     }
 }

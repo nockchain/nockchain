@@ -46,6 +46,14 @@ impl VerifiedBaseWithdrawalBurn {
         )
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicBaseWithdrawalBurn {
+    pub burn: VerifiedBaseWithdrawalBurn,
+    pub canonical: bool,
+    pub invalidated_at: Option<i64>,
+    pub invalidation_generation: Option<u64>,
+    pub invalidation_reason: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseActivityCursor {
@@ -57,6 +65,27 @@ pub struct BaseActivityCursor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseActivityHeaderCheckpoint {
+    pub chain_id: u64,
+    pub nock_contract_address: Address,
+    pub block_number: u64,
+    pub block_hash: B256,
+    pub parent_hash: B256,
+    pub block_timestamp: u64,
+    pub verified_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseActivityReorgPlan {
+    pub chain_id: u64,
+    pub nock_contract_address: Address,
+    pub old_cursor: BaseActivityCursor,
+    pub common_ancestor: BaseActivityHeaderCheckpoint,
+    pub canonical_cursor_header: BaseActivityHeaderCheckpoint,
+    pub rewind_depth: u64,
+    pub detected_at: i64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseActivityPageCursor {
     pub snapshot_revision: u64,
     pub snapshot_rowid: u64,
@@ -67,7 +96,7 @@ pub struct BaseActivityPageCursor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseActivityBurnPage {
-    pub burns: Vec<VerifiedBaseWithdrawalBurn>,
+    pub burns: Vec<PublicBaseWithdrawalBurn>,
     pub snapshot_rowid: u64,
 }
 
@@ -106,6 +135,17 @@ impl BaseActivityStore {
         records: Vec<VerifiedBaseWithdrawalBurn>,
         cursor: BaseActivityCursor,
     ) -> Result<u64, BridgeError> {
+        self.apply_verified_chunk_with_headers(records, Vec::new(), cursor, 0)
+            .await
+    }
+
+    pub async fn apply_verified_chunk_with_headers(
+        &self,
+        records: Vec<VerifiedBaseWithdrawalBurn>,
+        headers: Vec<BaseActivityHeaderCheckpoint>,
+        cursor: BaseActivityCursor,
+        retained_from_block: u64,
+    ) -> Result<u64, BridgeError> {
         self.with_conn(move |conn| {
             conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                 let existing =
@@ -126,6 +166,30 @@ impl BaseActivityStore {
                     .map(|existing| existing.last_verified_block)
                     .unwrap_or_default()
                     .max(cursor.last_verified_block);
+                for header in &headers {
+                    if header.chain_id != cursor.chain_id
+                        || header.nock_contract_address != cursor.nock_contract_address
+                    {
+                        return Err(BridgeError::Runtime(format!(
+                            "Base header checkpoint {} does not belong to cursor chain/deployment",
+                            header.block_number
+                        ))
+                        .into());
+                    }
+                    if header.block_number > effective_ceiling {
+                        return Err(BridgeError::Runtime(format!(
+                            "Base header checkpoint {} exceeds verified cursor ceiling {}",
+                            header.block_number, effective_ceiling
+                        ))
+                        .into());
+                    }
+                    insert_header_checkpoint_checked(conn, header)?;
+                }
+                if !headers.is_empty() {
+                    prune_header_checkpoints_before(
+                        conn, cursor.chain_id, cursor.nock_contract_address, retained_from_block,
+                    )?;
+                }
                 let mut inserted = 0u64;
                 for record in &records {
                     if record.chain_id != cursor.chain_id
@@ -174,6 +238,18 @@ impl BaseActivityStore {
         })
         .await
     }
+    pub async fn load_public_burn(
+        &self,
+        chain_id: u64,
+        nock_contract_address: Address,
+        base_event_id: &BaseEventId,
+    ) -> Result<Option<PublicBaseWithdrawalBurn>, BridgeError> {
+        let base_event_id = base_event_id.clone();
+        self.with_conn(move |conn| {
+            load_public_burn_row(conn, chain_id, nock_contract_address, &base_event_id)
+        })
+        .await
+    }
 
     pub async fn load_verified_burn_by_tx_log(
         &self,
@@ -184,6 +260,20 @@ impl BaseActivityStore {
     ) -> Result<Option<VerifiedBaseWithdrawalBurn>, BridgeError> {
         self.with_conn(move |conn| {
             load_verified_burn_by_tx_log_row(
+                conn, chain_id, nock_contract_address, tx_hash, log_index,
+            )
+        })
+        .await
+    }
+    pub async fn load_public_burn_by_tx_log(
+        &self,
+        chain_id: u64,
+        nock_contract_address: Address,
+        tx_hash: B256,
+        log_index: u64,
+    ) -> Result<Option<PublicBaseWithdrawalBurn>, BridgeError> {
+        self.with_conn(move |conn| {
+            load_public_burn_by_tx_log_row(
                 conn, chain_id, nock_contract_address, tx_hash, log_index,
             )
         })
@@ -215,7 +305,19 @@ impl BaseActivityStore {
         .await
     }
 
-    pub async fn list_verified_burns_by_burner_page(
+    pub async fn list_public_burns_by_tx_hash(
+        &self,
+        chain_id: u64,
+        nock_contract_address: Address,
+        tx_hash: B256,
+    ) -> Result<Vec<PublicBaseWithdrawalBurn>, BridgeError> {
+        self.with_conn(move |conn| {
+            load_public_burn_rows_by_tx_hash(conn, chain_id, nock_contract_address, tx_hash)
+        })
+        .await
+    }
+
+    pub async fn list_public_burns_by_burner_page(
         &self,
         chain_id: u64,
         nock_contract_address: Address,
@@ -253,6 +355,21 @@ impl BaseActivityStore {
     ) -> Result<Option<BaseActivityCursor>, BridgeError> {
         self.with_conn(move |conn| load_cursor_row(conn, chain_id, nock_contract_address))
             .await
+    }
+
+    pub async fn load_header_checkpoints(
+        &self,
+        chain_id: u64,
+        nock_contract_address: Address,
+        start_block: u64,
+        end_block: u64,
+    ) -> Result<Vec<BaseActivityHeaderCheckpoint>, BridgeError> {
+        self.with_conn(move |conn| {
+            load_header_checkpoint_rows(
+                conn, chain_id, nock_contract_address, start_block, end_block,
+            )
+        })
+        .await
     }
 
     pub async fn advance_cursor(&self, cursor: BaseActivityCursor) -> Result<(), BridgeError> {
@@ -336,6 +453,10 @@ pub(crate) fn ensure_base_activity_schema(conn: &mut SqliteConnection) -> Result
             observed_at_unix_secs INTEGER,
             policy_id TEXT,
             protocol_id TEXT,
+            canonical INTEGER NOT NULL DEFAULT 1,
+            invalidated_at INTEGER,
+            invalidation_generation INTEGER,
+            invalidation_reason TEXT,
             PRIMARY KEY (chain_id, nock_contract_address, base_event_id)
         );
 
@@ -351,12 +472,67 @@ pub(crate) fn ensure_base_activity_schema(conn: &mut SqliteConnection) -> Result
             block_number DESC, log_index DESC, base_event_id DESC
           );
 
+
         CREATE TABLE IF NOT EXISTS sequencer_base_activity_cursor (
             chain_id INTEGER NOT NULL,
             nock_contract_address BLOB NOT NULL CHECK(length(nock_contract_address) = 20),
             last_verified_block INTEGER NOT NULL,
             last_verified_block_hash BLOB NOT NULL CHECK(length(last_verified_block_hash) = 32),
             updated_at INTEGER NOT NULL,
+            PRIMARY KEY (chain_id, nock_contract_address)
+        );
+
+        CREATE TABLE IF NOT EXISTS sequencer_base_header_checkpoints (
+            chain_id INTEGER NOT NULL,
+            nock_contract_address BLOB NOT NULL CHECK(length(nock_contract_address) = 20),
+            block_number INTEGER NOT NULL,
+            block_hash BLOB NOT NULL CHECK(length(block_hash) = 32),
+            parent_hash BLOB NOT NULL CHECK(length(parent_hash) = 32),
+            block_timestamp INTEGER NOT NULL,
+            verified_at INTEGER NOT NULL,
+            PRIMARY KEY (chain_id, nock_contract_address, block_number)
+        );
+
+        CREATE TABLE IF NOT EXISTS sequencer_base_reorg_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chain_id INTEGER NOT NULL,
+            nock_contract_address BLOB NOT NULL CHECK(length(nock_contract_address) = 20),
+            generation INTEGER NOT NULL,
+            detected_at INTEGER NOT NULL,
+            old_cursor_block INTEGER NOT NULL,
+            old_cursor_hash BLOB NOT NULL CHECK(length(old_cursor_hash) = 32),
+            common_ancestor_block INTEGER,
+            common_ancestor_hash BLOB,
+            canonical_tip_block INTEGER NOT NULL,
+            canonical_tip_hash BLOB NOT NULL CHECK(length(canonical_tip_hash) = 32),
+            rewind_depth INTEGER,
+            outcome TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            UNIQUE (chain_id, nock_contract_address, generation)
+        );
+
+        CREATE TABLE IF NOT EXISTS sequencer_base_burn_invalidations (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chain_id INTEGER NOT NULL,
+            nock_contract_address BLOB NOT NULL CHECK(length(nock_contract_address) = 20),
+            generation INTEGER NOT NULL,
+            base_event_id BLOB NOT NULL CHECK(length(base_event_id) = 32),
+            old_block_number INTEGER NOT NULL,
+            old_block_hash BLOB NOT NULL CHECK(length(old_block_hash) = 32),
+            lifecycle_state TEXT,
+            invalidated_at INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            UNIQUE (
+                chain_id, nock_contract_address, generation, base_event_id
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS sequencer_base_reorg_guard (
+            chain_id INTEGER NOT NULL,
+            nock_contract_address BLOB NOT NULL CHECK(length(nock_contract_address) = 20),
+            generation INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
             PRIMARY KEY (chain_id, nock_contract_address)
         );
 
@@ -378,6 +554,23 @@ pub(crate) fn ensure_base_activity_schema(conn: &mut SqliteConnection) -> Result
     ensure_base_activity_column(conn, "policy_id", "TEXT")?;
     ensure_base_activity_column(conn, "protocol_id", "TEXT")?;
     ensure_base_incident_schema(conn)?;
+    ensure_base_activity_column(conn, "canonical", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_base_activity_column(conn, "invalidated_at", "INTEGER")?;
+    ensure_base_activity_column(conn, "invalidation_generation", "INTEGER")?;
+    ensure_base_activity_column(conn, "invalidation_reason", "TEXT")?;
+    conn.batch_execute(
+        r#"
+        CREATE INDEX IF NOT EXISTS sequencer_base_burns_by_canonical_block
+          ON sequencer_base_burns(
+            chain_id, nock_contract_address, canonical, block_number
+          );
+        "#,
+    )
+    .map_err(|error| {
+        BridgeError::Runtime(format!(
+            "Base activity canonical index migration failed: {error}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -414,6 +607,22 @@ fn insert_verified_burn_checked(
     conn: &mut SqliteConnection,
     record: &VerifiedBaseWithdrawalBurn,
 ) -> Result<bool, BridgeError> {
+    let reactivated = diesel::sql_query(
+        r#"
+        DELETE FROM sequencer_base_burns
+        WHERE chain_id = ? AND nock_contract_address = ?
+          AND base_event_id = ? AND canonical = 0
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(record.chain_id, "chain_id")?)
+    .bind::<Binary, _>(record.nock_contract_address.as_slice().to_vec())
+    .bind::<Binary, _>(record.base_event_id.0.clone())
+    .execute(conn)
+    .map_err(|error| {
+        BridgeError::Runtime(format!(
+            "invalidated Base burn projection cleanup failed: {error}"
+        ))
+    })?;
     let inserted = insert_verified_burn_row(conn, record)?;
     backfill_verified_burn_public_metadata(conn, record)?;
     let mut stored = load_verified_burn_row(
@@ -433,7 +642,7 @@ fn insert_verified_burn_checked(
             record.base_event_id
         )));
     }
-    Ok(inserted)
+    Ok(inserted || reactivated == 1)
 }
 
 fn backfill_verified_burn_public_metadata(
@@ -509,6 +718,14 @@ struct BaseBurnSqlRow {
     policy_id: Option<String>,
     #[diesel(sql_type = Nullable<Text>)]
     protocol_id: Option<String>,
+    #[diesel(sql_type = BigInt)]
+    canonical: i64,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    invalidated_at: Option<i64>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    invalidation_generation: Option<i64>,
+    #[diesel(sql_type = Nullable<Text>)]
+    invalidation_reason: Option<String>,
 }
 
 impl TryFrom<BaseBurnSqlRow> for VerifiedBaseWithdrawalBurn {
@@ -555,6 +772,32 @@ impl TryFrom<BaseBurnSqlRow> for VerifiedBaseWithdrawalBurn {
         })
     }
 }
+impl BaseBurnSqlRow {
+    fn into_public(self) -> Result<PublicBaseWithdrawalBurn, BridgeError> {
+        let canonical = match self.canonical {
+            0 => false,
+            1 => true,
+            value => {
+                return Err(BridgeError::Runtime(format!(
+                    "invalid Base activity canonical flag: {value}"
+                )));
+            }
+        };
+        let invalidated_at = self.invalidated_at;
+        let invalidation_generation = self
+            .invalidation_generation
+            .map(|value| i64_to_u64(value, "invalidation_generation"))
+            .transpose()?;
+        let invalidation_reason = self.invalidation_reason.clone();
+        Ok(PublicBaseWithdrawalBurn {
+            burn: self.try_into()?,
+            canonical,
+            invalidated_at,
+            invalidation_generation,
+            invalidation_reason,
+        })
+    }
+}
 
 #[derive(QueryableByName)]
 struct BaseActivityCursorSqlRow {
@@ -584,6 +827,42 @@ impl TryFrom<BaseActivityCursorSqlRow> for BaseActivityCursor {
                 &row.last_verified_block_hash, "last_verified_block_hash",
             )?),
             updated_at: row.updated_at,
+        })
+    }
+}
+
+#[derive(QueryableByName)]
+struct BaseActivityHeaderCheckpointSqlRow {
+    #[diesel(sql_type = BigInt)]
+    chain_id: i64,
+    #[diesel(sql_type = Binary)]
+    nock_contract_address: Vec<u8>,
+    #[diesel(sql_type = BigInt)]
+    block_number: i64,
+    #[diesel(sql_type = Binary)]
+    block_hash: Vec<u8>,
+    #[diesel(sql_type = Binary)]
+    parent_hash: Vec<u8>,
+    #[diesel(sql_type = BigInt)]
+    block_timestamp: i64,
+    #[diesel(sql_type = BigInt)]
+    verified_at: i64,
+}
+
+impl TryFrom<BaseActivityHeaderCheckpointSqlRow> for BaseActivityHeaderCheckpoint {
+    type Error = BridgeError;
+
+    fn try_from(row: BaseActivityHeaderCheckpointSqlRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            chain_id: i64_to_u64(row.chain_id, "chain_id")?,
+            nock_contract_address: address_from_bytes(
+                &row.nock_contract_address, "nock_contract_address",
+            )?,
+            block_number: i64_to_u64(row.block_number, "block_number")?,
+            block_hash: B256::from(fixed_bytes::<32>(&row.block_hash, "block_hash")?),
+            parent_hash: B256::from(fixed_bytes::<32>(&row.parent_hash, "parent_hash")?),
+            block_timestamp: i64_to_u64(row.block_timestamp, "block_timestamp")?,
+            verified_at: row.verified_at,
         })
     }
 }
@@ -650,9 +929,11 @@ fn load_verified_burn_row(
                block_hash, parent_hash, observed_at_unix_secs,
                tx_hash, tx_index, log_index, burner,
                amount_base_units, amount_nicks, lock_root, calldata,
-               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
         FROM sequencer_base_burns
         WHERE chain_id = ? AND nock_contract_address = ? AND base_event_id = ?
+          AND canonical = 1
         "#,
     )
     .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
@@ -662,6 +943,34 @@ fn load_verified_burn_row(
     .optional()
     .map_err(|error| BridgeError::Runtime(format!("Base activity burn load failed: {error}")))?
     .map(TryInto::try_into)
+    .transpose()
+}
+
+fn load_public_burn_row(
+    conn: &mut SqliteConnection,
+    chain_id: u64,
+    nock_contract_address: Address,
+    base_event_id: &BaseEventId,
+) -> Result<Option<PublicBaseWithdrawalBurn>, BridgeError> {
+    diesel::sql_query(
+        r#"
+        SELECT chain_id, nock_contract_address, base_event_id, block_number,
+               block_hash, parent_hash, observed_at_unix_secs,
+               tx_hash, tx_index, log_index, burner,
+               amount_base_units, amount_nicks, lock_root, calldata,
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
+        FROM sequencer_base_burns
+        WHERE chain_id = ? AND nock_contract_address = ? AND base_event_id = ?
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
+    .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+    .bind::<Binary, _>(base_event_id.0.clone())
+    .get_result::<BaseBurnSqlRow>(conn)
+    .optional()
+    .map_err(|error| BridgeError::Runtime(format!("public Base burn load failed: {error}")))?
+    .map(BaseBurnSqlRow::into_public)
     .transpose()
 }
 
@@ -678,7 +987,39 @@ fn load_verified_burn_by_tx_log_row(
                block_hash, parent_hash, observed_at_unix_secs,
                tx_hash, tx_index, log_index, burner,
                amount_base_units, amount_nicks, lock_root, calldata,
-               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
+        FROM sequencer_base_burns
+        WHERE chain_id = ? AND nock_contract_address = ?
+          AND tx_hash = ? AND log_index = ? AND canonical = 1
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
+    .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+    .bind::<Binary, _>(tx_hash.as_slice().to_vec())
+    .bind::<BigInt, _>(u64_to_i64(log_index, "log_index")?)
+    .get_result::<BaseBurnSqlRow>(conn)
+    .optional()
+    .map_err(|error| BridgeError::Runtime(format!("Base activity tx/log lookup failed: {error}")))?
+    .map(TryInto::try_into)
+    .transpose()
+}
+
+fn load_public_burn_by_tx_log_row(
+    conn: &mut SqliteConnection,
+    chain_id: u64,
+    nock_contract_address: Address,
+    tx_hash: B256,
+    log_index: u64,
+) -> Result<Option<PublicBaseWithdrawalBurn>, BridgeError> {
+    diesel::sql_query(
+        r#"
+        SELECT chain_id, nock_contract_address, base_event_id, block_number,
+               block_hash, parent_hash, observed_at_unix_secs,
+               tx_hash, tx_index, log_index, burner,
+               amount_base_units, amount_nicks, lock_root, calldata,
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
         FROM sequencer_base_burns
         WHERE chain_id = ? AND nock_contract_address = ?
           AND tx_hash = ? AND log_index = ?
@@ -690,8 +1031,8 @@ fn load_verified_burn_by_tx_log_row(
     .bind::<BigInt, _>(u64_to_i64(log_index, "log_index")?)
     .get_result::<BaseBurnSqlRow>(conn)
     .optional()
-    .map_err(|error| BridgeError::Runtime(format!("Base activity tx/log lookup failed: {error}")))?
-    .map(TryInto::try_into)
+    .map_err(|error| BridgeError::Runtime(format!("public Base tx/log lookup failed: {error}")))?
+    .map(BaseBurnSqlRow::into_public)
     .transpose()
 }
 
@@ -707,9 +1048,11 @@ fn load_verified_burn_rows_by_tx_hash(
                block_hash, parent_hash, observed_at_unix_secs,
                tx_hash, tx_index, log_index, burner,
                amount_base_units, amount_nicks, lock_root, calldata,
-               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
         FROM sequencer_base_burns
         WHERE chain_id = ? AND nock_contract_address = ? AND tx_hash = ?
+          AND canonical = 1
         ORDER BY log_index ASC
         "#,
     )
@@ -720,6 +1063,34 @@ fn load_verified_burn_rows_by_tx_hash(
     .map_err(|error| BridgeError::Runtime(format!("Base activity tx list failed: {error}")))?
     .into_iter()
     .map(TryInto::try_into)
+    .collect()
+}
+fn load_public_burn_rows_by_tx_hash(
+    conn: &mut SqliteConnection,
+    chain_id: u64,
+    nock_contract_address: Address,
+    tx_hash: B256,
+) -> Result<Vec<PublicBaseWithdrawalBurn>, BridgeError> {
+    diesel::sql_query(
+        r#"
+        SELECT chain_id, nock_contract_address, base_event_id, block_number,
+               block_hash, parent_hash, observed_at_unix_secs,
+               tx_hash, tx_index, log_index, burner,
+               amount_base_units, amount_nicks, lock_root, calldata,
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
+        FROM sequencer_base_burns
+        WHERE chain_id = ? AND nock_contract_address = ? AND tx_hash = ?
+        ORDER BY log_index ASC
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
+    .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+    .bind::<Binary, _>(tx_hash.as_slice().to_vec())
+    .load::<BaseBurnSqlRow>(conn)
+    .map_err(|error| BridgeError::Runtime(format!("public Base tx list failed: {error}")))?
+    .into_iter()
+    .map(BaseBurnSqlRow::into_public)
     .collect()
 }
 
@@ -736,9 +1107,11 @@ fn load_verified_burn_rows_by_burner(
                block_hash, parent_hash, observed_at_unix_secs,
                tx_hash, tx_index, log_index, burner,
                amount_base_units, amount_nicks, lock_root, calldata,
-               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
         FROM sequencer_base_burns
         WHERE chain_id = ? AND nock_contract_address = ? AND burner = ?
+          AND canonical = 1
         ORDER BY block_number DESC, log_index DESC, base_event_id DESC
         LIMIT ?
         "#,
@@ -802,7 +1175,8 @@ fn load_verified_burn_page_by_burner(
                    block_hash, parent_hash, observed_at_unix_secs,
                    tx_hash, tx_index, log_index, burner,
                    amount_base_units, amount_nicks, lock_root, calldata,
-                   base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id
+                   base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+                   canonical, invalidated_at, invalidation_generation, invalidation_reason
             FROM sequencer_base_burns
             WHERE chain_id = ? AND nock_contract_address = ? AND burner = ?
               AND rowid <= ?
@@ -833,7 +1207,8 @@ fn load_verified_burn_page_by_burner(
                    block_hash, parent_hash, observed_at_unix_secs,
                    tx_hash, tx_index, log_index, burner,
                    amount_base_units, amount_nicks, lock_root, calldata,
-                   base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id
+                   base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+                   canonical, invalidated_at, invalidation_generation, invalidation_reason
             FROM sequencer_base_burns
             WHERE chain_id = ? AND nock_contract_address = ? AND burner = ?
               AND rowid <= ?
@@ -854,7 +1229,7 @@ fn load_verified_burn_page_by_burner(
     Ok(BaseActivityBurnPage {
         burns: rows
             .into_iter()
-            .map(TryInto::try_into)
+            .map(BaseBurnSqlRow::into_public)
             .collect::<Result<Vec<_>, BridgeError>>()?,
         snapshot_rowid,
     })
@@ -872,11 +1247,13 @@ fn load_unmapped_verified_burn_rows(
                block_hash, parent_hash, observed_at_unix_secs,
                tx_hash, tx_index, log_index, burner,
                amount_base_units, amount_nicks, lock_root, calldata,
-               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id
+               base_batch_end, withdrawal_nonce, verified_at, policy_id, protocol_id,
+               canonical, invalidated_at, invalidation_generation, invalidation_reason
         FROM sequencer_base_burns
         WHERE chain_id = ?
           AND nock_contract_address = ?
           AND block_number >= ?
+          AND canonical = 1
           AND withdrawal_nonce IS NULL
         ORDER BY base_batch_end ASC, base_event_id ASC
         "#,
@@ -921,6 +1298,7 @@ pub(crate) fn assign_withdrawal_nonce(
         UPDATE sequencer_base_burns
         SET withdrawal_nonce = ?
         WHERE chain_id = ? AND nock_contract_address = ? AND base_event_id = ?
+          AND canonical = 1
         "#,
     )
     .bind::<BigInt, _>(u64_to_i64(withdrawal_nonce, "withdrawal_nonce")?)
@@ -949,6 +1327,110 @@ pub(crate) fn load_activity_cursor_for_reconciliation(
     nock_contract_address: Address,
 ) -> Result<Option<BaseActivityCursor>, BridgeError> {
     load_cursor_row(conn, chain_id, nock_contract_address)
+}
+
+fn insert_header_checkpoint_checked(
+    conn: &mut SqliteConnection,
+    checkpoint: &BaseActivityHeaderCheckpoint,
+) -> Result<(), BridgeError> {
+    diesel::sql_query(
+        r#"
+        INSERT OR IGNORE INTO sequencer_base_header_checkpoints (
+            chain_id, nock_contract_address, block_number, block_hash,
+            parent_hash, block_timestamp, verified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(checkpoint.chain_id, "chain_id")?)
+    .bind::<Binary, _>(checkpoint.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(u64_to_i64(checkpoint.block_number, "block_number")?)
+    .bind::<Binary, _>(checkpoint.block_hash.as_slice().to_vec())
+    .bind::<Binary, _>(checkpoint.parent_hash.as_slice().to_vec())
+    .bind::<BigInt, _>(u64_to_i64(checkpoint.block_timestamp, "block_timestamp")?)
+    .bind::<BigInt, _>(checkpoint.verified_at)
+    .execute(conn)
+    .map_err(|error| {
+        BridgeError::Runtime(format!("Base header checkpoint insert failed: {error}"))
+    })?;
+    let stored: BaseActivityHeaderCheckpoint = diesel::sql_query(
+        r#"
+        SELECT chain_id, nock_contract_address, block_number, block_hash,
+               parent_hash, block_timestamp, verified_at
+        FROM sequencer_base_header_checkpoints
+        WHERE chain_id = ? AND nock_contract_address = ? AND block_number = ?
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(checkpoint.chain_id, "chain_id")?)
+    .bind::<Binary, _>(checkpoint.nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(u64_to_i64(checkpoint.block_number, "block_number")?)
+    .get_result::<BaseActivityHeaderCheckpointSqlRow>(conn)
+    .map_err(|error| {
+        BridgeError::Runtime(format!("Base header checkpoint reload failed: {error}"))
+    })?
+    .try_into()?;
+    if stored.block_hash != checkpoint.block_hash
+        || stored.parent_hash != checkpoint.parent_hash
+        || stored.block_timestamp != checkpoint.block_timestamp
+    {
+        return Err(BridgeError::Runtime(format!(
+            "conflicting Base header checkpoint at block {}: stored {:?}, canonical {:?}",
+            checkpoint.block_number, stored.block_hash, checkpoint.block_hash
+        )));
+    }
+    Ok(())
+}
+
+fn load_header_checkpoint_rows(
+    conn: &mut SqliteConnection,
+    chain_id: u64,
+    nock_contract_address: Address,
+    start_block: u64,
+    end_block: u64,
+) -> Result<Vec<BaseActivityHeaderCheckpoint>, BridgeError> {
+    if end_block < start_block {
+        return Ok(Vec::new());
+    }
+    diesel::sql_query(
+        r#"
+        SELECT chain_id, nock_contract_address, block_number, block_hash,
+               parent_hash, block_timestamp, verified_at
+        FROM sequencer_base_header_checkpoints
+        WHERE chain_id = ? AND nock_contract_address = ?
+          AND block_number BETWEEN ? AND ?
+        ORDER BY block_number ASC
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
+    .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(u64_to_i64(start_block, "start_block")?)
+    .bind::<BigInt, _>(u64_to_i64(end_block, "end_block")?)
+    .load::<BaseActivityHeaderCheckpointSqlRow>(conn)
+    .map_err(|error| BridgeError::Runtime(format!("Base header checkpoint load failed: {error}")))?
+    .into_iter()
+    .map(TryInto::try_into)
+    .collect()
+}
+
+fn prune_header_checkpoints_before(
+    conn: &mut SqliteConnection,
+    chain_id: u64,
+    nock_contract_address: Address,
+    retained_from_block: u64,
+) -> Result<(), BridgeError> {
+    diesel::sql_query(
+        r#"
+        DELETE FROM sequencer_base_header_checkpoints
+        WHERE chain_id = ? AND nock_contract_address = ? AND block_number < ?
+        "#,
+    )
+    .bind::<BigInt, _>(u64_to_i64(chain_id, "chain_id")?)
+    .bind::<Binary, _>(nock_contract_address.as_slice().to_vec())
+    .bind::<BigInt, _>(u64_to_i64(retained_from_block, "retained_from_block")?)
+    .execute(conn)
+    .map_err(|error| {
+        BridgeError::Runtime(format!("Base header checkpoint pruning failed: {error}"))
+    })?;
+    Ok(())
 }
 
 fn load_cursor_row(

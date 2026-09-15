@@ -1,0 +1,58 @@
+name: Withdrawal contract conformance
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "crates/bridge/contracts/**"
+      - "crates/bridge/src/shared/base.rs"
+      - "crates/bridge/src/withdrawal/**"
+      - "crates/bridge/test-fixtures/withdrawal_wire_v1_vectors.json"
+      - "crates/bridge/BUILD.bazel"
+      - "tools/foundry/**"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".github/workflows/bridge-contracts.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "crates/bridge/contracts/**"
+      - "crates/bridge/src/shared/base.rs"
+      - "crates/bridge/src/withdrawal/**"
+      - "crates/bridge/test-fixtures/withdrawal_wire_v1_vectors.json"
+      - "crates/bridge/BUILD.bazel"
+      - "tools/foundry/**"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".github/workflows/bridge-contracts.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: withdrawal-contract-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  forge:
+    name: Full Forge and 68-vs-116 conformance suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Run pinned Foundry suite through Bazel
+        run: bazel build //crates/bridge:withdrawal_contract_conformance --verbose_failures
+
+      - name: Publish Forge test count and results
+        if: always()
+        run: |
+          summary=bazel-bin/crates/bridge/contracts/out/forge-test-summary.txt
+          if [[ -f "$summary" ]]; then
+            cat "$summary"
+          else
+            echo "Forge did not produce a summary; inspect the Bazel action failure above." >&2
+            exit 1
+          fi

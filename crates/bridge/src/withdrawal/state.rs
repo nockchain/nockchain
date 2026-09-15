@@ -11,6 +11,8 @@ pub enum WithdrawalState {
     Authorized,
     MempoolAccepted,
     Confirmed,
+    Invalidated,
+    ReorgHold,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +42,8 @@ impl WithdrawalState {
             Self::Authorized => "authorized",
             Self::MempoolAccepted => "mempool_accepted",
             Self::Confirmed => "confirmed",
+            Self::Invalidated => "invalidated",
+            Self::ReorgHold => "reorg_hold",
         }
     }
 
@@ -52,6 +56,8 @@ impl WithdrawalState {
             "authorized" => Ok(Self::Authorized),
             "mempool_accepted" => Ok(Self::MempoolAccepted),
             "confirmed" => Ok(Self::Confirmed),
+            "invalidated" => Ok(Self::Invalidated),
+            "reorg_hold" => Ok(Self::ReorgHold),
             other => Err(BridgeError::Runtime(format!(
                 "unknown withdrawal state: {other}"
             ))),

@@ -186,7 +186,7 @@
           (from-atom:blist base-event-id.i.txs)
         :*  (from-atom:blist base-event-id.i.txs)
             lock-root.content.i.txs
-            amount-burned=amount.content.i.txs  ::  TODO: what about withdrawal fees on the nock side?
+            amount-burned=amount.content.i.txs  ::  gross burn; Rust validates fees and payout before proposal
         ==
       ==
     $(txs t.txs)
