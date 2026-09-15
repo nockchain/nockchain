@@ -6,18 +6,24 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 alloy = { workspace = true }
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 bridge = { path = "../bridge" }
 bs58 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+hex = { workspace = true }
 ibig = { workspace = true }
 libc = { workspace = true }
 nockapp-grpc = { workspace = true }
 nockchain-math = { workspace = true }
 nockchain-types = { path = "../nockchain-types" }
 op-alloy = { workspace = true, features = ["network"] }
+reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = [
     "fs",
     "io-util",
@@ -34,9 +40,6 @@ tonic = { workspace = true }
 
 [dev-dependencies]
 aws-sdk-s3 = { workspace = true }
-reqwest = { workspace = true }
-sha2 = { workspace = true }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

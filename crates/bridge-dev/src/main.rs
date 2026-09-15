@@ -33,7 +33,12 @@ use bridge::shared::proposer::withdrawal_turn_proposer;
 use bridge::shared::signing::BridgeSigner;
 use bridge::shared::types::WITHDRAWAL_POLICY_V1_ID;
 use bridge::withdrawal::transport::withdrawal_id_from_proto;
-use clap::{Args, Parser, Subcommand};
+use bridge_dev::artifacts::{ArtifactResolveOptions, ArtifactResolver, E2eArtifacts};
+use bridge_dev::e2e::{
+    E2eBaseMode, E2eClientMode, E2eRunConfig, E2eRunner, E2eScenarioExecutor, ScriptedE2eExecutor,
+    ScriptedPlan, UnavailableE2eExecutor,
+};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ibig::UBig;
 use nockapp_grpc::pb::common::v2::note;
 use nockapp_grpc::services::public_nockchain::v2::client::{
@@ -48,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::process::{Child, Command as TokioCommand};
+use tokio::sync::watch;
 use tokio::time::{sleep, Instant};
 
 const NODE_BIND_PORT: u16 = 3005;
@@ -66,14 +72,12 @@ const BRIDGE_DEV_SEQUENCER_JOURNAL_SIGNING_KEY_ENV: &str =
 const BRIDGE_DEV_WITHDRAWAL_ACTIVATION_NOCK_NEXT_HEIGHT_ENV: &str =
     "BRIDGE_DEV_WITHDRAWAL_ACTIVATION_NOCK_NEXT_HEIGHT";
 const BRIDGE_DEV_MANUAL_SUBMIT_APPROVAL_ENV: &str = "BRIDGE_DEV_MANUAL_SUBMIT_APPROVAL";
-const BRIDGE_DEV_FAKENET_GENESIS_JAM_ENV: &str = "BRIDGE_DEV_FAKENET_GENESIS_JAM";
 const BRIDGE_DEV_FAKENET_POW_LEN_ENV: &str = "BRIDGE_DEV_FAKENET_POW_LEN";
 const BRIDGE_DEV_FAKENET_LOG_DIFFICULTY_ENV: &str = "BRIDGE_DEV_FAKENET_LOG_DIFFICULTY";
 const BRIDGE_DEV_FAKENET_BYTHOS_PHASE_ENV: &str = "BRIDGE_DEV_FAKENET_BYTHOS_PHASE";
 const BRIDGE_DEV_BASE_BLOCKS_CHUNK_ENV: &str = "BRIDGE_DEV_BASE_BLOCKS_CHUNK";
 const BRIDGE_DEV_BRIDGE_SAVE_INTERVAL_MILLIS_ENV: &str = "BRIDGE_DEV_BRIDGE_SAVE_INTERVAL_MILLIS";
-const FAKENET_GENESIS_JAM_RELATIVE_TO_CRATES: &str =
-    "nockchain/jams/fakenet-genesis-pow-64-bex-2.jam";
+const BRIDGE_DEV_AI_POW_CACHE_DIR_ENV: &str = "BRIDGE_DEV_AI_POW_CACHE_DIR";
 const FAKENET_POW_LEN: u64 = 64;
 const FAKENET_LOG_DIFFICULTY: u64 = 2;
 const CHILD_SIGINT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -114,6 +118,75 @@ fn optional_env_string(key: &str) -> Result<Option<String>> {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => bail!("{key} must be valid UTF-8"),
     }
+}
+
+fn seed_ai_pow_cache(node_dir: &Path) -> Result<()> {
+    let Some(source) = optional_env_string(BRIDGE_DEV_AI_POW_CACHE_DIR_ENV)? else {
+        return Ok(());
+    };
+    let source = source.trim();
+    if source.is_empty() {
+        bail!("{BRIDGE_DEV_AI_POW_CACHE_DIR_ENV} must not be empty");
+    }
+    let source = PathBuf::from(source);
+    if !source.is_dir() {
+        bail!(
+            "{BRIDGE_DEV_AI_POW_CACHE_DIR_ENV} must name an existing ai-pow cache directory: {}",
+            source.display()
+        );
+    }
+    let destination = node_dir.join(".data.nockchain").join("ai-pow");
+    hard_link_cache_tree(&source, &destination)
+}
+
+fn hard_link_cache_tree(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", source.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            hard_link_cache_tree(&entry.path(), &target)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            bail!(
+                "AI-PoW cache contains a non-regular entry: {}",
+                entry.path().display()
+            );
+        }
+        if target.exists() {
+            let source_len = entry
+                .metadata()
+                .with_context(|| format!("failed to inspect {}", entry.path().display()))?
+                .len();
+            let target_len = fs::metadata(&target)
+                .with_context(|| format!("failed to inspect {}", target.display()))?
+                .len();
+            if source_len != target_len {
+                bail!(
+                    "AI-PoW cache target has a different size: {}",
+                    target.display()
+                );
+            }
+            continue;
+        }
+        if fs::hard_link(entry.path(), &target).is_err() {
+            fs::copy(entry.path(), &target).with_context(|| {
+                format!(
+                    "failed to copy AI-PoW cache file {} to {}",
+                    entry.path().display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_bridge_dev_port_offset(raw: Option<&str>) -> Result<u16> {
@@ -252,32 +325,6 @@ fn withdrawal_activation_nock_next_height() -> Result<u64> {
     Ok(optional_u64_env(BRIDGE_DEV_WITHDRAWAL_ACTIVATION_NOCK_NEXT_HEIGHT_ENV)?.unwrap_or(1))
 }
 
-fn fakenet_genesis_jam_path(paths: &Paths) -> Result<PathBuf> {
-    resolve_fakenet_genesis_jam_path(
-        &paths.workspace_root,
-        &paths.crates_dir,
-        optional_env_string(BRIDGE_DEV_FAKENET_GENESIS_JAM_ENV)?.as_deref(),
-    )
-}
-
-fn resolve_fakenet_genesis_jam_path(
-    workspace_root: &Path,
-    crates_dir: &Path,
-    override_path: Option<&str>,
-) -> Result<PathBuf> {
-    match override_path {
-        Some(override_path) => {
-            let path = PathBuf::from(override_path);
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Ok(workspace_root.join(path))
-            }
-        }
-        None => Ok(crates_dir.join(FAKENET_GENESIS_JAM_RELATIVE_TO_CRATES)),
-    }
-}
-
 fn fakenet_pow_len() -> Result<u64> {
     Ok(optional_u64_env(BRIDGE_DEV_FAKENET_POW_LEN_ENV)?.unwrap_or(FAKENET_POW_LEN))
 }
@@ -371,6 +418,70 @@ enum Commands {
     MintForBurn(MintForBurnArgs),
     RequestWithdrawal(RequestWithdrawalArgs),
     AdvanceBase(AdvanceBaseArgs),
+    E2e(E2eArgs),
+}
+
+#[derive(Args, Debug)]
+struct E2eArgs {
+    #[command(subcommand)]
+    command: E2eCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum E2eCommands {
+    Withdrawal(WithdrawalE2eArgs),
+}
+
+#[derive(Args, Debug)]
+struct WithdrawalE2eArgs {
+    #[arg(long, value_enum)]
+    base: CliE2eBaseMode,
+    #[arg(long, value_enum)]
+    client: CliE2eClientMode,
+    #[arg(long)]
+    seed: u64,
+    #[arg(long)]
+    build: bool,
+    #[arg(long, help = "Use and verify an existing artifacts.json manifest")]
+    artifacts: Option<PathBuf>,
+    #[arg(long, help = "Base Sepolia archive RPC URL; never written to reports")]
+    archive_rpc_url: Option<String>,
+    #[arg(long)]
+    keep_artifacts: bool,
+    #[arg(long, help = "Parent directory for the isolated run directory")]
+    run_root: Option<PathBuf>,
+    #[arg(long, default_value_t = 1_800)]
+    timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliE2eBaseMode {
+    Hermetic,
+    BaseSepoliaFork,
+}
+
+impl From<CliE2eBaseMode> for E2eBaseMode {
+    fn from(value: CliE2eBaseMode) -> Self {
+        match value {
+            CliE2eBaseMode::Hermetic => Self::Hermetic,
+            CliE2eBaseMode::BaseSepoliaFork => Self::BaseSepoliaFork,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliE2eClientMode {
+    RustReference,
+    Iris,
+}
+
+impl From<CliE2eClientMode> for E2eClientMode {
+    fn from(value: CliE2eClientMode) -> Self {
+        match value {
+            CliE2eClientMode::RustReference => Self::RustReference,
+            CliE2eClientMode::Iris => Self::Iris,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -398,6 +509,12 @@ struct UpArgs {
         help = "Pass --start to bridge processes on boot to clear persisted kernel stop state"
     )]
     start: bool,
+
+    #[arg(
+        long,
+        help = "Build missing E2E binaries and kernel artifacts with the documented Bazel command"
+    )]
+    build: bool,
 }
 
 impl UpArgs {
@@ -564,7 +681,6 @@ struct AdvanceBaseArgs {
 #[derive(Debug, Clone)]
 struct SourceLayout {
     workspace_root: PathBuf,
-    crates_dir: PathBuf,
     bridge_dir: PathBuf,
 }
 
@@ -600,7 +716,6 @@ impl SourceLayout {
         let bridge_dir = crates_dir.join("bridge");
         Ok(Self {
             workspace_root,
-            crates_dir,
             bridge_dir,
         })
     }
@@ -609,11 +724,11 @@ impl SourceLayout {
 #[derive(Debug, Clone)]
 struct Paths {
     workspace_root: PathBuf,
-    crates_dir: PathBuf,
     bridge_dir: PathBuf,
     test_data_dir: PathBuf,
     current_dir: PathBuf,
     manifest_path: PathBuf,
+    artifact_manifest_path: PathBuf,
     control_socket: PathBuf,
     supervisor_log: PathBuf,
     env_file: PathBuf,
@@ -621,7 +736,6 @@ struct Paths {
     cleanup_script: PathBuf,
     advance_blocks_script: PathBuf,
     deposit_script: PathBuf,
-    bin_dir: PathBuf,
 }
 
 impl Paths {
@@ -634,7 +748,6 @@ impl Paths {
     fn from_layout(layout: SourceLayout) -> Result<Self> {
         let SourceLayout {
             workspace_root,
-            crates_dir,
             bridge_dir,
         } = layout;
         let test_data_dir_override = std::env::var_os(BRIDGE_DEV_TEST_RUN_ROOT_ENV)
@@ -650,11 +763,11 @@ impl Paths {
         );
         Ok(Self {
             workspace_root: workspace_root.clone(),
-            crates_dir,
             bridge_dir: bridge_dir.clone(),
             test_data_dir,
             current_dir: current_dir.clone(),
             manifest_path: current_dir.join("manifest.json"),
+            artifact_manifest_path: current_dir.join("artifacts.json"),
             control_socket: current_dir.join("control.sock"),
             supervisor_log: current_dir.join("supervisor.log"),
             env_file,
@@ -662,7 +775,6 @@ impl Paths {
             cleanup_script: bridge_dir.join("scripts/tenderly-vnet-cleanup.sh"),
             advance_blocks_script: bridge_dir.join("scripts/tenderly-advance-blocks.sh"),
             deposit_script: bridge_dir.join("scripts/create-bridge-spend.sh"),
-            bin_dir: workspace_root.join("target/release"),
         })
     }
 
@@ -709,14 +821,6 @@ impl Paths {
 
     fn last_withdrawal_target_path(&self) -> PathBuf {
         self.current_dir.join("last-withdrawal.json")
-    }
-
-    fn bridge_binary(&self) -> PathBuf {
-        self.bin_dir.join("bridge")
-    }
-
-    fn node_binary(&self) -> PathBuf {
-        self.bin_dir.join("nockchain-bridge-sequencer")
     }
 
     fn ensure_runtime_dirs(&self) -> Result<()> {
@@ -1365,6 +1469,73 @@ async fn main() -> Result<()> {
             run_request_withdrawal(paths, profile_path, profile_name, args).await
         }
         Commands::AdvanceBase(args) => run_advance_base(paths, args).await,
+        Commands::E2e(args) => run_e2e(paths, args).await,
+    }
+}
+
+async fn run_e2e(paths: Paths, args: E2eArgs) -> Result<()> {
+    let E2eCommands::Withdrawal(args) = args.command;
+    let base = E2eBaseMode::from(args.base);
+    let client = E2eClientMode::from(args.client);
+    match (base, args.archive_rpc_url.as_ref()) {
+        (E2eBaseMode::BaseSepoliaFork, None) => {
+            bail!("--archive-rpc-url is required for --base base-sepolia-fork")
+        }
+        (E2eBaseMode::Hermetic, Some(_)) => {
+            bail!("--archive-rpc-url is valid only for --base base-sepolia-fork")
+        }
+        _ => {}
+    }
+    let plan = std::env::var("BRIDGE_DEV_E2E_SCRIPTED_PLAN").ok();
+    let mut executor: Box<dyn E2eScenarioExecutor> = match plan.as_deref() {
+        Some("success") => Box::new(ScriptedE2eExecutor::new(ScriptedPlan::Success)),
+        Some("provision-failure") => {
+            Box::new(ScriptedE2eExecutor::new(ScriptedPlan::ProvisionFailure))
+        }
+        Some("assertion-failure") => {
+            Box::new(ScriptedE2eExecutor::new(ScriptedPlan::AssertionFailure))
+        }
+        Some("shutdown-failure") => {
+            Box::new(ScriptedE2eExecutor::new(ScriptedPlan::ShutdownFailure))
+        }
+        Some("zero-steps") => Box::new(ScriptedE2eExecutor::new(ScriptedPlan::ZeroSteps)),
+        Some("wait") => Box::new(ScriptedE2eExecutor::new(ScriptedPlan::WaitForCancellation)),
+        Some(other) => bail!("unknown BRIDGE_DEV_E2E_SCRIPTED_PLAN value {other:?}"),
+        None => Box::new(UnavailableE2eExecutor),
+    };
+    let config = E2eRunConfig {
+        workspace_root: paths.workspace_root,
+        run_root: args.run_root,
+        artifact_manifest: args.artifacts,
+        report_path: None,
+        build_artifacts: args.build,
+        require_ctl: false,
+        keep_artifacts: args.keep_artifacts,
+        timeout: Duration::from_secs(args.timeout_secs),
+        base,
+        client,
+        seed: args.seed,
+    };
+    let (cancellation_tx, cancellation_rx) = watch::channel(false);
+    let signal_guard = cancellation_tx.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = cancellation_tx.send(true);
+        }
+    });
+    let outcome = E2eRunner::run(config, executor.as_mut(), cancellation_rx).await?;
+    signal_task.abort();
+    drop(signal_guard);
+    for line in outcome.stable_output_lines() {
+        println!("{line}");
+    }
+    if outcome.success() {
+        Ok(())
+    } else {
+        bail!(
+            "withdrawal E2E failed; report={}",
+            outcome.report_path.display()
+        )
     }
 }
 
@@ -1399,10 +1570,13 @@ async fn run_up(
         env.clone(),
     )?;
     run_preflight_checks(&profile, &env)?;
+    let mut artifact_options = ArtifactResolveOptions::new(paths.workspace_root.clone());
+    artifact_options.build = args.build;
+    let artifacts = ArtifactResolver::resolve(&artifact_options).map_err(anyhow::Error::new)?;
     let manifest = build_manifest(&paths, &profile, &env)?;
     write_manifest(&paths.manifest_path, &manifest)?;
+    write_artifacts(&paths.artifact_manifest_path, &artifacts)?;
 
-    ensure_binaries(&paths)?;
     append_supervisor_log(&paths.supervisor_log, "starting bridge-dev supervisor")?;
     let listener = UnixListener::bind(&paths.control_socket)
         .with_context(|| format!("failed to bind {}", paths.control_socket.display()))?;
@@ -1411,16 +1585,16 @@ async fn run_up(
     let mut children = Vec::new();
     children.push(
         spawn_node(
-            &paths, &manifest, &bridge_configs.bridge_paths[0], &bridge_configs.sequencer_path,
-            needs_fresh_state,
+            &paths, &artifacts, &manifest, &bridge_configs.bridge_paths[0],
+            &bridge_configs.sequencer_path, needs_fresh_state,
         )
         .await?,
     );
-    wait_for_port(SocketTarget::PrivateNodeGrpc, Duration::from_secs(20)).await?;
+    wait_for_port(SocketTarget::PrivateNodeGrpc, NODE_STARTUP_TIMEOUT).await?;
     wait_for_private_node_blockchain_constants(NODE_STARTUP_TIMEOUT).await?;
     for (node_id, config_path) in bridge_configs.bridge_paths.iter().enumerate() {
         children.push(spawn_bridge(
-            &paths, node_id, config_path, needs_fresh_state, args.start,
+            &paths, &artifacts, node_id, config_path, needs_fresh_state, args.start,
         )?);
     }
 
@@ -2743,24 +2917,23 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn read_manifest(path: &Path) -> Result<Manifest> {
+fn write_artifacts(path: &Path, artifacts: &E2eArtifacts) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(artifacts)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn read_artifacts(path: &Path) -> Result<E2eArtifacts> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn ensure_binaries(paths: &Paths) -> Result<()> {
-    for (name, path) in [
-        ("bridge", paths.bridge_binary()),
-        ("nockchain-bridge-sequencer", paths.node_binary()),
-    ] {
-        if !path.exists() {
-            bail!(
-                "{name} binary not found at {}. Build with `cargo build --release -p bridge -p nockchain-bridge-sequencer`",
-                path.display()
-            );
-        }
-    }
-    Ok(())
+fn read_manifest(path: &Path) -> Result<Manifest> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 async fn provision_vnet(paths: &Paths, profile: &ProfileFile) -> Result<()> {
@@ -3007,6 +3180,7 @@ fn derive_bridge_dev_lock_root() -> Result<String> {
 
 async fn spawn_node(
     paths: &Paths,
+    artifacts: &E2eArtifacts,
     manifest: &Manifest,
     bridge_config_path: &Path,
     sequencer_config_path: &Path,
@@ -3014,6 +3188,7 @@ async fn spawn_node(
 ) -> Result<ManagedChild> {
     fs::create_dir_all(paths.node_dir())
         .with_context(|| format!("failed to create {}", paths.node_dir().display()))?;
+    seed_ai_pow_cache(&paths.node_dir())?;
     let bridge_config = BridgeConfigToml::from_file(bridge_config_path)?;
     let sequencer_config = SequencerConfigToml::from_file(sequencer_config_path)?;
     let sequencer_base_confirmation_depth =
@@ -3021,7 +3196,7 @@ async fn spawn_node(
     let mut args = vec![
         "--fakenet".to_string(),
         "--fakenet-genesis-jam-path".to_string(),
-        fakenet_genesis_jam_path(paths)?.display().to_string(),
+        artifacts.fakenet_genesis_jam.path.display().to_string(),
         "--fakenet-pow-len".to_string(),
         fakenet_pow_len()?.to_string(),
         "--fakenet-log-difficulty".to_string(),
@@ -3057,7 +3232,7 @@ async fn spawn_node(
     )?);
     spawn_process(
         "node",
-        &paths.node_binary(),
+        &artifacts.node.path,
         &args,
         &paths.node_dir(),
         &envs,
@@ -3068,6 +3243,7 @@ async fn spawn_node(
 
 fn spawn_bridge(
     paths: &Paths,
+    artifacts: &E2eArtifacts,
     node_id: usize,
     config_path: &Path,
     fresh_state: bool,
@@ -3098,7 +3274,7 @@ fn spawn_bridge(
     ]);
     spawn_process(
         &name,
-        &paths.bridge_binary(),
+        &artifacts.bridge.path,
         &args,
         &data_dir,
         &[
@@ -3354,10 +3530,12 @@ async fn spawn_component(
     fresh_state: bool,
     start: bool,
 ) -> Result<ManagedChild> {
+    let artifacts = read_artifacts(&paths.artifact_manifest_path)?;
     match target {
         ComponentTarget::Node => {
             spawn_node(
                 paths,
+                &artifacts,
                 manifest,
                 &paths.bridge_config_path(0),
                 &paths.sequencer_config_path(),
@@ -3367,6 +3545,7 @@ async fn spawn_component(
         }
         ComponentTarget::Bridge(node_id) => spawn_bridge(
             paths,
+            &artifacts,
             node_id,
             &paths.bridge_config_path(node_id),
             fresh_state,
@@ -4262,27 +4441,27 @@ mod tests {
             .collect()
     }
 
-    fn parse_up_args(args: &[&str]) -> UpArgs {
-        let cli = Cli::try_parse_from(args).unwrap();
+    fn parse_up_args(args: &[&str]) -> Result<UpArgs> {
+        let cli = Cli::try_parse_from(args)?;
         match cli.command {
-            Commands::Up(args) => args,
-            command => panic!("expected up command, got {command:?}"),
+            Commands::Up(args) => Ok(args),
+            command => bail!("expected up command, got {command:?}"),
         }
     }
 
-    fn parse_status_args(args: &[&str]) -> StatusArgs {
-        let cli = Cli::try_parse_from(args).unwrap();
+    fn parse_status_args(args: &[&str]) -> Result<StatusArgs> {
+        let cli = Cli::try_parse_from(args)?;
         match cli.command {
-            Commands::Status(args) => args,
-            command => panic!("expected status command, got {command:?}"),
+            Commands::Status(args) => Ok(args),
+            command => bail!("expected status command, got {command:?}"),
         }
     }
 
-    fn parse_component_target_args(args: &[&str]) -> ComponentTargetArgs {
-        let cli = Cli::try_parse_from(args).unwrap();
+    fn parse_component_target_args(args: &[&str]) -> Result<ComponentTargetArgs> {
+        let cli = Cli::try_parse_from(args)?;
         match cli.command {
-            Commands::Stop(args) | Commands::Start(args) | Commands::Restart(args) => args,
-            command => panic!("expected component command, got {command:?}"),
+            Commands::Stop(args) | Commands::Start(args) | Commands::Restart(args) => Ok(args),
+            command => bail!("expected component command, got {command:?}"),
         }
     }
 
@@ -4330,11 +4509,11 @@ mod tests {
         let current_dir = test_data_dir.join("bridge-dev/current");
         Paths {
             workspace_root: workspace_root.clone(),
-            crates_dir,
             bridge_dir: bridge_dir.clone(),
             test_data_dir,
             current_dir: current_dir.clone(),
             manifest_path: current_dir.join("manifest.json"),
+            artifact_manifest_path: current_dir.join("artifacts.json"),
             control_socket: current_dir.join("control.sock"),
             supervisor_log: current_dir.join("supervisor.log"),
             env_file: bridge_dir.join("scripts/environments/virtual-testnet.generated.env"),
@@ -4342,7 +4521,6 @@ mod tests {
             cleanup_script: bridge_dir.join("scripts/tenderly-vnet-cleanup.sh"),
             advance_blocks_script: bridge_dir.join("scripts/tenderly-advance-blocks.sh"),
             deposit_script: bridge_dir.join("scripts/create-bridge-spend.sh"),
-            bin_dir: workspace_root.join("target/release"),
         }
     }
 
@@ -4604,10 +4782,6 @@ mod tests {
 
         assert_eq!(layout.workspace_root, workspace);
         assert_eq!(
-            layout.crates_dir,
-            tempdir.path().join("workspace/open/crates")
-        );
-        assert_eq!(
             layout.bridge_dir,
             tempdir.path().join("workspace/open/crates/bridge")
         );
@@ -4623,7 +4797,6 @@ mod tests {
         let layout = SourceLayout::discover_from_manifest_dir(&manifest_dir).unwrap();
 
         assert_eq!(layout.workspace_root, workspace);
-        assert_eq!(layout.crates_dir, tempdir.path().join("nockchain/crates"));
         assert_eq!(
             layout.bridge_dir,
             tempdir.path().join("nockchain/crates/bridge")
@@ -4640,8 +4813,29 @@ mod tests {
         let layout = SourceLayout::discover_from_manifest_dir(&manifest_dir).unwrap();
 
         assert_eq!(layout.workspace_root, workspace);
-        assert_eq!(layout.crates_dir, tempdir.path().join("open/crates"));
         assert_eq!(layout.bridge_dir, tempdir.path().join("open/crates/bridge"));
+    }
+
+    #[test]
+    fn ai_pow_cache_seed_is_recursive_and_idempotent() {
+        let tempdir = TempDir::new().unwrap();
+        let source = tempdir.path().join("source");
+        let destination = tempdir.path().join("destination");
+        fs::create_dir_all(source.join("contexts")).unwrap();
+        fs::write(source.join("verifier-setup-seeds-v1.bin"), b"seed-table").unwrap();
+        fs::write(source.join("contexts/ctx.bin"), b"context").unwrap();
+
+        hard_link_cache_tree(&source, &destination).unwrap();
+        hard_link_cache_tree(&source, &destination).unwrap();
+
+        assert_eq!(
+            fs::read(destination.join("verifier-setup-seeds-v1.bin")).unwrap(),
+            b"seed-table"
+        );
+        assert_eq!(
+            fs::read(destination.join("contexts/ctx.bin")).unwrap(),
+            b"context"
+        );
     }
 
     #[test]
@@ -4756,31 +4950,6 @@ mod tests {
     }
 
     #[test]
-    fn fakenet_genesis_override_resolves_relative_to_workspace() {
-        let workspace = PathBuf::from("/workspace");
-        let crates_dir = PathBuf::from("/workspace/crates");
-
-        assert_eq!(
-            resolve_fakenet_genesis_jam_path(&workspace, &crates_dir, None).unwrap(),
-            crates_dir.join(FAKENET_GENESIS_JAM_RELATIVE_TO_CRATES)
-        );
-        assert_eq!(
-            resolve_fakenet_genesis_jam_path(
-                &workspace,
-                &crates_dir,
-                Some("open/crates/nockchain/jams/fakenet-genesis-pow-2-bex-1.jam"),
-            )
-            .unwrap(),
-            workspace.join("open/crates/nockchain/jams/fakenet-genesis-pow-2-bex-1.jam")
-        );
-        assert_eq!(
-            resolve_fakenet_genesis_jam_path(&workspace, &crates_dir, Some("/tmp/genesis.jam"))
-                .unwrap(),
-            PathBuf::from("/tmp/genesis.jam")
-        );
-    }
-
-    #[test]
     fn derives_real_bridge_nock_pkhs() {
         let pkhs = derive_bridge_nock_pkhs().unwrap();
         assert_eq!(
@@ -4815,7 +4984,8 @@ mod tests {
 
     #[test]
     fn parses_multiple_component_action_targets() {
-        let args = parse_component_target_args(&["bridge-dev", "stop", "bridge-0", "bridge-2"]);
+        let args =
+            parse_component_target_args(&["bridge-dev", "stop", "bridge-0", "bridge-2"]).unwrap();
 
         assert_eq!(args.targets, vec!["bridge-0", "bridge-2"]);
     }
@@ -4893,7 +5063,7 @@ mod tests {
 
     #[test]
     fn parses_split_up_flags() {
-        let args = parse_up_args(&["bridge-dev", "up", "--fresh-vnet", "--fresh-state"]);
+        let args = parse_up_args(&["bridge-dev", "up", "--fresh-vnet", "--fresh-state"]).unwrap();
         assert!(!args.fresh);
         assert!(args.fresh_vnet);
         assert!(args.fresh_state);
@@ -4903,7 +5073,7 @@ mod tests {
 
     #[test]
     fn parses_legacy_up_flag() {
-        let fresh = parse_up_args(&["bridge-dev", "up", "--fresh"]);
+        let fresh = parse_up_args(&["bridge-dev", "up", "--fresh"]).unwrap();
         assert!(fresh.fresh);
         assert!(fresh.fresh_vnet());
         assert!(fresh.fresh_state());
@@ -4911,7 +5081,7 @@ mod tests {
 
     #[test]
     fn parses_up_start_flag() {
-        let args = parse_up_args(&["bridge-dev", "up", "--start"]);
+        let args = parse_up_args(&["bridge-dev", "up", "--start"]).unwrap();
         assert!(args.start);
         assert!(!args.fresh);
         assert!(!args.fresh_vnet);
@@ -4982,7 +5152,8 @@ mod tests {
 
     #[test]
     fn parses_status_flags() {
-        let args = parse_status_args(&["bridge-dev", "status", "--bridges", "--sequencer"]);
+        let args =
+            parse_status_args(&["bridge-dev", "status", "--bridges", "--sequencer"]).unwrap();
         assert!(args.bridges);
         assert!(args.sequencer);
     }

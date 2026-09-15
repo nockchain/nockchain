@@ -1,5 +1,47 @@
 # bridge-dev Scenario Tests
 
+## One-command withdrawal runner
+
+The supported local entrypoint is:
+
+```sh
+bridge-dev e2e withdrawal \
+  --base hermetic \
+  --client iris \
+  --seed 1 \
+  --build
+```
+
+Use `--base base-sepolia-fork --archive-rpc-url "$BASE_SEPOLIA_ARCHIVE_RPC_URL"` for the
+deployed-contract lane. `--artifacts <artifacts.json>` verifies and reuses an existing artifact
+manifest; explicit artifact paths may also be supplied through the `BRIDGE_E2E_*` environment
+variables. Every invocation allocates an isolated child directory beneath `--run-root`, attempts
+shutdown on every outcome, refuses zero-step success, and prints stable `run_id`, `run_dir`,
+`environment`, `seed`, and `report` key/value lines.
+
+`iris` is the required official client for terminal success. A selected run fails nonzero when
+Anvil, bridge artifacts, or an immutable Iris artifact are unavailable; it never falls back to the
+Rust reference client. The nonignored `core_withdrawal_e2e` contract test runs in the ordinary test
+lane and enforces the exact `Pending -> Ready -> Submitted -> SequencerConfirmed -> Terminal`
+progression, policy-derived amount selection, two fresh observation rounds from every source,
+direct kernel target identity, durable sequencer confirmation and reservation-release references,
+correlation-group labels, reset-normalized evidence, and the isolated 68-byte ordinary-burn
+negative case.
+
+The current node runtime requires a complete AI-PoW verifier cache before it
+opens gRPC. For repeatable fresh runs, point `BRIDGE_DEV_AI_POW_CACHE_DIR` at a
+validated `ai-pow` cache directory. The harness hard-links its immutable cache
+files into the isolated node data directory, with a copy fallback across
+filesystems:
+
+```sh
+BRIDGE_DEV_AI_POW_CACHE_DIR=/path/to/nockchain-data/ai-pow \
+  bridge-dev e2e withdrawal --base hermetic --client iris --seed 1
+```
+
+The scenarios below remain opt-in regression coverage for the legacy Tenderly adapter. New E2E
+backends and clients extend `bridge-dev e2e withdrawal` rather than adding new test incantations.
+
 The ignored scenarios in `scenarios.rs` exercise bridge-dev against a fresh Tenderly VNET and
 release-built bridge binaries. They are intentionally opt-in because each test provisions remote
 state and can take several minutes.
@@ -17,7 +59,7 @@ cargo test -p bridge-dev --test scenarios -- --ignored --test-threads=1
 ```
 
 The test harness sets `BRIDGE_DEV_TEST_RUN_ROOT` and `BRIDGE_DEV_PORT_OFFSET` for every command, so
-it does not use the normal `open/crates/bridge/test_run_data` state or default ports. The generated
+it does not use the normal `crates/bridge/test_run_data` state or default ports. The generated
 VNET env file is written under the test run root. Set `BRIDGE_DEV_E2E_PORT_OFFSET` if you need a
 specific offset for your machine.
 
@@ -42,10 +84,11 @@ Covered scenarios:
 - All-bridge process restart after a successful deposit verifies the same successful deposit is
   still visible after every bridge process restarts.
 - Multiple deposits verifies nonce ordering and all-node visibility across successive deposits.
-- Withdrawal happy path first seeds bridge-owned Nockchain liquidity with a deposit observed by all
-  bridge nodes, then mints, burns, advances enough Base blocks to fill the observer chunk, and
-  verifies one withdrawal reaches pending, ready, submitted, and executed phases with stable
-  proposal and authorized transaction artifacts.
+- Legacy withdrawal happy paths first seed bridge-owned Nockchain liquidity with a deposit observed
+  by all bridge nodes, then mint, burn, advance enough Base blocks to fill the observer chunk, and
+  verify one withdrawal reaches pending, ready, submitted, and sequencer-confirmed phases with
+  stable proposal and authorized transaction artifacts. Only `TerminalWithdrawalProof` means
+  executed/terminal in the core lane.
 - Withdrawal pre-Bythos happy path seeds bridge-owned Nockchain liquidity before the configured
   fakenet Bythos phase, waits until Nockchain reaches that phase, then verifies the withdrawal
   still executes.
