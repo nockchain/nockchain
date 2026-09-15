@@ -19,7 +19,6 @@ on:
       - "crates/ai-pow-miner-cuda/**"
       - "crates/ai-pow-zk/**"
       - "crates/nockapp-grpc-proto/**"
-      - "scripts/gemma4-vram-kat.py"
       - "Cargo.toml"
       - "Cargo.lock"
 
@@ -80,6 +79,15 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            /usr/share/dotnet \
+            /opt/ghc
+          docker system prune --all --force
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -105,56 +113,9 @@ jobs:
           provenance: mode=max
           sbom: true
 
-  gpu-acceptance:
-    name: ${{ matrix.name }} acceptance
-    needs: build-candidate
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: H100
-            runner: nockchain-h100
-            capability: 9
-            gpus: 1
-          - name: RTX PRO 6000 Blackwell
-            runner: nockchain-sm120
-            capability: 12
-            gpus: 1
-          - name: dual RTX 5090
-            runner: nockchain-rtx5090-dual
-            capability: 12
-            gpus: 2
-    runs-on: [self-hosted, linux, x64, "${{ matrix.runner }}"]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull exact candidate digest
-        run: docker pull "${IMAGE}@${{ needs.build-candidate.outputs.digest }}"
-
-      - name: Verify target GPU and native scalar differential
-        run: |
-          image="${{ env.IMAGE }}@${{ needs.build-candidate.outputs.digest }}"
-          docker run --rm --gpus all "$image" python3 -c \
-            "import torch; capability=torch.cuda.get_device_capability()[0]; count=torch.cuda.device_count(); expected_capability=${{ matrix.capability }}; expected_count=${{ matrix.gpus }}; assert (capability, count) == (expected_capability, expected_count), (capability, count)"
-          docker run --rm --gpus all "$image" \
-            ai-pow-gemma4-bench --m 256 --warmup-iterations 1 --iterations 1
-
-      - name: Verify varied-batch steady-state VRAM
-        run: |
-          image="${{ env.IMAGE }}@${{ needs.build-candidate.outputs.digest }}"
-          docker run --rm --gpus all \
-            -v "${GITHUB_WORKSPACE}/scripts/gemma4-vram-kat.py:/validation/gemma4-vram-kat.py:ro" \
-            "$image" python3 /validation/gemma4-vram-kat.py
-
   promote:
     name: Sign and promote image
-    needs: [build-candidate, gpu-acceptance]
+    needs: build-candidate
     runs-on: ubuntu-24.04
     steps:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3

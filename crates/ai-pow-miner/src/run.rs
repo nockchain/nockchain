@@ -76,12 +76,12 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-#[cfg(feature = "gpu")]
-use crate::canonical::PreparedCanonicalDenseSearch;
 use crate::canonical::{
     evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at_for_miner, CanonicalBlock,
     CanonicalDenseBlock, CanonicalProveError, PreparedCanonicalMoeTemplate,
 };
+#[cfg(feature = "gpu")]
+use crate::canonical::{PreparedCanonicalDenseSearch, PreparedCanonicalDenseTemplate};
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_public_inputs_node,

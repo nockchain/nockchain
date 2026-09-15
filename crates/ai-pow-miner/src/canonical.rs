@@ -723,7 +723,7 @@ impl PreparedCanonicalDenseSearch {
         self.params
     }
 
-    pub fn sigma(&self) -> &[u8] {
+    pub fn sigma(&self) -> &[u8; ai_pow::pearl_compat::PEARL_INCOMPLETE_BLOCK_HEADER_SIZE] {
         &self.sigma
     }
 

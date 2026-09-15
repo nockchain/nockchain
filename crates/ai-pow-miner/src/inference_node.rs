@@ -375,7 +375,7 @@ pub(crate) fn reconstruct_inference_dense_attempt(
     let expected_header = canonical_dense_incomplete_header(
         candidate.inputs.nock_block_commitment, witness.extranonce,
     )?;
-    if prepared.sigma() != expected_header {
+    if *prepared.sigma() != expected_header {
         return Err(CanonicalProveError(
             "opened witness header does not match its candidate extranonce".to_string(),
         ));
