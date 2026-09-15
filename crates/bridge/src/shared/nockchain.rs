@@ -304,6 +304,16 @@ fn nock_block_still_waiting_for_kernel(
     in_flight_height.is_some() && in_flight_height == next_needed_height
 }
 
+fn truncate_after_first_transaction_block(
+    blocks: &mut Vec<NockBlockEvent>,
+) -> Option<&mut NockBlockEvent> {
+    let index = blocks
+        .iter()
+        .position(|block| !block.block.tx_ids.is_empty())?;
+    blocks.truncate(index + 1);
+    blocks.last_mut()
+}
+
 #[async_trait]
 impl NockSourcePort for NockGrpcSource {
     async fn tip_info(&mut self) -> Result<Option<NockTipInfo>, BridgeError> {
@@ -423,7 +433,7 @@ impl NockGrpcSource {
             }
         };
 
-        for block in &mut blocks {
+        if let Some(block) = truncate_after_first_transaction_block(&mut blocks) {
             Self::hydrate_block_transactions_from_client(client, block, request_timeout).await?;
         }
         Ok(blocks)
@@ -1413,6 +1423,21 @@ mod tests {
         }
     }
 
+    fn sample_block_event(height: u64, has_transactions: bool) -> NockBlockEvent {
+        let mut page = sample_page(height);
+        if has_transactions {
+            page.tx_ids.push(page.digest.clone());
+        }
+        let mut page_slab = NounSlab::<NockJammer>::new();
+        let page_noun = page.to_noun(&mut page_slab);
+        page_slab.set_root(page_noun);
+        NockBlockEvent {
+            block: page,
+            page_slab,
+            page_noun,
+            txs: Vec::new(),
+        }
+    }
     #[test]
     fn jam_path_roundtrips_through_cue() {
         let path = vec![Bytes::from("block"), Bytes::from("42")];
@@ -1421,6 +1446,7 @@ mod tests {
         let mut current = slab
             .cue_into(Bytes::from(jammed.clone()))
             .expect("cue jammed path");
+
         let space = slab.noun_space();
         for segment in path {
             let cell = current.in_space(&space).as_cell().expect("cell");
@@ -1465,6 +1491,28 @@ mod tests {
         assert!(!tip_covers_next_confirmed_height(Some(&tip), None, 400));
     }
 
+    #[test]
+
+    fn range_stops_at_first_block_requiring_transaction_hydration() {
+        let mut blocks = vec![
+            sample_block_event(10, false),
+            sample_block_event(11, false),
+            sample_block_event(12, true),
+            sample_block_event(13, true),
+        ];
+
+        let hydration_height =
+            truncate_after_first_transaction_block(&mut blocks).map(|block| block.block.height);
+
+        assert_eq!(hydration_height, Some(12));
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.block.height)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12]
+        );
+    }
     #[test]
     fn block_range_decoder_owns_each_page_noun() {
         let page = sample_page(77);
