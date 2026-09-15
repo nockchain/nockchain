@@ -36,6 +36,7 @@ const NOCK_GRPC_RESPONSE_TOO_LARGE_MARKER: &str = "message length too large";
 pub const DEFAULT_NOCK_GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const NOCK_BLOCK_BATCH_SIZE: u64 = 64;
 const NOCK_TIP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const NOCK_WATCHER_MAX_DECODING_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 pub const BLOCKCHAIN_CONSTANTS_PATH: &str = "blockchain-constants";
 
 /// Default nockchain confirmation depth used by the driver if not specified in config.
@@ -98,10 +99,7 @@ impl NockGrpcSource {
         request_timeout: Duration,
     ) -> Result<Self, BridgeError> {
         let client = connect_private_nockapp(endpoint, request_timeout).await?;
-        Ok(Self {
-            client,
-            request_timeout,
-        })
+        Ok(Self::from_client_with_timeout(client, request_timeout))
     }
 
     pub fn from_client(client: PrivateNockAppGrpcClient) -> Self {
@@ -113,7 +111,7 @@ impl NockGrpcSource {
         request_timeout: Duration,
     ) -> Self {
         Self {
-            client,
+            client: client.with_max_decoding_message_size(NOCK_WATCHER_MAX_DECODING_MESSAGE_SIZE),
             request_timeout,
         }
     }

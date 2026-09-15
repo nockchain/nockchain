@@ -21,10 +21,13 @@ pub enum PokeResponseResult {
 
 impl PrivateNockAppGrpcClient {
     pub async fn connect<T: AsRef<str>>(address: T) -> Result<Self> {
-        let client = PrivateNockAppClient::connect(address.as_ref().to_string())
-            .await?
-            .max_decoding_message_size(16 * 1024 * 1024);
+        let client = PrivateNockAppClient::connect(address.as_ref().to_string()).await?;
         Ok(Self { client })
+    }
+
+    pub fn with_max_decoding_message_size(mut self, limit: usize) -> Self {
+        self.client = self.client.max_decoding_message_size(limit);
+        self
     }
 
     // Monitoring ping is handled in MonitoringService, not here.
