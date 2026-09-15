@@ -992,19 +992,18 @@ impl NockchainWatcher {
                 Ok(Some(event)) => {
                     let height = event.block.height;
                     let block_hash = event.block.digest.to_base58();
-                    let confirmed_block_id =
-                        (!event.txs.is_empty()).then(|| event.block.digest.clone());
+                    let confirmed_block_id = event.block.digest.clone();
                     let txs_count = event.txs.len();
                     self.deps
                         .runtime
                         .send_event(BridgeEvent::Chain(Box::new(ChainEvent::Nock(event))))
                         .await?;
                     nock_block_in_flight = Some(height);
-                    if let (Some(snapshot_service), Some(confirmed_block_id)) =
-                        (&self.deps.confirmed_snapshot, confirmed_block_id.as_ref())
-                    {
-                        if let Err(err) = snapshot_service
-                            .refresh_on_confirmed_block(height, confirmed_block_id)
+                    if let Some(snapshot_service) = &self.deps.confirmed_snapshot {
+                        if txs_count == 0 {
+                            snapshot_service.refresh_in_background();
+                        } else if let Err(err) = snapshot_service
+                            .refresh_on_confirmed_block(height, &confirmed_block_id)
                             .await
                         {
                             warn!(
