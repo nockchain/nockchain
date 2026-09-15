@@ -35,6 +35,7 @@ use crate::observability::status::BridgeStatus;
 use crate::observability::tui::types::{BridgeTx, TxDirection, TxStatus};
 use crate::shared::errors::BridgeError;
 use crate::shared::runtime::{BaseBlockBatch, BridgeEvent, BridgeRuntimeHandle, ChainEvent};
+use crate::shared::signing::BridgeNodeEthAddressMap;
 use crate::shared::stop::StopHandle;
 
 fn is_rate_limit_error<E: std::fmt::Display>(e: &E) -> bool {
@@ -117,16 +118,20 @@ pub const WITHDRAWAL_BURN_CALLDATA_LEN: usize =
     WITHDRAWAL_BURN_BASE_CALLDATA_LEN + WITHDRAWAL_BURN_TRAILER_LEN;
 const WITHDRAWAL_BURN_COMMITMENT_DOMAIN: &[u8] = b"nock-withdrawal-calldata-v1";
 
-// Refunded operator recovery: keep this exact historical burn out of withdrawal ordering.
-const REFUNDED_WITHDRAWAL_BURN_TX_HASH: [u8; 32] = [
-    0xfa, 0x0b, 0x8e, 0x41, 0x34, 0xa3, 0x87, 0x44, 0x0a, 0x99, 0x54, 0x41, 0x14, 0x57, 0x83, 0x97,
-    0xd5, 0x25, 0x42, 0xce, 0xa3, 0x06, 0xd6, 0xb9, 0xad, 0xea, 0x80, 0x14, 0x07, 0xe3, 0x12, 0x3f,
-];
-const REFUNDED_WITHDRAWAL_BURN_LOG_INDEX: u64 = 243;
-const REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID: [u8; 32] = [
-    0x45, 0xcf, 0xbf, 0x83, 0x1f, 0x2a, 0xbf, 0x37, 0x71, 0x64, 0xf8, 0x57, 0xa2, 0xbc, 0x47, 0x33,
-    0x8f, 0xca, 0xa8, 0xf4, 0xf1, 0x2a, 0x59, 0x86, 0xa3, 0xba, 0x9b, 0xef, 0x35, 0xaf, 0xea, 0xbd,
-];
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompensatedWithdrawalFact {
+    pub base_event_id: BaseEventId,
+    pub transaction_hash: B256,
+    pub log_index: u64,
+    pub reason: String,
+    pub evidence_reference: String,
+    pub recorded_at_unix_secs: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompensatedWithdrawalRegistry {
+    entries: HashMap<BaseEventId, CompensatedWithdrawalFact>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecodedBurnForWithdrawalLog {
@@ -135,19 +140,79 @@ pub(crate) struct DecodedBurnForWithdrawalLog {
     pub amount: u64,
     pub lock_root: Tip5Hash,
 }
-
-pub(crate) fn is_explicitly_refunded_withdrawal_base_event_id(base_event_id: &BaseEventId) -> bool {
-    base_event_id.0.as_slice() == REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BurnForWithdrawalEventFacts {
+    pub burner: Address,
+    pub amount_raw: U256,
+    pub commitment: B256,
 }
 
-pub(crate) fn is_explicitly_refunded_withdrawal_burn(
-    base_event_id: &BaseEventId,
-    tx_hash: &B256,
-    log_index: Option<u64>,
-) -> bool {
-    is_explicitly_refunded_withdrawal_base_event_id(base_event_id)
-        && tx_hash.as_slice() == REFUNDED_WITHDRAWAL_BURN_TX_HASH
-        && log_index == Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX)
+impl CompensatedWithdrawalRegistry {
+    pub fn from_config(
+        entries: &[crate::shared::config::CompensatedWithdrawalToml],
+    ) -> Result<Self, BridgeError> {
+        let mut registry = Self::default();
+        for entry in entries {
+            let transaction_hash =
+                parse_compensation_hex::<32>(&entry.transaction_hash, "transaction_hash")?;
+            let expected =
+                compute_base_event_id(&B256::from(transaction_hash), Some(entry.log_index));
+            let configured = BaseEventId(
+                parse_compensation_hex::<32>(&entry.base_event_id, "base_event_id")?.to_vec(),
+            );
+            if configured != expected {
+                return Err(BridgeError::Config(format!(
+                    "compensated withdrawal {} does not match transaction hash and log index",
+                    entry.base_event_id
+                )));
+            }
+            if entry.reason.trim().is_empty() || entry.evidence_reference.trim().is_empty() {
+                return Err(BridgeError::Config(
+                    "compensated withdrawal requires reason and evidence_reference".into(),
+                ));
+            }
+            let fact = CompensatedWithdrawalFact {
+                base_event_id: configured.clone(),
+                transaction_hash: B256::from(transaction_hash),
+                log_index: entry.log_index,
+                reason: entry.reason.trim().to_string(),
+                evidence_reference: entry.evidence_reference.trim().to_string(),
+                recorded_at_unix_secs: entry.recorded_at_unix_secs,
+            };
+            if let Some(existing) = registry.entries.insert(configured.clone(), fact.clone()) {
+                if existing != fact {
+                    return Err(BridgeError::Config(format!(
+                        "compensated withdrawal {} is configured more than once with conflicting facts",
+                        entry.base_event_id
+                    )));
+                }
+            }
+        }
+        Ok(registry)
+    }
+
+    pub fn get(&self, base_event_id: &BaseEventId) -> Option<&CompensatedWithdrawalFact> {
+        self.entries.get(base_event_id)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &CompensatedWithdrawalFact> {
+        self.entries.values()
+    }
+}
+
+fn parse_compensation_hex<const N: usize>(
+    value: &str,
+    field: &str,
+) -> Result<[u8; N], BridgeError> {
+    let raw = value.trim().strip_prefix("0x").unwrap_or(value.trim());
+    let bytes = hex::decode(raw)
+        .map_err(|_| BridgeError::Config(format!("compensated withdrawal {field} is not hex")))?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        BridgeError::Config(format!(
+            "compensated withdrawal {field} has {} bytes, expected {N}",
+            bytes.len()
+        ))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +294,21 @@ impl fmt::Display for BurnForWithdrawalDecodeError {
 }
 
 impl std::error::Error for BurnForWithdrawalDecodeError {}
+impl BurnForWithdrawalDecodeError {
+    pub(crate) const fn code(&self) -> &'static str {
+        match self {
+            Self::NotBurnForWithdrawal(_) => "not_burn_for_withdrawal",
+            Self::AmountNotDivisible { .. } => "amount_not_divisible",
+            Self::AmountOverflow { .. } => "amount_overflow",
+            Self::MissingCalldataTrailer { .. } => "missing_calldata_trailer",
+            Self::MalformedCalldata { .. } => "malformed_calldata",
+            Self::CalldataAmountMismatch { .. } => "calldata_amount_mismatch",
+            Self::CalldataCommitmentMismatch { .. } => "calldata_commitment_mismatch",
+            Self::CommitmentMismatch { .. } => "commitment_mismatch",
+            Self::InvalidLockRoot { .. } => "invalid_lock_root",
+        }
+    }
+}
 
 /// Test helper: calculate confirmed batch using old global-boundary logic.
 /// Only used for testing the confirmation depth behavior.
@@ -280,6 +360,8 @@ struct BaseBridgeConfig {
     batch_size: u64,
     /// Number of confirmations required before emitting a batch to the kernel.
     confirmation_depth: u64,
+    /// Governance-approved burn identities that must never enter kernel state.
+    compensated_withdrawals: CompensatedWithdrawalRegistry,
 }
 
 #[allow(dead_code)]
@@ -289,9 +371,120 @@ pub struct BaseBridge {
     config: BaseBridgeConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseContractReadiness {
+    pub inbox_contract_address: Address,
+    pub nock_contract_address: Address,
+    pub owner: Address,
+    pub bridge_nodes: [Address; 5],
+    pub threshold: u64,
+    pub withdrawals_enabled: bool,
+}
+
+fn validate_base_contract_readiness(
+    facts: &BaseContractReadiness,
+    expected_inbox: Address,
+    expected_nock: Address,
+    expected_nodes: &BridgeNodeEthAddressMap,
+    expected_threshold: u64,
+) -> Result<(), BridgeError> {
+    if facts.inbox_contract_address != expected_inbox {
+        return Err(BridgeError::Config(format!(
+            "Nock.inbox mismatch: expected {expected_inbox}, observed {}",
+            facts.inbox_contract_address
+        )));
+    }
+    if facts.nock_contract_address != expected_nock {
+        return Err(BridgeError::Config(format!(
+            "MessageInbox.nock mismatch: expected {expected_nock}, observed {}",
+            facts.nock_contract_address
+        )));
+    }
+    if facts.owner == Address::ZERO {
+        return Err(BridgeError::Config(
+            "MessageInbox owner must not be the zero address".into(),
+        ));
+    }
+    if facts.threshold != expected_threshold {
+        return Err(BridgeError::Config(format!(
+            "MessageInbox threshold mismatch: expected {expected_threshold}, observed {}",
+            facts.threshold
+        )));
+    }
+    if expected_nodes.len() != 5 {
+        return Err(BridgeError::Config(format!(
+            "bridge config must provide exactly 5 Ethereum node addresses, found {}",
+            expected_nodes.len()
+        )));
+    }
+    for (node_id, observed) in facts.bridge_nodes.iter().enumerate() {
+        let expected = expected_nodes.get(&(node_id as u64)).ok_or_else(|| {
+            BridgeError::Config(format!(
+                "bridge config is missing Ethereum address for node {node_id}"
+            ))
+        })?;
+        if observed != expected {
+            return Err(BridgeError::Config(format!(
+                "MessageInbox bridge node {node_id} mismatch: expected {expected}, observed {observed}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_base_chain_id(
+    provider: &DynProvider<Optimism>,
+    expected_chain_id: u64,
+    provider_name: &str,
+) -> Result<u64, BridgeError> {
+    let observed_chain_id = provider.get_chain_id().await.map_err(|error| {
+        BridgeError::BaseBridgeMonitoring(format!(
+            "failed to query Base chain id from {provider_name}: {error}"
+        ))
+    })?;
+    if observed_chain_id != expected_chain_id {
+        return Err(BridgeError::Config(format!(
+            "Base chain id mismatch for {provider_name}: expected {expected_chain_id}, observed {observed_chain_id}"
+        )));
+    }
+    info!(
+        target: "bridge.base.connect",
+        expected_chain_id,
+        observed_chain_id,
+        provider_name,
+        "validated Base chain id"
+    );
+    Ok(observed_chain_id)
+}
+
+pub(crate) async fn query_withdrawals_enabled(
+    provider: &DynProvider<Optimism>,
+    nock_contract_address: Address,
+) -> Result<bool, BridgeError> {
+    let nock = Nock::new(nock_contract_address, provider);
+    let inbox_contract_address = nock.inbox().call().await.map_err(|error| {
+        BridgeError::BaseBridgeMonitoring(format!("failed to read Nock.inbox: {error}"))
+    })?;
+    let inbox = MessageInbox::new(inbox_contract_address, provider);
+    let paired_nock = inbox.nock().call().await.map_err(|error| {
+        BridgeError::BaseBridgeMonitoring(format!("failed to read MessageInbox.nock: {error}"))
+    })?;
+    if paired_nock != nock_contract_address {
+        return Err(BridgeError::Config(format!(
+            "MessageInbox.nock mismatch: expected {nock_contract_address}, observed {paired_nock}"
+        )));
+    }
+    inbox.withdrawalsEnabled().call().await.map_err(|error| {
+        BridgeError::BaseBridgeMonitoring(format!(
+            "failed to read MessageInbox.withdrawalsEnabled: {error}"
+        ))
+    })
+}
+
 impl BaseBridge {
     pub async fn new(
         ws_url: String,
+        expected_chain_id: u64,
         inbox_contract_address: Address,
         nock_contract_address: Address,
         private_key: String,
@@ -299,6 +492,7 @@ impl BaseBridge {
         batch_size: u64,
         confirmation_depth: u64,
         stop: StopHandle,
+        compensated_withdrawals: CompensatedWithdrawalRegistry,
     ) -> Result<Self, BridgeError> {
         let signer = {
             let key = private_key.strip_prefix("0x").unwrap_or(&private_key);
@@ -362,6 +556,7 @@ impl BaseBridge {
                 }
             }
         };
+        validate_base_chain_id(&provider, expected_chain_id, "bridge Base provider").await?;
 
         Ok(Self {
             deps: BaseBridgeDeps {
@@ -377,6 +572,7 @@ impl BaseBridge {
             config: BaseBridgeConfig {
                 batch_size,
                 confirmation_depth,
+                compensated_withdrawals,
             },
         })
     }
@@ -387,6 +583,76 @@ impl BaseBridge {
 
     pub(crate) fn inbox_contract_address(&self) -> Address {
         self.contracts.inbox_contract_address
+    }
+
+    pub async fn validate_contract_readiness(
+        &self,
+        expected_nodes: &BridgeNodeEthAddressMap,
+        expected_threshold: u64,
+    ) -> Result<BaseContractReadiness, BridgeError> {
+        let provider = self.provider();
+        let inbox = MessageInbox::new(self.contracts.inbox_contract_address, &provider);
+        let nock = Nock::new(self.contracts.nock_contract_address, &provider);
+
+        let nock_contract_address = inbox.nock().call().await.map_err(|error| {
+            BridgeError::BaseBridgeMonitoring(format!("failed to read MessageInbox.nock: {error}"))
+        })?;
+        let inbox_contract_address = nock.inbox().call().await.map_err(|error| {
+            BridgeError::BaseBridgeMonitoring(format!("failed to read Nock.inbox: {error}"))
+        })?;
+        let owner = inbox.owner().call().await.map_err(|error| {
+            BridgeError::BaseBridgeMonitoring(format!("failed to read MessageInbox.owner: {error}"))
+        })?;
+        let threshold = inbox.THRESHOLD().call().await.map_err(|error| {
+            BridgeError::BaseBridgeMonitoring(format!(
+                "failed to read MessageInbox.THRESHOLD: {error}"
+            ))
+        })?;
+        let threshold = u64::try_from(threshold).map_err(|error| {
+            BridgeError::ValueConversion(format!(
+                "MessageInbox.THRESHOLD does not fit u64: {error}"
+            ))
+        })?;
+        let withdrawals_enabled = inbox.withdrawalsEnabled().call().await.map_err(|error| {
+            BridgeError::BaseBridgeMonitoring(format!(
+                "failed to read MessageInbox.withdrawalsEnabled: {error}"
+            ))
+        })?;
+        let mut bridge_nodes = [Address::ZERO; 5];
+        for (node_id, node) in bridge_nodes.iter_mut().enumerate() {
+            *node = inbox
+                .bridgeNodes(U256::from(node_id))
+                .call()
+                .await
+                .map_err(|error| {
+                    BridgeError::BaseBridgeMonitoring(format!(
+                        "failed to read MessageInbox.bridgeNodes({node_id}): {error}"
+                    ))
+                })?;
+        }
+
+        let facts = BaseContractReadiness {
+            inbox_contract_address,
+            nock_contract_address,
+            owner,
+            bridge_nodes,
+            threshold,
+            withdrawals_enabled,
+        };
+        validate_base_contract_readiness(
+            &facts, self.contracts.inbox_contract_address, self.contracts.nock_contract_address,
+            expected_nodes, expected_threshold,
+        )?;
+        info!(
+            target: "bridge.base.connect",
+            inbox_contract_address = %facts.inbox_contract_address,
+            nock_contract_address = %facts.nock_contract_address,
+            owner = %facts.owner,
+            threshold = facts.threshold,
+            withdrawals_enabled = facts.withdrawals_enabled,
+            "validated Base bridge contract readiness"
+        );
+        Ok(facts)
     }
 
     pub(crate) fn default_signer_address(&self) -> Address {
@@ -689,14 +955,14 @@ impl BaseBridge {
         let block_info = fetch_base_block_info(&self.deps.provider, batch_start, batch_end).await?;
         let mut blocks = Vec::new();
         for height in batch_start..=batch_end {
-            let (block_hash, parent_hash) = block_info.get(&height).ok_or_else(|| {
+            let header = block_info.get(&height).ok_or_else(|| {
                 BridgeError::BaseBridgeMonitoring(format!("missing block info for {}", height))
             })?;
 
             blocks.push(BaseBlockRef {
                 height,
-                block_id: atom_bytes_from_b256(*block_hash),
-                parent_block_id: atom_bytes_from_b256(*parent_hash),
+                block_id: atom_bytes_from_b256(header.hash),
+                parent_block_id: atom_bytes_from_b256(header.parent_hash),
             });
         }
 
@@ -963,16 +1229,20 @@ impl BaseBridge {
             raw, tx_hash, log_index, self.contracts.nock_contract_address, tx_input,
         ) {
             Ok(decoded) => {
-                if is_explicitly_refunded_withdrawal_burn(
-                    &decoded.base_event_id, tx_hash, log_index,
-                ) {
+                if let Some(compensation) = self
+                    .config
+                    .compensated_withdrawals
+                    .get(&decoded.base_event_id)
+                {
                     info!(
                         target: "bridge.base.observer",
                         tx_hash = %format!("0x{}", hex_encode(tx_hash.as_slice())),
                         log_index = ?log_index,
                         base_event_id = %format!("0x{}", hex_encode(&decoded.base_event_id.0)),
                         amount = %decoded.amount,
-                        "skipping explicitly refunded withdrawal burn"
+                        reason = %compensation.reason,
+                        evidence_reference = %compensation.evidence_reference,
+                        "skipping governance-compensated withdrawal burn"
                     );
                     return Ok(None);
                 }
@@ -1074,7 +1344,14 @@ fn atom_bytes_from_b256(value: B256) -> AtomBytes {
     AtomBytes(value.as_slice().to_vec())
 }
 
-pub(crate) type BaseBlockInfo = HashMap<u64, (B256, B256)>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BaseBlockHeaderInfo {
+    pub hash: B256,
+    pub parent_hash: B256,
+    pub timestamp: u64,
+}
+
+pub(crate) type BaseBlockInfo = HashMap<u64, BaseBlockHeaderInfo>;
 const BASE_HEADER_RPC_BATCH_SIZE: usize = 20;
 
 pub(crate) async fn fetch_base_block_info(
@@ -1119,7 +1396,14 @@ pub(crate) async fn fetch_base_block_info(
                     "Base block header {height} unavailable during batch fetch"
                 ))
             })?;
-            block_info.insert(height, (block.header.hash, block.header.inner.parent_hash));
+            block_info.insert(
+                height,
+                BaseBlockHeaderInfo {
+                    hash: block.header.hash,
+                    parent_hash: block.header.inner.parent_hash,
+                    timestamp: block.header.inner.timestamp,
+                },
+            );
         }
     }
 
@@ -1134,20 +1418,20 @@ pub(crate) fn validate_base_block_parent_chain(
 ) -> Result<(), BridgeError> {
     let mut prev_hash = None;
     for height in batch_start..=batch_end {
-        let (block_hash, parent_hash) = block_info.get(&height).ok_or_else(|| {
+        let header = block_info.get(&height).ok_or_else(|| {
             BridgeError::BaseBridgeMonitoring(format!(
                 "missing Base block header for height {height}"
             ))
         })?;
         if let Some(expected_parent) = prev_hash {
-            if *parent_hash != expected_parent {
+            if header.parent_hash != expected_parent {
                 return Err(BridgeError::BaseBridgeMonitoring(format!(
                     "base reorg detected at height {height} (expected parent {:?}, got {:?})",
-                    expected_parent, parent_hash
+                    expected_parent, header.parent_hash
                 )));
             }
         }
-        prev_hash = Some(*block_hash);
+        prev_hash = Some(header.hash);
     }
     Ok(())
 }
@@ -1162,15 +1446,15 @@ pub(crate) fn validate_base_log_block_hash(
     let log_block_hash = log_block_hash.ok_or_else(|| {
         BridgeError::BaseBridgeMonitoring(format!("log at block {block_number} missing block hash"))
     })?;
-    let (expected_block_hash, _) = block_info.get(&block_number).ok_or_else(|| {
+    let expected_header = block_info.get(&block_number).ok_or_else(|| {
         BridgeError::BaseBridgeMonitoring(format!(
             "log block {block_number} is outside fetched batch {batch_start}..={batch_end}"
         ))
     })?;
-    if log_block_hash != *expected_block_hash {
+    if log_block_hash != expected_header.hash {
         return Err(BridgeError::BaseBridgeMonitoring(format!(
             "log block hash mismatch at height {block_number}: expected {:?}, got {:?}",
-            expected_block_hash, log_block_hash
+            expected_header.hash, log_block_hash
         )));
     }
     Ok(())
@@ -1314,6 +1598,19 @@ pub(crate) fn decode_burn_for_withdrawal_log(
     })
 }
 
+pub(crate) fn decode_burn_for_withdrawal_event(
+    raw: &RawLog,
+) -> Result<BurnForWithdrawalEventFacts, BurnForWithdrawalDecodeError> {
+    let event =
+        Nock::BurnForWithdrawal::decode_raw_log(raw.topics.iter().cloned(), raw.data.as_ref())
+            .map_err(|err| BurnForWithdrawalDecodeError::NotBurnForWithdrawal(err.to_string()))?;
+    Ok(BurnForWithdrawalEventFacts {
+        burner: event.burner,
+        amount_raw: event.amount,
+        commitment: event.lockRoot,
+    })
+}
+
 pub(crate) fn decode_burn_for_withdrawal_log_with_calldata(
     raw: &RawLog,
     tx_hash: &B256,
@@ -1321,30 +1618,28 @@ pub(crate) fn decode_burn_for_withdrawal_log_with_calldata(
     nock_contract_address: Address,
     tx_input: &[u8],
 ) -> Result<DecodedBurnForWithdrawalLog, BurnForWithdrawalDecodeError> {
-    let event =
-        Nock::BurnForWithdrawal::decode_raw_log(raw.topics.iter().cloned(), raw.data.as_ref())
-            .map_err(|err| BurnForWithdrawalDecodeError::NotBurnForWithdrawal(err.to_string()))?;
+    let event = decode_burn_for_withdrawal_event(raw)?;
     let (calldata_amount_raw, calldata_commitment, lock_root) =
         parse_withdrawal_burn_calldata(tx_input)?;
-    let amount_raw: U256 = event.amount;
+    let amount_raw = event.amount_raw;
     if calldata_amount_raw != amount_raw {
         return Err(BurnForWithdrawalDecodeError::CalldataAmountMismatch {
             event_amount_raw: amount_raw,
             calldata_amount_raw,
         });
     }
-    if calldata_commitment != event.lockRoot {
+    if calldata_commitment != event.commitment {
         return Err(BurnForWithdrawalDecodeError::CalldataCommitmentMismatch {
-            event_commitment: event.lockRoot,
+            event_commitment: event.commitment,
             calldata_commitment,
         });
     }
     let expected =
         withdrawal_burn_commitment(nock_contract_address, event.burner, amount_raw, &lock_root);
-    if expected != event.lockRoot {
+    if expected != event.commitment {
         return Err(BurnForWithdrawalDecodeError::CommitmentMismatch {
             expected,
-            actual: event.lockRoot,
+            actual: event.commitment,
         });
     }
 
@@ -1380,6 +1675,31 @@ mod tests {
     const REFUNDED_WITHDRAWAL_BURN_BASE_RPC_URL_ENV: &str =
         "BRIDGE_REFUNDED_WITHDRAWAL_BASE_RPC_URL";
     const BASE_RPC_URL_ENV: &str = "BASE_RPC_URL";
+    const REFUNDED_WITHDRAWAL_BURN_TX_HASH: [u8; 32] = [
+        0xfa, 0x0b, 0x8e, 0x41, 0x34, 0xa3, 0x87, 0x44, 0x0a, 0x99, 0x54, 0x41, 0x14, 0x57, 0x83,
+        0x97, 0xd5, 0x25, 0x42, 0xce, 0xa3, 0x06, 0xd6, 0xb9, 0xad, 0xea, 0x80, 0x14, 0x07, 0xe3,
+        0x12, 0x3f,
+    ];
+    const REFUNDED_WITHDRAWAL_BURN_LOG_INDEX: u64 = 243;
+    const REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID: [u8; 32] = [
+        0x45, 0xcf, 0xbf, 0x83, 0x1f, 0x2a, 0xbf, 0x37, 0x71, 0x64, 0xf8, 0x57, 0xa2, 0xbc, 0x47,
+        0x33, 0x8f, 0xca, 0xa8, 0xf4, 0xf1, 0x2a, 0x59, 0x86, 0xa3, 0xba, 0x9b, 0xef, 0x35, 0xaf,
+        0xea, 0xbd,
+    ];
+
+    fn known_compensation_registry() -> CompensatedWithdrawalRegistry {
+        CompensatedWithdrawalRegistry::from_config(&[
+            crate::shared::config::CompensatedWithdrawalToml {
+                base_event_id: format!("0x{}", hex_encode(REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID)),
+                transaction_hash: format!("0x{}", hex_encode(REFUNDED_WITHDRAWAL_BURN_TX_HASH)),
+                log_index: REFUNDED_WITHDRAWAL_BURN_LOG_INDEX,
+                reason: "legacy operator refund".to_string(),
+                evidence_reference: "incident:legacy-refund".to_string(),
+                recorded_at_unix_secs: 0,
+            },
+        ])
+        .expect("known compensation registry")
+    }
 
     const WITHDRAWAL_WIRE_V1_VECTORS_JSON: &str =
         include_str!("../../test-fixtures/withdrawal_wire_v1_vectors.json");
@@ -1847,11 +2167,157 @@ mod tests {
         Ok(())
     }
 
+    fn sample_contract_readiness() -> (BaseContractReadiness, BridgeNodeEthAddressMap) {
+        let bridge_nodes = [
+            address_from_u64(10),
+            address_from_u64(11),
+            address_from_u64(12),
+            address_from_u64(13),
+            address_from_u64(14),
+        ];
+        let expected_nodes = bridge_nodes
+            .iter()
+            .enumerate()
+            .map(|(node_id, address)| (node_id as u64, *address))
+            .collect();
+        (
+            BaseContractReadiness {
+                inbox_contract_address: address_from_u64(1),
+                nock_contract_address: address_from_u64(2),
+                owner: address_from_u64(3),
+                bridge_nodes,
+                threshold: 3,
+                withdrawals_enabled: false,
+            },
+            expected_nodes,
+        )
+    }
+
+    #[test]
+    fn validate_base_contract_readiness_accepts_matching_facts() {
+        let (facts, expected_nodes) = sample_contract_readiness();
+        validate_base_contract_readiness(
+            &facts,
+            address_from_u64(1),
+            address_from_u64(2),
+            &expected_nodes,
+            3,
+        )
+        .expect("matching contract facts");
+    }
+
+    #[test]
+    fn validate_base_contract_readiness_rejects_each_mismatch() {
+        let (facts, expected_nodes) = sample_contract_readiness();
+
+        let mut mismatch = facts.clone();
+        mismatch.inbox_contract_address = address_from_u64(99);
+        assert!(validate_base_contract_readiness(
+            &mismatch,
+            address_from_u64(1),
+            address_from_u64(2),
+            &expected_nodes,
+            3,
+        )
+        .expect_err("inbox mismatch")
+        .to_string()
+        .contains("Nock.inbox mismatch"));
+
+        let mut mismatch = facts.clone();
+        mismatch.nock_contract_address = address_from_u64(99);
+        assert!(validate_base_contract_readiness(
+            &mismatch,
+            address_from_u64(1),
+            address_from_u64(2),
+            &expected_nodes,
+            3,
+        )
+        .expect_err("nock mismatch")
+        .to_string()
+        .contains("MessageInbox.nock mismatch"));
+
+        let mut mismatch = facts.clone();
+        mismatch.owner = Address::ZERO;
+        assert!(validate_base_contract_readiness(
+            &mismatch,
+            address_from_u64(1),
+            address_from_u64(2),
+            &expected_nodes,
+            3,
+        )
+        .expect_err("zero owner")
+        .to_string()
+        .contains("owner must not be the zero address"));
+
+        let mut mismatch = facts.clone();
+        mismatch.threshold = 2;
+        assert!(validate_base_contract_readiness(
+            &mismatch,
+            address_from_u64(1),
+            address_from_u64(2),
+            &expected_nodes,
+            3,
+        )
+        .expect_err("threshold mismatch")
+        .to_string()
+        .contains("threshold mismatch"));
+
+        let mut mismatch = facts;
+        mismatch.bridge_nodes[2] = address_from_u64(99);
+        assert!(validate_base_contract_readiness(
+            &mismatch,
+            address_from_u64(1),
+            address_from_u64(2),
+            &expected_nodes,
+            3,
+        )
+        .expect_err("node mismatch")
+        .to_string()
+        .contains("bridge node 2 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn validate_base_chain_id_accepts_matching_provider() {
+        let asserter = alloy::transports::mock::Asserter::new();
+        asserter.push_success(&8_453u64);
+        let provider = ProviderBuilder::<_, _, Optimism>::default()
+            .connect_mocked_client(asserter)
+            .erased();
+
+        assert_eq!(
+            validate_base_chain_id(&provider, 8_453, "mock://base")
+                .await
+                .expect("matching chain id"),
+            8_453
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_base_chain_id_rejects_mismatched_provider() {
+        let asserter = alloy::transports::mock::Asserter::new();
+        asserter.push_success(&84_532u64);
+        let provider = ProviderBuilder::<_, _, Optimism>::default()
+            .connect_mocked_client(asserter)
+            .erased();
+
+        let error = validate_base_chain_id(&provider, 8_453, "mock://base")
+            .await
+            .expect_err("mismatched chain id must fail");
+        assert!(error.to_string().contains("expected 8453, observed 84532"));
+    }
+
     #[test]
     fn validate_base_log_block_hash_accepts_matching_header() {
         let mut block_info = HashMap::new();
         let block_hash = b256_from_u64(0xabc);
-        block_info.insert(42, (block_hash, b256_from_u64(0xdef)));
+        block_info.insert(
+            42,
+            BaseBlockHeaderInfo {
+                hash: block_hash,
+                parent_hash: b256_from_u64(0xdef),
+                timestamp: 1_700_000_000,
+            },
+        );
 
         validate_base_log_block_hash(&block_info, 40, 50, 42, Some(block_hash))
             .expect("matching log block hash should be accepted");
@@ -1860,7 +2326,14 @@ mod tests {
     #[test]
     fn validate_base_log_block_hash_rejects_missing_hash() {
         let mut block_info = HashMap::new();
-        block_info.insert(42, (b256_from_u64(0xabc), b256_from_u64(0xdef)));
+        block_info.insert(
+            42,
+            BaseBlockHeaderInfo {
+                hash: b256_from_u64(0xabc),
+                parent_hash: b256_from_u64(0xdef),
+                timestamp: 1_700_000_000,
+            },
+        );
 
         let err = validate_base_log_block_hash(&block_info, 40, 50, 42, None)
             .expect_err("missing log block hash should fail closed");
@@ -1873,7 +2346,14 @@ mod tests {
     #[test]
     fn validate_base_log_block_hash_rejects_mismatched_header() {
         let mut block_info = HashMap::new();
-        block_info.insert(42, (b256_from_u64(0xabc), b256_from_u64(0xdef)));
+        block_info.insert(
+            42,
+            BaseBlockHeaderInfo {
+                hash: b256_from_u64(0xabc),
+                parent_hash: b256_from_u64(0xdef),
+                timestamp: 1_700_000_000,
+            },
+        );
 
         let err = validate_base_log_block_hash(&block_info, 40, 50, 42, Some(b256_from_u64(0x123)))
             .expect_err("mismatched log block hash should fail closed");
@@ -2030,12 +2510,10 @@ mod tests {
         let id = compute_base_event_id(&tx_hash, Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX));
 
         assert_eq!(id.0, REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID);
-        assert!(is_explicitly_refunded_withdrawal_base_event_id(&id));
-        assert!(is_explicitly_refunded_withdrawal_burn(
-            &id,
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
+        let registry = known_compensation_registry();
+        let compensation = registry.get(&id).expect("known compensation");
+        assert_eq!(compensation.transaction_hash, tx_hash);
+        assert_eq!(compensation.log_index, REFUNDED_WITHDRAWAL_BURN_LOG_INDEX);
     }
 
     #[test]
@@ -2148,47 +2626,29 @@ mod tests {
             decoded.base_event_id.0,
             REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID
         );
-        assert!(is_explicitly_refunded_withdrawal_burn(
-            &decoded.base_event_id,
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
+        assert!(known_compensation_registry()
+            .get(&decoded.base_event_id)
+            .is_some());
 
         Ok(())
     }
 
     #[test]
-    fn refunded_withdrawal_burn_skip_requires_exact_identity() {
-        let tx_hash = B256::from(REFUNDED_WITHDRAWAL_BURN_TX_HASH);
-        let base_event_id = BaseEventId(REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID.to_vec());
-
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &base_event_id,
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX - 1),
-        ));
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &base_event_id, &tx_hash, None,
-        ));
-
-        let mut other_tx_hash = REFUNDED_WITHDRAWAL_BURN_TX_HASH;
-        other_tx_hash[31] ^= 1;
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &base_event_id,
-            &B256::from(other_tx_hash),
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
-
-        let mut other_base_event_id = REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID.to_vec();
-        other_base_event_id[31] ^= 1;
-        assert!(!is_explicitly_refunded_withdrawal_base_event_id(
-            &BaseEventId(other_base_event_id.clone()),
-        ));
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &BaseEventId(other_base_event_id),
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
+    fn compensated_withdrawal_registry_rejects_mismatched_coordinate() {
+        let error = CompensatedWithdrawalRegistry::from_config(&[
+            crate::shared::config::CompensatedWithdrawalToml {
+                base_event_id: format!("0x{}", hex_encode(REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID)),
+                transaction_hash: format!("0x{}", hex_encode(REFUNDED_WITHDRAWAL_BURN_TX_HASH)),
+                log_index: REFUNDED_WITHDRAWAL_BURN_LOG_INDEX - 1,
+                reason: "legacy operator refund".to_string(),
+                evidence_reference: "incident:legacy-refund".to_string(),
+                recorded_at_unix_secs: 0,
+            },
+        ])
+        .expect_err("mismatched compensation identity must fail");
+        assert!(error
+            .to_string()
+            .contains("does not match transaction hash and log index"));
     }
 
     const TEST_BATCH_SIZE: u64 = 1000;

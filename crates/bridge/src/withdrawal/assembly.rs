@@ -1576,16 +1576,16 @@ fn is_fatal_withdrawal_signing_error(err: &BridgeError) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PlannedWithdrawalBuild {
-    selected_inputs: Vec<nockchain_types::v1::Name>,
+pub(crate) struct PlannedWithdrawalBuild {
+    pub(crate) selected_inputs: Vec<nockchain_types::v1::Name>,
     selected_notes: Vec<SelectedWithdrawalNoteData>,
-    net_amount: u64,
-    burned_amount: u64,
-    fee: u64,
+    pub(crate) net_amount: u64,
+    pub(crate) burned_amount: u64,
+    pub(crate) fee: u64,
 }
 
 #[derive(Debug)]
-enum WithdrawalBuildPlanningError {
+pub(crate) enum WithdrawalBuildPlanningError {
     InsufficientFunds { selected_total: u64, required: u64 },
     Bridge(BridgeError),
 }
@@ -1710,7 +1710,7 @@ async fn next_stageable_withdrawal_request<K: WithdrawalKernelPort>(
 
 /// Computes the note-selection and fee plan for one withdrawal build using the
 /// latest confirmed bridge-owned note snapshot.
-fn plan_withdrawal_build(
+pub(crate) fn plan_withdrawal_build(
     request: &TrackedWithdrawalRequest,
     snapshot: &wallet_tx_builder::adapter::NormalizedSnapshot,
     planner: &WithdrawalAssemblyPlannerConfig,

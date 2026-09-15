@@ -894,6 +894,7 @@ struct VnetManifest {
     vnet_id: Option<String>,
     base_rpc_url: String,
     base_ws_url: String,
+    base_chain_id: u64,
     base_start_height: u64,
     inbox_contract_address: String,
     nock_contract_address: String,
@@ -2707,6 +2708,10 @@ fn build_manifest(
             vnet_id: env.optional("TENDERLY_VNET_ID"),
             base_rpc_url: env.require("BASE_RPC_URL")?,
             base_ws_url: env.require("BASE_WS_URL")?,
+            base_chain_id: env
+                .require("BASE_CHAIN_ID")?
+                .parse::<u64>()
+                .context("invalid BASE_CHAIN_ID")?,
             base_start_height: env
                 .require("BASE_START_HEIGHT")?
                 .parse::<u64>()
@@ -2851,6 +2856,7 @@ fn write_bridge_configs(
         let config = BridgeConfigToml {
             node_id: node_id as u64,
             base_ws_url: vnet.base_ws_url.clone(),
+            base_chain_id: Some(vnet.base_chain_id),
             bridge_lock_root: bridge_lock_root.clone(),
             inbox_contract_address: Some(vnet.inbox_contract_address.clone()),
             nock_contract_address: Some(vnet.nock_contract_address.clone()),
@@ -2861,6 +2867,7 @@ fn write_bridge_configs(
             base_confirmation_depth: profile.cluster.base_confirmation_depth,
             nockchain_confirmation_depth: profile.cluster.nockchain_confirmation_depth,
             withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
+            compensated_withdrawals: Vec::new(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
@@ -2883,8 +2890,11 @@ fn write_bridge_configs(
     }
     let sequencer_config = SequencerConfigToml {
         nock_contract_address: vnet.nock_contract_address.clone(),
+        base_chain_id: Some(vnet.base_chain_id),
         nockchain_confirmation_depth: profile.cluster.nockchain_confirmation_depth,
         withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
+        compensated_withdrawals: Vec::new(),
+        public_withdrawal_admission_enabled: true,
         manual_submit_approval: bridge_dev_manual_submit_approval()?,
         manual_submit_approval_dir: None,
         nodes: (0..5usize)
@@ -4139,11 +4149,23 @@ fn parse_fixed_hex<const N: usize>(raw: &str, label: &str) -> Result<[u8; N]> {
 fn run_preflight_checks(profile: &ResolvedProfile, env: &GeneratedEnv) -> Result<()> {
     let mut errors = Vec::new();
     for key in [
-        "BASE_RPC_URL", "BASE_WS_URL", "BASE_START_HEIGHT", "INBOX_CONTRACT_ADDRESS",
-        "NOCK_CONTRACT_ADDRESS",
+        "BASE_CHAIN_ID", "BASE_RPC_URL", "BASE_WS_URL", "BASE_START_HEIGHT",
+        "INBOX_CONTRACT_ADDRESS", "NOCK_CONTRACT_ADDRESS",
     ] {
         if let Err(err) = env.require(key) {
             errors.push(err.to_string());
+        }
+    }
+    if let Some(raw_chain_id) = env.optional("BASE_CHAIN_ID") {
+        if raw_chain_id
+            .parse::<u64>()
+            .ok()
+            .filter(|chain_id| *chain_id > 0)
+            .is_none()
+        {
+            errors.push(format!(
+                "invalid positive BASE_CHAIN_ID in generated env: {raw_chain_id}"
+            ));
         }
     }
     if let Some(raw_height) = env.optional("BASE_START_HEIGHT") {
@@ -4376,6 +4398,7 @@ mod tests {
         let config = BridgeConfigToml {
             node_id: 0,
             base_ws_url: "ws://example".to_string(),
+            base_chain_id: Some(84_532),
             bridge_lock_root: "lock-root".to_string(),
             inbox_contract_address: None,
             nock_contract_address: None,
@@ -4386,6 +4409,7 @@ mod tests {
             base_confirmation_depth: 0,
             nockchain_confirmation_depth: 0,
             withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
+            compensated_withdrawals: Vec::new(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
@@ -4407,6 +4431,7 @@ mod tests {
         let config = BridgeConfigToml {
             node_id: 0,
             base_ws_url: "ws://example".to_string(),
+            base_chain_id: Some(84_532),
             bridge_lock_root: "lock-root".to_string(),
             inbox_contract_address: None,
             nock_contract_address: None,
@@ -4417,6 +4442,7 @@ mod tests {
             base_confirmation_depth: 0,
             nockchain_confirmation_depth: 0,
             withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
+            compensated_withdrawals: Vec::new(),
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,

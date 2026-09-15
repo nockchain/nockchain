@@ -11,7 +11,6 @@ use tonic_reflection::server::Builder as ReflectionBuilder;
 
 use crate::core::loop_policy::RetryPolicy;
 use crate::observability::metrics;
-use crate::shared::base::is_explicitly_refunded_withdrawal_base_event_id;
 use crate::shared::errors::BridgeError;
 use crate::shared::ingress::proto::withdrawal_sequencer_server::{
     WithdrawalSequencer, WithdrawalSequencerServer,
@@ -76,6 +75,8 @@ struct BoundedSubmitOutcome {
     last_submit_error: Option<String>,
 }
 
+/// Matches by Base identity and canonical request facts so bridge registration
+/// is idempotent with zero-as_of pending rows recovered directly from Base.
 fn registered_withdrawal_matches_tracked(
     existing: &LiveWithdrawalView,
     tracked: &TrackedWithdrawalRequest,
@@ -799,9 +800,16 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
             .increment();
         let inner = request.into_inner();
         let base_event_id = base_event_id_from_proto(&inner.base_event_id, "registration")?;
-        if is_explicitly_refunded_withdrawal_base_event_id(&base_event_id) {
+        if self
+            .withdrawal_state_store
+            .is_compensated_withdrawal(&base_event_id)
+            .await
+            .map_err(|err| {
+                Status::internal(format!("compensated withdrawal lookup failed: {err}"))
+            })?
+        {
             let base_event_id_hex = sequencer_base_event_id_hex(&base_event_id);
-            let err = BaseWithdrawalRejection::ExplicitlyRefunded {
+            let err = BaseWithdrawalRejection::Compensated {
                 base_event_id_hex: base_event_id_hex.clone(),
             };
             metrics::init_metrics()
@@ -812,7 +820,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
                 withdrawal_nonce = inner.withdrawal_nonce,
                 base_batch_end = inner.base_batch_end,
                 base_event_id = %base_event_id_hex,
-                "ignored explicitly refunded withdrawal registration"
+                "rejected compensated withdrawal registration"
             );
             return Ok(Response::new(SequencerUpdateResponse {
                 request_accepted: false,
@@ -848,6 +856,7 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
                 metrics
                     .sequencer_withdrawal_registration_idempotent
                     .increment();
+
                 return Ok(Response::new(SequencerUpdateResponse {
                     request_accepted: true,
                     error: String::new(),
@@ -1547,7 +1556,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use alloy::primitives::Address;
+    use alloy::primitives::{Address, B256};
     use nockapp::noun::slab::{NockJammer, NounSlab};
     use nockchain_math::belt::Belt;
     use nockchain_types::tx_engine::common::Hash as Tip5Hash;
@@ -2164,18 +2173,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequencer_rpc_service_ignores_explicitly_refunded_withdrawal_registration() {
+    async fn sequencer_rpc_service_rejects_durably_compensated_registration() {
         let (rpc, withdrawal_state_store, _base_height_tracker, _submitter, _dir) =
             open_rpc_service().await;
         let verifier = Arc::new(ScriptedBaseWithdrawalVerifier::accepting());
         let rpc = rpc.with_base_withdrawal_verifier(verifier.clone());
+        let compensated_id = refunded_withdrawal_base_event_id();
+        withdrawal_state_store
+            .base_activity_store()
+            .incident_store()
+            .record_compensated_withdrawals(vec![
+                crate::withdrawal::sequencer::base_incidents::CompensatedBaseWithdrawal {
+                    chain_id: 8_453,
+                    nock_contract_address: Address::ZERO,
+                    base_event_id: compensated_id.clone(),
+                    tx_hash: B256::from_slice(
+                        &hex::decode(
+                            "fa0b8e4134a387440a99544114578397d52542cea306d6b9adea801407e3123f",
+                        )
+                        .expect("compensated tx hash"),
+                    ),
+                    log_index: 243,
+                    reason: "legacy operator refund".to_string(),
+                    evidence_reference: "incident:legacy-refund".to_string(),
+                    recorded_at: 0,
+                },
+            ])
+            .await
+            .expect("record compensated withdrawal");
         let mut proposal = sample_proposal(0);
-        proposal.id.base_event_id = refunded_withdrawal_base_event_id();
+        proposal.id.base_event_id = compensated_id;
 
         let response = register_withdrawal_request(&rpc, &proposal, 1).await;
 
         assert!(!response.request_accepted);
-        assert!(response.error.contains("explicitly refunded"));
+        assert!(response.error.contains("was compensated"));
         assert!(response
             .error
             .contains("45cfbf831f2abf377164f857a2bc47338fcaa8f4f12a5986a3ba9bef35afeabd"));

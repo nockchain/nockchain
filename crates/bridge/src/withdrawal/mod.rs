@@ -1,6 +1,7 @@
 pub mod assembly;
 pub mod ingress;
 pub mod proposals;
+pub mod quote;
 pub mod raw_tx;
 pub mod runtime;
 pub mod schema;
