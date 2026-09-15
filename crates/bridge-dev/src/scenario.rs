@@ -7,9 +7,14 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use anyhow::{anyhow, bail, Context, Result};
+use async_trait::async_trait;
 use bridge::shared::types::WithdrawalPolicy;
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
+use crate::actions::{
+    ActionComponent, ActionSutResult, LifecycleObservation, WithdrawalActionIntent,
+    WithdrawalActionSpec, WithdrawalActionSut,
+};
 use crate::artifacts::{ArtifactResolveOptions, ArtifactResolver};
 
 pub const E2E_ENABLE_ENV: &str = "BRIDGE_DEV_RUN_E2E";
@@ -170,7 +175,7 @@ impl ObservedDepositPhase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ObservedWithdrawal {
     pub phase: String,
     pub id: String,
@@ -1110,6 +1115,103 @@ impl ScenarioHarness {
         }
         self.up_child = None;
     }
+}
+
+#[async_trait]
+impl WithdrawalActionSut for ScenarioHarness {
+    async fn execute_action(
+        &mut self,
+        action: &WithdrawalActionSpec,
+    ) -> std::result::Result<ActionSutResult, String> {
+        let result = match &action.intent {
+            WithdrawalActionIntent::Provision { reset } => if !reset {
+                Err(anyhow!("scenario provision requires reset=true"))
+            } else if self
+                .run_root
+                .join("virtual-testnet.generated.env")
+                .is_file()
+            {
+                self.spawn_local_cluster()
+            } else {
+                self.spawn_fresh_cluster()
+            }
+            .map(|_| serde_json::json!({"provisioned": true})),
+            WithdrawalActionIntent::Stop { component } => action_process_target(component)
+                .and_then(|target| self.stop_targets(&[target]))
+                .map(|status| serde_json::json!({"status": status})),
+            WithdrawalActionIntent::Start { component } => action_process_target(component)
+                .and_then(|target| self.start_targets(&[target]))
+                .map(|status| serde_json::json!({"status": status})),
+            WithdrawalActionIntent::Restart { component } => action_process_target(component)
+                .and_then(|target| {
+                    self.restart_targets(&[target], Duration::from_millis(action.timeout_ms))
+                })
+                .map(|status| serde_json::json!({"status": status})),
+            WithdrawalActionIntent::MineBase { blocks } => self
+                .run_checked(&["advance-base", "--blocks", &blocks.to_string()])
+                .map(|output| serde_json::json!({"output": output})),
+            WithdrawalActionIntent::WaitLifecycle { phase } => {
+                observe_action_lifecycle(self, *phase, action.timeout_ms, false)
+            }
+            WithdrawalActionIntent::ObserveLifecycle { phase } => {
+                observe_action_lifecycle(self, *phase, action.timeout_ms, true)
+            }
+            WithdrawalActionIntent::QueryFacts
+            | WithdrawalActionIntent::AssertModelInvariant { .. }
+            | WithdrawalActionIntent::ModelTransition { .. } => self
+                .run_checked(&["status", "--bridges", "--sequencer"])
+                .map(|status| serde_json::json!({"status": status})),
+            WithdrawalActionIntent::AssertTerminal => self
+                .run_checked(&["status", "--bridges", "--sequencer"])
+                .and_then(|status| {
+                    assert_sequencer_idle(&status)?;
+                    assert_queue_drained(&status)?;
+                    Ok(serde_json::json!({"status": status}))
+                }),
+            unsupported => Err(anyhow!(
+                "scenario backend does not support action intent {:?}", unsupported
+            )),
+        };
+        result
+            .map(|detail| ActionSutResult {
+                status: "passed".to_owned(),
+                detail: Some(detail),
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn action_process_target(component: &ActionComponent) -> Result<ProcessTarget> {
+    match component {
+        ActionComponent::Bridge { node_id } => usize::try_from(*node_id)
+            .map(ProcessTarget::Bridge)
+            .context("bridge node id does not fit usize"),
+        ActionComponent::Sequencer | ActionComponent::NockchainNode => Ok(ProcessTarget::Node),
+    }
+}
+
+fn observe_action_lifecycle(
+    scenario: &mut ScenarioHarness,
+    phase: LifecycleObservation,
+    timeout_ms: u64,
+    once: bool,
+) -> Result<serde_json::Value> {
+    let (label, flag) = match phase {
+        LifecycleObservation::Pending => ("Pending", "--pending"),
+        LifecycleObservation::Ready => ("Ready", "--ready"),
+        LifecycleObservation::Submitted => ("Submitted", "--submitted"),
+        LifecycleObservation::SequencerConfirmed => ("Executed", "--executed"),
+        LifecycleObservation::Terminal => {
+            bail!("Terminal lifecycle observation requires the multi-source terminal oracle")
+        }
+    };
+    let timeout_secs = timeout_ms.div_ceil(1_000).max(1);
+    let observed = if once {
+        scenario.wait_for_withdrawal_phase_once(label, flag, timeout_secs, None)?
+    } else {
+        scenario.wait_for_withdrawal_phase(label, flag, timeout_secs)?
+    };
+    serde_json::to_value(observed).context("serialize observed withdrawal")
 }
 
 impl Drop for ScenarioHarness {
