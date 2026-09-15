@@ -56,6 +56,19 @@ fn tip_covers_next_confirmed_height(
     }
 }
 
+fn tip_change_invalidates_prefetch(
+    previous: Option<&NockTipInfo>,
+    refreshed: Option<&NockTipInfo>,
+) -> bool {
+    match (previous, refreshed) {
+        (Some(previous), Some(refreshed)) => {
+            previous.tip_hash != refreshed.tip_hash || refreshed.height < previous.height
+        }
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 fn confirmed_height(chain_tip: u64, confirmation_depth: u64) -> Option<u64> {
     let target = if confirmation_depth == 0 {
@@ -835,9 +848,10 @@ impl NockchainWatcher {
                 next_needed_height,
                 self.config.confirmation_depth,
             );
-            let tip_refresh_due = tip_refreshed_at
-                .map(|refreshed_at| refreshed_at.elapsed() >= NOCK_TIP_REFRESH_INTERVAL)
-                .unwrap_or(true);
+            let tip_refresh_due = prefetched_blocks.is_empty()
+                || tip_refreshed_at
+                    .map(|refreshed_at| refreshed_at.elapsed() >= NOCK_TIP_REFRESH_INTERVAL)
+                    .unwrap_or(true);
             if !cached_tip_covers_next || tip_refresh_due {
                 let refreshed_tip = match source.tip_info().await {
                     Ok(info) => info,
@@ -859,6 +873,18 @@ impl NockchainWatcher {
                         continue;
                     }
                 };
+                if tip_change_invalidates_prefetch(cached_tip_info.as_ref(), refreshed_tip.as_ref())
+                {
+                    debug!(
+                        target: "bridge.nock-watcher",
+                        previous_height = cached_tip_info.as_ref().map(|tip| tip.height),
+                        previous_hash = cached_tip_info.as_ref().map(|tip| tip.tip_hash.as_str()),
+                        refreshed_height = refreshed_tip.as_ref().map(|tip| tip.height),
+                        refreshed_hash = refreshed_tip.as_ref().map(|tip| tip.tip_hash.as_str()),
+                        "nock tip changed; discarding prefetched blocks"
+                    );
+                    prefetched_blocks.clear();
+                }
                 cached_tip_info = refreshed_tip;
                 tip_refreshed_at = Some(Instant::now());
                 if let Some(info) = &cached_tip_info {
@@ -1489,6 +1515,41 @@ mod tests {
             400
         ));
         assert!(!tip_covers_next_confirmed_height(Some(&tip), None, 400));
+    }
+
+    #[test]
+    fn tip_change_invalidates_prefetched_blocks() {
+        let previous = NockTipInfo {
+            height: 1_000,
+            tip_hash: "old-tip".to_string(),
+        };
+        let same = NockTipInfo {
+            height: 1_000,
+            tip_hash: "old-tip".to_string(),
+        };
+        let extension = NockTipInfo {
+            height: 1_001,
+            tip_hash: "new-tip".to_string(),
+        };
+        let lower_same_hash = NockTipInfo {
+            height: 999,
+            tip_hash: "old-tip".to_string(),
+        };
+
+        assert!(!tip_change_invalidates_prefetch(
+            Some(&previous),
+            Some(&same)
+        ));
+        assert!(tip_change_invalidates_prefetch(
+            Some(&previous),
+            Some(&extension)
+        ));
+        assert!(tip_change_invalidates_prefetch(
+            Some(&previous),
+            Some(&lower_same_hash)
+        ));
+        assert!(tip_change_invalidates_prefetch(Some(&previous), None));
+        assert!(!tip_change_invalidates_prefetch(None, Some(&extension)));
     }
 
     #[test]
