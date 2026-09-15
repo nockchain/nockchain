@@ -12,6 +12,14 @@ use tokio::sync::watch;
 use tokio::time::{sleep, timeout, timeout_at, Instant};
 
 use crate::artifacts::{ArtifactOverrides, ArtifactResolveOptions, ArtifactResolver, E2eArtifacts};
+use crate::evidence::{
+    EvidenceCollector, EvidenceEnvironmentFacts, EvidenceEnvironmentMode, EvidenceRunFacts,
+    EvidenceRunStatus, RedactionDeclaration, WithdrawalEvidenceCapsuleV1,
+};
+use crate::iris_artifact::IrisArtifactInput;
+use crate::iris_driver::BurnSubmissionProof;
+use crate::redaction::SecretRedactor;
+use crate::settlement_oracle::{SettlementConservationProof, TerminalWithdrawalProof};
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -58,6 +66,8 @@ pub struct E2eRunConfig {
     pub keep_artifacts: bool,
     pub timeout: Duration,
     pub base: E2eBaseMode,
+    pub archive_rpc_url: Option<String>,
+    pub iris_artifact: Option<IrisArtifactInput>,
     pub client: E2eClientMode,
     pub seed: u64,
 }
@@ -68,6 +78,8 @@ pub struct E2eRunContext {
     pub run_dir: PathBuf,
     pub artifacts: E2eArtifacts,
     pub base: E2eBaseMode,
+    pub archive_rpc_url: Option<String>,
+    pub iris_artifact: Option<IrisArtifactInput>,
     pub client: E2eClientMode,
     pub seed: u64,
 }
@@ -76,6 +88,195 @@ pub struct E2eRunContext {
 pub struct ScenarioExecution {
     pub steps_executed: u64,
     pub facts: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreWithdrawalPhase {
+    Pending,
+    Ready,
+    Submitted,
+    SequencerConfirmed,
+    Terminal,
+}
+
+impl CoreWithdrawalPhase {
+    const ORDER: [Self; 5] = [
+        Self::Pending,
+        Self::Ready,
+        Self::Submitted,
+        Self::SequencerConfirmed,
+        Self::Terminal,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreWithdrawalEvidence {
+    pub burn: BurnSubmissionProof,
+    pub terminal: TerminalWithdrawalProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedCoreWithdrawalFacts {
+    pub client_mode: String,
+    pub iris_git_revision: String,
+    pub iris_tarball_sha256: String,
+    pub calldata_hex: String,
+    pub amount_base_units: String,
+    pub amount_nicks: String,
+    pub commitment: String,
+    pub recipient_lock_root: String,
+    pub withdrawal_id: String,
+    pub nock_transaction_id: String,
+    pub nock_inclusion_height: u64,
+    pub nock_inclusion_block_id: String,
+    pub settlement: SettlementConservationProof,
+}
+
+#[derive(Debug, Default)]
+pub struct CoreWithdrawalProgress {
+    phases: Vec<CoreWithdrawalPhase>,
+}
+
+impl CoreWithdrawalProgress {
+    pub fn record(&mut self, phase: CoreWithdrawalPhase) -> Result<(), CoreWithdrawalError> {
+        let expected = CoreWithdrawalPhase::ORDER
+            .get(self.phases.len())
+            .copied()
+            .ok_or(CoreWithdrawalError::PhaseAfterTerminal)?;
+        if phase != expected {
+            return Err(CoreWithdrawalError::UnexpectedPhase {
+                expected,
+                observed: phase,
+            });
+        }
+        self.phases.push(phase);
+        Ok(())
+    }
+
+    pub fn finish(
+        self,
+        evidence: CoreWithdrawalEvidence,
+    ) -> Result<ScenarioExecution, CoreWithdrawalError> {
+        if self.phases != CoreWithdrawalPhase::ORDER {
+            return Err(CoreWithdrawalError::IncompletePhases(self.phases));
+        }
+        validate_core_evidence(&evidence)?;
+        Ok(ScenarioExecution {
+            steps_executed: CoreWithdrawalPhase::ORDER.len() as u64,
+            facts: serde_json::to_value(evidence)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreWithdrawalPrerequisites {
+    pub anvil: bool,
+    pub bridge_artifacts: bool,
+    pub iris_artifact: bool,
+}
+
+impl CoreWithdrawalPrerequisites {
+    pub fn require(self) -> Result<(), CoreWithdrawalError> {
+        let missing = [
+            (!self.anvil).then_some("Anvil"),
+            (!self.bridge_artifacts).then_some("bridge artifacts"),
+            (!self.iris_artifact).then_some("Iris artifact"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(CoreWithdrawalError::MissingPrerequisites(missing))
+        }
+    }
+}
+
+pub fn ordinary_burn_calldata(
+    full_withdrawal_calldata: &[u8],
+) -> Result<Vec<u8>, CoreWithdrawalError> {
+    if full_withdrawal_calldata.len() != 116 {
+        return Err(CoreWithdrawalError::InvalidFullCalldataLength(
+            full_withdrawal_calldata.len(),
+        ));
+    }
+    Ok(full_withdrawal_calldata[..68].to_vec())
+}
+
+pub fn normalize_core_withdrawal_evidence(
+    evidence: &CoreWithdrawalEvidence,
+) -> Result<NormalizedCoreWithdrawalFacts, CoreWithdrawalError> {
+    validate_core_evidence(evidence)?;
+    let artifact = evidence
+        .burn
+        .client
+        .artifact
+        .as_ref()
+        .ok_or(CoreWithdrawalError::OfficialIrisRequired)?;
+    Ok(NormalizedCoreWithdrawalFacts {
+        client_mode: "iris_sdk".to_owned(),
+        iris_git_revision: artifact.git_revision.clone(),
+        iris_tarball_sha256: artifact.tarball_sha256.clone(),
+        calldata_hex: evidence.burn.client.calldata_hex.clone(),
+        amount_base_units: evidence.burn.event.amount_base_units.clone(),
+        amount_nicks: evidence.burn.event.amount_nicks.clone(),
+        commitment: evidence.burn.event.commitment.clone(),
+        recipient_lock_root: evidence.burn.event.lock_root.clone(),
+        withdrawal_id: evidence.terminal.target.withdrawal_id.clone(),
+        nock_transaction_id: evidence.terminal.target.transaction_id.clone(),
+        nock_inclusion_height: evidence.terminal.chain.facts.inclusion.height,
+        nock_inclusion_block_id: evidence.terminal.chain.facts.inclusion.block_id.clone(),
+        settlement: evidence.terminal.settlement.clone(),
+    })
+}
+
+fn validate_core_evidence(evidence: &CoreWithdrawalEvidence) -> Result<(), CoreWithdrawalError> {
+    if !evidence.burn.client.official_client
+        || evidence.burn.client.client_mode != crate::client_driver::WithdrawalClientMode::IrisSdk
+        || evidence.burn.client.artifact.is_none()
+    {
+        return Err(CoreWithdrawalError::OfficialIrisRequired);
+    }
+    if evidence.terminal.stable_observations < 2
+        || evidence.terminal.target.base_event_id != evidence.burn.event.base_event_id
+        || evidence.terminal.settlement.base_event_id != evidence.burn.event.base_event_id
+        || evidence.terminal.settlement.nock_transaction_id
+            != evidence.terminal.target.transaction_id
+        || !evidence
+            .terminal
+            .settlement
+            .transaction_conservation
+            .verdict
+        || !evidence.terminal.settlement.burn_to_payout.verdict
+    {
+        return Err(CoreWithdrawalError::TerminalProofMismatch);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+pub enum CoreWithdrawalError {
+    #[error("missing core withdrawal prerequisites: {0:?}")]
+    MissingPrerequisites(Vec<&'static str>),
+    #[error("unexpected phase: expected {expected:?}, observed {observed:?}")]
+    UnexpectedPhase {
+        expected: CoreWithdrawalPhase,
+        observed: CoreWithdrawalPhase,
+    },
+    #[error("phase recorded after terminal")]
+    PhaseAfterTerminal,
+    #[error("core withdrawal phases are incomplete: {0:?}")]
+    IncompletePhases(Vec<CoreWithdrawalPhase>),
+    #[error("core withdrawal requires official Iris artifact evidence")]
+    OfficialIrisRequired,
+    #[error("terminal proof does not join the Base burn and Nockchain transaction")]
+    TerminalProofMismatch,
+    #[error("full withdrawal calldata must be 116 bytes, observed {0}")]
+    InvalidFullCalldataLength(usize),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }
 
 #[async_trait]
@@ -136,13 +337,21 @@ impl E2eRunner {
         if config.timeout.is_zero() {
             return Err(E2eRunnerError::InvalidTimeout);
         }
-        let artifacts = resolve_artifacts(&config)?;
         let (run_id, run_dir) = allocate_run_dir(&config)?;
+        let artifacts = match resolve_artifacts(&config) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                write_early_failure_evidence(&config, &run_id, &run_dir, &error.to_string())?;
+                return Err(error);
+            }
+        };
         let context = E2eRunContext {
             run_id: run_id.clone(),
             run_dir: run_dir.clone(),
             artifacts: artifacts.clone(),
             base: config.base,
+            archive_rpc_url: config.archive_rpc_url.clone(),
+            iris_artifact: config.iris_artifact.clone(),
             client: config.client,
             seed: config.seed,
         };
@@ -349,6 +558,56 @@ fn set_private_permissions(_path: &Path) -> Result<(), E2eRunnerError> {
     Ok(())
 }
 
+fn write_early_failure_evidence(
+    config: &E2eRunConfig,
+    run_id: &str,
+    run_dir: &Path,
+    error: &str,
+) -> Result<(), E2eRunnerError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let mode = match config.base {
+        E2eBaseMode::Hermetic => EvidenceEnvironmentMode::Hermetic,
+        E2eBaseMode::BaseSepoliaFork => EvidenceEnvironmentMode::BaseSepoliaFork,
+    };
+    let capsule = WithdrawalEvidenceCapsuleV1::new(
+        EvidenceRunFacts {
+            run_id: run_id.to_owned(),
+            scenario: "withdrawal".to_owned(),
+            seed: config.seed,
+            status: EvidenceRunStatus::Failed,
+            error: Some(error.to_owned()),
+            started_at_unix_ms: now,
+            finished_at_unix_ms: Some(now),
+        },
+        EvidenceEnvironmentFacts {
+            mode,
+            environment_id: config.base.id().to_owned(),
+            source_manifest_sha256: None,
+            source_chain_id: (config.base == E2eBaseMode::BaseSepoliaFork).then_some(84_532),
+            source_block_number: None,
+            source_block_hash: None,
+            local_chain_id: 31_338,
+            rpc_endpoint_class: "loopback_anvil".to_owned(),
+        },
+        RedactionDeclaration {
+            policy: "withdrawal-e2e-redaction-v1".to_owned(),
+            removed_secret_classes: Vec::new(),
+            raw_logs_embedded: false,
+            external_artifacts_only: true,
+        },
+    );
+    let redactor = SecretRedactor::new(Vec::new())?;
+    let mut collector = EvidenceCollector::new(run_dir, redactor)?;
+    collector.checkpoint("artifact-resolution", &capsule)?;
+    collector.finish(&capsule)?;
+    Ok(())
+}
+
 fn write_report(path: &Path, report: &E2eReport) -> Result<(), E2eRunnerError> {
     let bytes = serde_json::to_vec_pretty(report)?;
     fs::write(path, bytes).map_err(|source| E2eRunnerError::ReportWrite {
@@ -391,6 +650,10 @@ pub enum E2eRunnerError {
         #[source]
         source: std::io::Error,
     },
+    #[error(transparent)]
+    Evidence(#[from] crate::evidence::EvidenceCollectionError),
+    #[error(transparent)]
+    Redaction(#[from] crate::redaction::RedactionError),
     #[error(transparent)]
     ReportJson(#[from] serde_json::Error),
 }

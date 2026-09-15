@@ -10,6 +10,7 @@ use bridge_dev::e2e::{
     E2eBaseMode, E2eClientMode, E2eRunConfig, E2eRunner, E2eRunnerError, ScriptedE2eExecutor,
     ScriptedPlan,
 };
+use bridge_dev::evidence::WithdrawalEvidenceCapsuleV1;
 use tempfile::TempDir;
 use tokio::sync::watch;
 
@@ -32,6 +33,8 @@ async fn report_write_failure_is_non_success_after_shutdown() -> Result<()> {
         keep_artifacts: true,
         timeout: std::time::Duration::from_secs(10),
         base: E2eBaseMode::Hermetic,
+        archive_rpc_url: None,
+        iris_artifact: None,
         client: E2eClientMode::RustReference,
         seed: 1,
     };
@@ -47,6 +50,45 @@ async fn report_write_failure_is_non_success_after_shutdown() -> Result<()> {
         .next()
         .expect("runner did not allocate a run directory");
     assert!(run_dir.join("shutdown").is_file());
+    Ok(())
+}
+
+#[tokio::test]
+async fn artifact_resolution_failure_still_writes_safe_partial_evidence() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let run_root = tempdir.path().join("runs");
+    let config = E2eRunConfig {
+        workspace_root: tempdir.path().to_path_buf(),
+        run_root: Some(run_root.clone()),
+        artifact_manifest: Some(tempdir.path().join("missing-artifacts.json")),
+        report_path: None,
+        build_artifacts: false,
+        require_ctl: true,
+        keep_artifacts: true,
+        timeout: std::time::Duration::from_secs(10),
+        base: E2eBaseMode::Hermetic,
+        archive_rpc_url: None,
+        iris_artifact: None,
+        client: E2eClientMode::RustReference,
+        seed: 2,
+    };
+    let (_sender, receiver) = watch::channel(false);
+    let mut executor = ScriptedE2eExecutor::new(ScriptedPlan::Success);
+    assert!(E2eRunner::run(config, &mut executor, receiver)
+        .await
+        .is_err());
+    let run_dir = fs::read_dir(run_root)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .next()
+        .expect("runner did not allocate a failure run directory");
+    let report_path = run_dir.join("safe-evidence/report.json");
+    let capsule = WithdrawalEvidenceCapsuleV1::from_json(&fs::read_to_string(report_path)?)?;
+    assert_eq!(
+        capsule.run.status,
+        bridge_dev::evidence::EvidenceRunStatus::Failed
+    );
+    assert!(run_dir.join("safe-evidence/artifact-index.json").is_file());
     Ok(())
 }
 

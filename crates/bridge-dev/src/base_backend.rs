@@ -45,6 +45,10 @@ impl BaseBackend {
             })
             .collect()
     }
+    pub async fn chain_id(&self) -> Result<u64, BaseBackendError> {
+        let value: String = self.rpc.call("eth_chainId", json!([])).await?;
+        decode_quantity("chain id", &value)
+    }
 
     pub async fn snapshot(&self) -> Result<SnapshotId, BaseBackendError> {
         let id: String = self.rpc.call("evm_snapshot", json!([])).await?;
@@ -251,6 +255,17 @@ impl BaseBackend {
             .await?;
         receipt.map(TransactionReceiptFacts::try_from).transpose()
     }
+    pub async fn transaction(
+        &self,
+        hash: B256,
+    ) -> Result<Option<TransactionFacts>, BaseBackendError> {
+        let transaction: Option<RpcTransaction> = self
+            .rpc
+            .call("eth_getTransactionByHash", json!([format!("{hash:#x}")]))
+            .await?;
+        transaction.map(TransactionFacts::try_from).transpose()
+    }
+
     pub async fn block_hash(&self, number: u64) -> Result<B256, BaseBackendError> {
         let block: RpcBlock = self
             .rpc
@@ -305,6 +320,16 @@ pub struct TransactionLogFacts {
     pub address: Address,
     pub topics: Vec<B256>,
     pub data: Bytes,
+    pub log_index: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionFacts {
+    pub hash: B256,
+    pub from: Address,
+    pub to: Option<Address>,
+    pub input: Bytes,
+    pub block_number: Option<u64>,
 }
 
 impl TryFrom<RpcReceipt> for TransactionReceiptFacts {
@@ -349,6 +374,39 @@ impl TryFrom<RpcReceipt> for TransactionReceiptFacts {
     }
 }
 
+impl TryFrom<RpcTransaction> for TransactionFacts {
+    type Error = BaseBackendError;
+
+    fn try_from(transaction: RpcTransaction) -> Result<Self, Self::Error> {
+        Ok(Self {
+            hash: B256::from_str(&transaction.hash).map_err(|_| {
+                BaseBackendError::InvalidRpcValue {
+                    field: "transaction hash",
+                }
+            })?,
+            from: Address::from_str(&transaction.from).map_err(|_| {
+                BaseBackendError::InvalidRpcValue {
+                    field: "transaction from",
+                }
+            })?,
+            to: transaction
+                .to
+                .as_deref()
+                .map(Address::from_str)
+                .transpose()
+                .map_err(|_| BaseBackendError::InvalidRpcValue {
+                    field: "transaction to",
+                })?,
+            input: decode_hex_bytes("transaction input", &transaction.input)?,
+            block_number: transaction
+                .block_number
+                .as_deref()
+                .map(|value| decode_quantity("transaction block number", value))
+                .transpose()?,
+        })
+    }
+}
+
 impl TryFrom<RpcLog> for TransactionLogFacts {
     type Error = BaseBackendError;
 
@@ -371,6 +429,7 @@ impl TryFrom<RpcLog> for TransactionLogFacts {
             address,
             topics,
             data,
+            log_index: decode_quantity("receipt log index", &log.log_index)?,
         })
     }
 }
@@ -411,6 +470,16 @@ struct RpcBlock {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RpcTransaction {
+    hash: String,
+    from: String,
+    to: Option<String>,
+    input: String,
+    block_number: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RpcReceipt {
     transaction_hash: String,
     block_number: Option<String>,
@@ -424,4 +493,6 @@ struct RpcLog {
     address: String,
     topics: Vec<String>,
     data: String,
+    #[serde(rename = "logIndex")]
+    log_index: String,
 }
