@@ -24,6 +24,20 @@ pub trait NockSourcePort: Send {
         &mut self,
         height: u64,
     ) -> Result<Option<NockBlockEvent>, BridgeError>;
+
+    async fn fetch_blocks_in_range(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<NockBlockEvent>, BridgeError> {
+        let mut blocks = Vec::new();
+        for height in start..=end {
+            if let Some(block) = self.fetch_block_at_height(height).await? {
+                blocks.push(block);
+            }
+        }
+        Ok(blocks)
+    }
 }
 
 #[async_trait]

@@ -18,15 +18,18 @@
 /=  dumb  /apps/dumbnet/lib/types
 ::
 =>
+~%  %bridge-lib  ..keep  ~
 |%
 ++  moat  (keep bridge-state)
 ::
 ++  bridge
+  ~%  %bridge  ..bridge  ~
   |_  state=bridge-state
   +*  base  ~(. base-lib state)
       nock  ~(. nock-lib state)
   ::
   ++  handle-cause
+    ~%  %bridge-handle-cause  ..handle-cause  ~
     |=  [=cause rest=[=wire eny=@ our=@ux now=@da]]
     ^-  [(list effect) bridge-state]
     ?>  ?=(%0 -.cause)
@@ -663,13 +666,7 @@
 ++  poke
   |=  [=wire eny=@ our=@ux now=@da dat=*]
   ^-  [(list effect) bridge-state]
-  =;  res
-    ~&  >  "effects: {<-.res>}"
-    res
-  =/  soft-cause  ((soft cause) dat)
-  ?~  soft-cause
-    ~&  "bridge: could not mold poke: {<dat>}"  !!
-  =/  =cause  u.soft-cause
+  =/  =cause  !<(cause [-:!>(*cause) dat])
   =/  tag  +<.cause
   =/  =(pole)  wire
   ~&  >  "poke: saw cause {<;;(@t tag)>} on wire {<wire>}"

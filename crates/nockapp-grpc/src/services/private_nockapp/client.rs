@@ -21,7 +21,9 @@ pub enum PokeResponseResult {
 
 impl PrivateNockAppGrpcClient {
     pub async fn connect<T: AsRef<str>>(address: T) -> Result<Self> {
-        let client = PrivateNockAppClient::connect(address.as_ref().to_string()).await?;
+        let client = PrivateNockAppClient::connect(address.as_ref().to_string())
+            .await?
+            .max_decoding_message_size(16 * 1024 * 1024);
         Ok(Self { client })
     }
 

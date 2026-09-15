@@ -123,6 +123,11 @@ impl TraceBackend for TracingBackend {
         let path = std::str::from_utf8(path_handle.as_ne_bytes()).unwrap_or("");
 
         if self.subscriber.is_none() {
+            // Some applications install tracing after kernel boot. Do not pin
+            // this backend to tracing's no-op dispatcher before initialization.
+            if !dispatcher::has_been_set() {
+                return;
+            }
             self.subscriber = Some(dispatcher::get_default(Clone::clone));
         }
         let subscriber = self.subscriber.as_ref().expect("subscriber should be set");

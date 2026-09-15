@@ -113,6 +113,10 @@ RUST_LOG=bridge::shared::runtime=debug,bridge::shared::base=trace cargo run -p b
 RUST_LOG=debug cargo run -p bridge
 ```
 
+Set `TRACY_ENABLE=1` to enable Tracy collection. Use `--trace tracing` to
+include kernel-arm spans and set `TRACY_PORT` when the default listener port is
+already occupied.
+
 Useful queries:
 
 ```bash

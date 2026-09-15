@@ -2238,6 +2238,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tracing-tracy",
  "wallet-tx-builder",
  "zkvm-jetpack",
 ]

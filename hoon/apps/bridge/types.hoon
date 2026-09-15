@@ -10,6 +10,7 @@
 /=  dumb  /apps/dumbnet/lib/types
 ::>)  TODO: review all hashables in types.hoon
 ::
+~%  %bridge-types  ..ut  ~
 |%
 ::
 ::    $node-config: bridge node configuration

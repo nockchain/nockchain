@@ -1,14 +1,15 @@
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use backon::Retryable;
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::{Bytes, ToBytes};
 use nockapp_grpc::services::private_nockapp::client::PrivateNockAppGrpcClient;
-use nockchain_types::tx_engine::common::{BlockId, Heavy, Page, TxId};
+use nockchain_types::tx_engine::common::{BlockId, Page, TxId};
 use nockchain_types::BlockchainConstants;
 use nockvm::noun::{NounAllocator, NounSpace};
 use noun_serde::prelude::*;
@@ -26,18 +27,33 @@ use crate::observability::tui::types::{
 use crate::shared::errors::BridgeError;
 use crate::shared::runtime::{BridgeEvent, BridgeRuntimeHandle, ChainEvent, NockBlockEvent};
 use crate::shared::stop::StopHandle;
-use crate::shared::types::Tx;
+use crate::shared::types::{NockchainTxsMap, Tx};
 use crate::withdrawal::snapshot::BridgeNoteSnapshotService;
 
 const CLIENT_PID: i32 = 1;
 const NOCK_GRPC_TIMEOUT_MARKER: &str = " timed out after ";
 pub const DEFAULT_NOCK_GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const NOCK_BLOCK_BATCH_SIZE: u64 = 64;
+const NOCK_TIP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 pub const BLOCKCHAIN_CONSTANTS_PATH: &str = "blockchain-constants";
 
 /// Default nockchain confirmation depth used by the driver if not specified in config.
 ///
 /// The bridge kernel assumes blocks it receives are final; this is enforced by the Rust driver.
 pub const DEFAULT_NOCKCHAIN_CONFIRMATION_DEPTH: u64 = 400;
+
+fn tip_covers_next_confirmed_height(
+    tip_info: Option<&NockTipInfo>,
+    next_needed_height: Option<u64>,
+    confirmation_depth: u64,
+) -> bool {
+    match (tip_info, next_needed_height) {
+        (Some(tip), Some(next_height)) => {
+            tip.height.saturating_sub(confirmation_depth) >= next_height
+        }
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 fn confirmed_height(chain_tip: u64, confirmation_depth: u64) -> Option<u64> {
@@ -286,7 +302,20 @@ impl NockSourcePort for NockGrpcSource {
         &mut self,
         height: u64,
     ) -> Result<Option<NockBlockEvent>, BridgeError> {
-        Self::fetch_block_at_height_from_client(&mut self.client, height, self.request_timeout)
+        Ok(Self::fetch_blocks_in_range_from_client(
+            &mut self.client, height, height, self.request_timeout,
+        )
+        .await?
+        .into_iter()
+        .next())
+    }
+
+    async fn fetch_blocks_in_range(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<NockBlockEvent>, BridgeError> {
+        Self::fetch_blocks_in_range_from_client(&mut self.client, start, end, self.request_timeout)
             .await
     }
 }
@@ -296,91 +325,100 @@ impl NockGrpcSource {
         client: &mut PrivateNockAppGrpcClient,
         request_timeout: Duration,
     ) -> Result<Option<(u64, String)>, BridgeError> {
-        let heavy_path = vec![Bytes::from("heavy")];
-        let heavy_bytes = jam_path(&heavy_path)?;
+        let path = jam_path(&[Bytes::from("heaviest-chain")])?;
         let response =
-            peek_private_nockapp(client, "heavy peek", heavy_bytes, request_timeout).await?;
-        let heavy: Heavy = {
-            let (heavy_slab, heavy_noun) = cue_response(response)?;
-            let heavy_space = heavy_slab.noun_space();
-            heavy_noun.decode(&heavy_space).map_err(|err| {
-                BridgeError::EventMonitoring(format!("failed to decode heavy response: {}", err))
-            })?
-        };
-        let Some(block_id_base58) = heavy.to_base58() else {
+            peek_private_nockapp(client, "heaviest chain peek", path, request_timeout).await?;
+        let (response_slab, response_noun) = cue_response(response)?;
+        let response_space = response_slab.noun_space();
+        let Some(inner) =
+            decode_unit_payload(response_noun, &response_space, "heaviest chain outer")?
+        else {
             return Ok(None);
         };
-        let tip_hash = block_id_base58.clone();
-
-        let block_path = vec![Bytes::from("block"), Bytes::from(block_id_base58)];
-        let block_bytes = jam_path(&block_path)?;
-        let response =
-            peek_private_nockapp(client, "tip block peek", block_bytes, request_timeout).await?;
-        let (page, _page_noun) = {
-            let (page_slab, block_noun) = cue_response(response)?;
-            let page_space = page_slab.noun_space();
-            decode_page_from_peek(&block_noun, &page_space)?
+        let Some(tip) = decode_unit_payload(inner, &response_space, "heaviest chain inner")? else {
+            return Ok(None);
         };
-        Ok(Some((page.height, tip_hash)))
+        let tip_cell = tip.in_space(&response_space).as_cell().map_err(|_| {
+            BridgeError::EventMonitoring("heaviest chain tip expected a cell".into())
+        })?;
+        let height = tip_cell
+            .head()
+            .as_atom()
+            .map_err(|_| {
+                BridgeError::EventMonitoring("heaviest chain height expected an atom".into())
+            })?
+            .as_u64()
+            .map_err(|_| {
+                BridgeError::EventMonitoring("heaviest chain height is too large".into())
+            })?;
+        let block_id =
+            BlockId::from_noun(&tip_cell.tail().noun(), &response_space).map_err(|err| {
+                BridgeError::EventMonitoring(format!(
+                    "failed to decode heaviest chain block id: {err}"
+                ))
+            })?;
+        Ok(Some((height, block_id.to_base58())))
     }
 
-    async fn fetch_block_at_height_from_client(
+    async fn fetch_blocks_in_range_from_client(
         client: &mut PrivateNockAppGrpcClient,
-        height: u64,
+        start: u64,
+        end: u64,
         request_timeout: Duration,
-    ) -> Result<Option<NockBlockEvent>, BridgeError> {
-        let heavy_n_path = vec![Bytes::from("heavy-n"), Bytes::from(height.to_bytes()?)];
-        let heavy_n_bytes = jam_path(&heavy_n_path)?;
+    ) -> Result<Vec<NockBlockEvent>, BridgeError> {
+        if start > end {
+            return Ok(Vec::new());
+        }
+        let range_path = vec![
+            Bytes::from("heaviest-chain-blocks-range"),
+            Bytes::from(start.to_bytes()?),
+            Bytes::from(end.to_bytes()?),
+        ];
+        let range_bytes = jam_path(&range_path)?;
         let response =
-            peek_private_nockapp(client, "height block peek", heavy_n_bytes, request_timeout)
-                .await?;
-        let (page_slab, block_noun) = cue_response(response)?;
-        let (page, page_noun) = {
-            let page_space = page_slab.noun_space();
-            match decode_page_from_peek(&block_noun, &page_space) {
-                Ok(result) => result,
-                Err(_) => return Ok(None),
+            peek_private_nockapp(client, "block range peek", range_bytes, request_timeout).await?;
+        let mut blocks = decode_block_range_response(response)?;
+        for block in &mut blocks {
+            if block.block.tx_ids.is_empty() {
+                continue;
             }
-        };
-
-        let txs = Self::fetch_transactions_from_client(
-            client, &page.digest, &page.tx_ids, request_timeout,
-        )
-        .await?;
-
-        Ok(Some(NockBlockEvent {
-            block: page,
-            page_slab,
-            page_noun,
-            txs,
-        }))
+            let txs = Self::fetch_block_transactions_from_client(
+                client, &block.block.digest, request_timeout,
+            )
+            .await?;
+            let complete = txs.len() == block.block.tx_ids.len()
+                && block
+                    .block
+                    .tx_ids
+                    .iter()
+                    .all(|expected| txs.iter().any(|(actual, _)| actual == expected));
+            if !complete {
+                return Err(BridgeError::EventMonitoring(format!(
+                    "block transaction map does not match page at height {}: expected {} transactions, got {}",
+                    block.block.height,
+                    block.block.tx_ids.len(),
+                    txs.len()
+                )));
+            }
+            block.txs = txs;
+        }
+        Ok(blocks)
     }
 
-    async fn fetch_transactions_from_client(
+    async fn fetch_block_transactions_from_client(
         client: &mut PrivateNockAppGrpcClient,
         block_id: &BlockId,
-        tx_ids: &[TxId],
         request_timeout: Duration,
     ) -> Result<Vec<(TxId, Tx)>, BridgeError> {
-        let block_id_base58 = block_id.to_base58();
-        let mut txs = Vec::with_capacity(tx_ids.len());
-        for tx_id in tx_ids {
-            let tx_id_base58 = tx_id.to_base58();
-            let tx_path = vec![
-                Bytes::from("block-transaction"),
-                Bytes::from(block_id_base58.clone()),
-                Bytes::from(tx_id_base58),
-            ];
-            let tx_bytes = jam_path(&tx_path)?;
-            let response =
-                peek_private_nockapp(client, "block transaction peek", tx_bytes, request_timeout)
-                    .await?;
-            let (tx_slab, tx_noun) = cue_response(response)?;
-            let tx_space = tx_slab.noun_space();
-            let tx = decode_tx_from_peek(&tx_noun, &tx_space)?;
-            txs.push((tx_id.clone(), tx));
-        }
-        Ok(txs)
+        let path = vec![Bytes::from("block-transactions"), Bytes::from(block_id.to_base58())];
+        let response = peek_private_nockapp(
+            client,
+            "block transactions peek",
+            jam_path(&path)?,
+            request_timeout,
+        )
+        .await?;
+        decode_block_transactions_response(response)
     }
 }
 
@@ -626,34 +664,13 @@ impl NockchainWatcher {
             "starting nock observer with confirmation depth"
         );
         let mut nock_block_in_flight: Option<u64> = None;
+        let mut cached_tip_info: Option<NockTipInfo> = None;
+        let mut tip_refreshed_at: Option<Instant> = None;
+        let mut prefetched_blocks: VecDeque<NockBlockEvent> = VecDeque::new();
         loop {
             if self.deps.stop.is_stopped() {
                 sleep(poll_interval).await;
                 continue;
-            }
-            let tip_info = match source.tip_info().await {
-                Ok(info) => info,
-                Err(err) => {
-                    if is_nock_grpc_timeout_error(&err) {
-                        warn!(
-                            target: "bridge.nock-watcher",
-                            error=%err,
-                            "failed to fetch tip height after nock gRPC timeout; reconnecting nock gRPC source"
-                        );
-                        return Err(err);
-                    }
-                    warn!(
-                        target: "bridge.nock-watcher",
-                        error=%err,
-                        "failed to fetch tip height"
-                    );
-                    sleep(poll_interval).await;
-                    continue;
-                }
-            };
-
-            if let Some(info) = &tip_info {
-                self.update_tip_hash(info.tip_hash.clone());
             }
 
             let next_needed_height = match self.deps.runtime.peek_nock_next_height().await {
@@ -681,13 +698,49 @@ impl NockchainWatcher {
             }
             nock_block_in_flight = None;
 
+            let cached_tip_covers_next = tip_covers_next_confirmed_height(
+                cached_tip_info.as_ref(),
+                next_needed_height,
+                self.config.confirmation_depth,
+            );
+            let tip_refresh_due = tip_refreshed_at
+                .map(|refreshed_at| refreshed_at.elapsed() >= NOCK_TIP_REFRESH_INTERVAL)
+                .unwrap_or(true);
+            if !cached_tip_covers_next || tip_refresh_due {
+                let refreshed_tip = match source.tip_info().await {
+                    Ok(info) => info,
+                    Err(err) => {
+                        if is_nock_grpc_timeout_error(&err) {
+                            warn!(
+                                target: "bridge.nock-watcher",
+                                error=%err,
+                                "failed to fetch tip height after nock gRPC timeout; reconnecting nock gRPC source"
+                            );
+                            return Err(err);
+                        }
+                        warn!(
+                            target: "bridge.nock-watcher",
+                            error=%err,
+                            "failed to fetch tip height"
+                        );
+                        sleep(poll_interval).await;
+                        continue;
+                    }
+                };
+                cached_tip_info = refreshed_tip;
+                tip_refreshed_at = Some(Instant::now());
+                if let Some(info) = &cached_tip_info {
+                    self.update_tip_hash(info.tip_hash.clone());
+                }
+            }
+
             let action = plan_nock_tick(NockPlanInput {
-                tip_height: tip_info.as_ref().map(|info| info.height),
+                tip_height: cached_tip_info.as_ref().map(|info| info.height),
                 next_needed_height,
                 confirmation_depth: self.config.confirmation_depth,
             });
 
-            let (tip_height, target_height) = match action {
+            let (tip_height, confirmed_target, target_height) = match action {
                 NockPlanAction::NoTipAvailable => {
                     debug!(
                         target: "bridge.nock-watcher",
@@ -701,6 +754,7 @@ impl NockchainWatcher {
                     confirmed_target,
                 } => {
                     nock_block_in_flight = None;
+                    prefetched_blocks.clear();
                     debug!(
                         target: "bridge.nock-watcher",
                         tip_height,
@@ -728,6 +782,7 @@ impl NockchainWatcher {
                     confirmed_target,
                     next_needed_height,
                 } => {
+                    prefetched_blocks.clear();
                     debug!(
                         target: "bridge.nock-watcher",
                         tip_height,
@@ -739,24 +794,59 @@ impl NockchainWatcher {
                     continue;
                 }
                 NockPlanAction::FetchHeight {
-                    tip_height, height, ..
-                } => (tip_height, height),
+                    tip_height,
+                    confirmed_target,
+                    height,
+                } => (tip_height, confirmed_target, height),
             };
 
-            match source.fetch_block_at_height(target_height).await {
+            let block_result = if prefetched_blocks
+                .front()
+                .is_some_and(|event| event.block.height == target_height)
+            {
+                Ok(prefetched_blocks.pop_front())
+            } else {
+                prefetched_blocks.clear();
+                let batch_end = target_height
+                    .saturating_add(NOCK_BLOCK_BATCH_SIZE - 1)
+                    .min(confirmed_target);
+                match source.fetch_blocks_in_range(target_height, batch_end).await {
+                    Ok(blocks) => {
+                        let first_unexpected = blocks.iter().enumerate().find(|(index, event)| {
+                            event.block.height != target_height.saturating_add(*index as u64)
+                        });
+                        if let Some((index, event)) = first_unexpected {
+                            Err(BridgeError::EventMonitoring(format!(
+                                "block range is not contiguous at index {index}: expected height {}, got {}",
+                                target_height.saturating_add(index as u64),
+                                event.block.height
+                            )))
+                        } else {
+                            prefetched_blocks.extend(blocks);
+                            Ok(prefetched_blocks.pop_front())
+                        }
+                    }
+                    Err(err) => Err(err),
+                }
+            };
+
+            match block_result {
                 Ok(Some(event)) => {
                     let height = event.block.height;
                     let block_hash = event.block.digest.to_base58();
-                    let confirmed_block_id = event.block.digest.clone();
+                    let confirmed_block_id =
+                        (!event.txs.is_empty()).then(|| event.block.digest.clone());
                     let txs_count = event.txs.len();
                     self.deps
                         .runtime
                         .send_event(BridgeEvent::Chain(Box::new(ChainEvent::Nock(event))))
                         .await?;
                     nock_block_in_flight = Some(height);
-                    if let Some(snapshot_service) = &self.deps.confirmed_snapshot {
+                    if let (Some(snapshot_service), Some(confirmed_block_id)) =
+                        (&self.deps.confirmed_snapshot, confirmed_block_id.as_ref())
+                    {
                         if let Err(err) = snapshot_service
-                            .refresh_on_confirmed_block(height, &confirmed_block_id)
+                            .refresh_on_confirmed_block(height, confirmed_block_id)
                             .await
                         {
                             warn!(
@@ -772,11 +862,12 @@ impl NockchainWatcher {
                         target: "bridge.nock-watcher",
                         height,
                         tip_height,
-                        confirmations = tip_height - height,
+                        confirmations = tip_height.saturating_sub(height),
                         hash=%block_hash,
                         txs_count=%txs_count,
                         "emitted confirmed nock block"
                     );
+                    continue;
                 }
                 Ok(None) => {
                     debug!(
@@ -791,7 +882,7 @@ impl NockchainWatcher {
                             target: "bridge.nock-watcher",
                             target = target_height,
                             error=%err,
-                            "failed to fetch block at height after nock gRPC timeout; reconnecting nock gRPC source"
+                            "failed to fetch block range after nock gRPC timeout; reconnecting nock gRPC source"
                         );
                         return Err(err);
                     }
@@ -799,7 +890,7 @@ impl NockchainWatcher {
                         target: "bridge.nock-watcher",
                         target = target_height,
                         error=%err,
-                        "failed to fetch block at height"
+                        "failed to fetch block range"
                     );
                 }
             }
@@ -978,124 +1069,146 @@ fn cue_response(bytes: Vec<u8>) -> Result<(NounSlab<NockJammer>, nockapp::Noun),
     Ok((slab, noun))
 }
 
-fn decode_page_from_peek(
-    noun: &nockapp::Noun,
+fn decode_unit_payload(
+    noun: nockapp::Noun,
     space: &NounSpace,
-) -> Result<(Page, nockapp::Noun), BridgeError> {
-    let outer_cell = noun
-        .in_space(space)
-        .as_cell()
-        .map_err(|_| BridgeError::EventMonitoring("peek response expected to be cell".into()))?;
+    context: &str,
+) -> Result<Option<nockapp::Noun>, BridgeError> {
+    if let Ok(atom) = noun.in_space(space).as_atom() {
+        let value = atom.as_u64().map_err(|_| {
+            BridgeError::EventMonitoring(format!("{context} unit tag is too large"))
+        })?;
+        return if value == 0 {
+            Ok(None)
+        } else {
+            Err(BridgeError::EventMonitoring(format!(
+                "{context} has invalid unit atom {value}"
+            )))
+        };
+    }
 
-    let outer_head = outer_cell.head();
-    let outer_tail = outer_cell.tail();
-
-    let outer_tag = outer_head.as_atom().map_err(|_| {
-        BridgeError::EventMonitoring("peek response outer unit tag expected to be atom".into())
+    let cell = noun.in_space(space).as_cell().map_err(|_| {
+        BridgeError::EventMonitoring(format!("{context} unit expected to be a cell"))
     })?;
-
-    let outer_tag_val = outer_tag
+    let tag = cell
+        .head()
+        .as_atom()
+        .map_err(|_| {
+            BridgeError::EventMonitoring(format!("{context} unit tag expected to be an atom"))
+        })?
         .as_u64()
-        .map_err(|_| BridgeError::EventMonitoring("peek response outer tag too large".into()))?;
-
-    if outer_tag_val != 0 {
+        .map_err(|_| BridgeError::EventMonitoring(format!("{context} unit tag is too large")))?;
+    if tag != 0 {
         return Err(BridgeError::EventMonitoring(format!(
-            "peek response indicates no data (outer unit tag={})",
-            outer_tag_val
+            "{context} has invalid unit tag {tag}"
         )));
     }
-
-    let inner = outer_tail.noun();
-
-    if inner.is_atom() {
-        return Err(BridgeError::EventMonitoring(
-            "peek response inner is atom (no data)".into(),
-        ));
-    }
-
-    let inner_cell = inner.in_space(space).as_cell().map_err(|_| {
-        BridgeError::EventMonitoring("peek response inner expected to be cell".into())
-    })?;
-
-    let inner_head = inner_cell.head();
-    let inner_tail = inner_cell.tail();
-
-    if let Ok(tag_atom) = inner_head.as_atom() {
-        if let Ok(tag_val) = tag_atom.as_u64() {
-            if tag_val == 0 {
-                if inner_tail.is_atom() {
-                    if let Ok(atom) = inner_tail.as_atom() {
-                        if let Ok(val) = atom.as_u64() {
-                            if val == 0 {
-                                return Err(BridgeError::EventMonitoring(
-                                    "block not found (inner unit is null)".into(),
-                                ));
-                            }
-                        }
-                    }
-                    return Err(BridgeError::EventMonitoring(
-                        "inner_tail is atom but not null - unexpected structure".into(),
-                    ));
-                }
-
-                let inner_tail = inner_tail.noun();
-                let page = Page::from_noun(&inner_tail, space).map_err(|err| {
-                    BridgeError::EventMonitoring(format!(
-                        "failed to decode Page (after inner unwrap): {}",
-                        err
-                    ))
-                })?;
-                return Ok((page, inner_tail));
-            }
-        }
-    }
-
-    let page = Page::from_noun(&inner, space)
-        .map_err(|err| BridgeError::EventMonitoring(format!("failed to decode Page: {}", err)))?;
-    Ok((page, inner))
+    Ok(Some(cell.tail().noun()))
 }
 
-fn decode_tx_from_peek(noun: &nockapp::Noun, space: &NounSpace) -> Result<Tx, BridgeError> {
-    // peek returns (unit (unit tx:t)), need to unwrap both layers
-    let outer_cell = noun
-        .in_space(space)
-        .as_cell()
-        .map_err(|_| BridgeError::EventMonitoring("peek response expected to be cell".into()))?;
-
-    let outer_tag = outer_cell.head().as_atom().map_err(|_| {
-        BridgeError::EventMonitoring("peek response outer unit tag expected to be atom".into())
-    })?;
-
-    if outer_tag
-        .as_u64()
-        .map_err(|_| BridgeError::EventMonitoring("peek response outer tag too large".into()))?
-        != 0
-    {
+fn decode_block_transactions_response(bytes: Vec<u8>) -> Result<Vec<(TxId, Tx)>, BridgeError> {
+    let (response_slab, response_noun) = cue_response(bytes)?;
+    let response_space = response_slab.noun_space();
+    let Some(inner) =
+        decode_unit_payload(response_noun, &response_space, "block transactions outer")?
+    else {
         return Err(BridgeError::EventMonitoring(
-            "peek response indicates no data for transaction (outer unit)".into(),
+            "block transactions response has no outer payload".into(),
         ));
+    };
+    let Some(txs_noun) = decode_unit_payload(inner, &response_space, "block transactions inner")?
+    else {
+        return Err(BridgeError::EventMonitoring(
+            "block transactions response has no transaction map".into(),
+        ));
+    };
+    NockchainTxsMap::from_noun(&txs_noun, &response_space)
+        .map(|txs| txs.0)
+        .map_err(|err| {
+            BridgeError::EventMonitoring(format!(
+                "failed to decode block transactions response: {err}"
+            ))
+        })
+}
+
+fn decode_block_range_response(bytes: Vec<u8>) -> Result<Vec<NockBlockEvent>, BridgeError> {
+    let (response_slab, response_noun) = cue_response(bytes)?;
+    let response_space = response_slab.noun_space();
+    let Some(inner) = decode_unit_payload(response_noun, &response_space, "block range outer")?
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(mut list) = decode_unit_payload(inner, &response_space, "block range inner")? else {
+        return Ok(Vec::new());
+    };
+
+    let mut blocks = Vec::new();
+    loop {
+        if let Ok(atom) = list.in_space(&response_space).as_atom() {
+            let value = atom.as_u64().map_err(|_| {
+                BridgeError::EventMonitoring("block range list terminator is too large".into())
+            })?;
+            if value == 0 {
+                break;
+            }
+            return Err(BridgeError::EventMonitoring(format!(
+                "block range list has invalid terminator {value}"
+            )));
+        }
+
+        let list_cell = list
+            .in_space(&response_space)
+            .as_cell()
+            .map_err(|_| BridgeError::EventMonitoring("block range expected a list".into()))?;
+        let entry = list_cell.head().as_cell().map_err(|_| {
+            BridgeError::EventMonitoring("block range entry expected a cell".into())
+        })?;
+        let height = entry
+            .head()
+            .as_atom()
+            .map_err(|_| {
+                BridgeError::EventMonitoring("block range height expected an atom".into())
+            })?
+            .as_u64()
+            .map_err(|_| BridgeError::EventMonitoring("block range height is too large".into()))?;
+        let after_height = entry.tail().as_cell().map_err(|_| {
+            BridgeError::EventMonitoring("block range entry missing block id".into())
+        })?;
+        let block_id =
+            BlockId::from_noun(&after_height.head().noun(), &response_space).map_err(|err| {
+                BridgeError::EventMonitoring(format!(
+                    "failed to decode block range block id: {err}"
+                ))
+            })?;
+        let page_and_txs = after_height.tail().as_cell().map_err(|_| {
+            BridgeError::EventMonitoring("block range entry missing page or transactions".into())
+        })?;
+        let source_page_noun = page_and_txs.head().noun();
+        let page = Page::from_noun(&source_page_noun, &response_space).map_err(|err| {
+            BridgeError::EventMonitoring(format!("failed to decode block range page: {err}"))
+        })?;
+        if page.height != height || page.digest != block_id {
+            return Err(BridgeError::EventMonitoring(format!(
+                "block range entry metadata mismatch: range_height={height} page_height={} block_id={} page_digest={}",
+                page.height,
+                block_id.to_base58(),
+                page.digest.to_base58()
+            )));
+        }
+
+        let mut page_slab = NounSlab::<NockJammer>::new();
+        let page_noun = page_slab.copy_into(source_page_noun, &response_space);
+        page_slab.set_root(page_noun);
+        blocks.push(NockBlockEvent {
+            block: page,
+            page_slab,
+            page_noun,
+            txs: Vec::new(),
+        });
+        list = list_cell.tail().noun();
     }
 
-    let inner_cell = outer_cell.tail().as_cell().map_err(|_| {
-        BridgeError::EventMonitoring("peek response inner unit expected to be cell".into())
-    })?;
-
-    let inner_tag = inner_cell.head().as_atom().map_err(|_| {
-        BridgeError::EventMonitoring("peek response inner unit tag expected to be atom".into())
-    })?;
-
-    if inner_tag
-        .as_u64()
-        .map_err(|_| BridgeError::EventMonitoring("peek response inner tag too large".into()))?
-        != 0
-    {
-        return Err(BridgeError::EventMonitoring(
-            "peek response indicates no data for transaction (inner unit)".into(),
-        ));
-    }
-
-    Tx::from_noun(&inner_cell.tail().noun(), space)
-        .map_err(|err| BridgeError::EventMonitoring(format!("failed to decode Tx: {}", err)))
+    Ok(blocks)
 }
 
 #[cfg(test)]
@@ -1149,6 +1262,65 @@ mod tests {
         assert!(!nock_block_still_waiting_for_kernel(None, Some(7)));
     }
 
+    #[test]
+    fn cached_tip_only_covers_confirmed_heights() {
+        let tip = NockTipInfo {
+            height: 1_000,
+            tip_hash: "tip".to_string(),
+        };
+
+        assert!(tip_covers_next_confirmed_height(Some(&tip), Some(600), 400));
+        assert!(!tip_covers_next_confirmed_height(
+            Some(&tip),
+            Some(601),
+            400
+        ));
+        assert!(!tip_covers_next_confirmed_height(Some(&tip), None, 400));
+    }
+
+    #[test]
+    fn block_range_decoder_owns_each_page_noun() {
+        use nockchain_math::belt::Belt;
+        use nockchain_types::tx_engine::common::{BigNum, CoinbaseSplit, Hash};
+
+        let page = Page {
+            digest: Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
+            pow: None,
+            parent: Hash([Belt(6), Belt(7), Belt(8), Belt(9), Belt(10)]),
+            tx_ids: Vec::new(),
+            coinbase: CoinbaseSplit::V0(Vec::new()),
+            timestamp: 1_717_171,
+            epoch_counter: 42,
+            target: BigNum::from_u64(1_000),
+            accumulated_work: BigNum::from_u64(2_000),
+            height: 77,
+            msg: Vec::new(),
+        };
+        let mut slab = NounSlab::<NockJammer>::new();
+        let block_id = page.digest.to_noun(&mut slab);
+        let page_noun = page.to_noun(&mut slab);
+        let entry = nockvm::noun::T(
+            &mut slab,
+            &[nockvm::noun::D(page.height), block_id, page_noun, nockvm::noun::D(0)],
+        );
+        let list = nockvm::noun::T(&mut slab, &[entry, nockvm::noun::D(0)]);
+        let inner = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), list]);
+        let outer = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), inner]);
+        slab.set_root(outer);
+
+        let mut decoded =
+            decode_block_range_response(slab.jam().to_vec()).expect("decode block range");
+        assert_eq!(decoded.len(), 1);
+        let event = decoded.pop().expect("one block");
+        assert_eq!(event.block, page);
+        assert!(event.txs.is_empty());
+
+        let owned_space = event.page_slab.noun_space();
+        let owned_page =
+            Page::from_noun(&event.page_noun, &owned_space).expect("owned page noun decodes");
+        assert_eq!(owned_page, page);
+    }
+
     #[tokio::test]
     async fn nock_grpc_timeout_returns_event_monitoring_error() {
         let err = with_nock_grpc_timeout(
@@ -1190,151 +1362,6 @@ mod tests {
         let tx_id = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]);
         let result = tx_id.to_base58();
         assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn decode_page_from_peek_accepts_structured_pow() {
-        use nockapp::noun::NounJamExt;
-        use nockchain_math::belt::Belt;
-        use nockchain_types::tx_engine::common::{BigNum, CoinbaseSplit, Hash};
-        use noun_serde::NounEncode;
-
-        let page = Page {
-            digest: Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
-            pow: None,
-            parent: Hash([Belt(6), Belt(7), Belt(8), Belt(9), Belt(10)]),
-            tx_ids: Vec::new(),
-            coinbase: CoinbaseSplit::V0(Vec::new()),
-            timestamp: 1_717_171,
-            epoch_counter: 42,
-            target: BigNum::from_u64(1_000),
-            accumulated_work: BigNum::from_u64(2_000),
-            height: 77,
-            msg: Vec::new(),
-        };
-
-        let mut slab: NounSlab<NockJammer> = NounSlab::new();
-        let proof_item = nockvm::noun::T(&mut slab, &[nockvm::noun::D(42), nockvm::noun::D(43)]);
-        let proof = nockvm::noun::T(&mut slab, &[proof_item, nockvm::noun::D(0)]);
-        let pow = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), proof]);
-        let digest = page.digest.to_noun(&mut slab);
-        let parent = page.parent.to_noun(&mut slab);
-        let tx_ids = page.tx_ids.to_noun(&mut slab);
-        let coinbase = page.coinbase.to_noun(&mut slab);
-        let target = page.target.to_noun(&mut slab);
-        let accumulated_work = page.accumulated_work.to_noun(&mut slab);
-        let msg = page.msg.to_noun(&mut slab);
-        let page_noun = nockvm::noun::T(
-            &mut slab,
-            &[
-                nockvm::noun::D(1),
-                digest,
-                pow,
-                parent,
-                tx_ids,
-                coinbase,
-                nockvm::noun::D(page.timestamp),
-                nockvm::noun::D(page.epoch_counter),
-                target,
-                accumulated_work,
-                nockvm::noun::D(page.height),
-                msg,
-            ],
-        );
-        let inner_unit = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), page_noun]);
-        let peek_noun = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), inner_unit]);
-        let space = slab.noun_space();
-        let expected_pow = proof.jam_bytes(&space).to_vec();
-
-        let (decoded, _) =
-            decode_page_from_peek(&peek_noun, &space).expect("decode structured proof page");
-
-        assert_eq!(decoded.pow, Some(expected_pow));
-        assert_eq!(decoded.digest, page.digest);
-        assert_eq!(decoded.height, page.height);
-    }
-
-    #[test]
-    fn decode_page_from_peek_decodes_tagged_bn_numbers() {
-        use nockchain_math::belt::Belt;
-        use nockchain_types::tx_engine::common::{CoinbaseSplit, Hash};
-        use noun_serde::NounEncode;
-        use num_bigint::BigUint;
-
-        fn tagged_bn_noun(allocator: &mut NounSlab<NockJammer>, chunks: &[u32]) -> nockapp::Noun {
-            let chunks_noun = chunks.to_vec().to_noun(allocator);
-            nockvm::noun::T(allocator, &[nockvm::noun::D(28258), chunks_noun])
-        }
-
-        fn biguint_from_u32_chunks(chunks: &[u32]) -> BigUint {
-            let mut bytes = Vec::with_capacity(chunks.len() * 4);
-            for &chunk in chunks {
-                bytes.extend_from_slice(&chunk.to_le_bytes());
-            }
-            while bytes.last() == Some(&0) {
-                bytes.pop();
-            }
-            BigUint::from_bytes_le(&bytes)
-        }
-
-        let digest = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]);
-        let parent = Hash([Belt(6), Belt(7), Belt(8), Belt(9), Belt(10)]);
-        let expected_coinbase = CoinbaseSplit::V0(vec![0xaa, 0xbb]);
-        let expected_msg = vec![7u32, 8u32, 9u32];
-
-        let target_chunks = [0x89abcdef, 0x01234567, 0xfedcba98, 0x76543210];
-        let accumulated_work_chunks = [0xffffffff, 0x00000000, 0x22222222, 0x33333333, 0x44444444];
-
-        let mut slab: NounSlab<NockJammer> = NounSlab::new();
-        let digest_noun = digest.to_noun(&mut slab);
-        let parent_noun = parent.to_noun(&mut slab);
-        let coinbase_noun = expected_coinbase.to_noun(&mut slab);
-        let msg_noun = expected_msg.to_noun(&mut slab);
-        let target_noun = tagged_bn_noun(&mut slab, &target_chunks);
-        let accumulated_work_noun = tagged_bn_noun(&mut slab, &accumulated_work_chunks);
-
-        let page_noun = nockvm::noun::T(
-            &mut slab,
-            &[
-                nockvm::noun::D(1), // page version
-                digest_noun,
-                nockvm::noun::D(0), // no pow
-                parent_noun,
-                nockvm::noun::D(0), // empty tx_ids z-set
-                coinbase_noun,
-                nockvm::noun::D(1_717_171),
-                nockvm::noun::D(42),
-                target_noun,
-                accumulated_work_noun,
-                nockvm::noun::D(77),
-                msg_noun,
-            ],
-        );
-
-        // peek response shape: [~ [~ page]]
-        let inner_unit = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), page_noun]);
-        let peek_noun = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), inner_unit]);
-        let space = slab.noun_space();
-
-        let (page, _) = decode_page_from_peek(&peek_noun, &space).expect("decode tagged-bn page");
-
-        assert_eq!(page.digest, digest, "digest should decode correctly");
-        assert_eq!(page.parent, parent, "parent should decode correctly");
-        assert_eq!(page.coinbase, expected_coinbase, "coinbase should decode");
-        assert_eq!(page.timestamp, 1_717_171, "timestamp should decode");
-        assert_eq!(page.epoch_counter, 42, "epoch counter should decode");
-        assert_eq!(page.height, 77, "height should decode");
-        assert_eq!(page.msg, expected_msg, "msg should decode");
-        assert_eq!(
-            page.target.0,
-            biguint_from_u32_chunks(&target_chunks),
-            "target should decode via [%bn (list u32)] path"
-        );
-        assert_eq!(
-            page.accumulated_work.0,
-            biguint_from_u32_chunks(&accumulated_work_chunks),
-            "accumulated_work should decode via [%bn (list u32)] path"
-        );
     }
 
     #[test]

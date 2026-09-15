@@ -5,8 +5,10 @@
 /=  *  /common/wrapper
 /=  *  /apps/bridge/types
 /=  dumb  /apps/dumbnet/lib/types
+~%  %bridge-base  ..ut  ~
 |_  state=bridge-state
 ++  incoming-base-blocks
+  ~%  %incoming-base-blocks  ..incoming-base-blocks  ~
   |=  [raw=raw-base-blocks:cause rest=[=wire eny=@ our=@ux now=@da]]
   ^-  [(list effect) bridge-state]
   ~&  %incoming-base-blocks

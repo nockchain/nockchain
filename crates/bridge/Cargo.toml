@@ -70,6 +70,7 @@ tonic-reflection = { workspace = true }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+tracing-tracy.workspace = true
 wallet-tx-builder.workspace = true
 zkvm-jetpack.workspace = true
 

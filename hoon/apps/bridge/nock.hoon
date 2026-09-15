@@ -5,8 +5,10 @@
 /=  *  /common/wrapper
 /=  *  /apps/bridge/types
 /=  dumb  /apps/dumbnet/lib/types
+~%  %bridge-nock  ..ut  ~
 |_  state=bridge-state
 ++  incoming-nockchain-block
+  ~%  %incoming-nockchain-block  ..incoming-nockchain-block  ~
   |=  [nockchain-block=nockchain-block:cause rest=[=wire eny=@ our=@ux now=@da]]
   ^-  [(list effect) bridge-state]
   ~&  %incoming-nockchain
@@ -74,6 +76,7 @@
 ::
 ::  check if nockchain page belongs to hashchain
 ++  validate-nockchain-page-sequence
+  ~%  %validate-nockchain-page-sequence  ..validate-nockchain-page-sequence  ~
   |=  =page:v1:t
   ^-  (unit @t)
   =/  height  ~(height get:page:t page)
@@ -95,6 +98,7 @@
   ~
 ::
 ++  process-nockchain-block
+  ~%  %process-nockchain-block  ..process-nockchain-block  ~
   |=  [block=page:t txs=(z-map tx-id:t tx:t)]
   ^-  [nock-block process-result]
   |^

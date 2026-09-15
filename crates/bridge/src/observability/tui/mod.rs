@@ -180,11 +180,17 @@ pub fn init_bridge_tracing(
             .boxed()
     };
 
-    // Combine both layers
+    let tracy_enabled = std::env::var("TRACY_ENABLE")
+        .map(|value| value != "0")
+        .unwrap_or(false);
+    let tracy_layer = tracy_enabled.then(tracing_tracy::TracyLayer::default);
+
+    // Combine file, console, and optional Tracy layers.
     tracing_subscriber::registry()
         .with(filter)
         .with(file_layer)
         .with(console_layer)
+        .with(tracy_layer)
         .try_init()
         .map_err(|e| BridgeError::Runtime(format!("failed to init tracing: {}", e)))?;
 
