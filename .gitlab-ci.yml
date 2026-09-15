@@ -89,6 +89,30 @@ build-kernels:
       - assets/*.jam
     expire_in: 1 day
 
+forge-withdrawal-protocol:
+  stage: test
+  needs: []
+  rules:
+    - <<: *open_sync_merge_train_rule
+      when: never
+    - changes:
+        - "crates/bridge/contracts/**/*"
+        - "crates/bridge/src/shared/base.rs"
+        - "crates/bridge/src/withdrawal/**/*"
+        - "crates/bridge/test-fixtures/withdrawal_wire_v1_vectors.json"
+        - "crates/bridge/BUILD.bazel"
+        - "tools/foundry/**/*"
+        - "MODULE.bazel"
+        - "MODULE.bazel.lock"
+        - ".gitlab-ci.yml"
+        - ".github/workflows/bridge-contracts.yml"
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      bazel build //crates/bridge:withdrawal_contract_conformance --verbose_failures
+      cat bazel-bin/crates/bridge/contracts/out/forge-test-summary.txt
+
 cargo-test:
   stage: test
   needs:

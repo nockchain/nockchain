@@ -54,7 +54,8 @@ use crate::withdrawal::state::{
 #[cfg(test)]
 use crate::withdrawal::submission::WithdrawalSequencerSubmitOutcome;
 use crate::withdrawal::submission::{
-    register_withdrawal_or_alert, sequenced_withdrawal_released, WithdrawalSequencerPort,
+    register_withdrawal_or_alert, sequenced_withdrawal_needs_no_bridge_work,
+    WithdrawalSequencerPort,
 };
 use crate::withdrawal::transport::{
     required_withdrawal_commit_signature_threshold, signed_proposal_matches_base,
@@ -1628,7 +1629,7 @@ async fn next_stageable_withdrawal_request<K: WithdrawalKernelPort>(
                     .sequencer
                     .get_sequenced_withdrawal_status(&tracked.id)
                     .await?;
-                if sequenced_withdrawal_released(&status) {
+                if sequenced_withdrawal_needs_no_bridge_work(&status) {
                     continue;
                 }
                 register_withdrawal_or_alert(
@@ -1645,7 +1646,7 @@ async fn next_stageable_withdrawal_request<K: WithdrawalKernelPort>(
                     .sequencer
                     .get_sequenced_withdrawal_status(&tracked.id)
                     .await?;
-                if sequenced_withdrawal_released(&status) {
+                if sequenced_withdrawal_needs_no_bridge_work(&status) {
                     continue;
                 }
                 return Ok(None);
@@ -2090,7 +2091,7 @@ mod tests {
             for (id, withdrawal_nonce) in candidates {
                 let released = statuses
                     .get(&id)
-                    .map(|status| matches!(status.state.as_str(), "mempool_accepted" | "confirmed"))
+                    .map(|status| status.state == "confirmed")
                     .unwrap_or(false);
                 if !released {
                     return Ok(Some(
@@ -4053,7 +4054,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn withdrawal_assembly_tick_stages_later_request_after_prior_nonce_mempool_acceptance() {
+    async fn withdrawal_assembly_tick_waits_for_prior_nonce_confirmation() {
         let (_dir, registry) = open_services().await;
         let mut earlier = sample_withdrawal_request_with_seed(1);
         let mut later = sample_withdrawal_request_with_seed(2);
@@ -4135,7 +4136,7 @@ mod tests {
         let context = WithdrawalAssemblyContext {
             kernel: kernel.clone(),
             snapshot_service,
-            sequencer,
+            sequencer: sequencer.clone(),
             proposal_registry: registry,
             bridge_status: sample_bridge_status(1),
             planner,
@@ -4147,6 +4148,19 @@ mod tests {
         let outcome = withdrawal_assembly_tick_once(&context)
             .await
             .expect("assembly tick");
+        assert_eq!(outcome, WithdrawalAssemblyTickOutcome::Idle);
+        assert!(kernel.requests.lock().expect("requests lock").is_empty());
+
+        sequencer
+            .statuses
+            .lock()
+            .expect("sequencer statuses lock")
+            .get_mut(&earlier.withdrawal_id())
+            .expect("earlier sequencer status")
+            .state = "confirmed".to_string();
+        let outcome = withdrawal_assembly_tick_once(&context)
+            .await
+            .expect("assembly tick after confirmation");
         assert!(matches!(
             outcome,
             WithdrawalAssemblyTickOutcome::RequestedBuild {

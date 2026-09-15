@@ -14,14 +14,14 @@ use crate::shared::ingress::proto::withdrawal_public_query_server::{
 };
 use crate::withdrawal::quote::WithdrawalQuotePort;
 use crate::withdrawal::sequencer::base_activity::{
-    BaseActivityPageCursor, BaseActivityStore, VerifiedBaseWithdrawalBurn,
+    BaseActivityPageCursor, BaseActivityStore, PublicBaseWithdrawalBurn,
 };
 use crate::withdrawal::sequencer::base_height::SequencerBaseHeightTracker;
 use crate::withdrawal::sequencer::base_incidents::{
     BaseIncidentStore, CompensatedBaseWithdrawal, RejectedBaseWithdrawalBurn,
 };
 use crate::withdrawal::sequencer::store::{
-    WithdrawalSequencerStore, WithdrawalSubmissionEventRecord,
+    PublicWithdrawalRecoveryProjection, WithdrawalSequencerStore, WithdrawalSubmissionEventRecord,
 };
 use crate::withdrawal::state::{LiveWithdrawalView, WithdrawalState};
 use crate::withdrawal::submission::WithdrawalSubmitPort;
@@ -135,12 +135,12 @@ impl PublicWithdrawalQueryService {
         &self,
         locator: &proto::PublicBaseWithdrawalLocator,
         require_unique: bool,
-    ) -> Result<Option<VerifiedBaseWithdrawalBurn>, Status> {
+    ) -> Result<Option<PublicBaseWithdrawalBurn>, Status> {
         let tx_hash = Self::parse_tx_hash(&locator.transaction_hash)?;
         if let Some(log_index) = locator.log_index {
             return self
                 .activity
-                .load_verified_burn_by_tx_log(
+                .load_public_burn_by_tx_log(
                     self.config.base_chain_id, self.config.nock_contract_address, tx_hash,
                     log_index,
                 )
@@ -149,7 +149,7 @@ impl PublicWithdrawalQueryService {
         }
         let burns = self
             .activity
-            .list_verified_burns_by_tx_hash(
+            .list_public_burns_by_tx_hash(
                 self.config.base_chain_id, self.config.nock_contract_address, tx_hash,
             )
             .await
@@ -224,14 +224,15 @@ impl PublicWithdrawalQueryService {
 
     async fn single_record(
         &self,
-        burn: VerifiedBaseWithdrawalBurn,
+        burn: PublicBaseWithdrawalBurn,
     ) -> Result<proto::PublicWithdrawalRecord, Status> {
+        let base_event_id = burn.burn.base_event_id.clone();
         let mut projections = self
             .store
-            .public_lifecycle_projections(vec![burn.base_event_id.clone()])
+            .public_lifecycle_projections(vec![base_event_id.clone()])
             .await
             .map_err(|err| self.internal_status("public lifecycle lookup", err))?;
-        let projection = projections.remove(&burn.base_event_id);
+        let projection = projections.remove(&base_event_id);
         let lifecycle = projection.as_ref().map(|projection| &projection.lifecycle);
         let net_amount = projection
             .as_ref()
@@ -239,6 +240,9 @@ impl PublicWithdrawalQueryService {
         let confirmation = projection
             .as_ref()
             .and_then(|projection| projection.confirmation.as_ref());
+        let recovery = projection
+            .as_ref()
+            .and_then(|projection| projection.recovery.as_ref());
         let revision = self
             .store
             .public_projection_revision()
@@ -247,7 +251,7 @@ impl PublicWithdrawalQueryService {
         let compensated = self
             .incidents
             .load_compensated_withdrawal(
-                self.config.base_chain_id, self.config.nock_contract_address, &burn.base_event_id,
+                self.config.base_chain_id, self.config.nock_contract_address, &base_event_id,
             )
             .await
             .map_err(|err| self.internal_status("compensation lookup", err))?;
@@ -257,6 +261,7 @@ impl PublicWithdrawalQueryService {
             lifecycle,
             net_amount,
             confirmation,
+            recovery,
             revision,
             unix_now_secs().map_err(|err| self.internal_status("system time", err))?,
         )
@@ -265,14 +270,20 @@ impl PublicWithdrawalQueryService {
 
     fn build_record(
         &self,
-        burn: VerifiedBaseWithdrawalBurn,
+        public_burn: PublicBaseWithdrawalBurn,
         compensated: Option<&CompensatedBaseWithdrawal>,
         lifecycle: Option<&LiveWithdrawalView>,
         net_amount: Option<u64>,
         confirmation: Option<&WithdrawalSubmissionEventRecord>,
+        recovery: Option<&PublicWithdrawalRecoveryProjection>,
         projection_revision: u64,
         now_secs: u64,
     ) -> Result<proto::PublicWithdrawalRecord, BridgeError> {
+        let canonical_base_event = public_burn.canonical;
+        let fallback_generation = public_burn.invalidation_generation;
+        let fallback_reason = public_burn.invalidation_reason.clone();
+        let fallback_invalidated_at = public_burn.invalidated_at;
+        let burn = public_burn.burn;
         let policy_matches = burn.policy_id.as_deref() == Some(self.config.policy_id.as_str())
             && burn.protocol_id.as_deref() == Some(self.config.protocol_id.as_str());
         let minimum_nicks = crate::shared::types::WithdrawalPolicy::v1()
@@ -286,6 +297,26 @@ impl PublicWithdrawalQueryService {
         let delayed = observed_secs
             .and_then(|observed| now_secs.checked_sub(observed))
             .is_some_and(|elapsed| elapsed >= self.config.delayed_after.as_secs());
+        let recovery = recovery.filter(|recovery| {
+            !matches!(
+                (lifecycle, confirmation),
+                (Some(row), Some(event))
+                    if row.state == WithdrawalState::Confirmed
+                        && event.created_at > recovery.observed_at
+            )
+        });
+        let active_confirmation = confirmation.filter(|event| {
+            lifecycle.is_some_and(|row| row.state == WithdrawalState::Confirmed)
+                && recovery.is_none_or(|recovery| event.created_at > recovery.observed_at)
+        });
+        let reorged = !canonical_base_event
+            || recovery.is_some()
+            || lifecycle.is_some_and(|row| {
+                matches!(
+                    row.state,
+                    WithdrawalState::Invalidated | WithdrawalState::ReorgHold
+                )
+            });
         let (status, resolution, support_hint) = if compensated.is_some() {
             (
                 proto::PublicWithdrawalStatus::Failure,
@@ -304,7 +335,24 @@ impl PublicWithdrawalQueryService {
                 proto::PublicWithdrawalResolution::BelowPolicy,
                 "This burn is below the active withdrawal policy. Contact support; do not burn again.",
             )
-        } else if lifecycle.is_some_and(|row| row.state == WithdrawalState::Confirmed) {
+        } else if reorged {
+            (
+                if !canonical_base_event
+                    || lifecycle.is_some_and(|row| {
+                        matches!(
+                            row.state,
+                            WithdrawalState::Invalidated | WithdrawalState::ReorgHold
+                        )
+                    })
+                {
+                    proto::PublicWithdrawalStatus::Failure
+                } else {
+                    proto::PublicWithdrawalStatus::WithdrawalPending
+                },
+                proto::PublicWithdrawalResolution::Reorged,
+                "Authoritative chain recovery invalidated prior settlement facts. Do not submit another burn.",
+            )
+        } else if active_confirmation.is_some() {
             (
                 proto::PublicWithdrawalStatus::Confirmed,
                 proto::PublicWithdrawalResolution::Found,
@@ -327,11 +375,18 @@ impl PublicWithdrawalQueryService {
             .filter(|row| row.id.as_of != crate::shared::types::zero_tip5_hash())
             .map(|row| withdrawal_id_to_proto(&row.id));
         let observed_at_unix_ms = observed_secs.map(seconds_u64_to_millis_i64).transpose()?;
-        let updated_at_unix_ms = lifecycle
-            .map(|row| seconds_i64_to_millis(row.updated_at))
+        let lifecycle_updated_at = lifecycle.map(|row| row.updated_at);
+        let recovery_updated_at = recovery
+            .map(|recovery| recovery.observed_at)
+            .or(fallback_invalidated_at);
+        let updated_at_unix_ms = [lifecycle_updated_at, recovery_updated_at]
+            .into_iter()
+            .flatten()
+            .max()
+            .map(seconds_i64_to_millis)
             .transpose()?
             .or(observed_at_unix_ms);
-        let confirmed_at_unix_ms = confirmation
+        let confirmed_at_unix_ms = active_confirmation
             .map(|event| seconds_i64_to_millis(event.created_at))
             .transpose()?;
         let revision = compose_public_revision(burn.verified_at, projection_revision)?;
@@ -352,24 +407,41 @@ impl PublicWithdrawalQueryService {
             status: status as i32,
             resolution: resolution as i32,
             revision,
-            canonical_base_event: true,
+            canonical_base_event,
             base_block_number: Some(burn.block_number),
             base_block_hash: Some(burn.block_hash.as_slice().to_vec()),
             observed_at_unix_ms,
             updated_at_unix_ms,
             nock_transaction_name: lifecycle
                 .and_then(|row| row.authorized_transaction_name.clone()),
-            nock_confirmed_height: confirmation.and_then(|event| event.confirmed_height),
-            nock_confirmed_block_id: confirmation
+            nock_confirmed_height: active_confirmation.and_then(|event| event.confirmed_height),
+            nock_confirmed_block_id: active_confirmation
                 .and_then(|event| event.confirmed_block_id.as_ref())
                 .map(|block_id| block_id.to_be_limb_bytes().to_vec()),
             confirmed_at_unix_ms,
             support_hint: support_hint.to_string(),
-            recovery_generation: None,
-            invalidated_block_height: None,
-            invalidated_block_id: None,
-            prior_status: String::new(),
-            recovery_reason: String::new(),
+            recovery_generation: recovery
+                .map(|recovery| recovery.generation)
+                .or(fallback_generation),
+            invalidated_block_height: recovery
+                .map(|recovery| recovery.invalidated_block_height)
+                .or_else(|| (!canonical_base_event).then_some(burn.block_number)),
+            invalidated_block_id: recovery
+                .map(|recovery| recovery.invalidated_block_id.clone())
+                .or_else(|| (!canonical_base_event).then(|| burn.block_hash.as_slice().to_vec())),
+            prior_status: recovery
+                .map(|recovery| recovery.prior_status.clone())
+                .unwrap_or_else(|| {
+                    if canonical_base_event {
+                        String::new()
+                    } else {
+                        "pending".to_string()
+                    }
+                }),
+            recovery_reason: recovery
+                .map(|recovery| recovery.reason.clone())
+                .or(fallback_reason)
+                .unwrap_or_default(),
         })
     }
 
@@ -453,7 +525,7 @@ impl PublicWithdrawalQueryService {
         burner: Address,
         snapshot_revision: u64,
         snapshot_rowid: u64,
-        last: &VerifiedBaseWithdrawalBurn,
+        last: &PublicBaseWithdrawalBurn,
     ) -> String {
         let mut payload = Vec::with_capacity(PUBLIC_WITHDRAWAL_PAGE_TOKEN_PAYLOAD_LEN);
         payload.push(2);
@@ -464,9 +536,9 @@ impl PublicWithdrawalQueryService {
         payload.extend_from_slice(blake3::hash(self.config.protocol_id.as_bytes()).as_bytes());
         payload.extend_from_slice(&snapshot_revision.to_be_bytes());
         payload.extend_from_slice(&snapshot_rowid.to_be_bytes());
-        payload.extend_from_slice(&last.block_number.to_be_bytes());
-        payload.extend_from_slice(&last.log_index.to_be_bytes());
-        payload.extend_from_slice(&last.base_event_id.0);
+        payload.extend_from_slice(&last.burn.block_number.to_be_bytes());
+        payload.extend_from_slice(&last.burn.log_index.to_be_bytes());
+        payload.extend_from_slice(&last.burn.base_event_id.0);
         let tag = blake3::keyed_hash(&self.config.page_token_key, &payload);
         payload.extend_from_slice(tag.as_bytes());
         hex::encode(payload)
@@ -489,7 +561,7 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
         if locator.log_index.is_none() {
             let burns = self
                 .activity
-                .list_verified_burns_by_tx_hash(
+                .list_public_burns_by_tx_hash(
                     self.config.base_chain_id, self.config.nock_contract_address, tx_hash,
                 )
                 .await
@@ -503,19 +575,16 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
                 .map_err(|err| self.internal_status("rejected Base transaction resolution", err))?;
             let compensated = self
                 .incidents
-                .list_compensated_withdrawals(
-                    self.config.base_chain_id, self.config.nock_contract_address,
+                .list_compensated_withdrawals_by_tx_hash(
+                    self.config.base_chain_id, self.config.nock_contract_address, tx_hash,
                 )
                 .await
                 .map_err(|err| {
                     self.internal_status("compensated Base transaction resolution", err)
-                })?
-                .into_iter()
-                .filter(|record| record.tx_hash == tx_hash)
-                .collect::<Vec<_>>();
+                })?;
             let candidate_log_indices = burns
                 .iter()
-                .map(|burn| burn.log_index)
+                .map(|burn| burn.burn.log_index)
                 .chain(rejected.iter().map(|burn| burn.log_index))
                 .chain(compensated.iter().map(|record| record.log_index))
                 .collect::<BTreeSet<_>>()
@@ -634,7 +703,7 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
                 let base_event_id = Self::parse_base_event_id(&base_event_id)?;
                 base_event_id_hint = Some(base_event_id.clone());
                 self.activity
-                    .load_verified_burn(
+                    .load_public_burn(
                         self.config.base_chain_id, self.config.nock_contract_address,
                         &base_event_id,
                     )
@@ -647,7 +716,7 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
                 base_event_id_hint = Some(withdrawal_id.base_event_id.clone());
                 let burn = self
                     .activity
-                    .load_verified_burn(
+                    .load_public_burn(
                         self.config.base_chain_id, self.config.nock_contract_address,
                         &withdrawal_id.base_event_id,
                     )
@@ -778,7 +847,7 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             .ok_or_else(|| Status::invalid_argument("page_size overflow"))?;
         let mut page = self
             .activity
-            .list_verified_burns_by_burner_page(
+            .list_public_burns_by_burner_page(
                 self.config.base_chain_id, self.config.nock_contract_address, burner, cursor,
                 fetch_limit,
             )
@@ -799,7 +868,7 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
         let base_event_ids = page
             .burns
             .iter()
-            .map(|burn| burn.base_event_id.clone())
+            .map(|burn| burn.burn.base_event_id.clone())
             .collect::<Vec<_>>();
         let projections = self
             .store
@@ -819,14 +888,16 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
         let now_secs = unix_now_secs().map_err(|err| self.internal_status("system time", err))?;
         let mut withdrawals = Vec::with_capacity(page.burns.len());
         for burn in page.burns {
-            let projection = projections.get(&burn.base_event_id);
+            let projection = projections.get(&burn.burn.base_event_id);
             let lifecycle = projection.map(|projection| &projection.lifecycle);
-            let compensation = compensated.get(&burn.base_event_id);
+            let compensation = compensated.get(&burn.burn.base_event_id);
             let net_amount = projection.and_then(|projection| projection.net_amount);
             let confirmation = projection.and_then(|projection| projection.confirmation.as_ref());
+            let recovery = projection.and_then(|projection| projection.recovery.as_ref());
             withdrawals.push(
                 self.build_record(
-                    burn, compensation, lifecycle, net_amount, confirmation, revision, now_secs,
+                    burn, compensation, lifecycle, net_amount, confirmation, recovery, revision,
+                    now_secs,
                 )
                 .map_err(|err| self.internal_status("history record projection", err))?,
             );
@@ -883,10 +954,12 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             .public_projection_revision()
             .await
             .map_err(|err| self.internal_status("projection readiness", err))?;
-        let observed_nockchain_height = match self.nockchain.current_nockchain_tip_height().await {
-            Ok(height) => height,
-            Err(_) => None,
-        };
+        let reorg_hold = self.store.ensure_reorg_ready().await.is_err();
+        let observed_nockchain_height = self
+            .nockchain
+            .current_nockchain_tip_height()
+            .await
+            .unwrap_or_default();
         let mut reasons = Vec::new();
         let indexed_base_height = activity_cursor
             .as_ref()
@@ -902,6 +975,12 @@ impl WithdrawalPublicQuery for PublicWithdrawalQueryService {
             Some(frontier.base_block) != indexed_base_height
                 || frontier.journal_sequence != projection_revision
         }) {
+            reasons.push(proto::PublicWithdrawalReadinessReason::JournalReconciling as i32);
+        }
+        if reorg_hold
+            && !reasons
+                .contains(&(proto::PublicWithdrawalReadinessReason::JournalReconciling as i32))
+        {
             reasons.push(proto::PublicWithdrawalReadinessReason::JournalReconciling as i32);
         }
         if observed_nockchain_height.is_none() {
@@ -1285,6 +1364,15 @@ mod tests {
             protocol_id: Some(policy.wire_format.to_string()),
         }
     }
+    fn canonical_public_burn(burn: VerifiedBaseWithdrawalBurn) -> PublicBaseWithdrawalBurn {
+        PublicBaseWithdrawalBurn {
+            burn,
+            canonical: true,
+            invalidated_at: None,
+            invalidation_generation: None,
+            invalidation_reason: None,
+        }
+    }
 
     struct PublicQueryFixture {
         _directory: TempDir,
@@ -1559,6 +1647,122 @@ mod tests {
         assert_eq!(quote.transaction_fee_nicks, "256");
         assert!(quote.net_payout_nicks.parse::<u64>().expect("net quote") > 0);
         assert_eq!(quote.snapshot_height, Some(700));
+    }
+
+    #[tokio::test]
+    async fn public_withdrawal_regresses_confirmed_facts_on_nock_reorg() {
+        let fixture = PublicQueryFixture::new().await;
+        let before = fixture
+            .service
+            .get_withdrawal(Request::new(proto::GetPublicWithdrawalRequest {
+                lookup: Some(proto::PublicWithdrawalLookupKey {
+                    deployment: Some(fixture.deployment()),
+                    key: Some(proto::public_withdrawal_lookup_key::Key::WithdrawalId(
+                        withdrawal_id_to_proto(&fixture.confirmed_id),
+                    )),
+                }),
+            }))
+            .await
+            .expect("get confirmed withdrawal")
+            .into_inner()
+            .withdrawal
+            .expect("confirmed withdrawal");
+        let page_before = fixture
+            .service
+            .list_withdrawals_by_burner(Request::new(proto::ListPublicWithdrawalsByBurnerRequest {
+                deployment: Some(fixture.deployment()),
+                burner: fixture.burner.as_slice().to_vec(),
+                page_size: 1,
+                page_token: String::new(),
+            }))
+            .await
+            .expect("history page before reorg")
+            .into_inner();
+        assert!(!page_before.next_page_token.is_empty());
+        let invalidated_block_id = Tip5Hash::from_limbs(&[71, 72, 73, 74, 75]);
+        fixture
+            .store
+            .record_nockchain_inclusion_invalidated(
+                &fixture.confirmed_id,
+                700,
+                invalidated_block_id.clone(),
+                WithdrawalState::ReorgHold,
+                "Nockchain confirmation was orphaned".to_string(),
+            )
+            .await
+            .expect("record Nockchain reorg");
+        let stale_page = fixture
+            .service
+            .list_withdrawals_by_burner(Request::new(proto::ListPublicWithdrawalsByBurnerRequest {
+                deployment: Some(fixture.deployment()),
+                burner: fixture.burner.as_slice().to_vec(),
+                page_size: 1,
+                page_token: page_before.next_page_token,
+            }))
+            .await
+            .expect_err("pre-reorg page token must be superseded");
+        assert_eq!(stale_page.code(), tonic::Code::FailedPrecondition);
+
+        let after = fixture
+            .service
+            .get_withdrawal(Request::new(proto::GetPublicWithdrawalRequest {
+                lookup: Some(proto::PublicWithdrawalLookupKey {
+                    deployment: Some(fixture.deployment()),
+                    key: Some(proto::public_withdrawal_lookup_key::Key::WithdrawalId(
+                        withdrawal_id_to_proto(&fixture.confirmed_id),
+                    )),
+                }),
+            }))
+            .await
+            .expect("get reorged withdrawal")
+            .into_inner()
+            .withdrawal
+            .expect("reorged withdrawal");
+        assert!(after.revision > before.revision);
+        assert_eq!(
+            after.resolution,
+            proto::PublicWithdrawalResolution::Reorged as i32
+        );
+        assert_eq!(after.status, proto::PublicWithdrawalStatus::Failure as i32);
+        assert_eq!(after.recovery_generation, Some(1));
+        assert_eq!(after.invalidated_block_height, Some(700));
+        assert_eq!(
+            after.invalidated_block_id,
+            Some(invalidated_block_id.to_be_limb_bytes().to_vec())
+        );
+        assert_eq!(after.prior_status, "confirmed");
+        assert!(after.recovery_reason.contains("orphaned"));
+        assert_eq!(after.nock_confirmed_height, None);
+        assert_eq!(after.nock_confirmed_block_id, None);
+        assert_eq!(after.confirmed_at_unix_ms, None);
+    }
+
+    #[tokio::test]
+    async fn public_readiness_fails_closed_while_base_reorg_guard_is_active() {
+        let fixture = PublicQueryFixture::new().await;
+        fixture
+            .store
+            .activate_base_reorg_guard(
+                8_453,
+                Address::from([0x11; 20]),
+                "proof fixture: kernel hashchain has not been recovered".to_string(),
+            )
+            .await
+            .expect("activate Base reorg guard");
+
+        let readiness = fixture
+            .service
+            .get_withdrawal_readiness(Request::new(proto::GetPublicWithdrawalReadinessRequest {
+                deployment: Some(fixture.deployment()),
+            }))
+            .await
+            .expect("reorg-held readiness")
+            .into_inner();
+
+        assert!(!readiness.accepting_new_withdrawals);
+        assert!(readiness
+            .reasons
+            .contains(&(proto::PublicWithdrawalReadinessReason::JournalReconciling as i32)));
     }
 
     #[tokio::test]
@@ -1906,9 +2110,10 @@ mod tests {
             let record = fixture
                 .service
                 .build_record(
-                    burn.clone(),
+                    canonical_public_burn(burn.clone()),
                     None,
                     Some(&lifecycle),
+                    None,
                     None,
                     None,
                     10,
@@ -1925,9 +2130,10 @@ mod tests {
         delayed_service.config.delayed_after = Duration::from_secs(1);
         let delayed = delayed_service
             .build_record(
-                burn.clone(),
+                canonical_public_burn(burn.clone()),
                 None,
                 Some(&lifecycle),
+                None,
                 None,
                 None,
                 11,
@@ -1943,7 +2149,16 @@ mod tests {
         below_policy.amount_nicks = 1;
         let failure = fixture
             .service
-            .build_record(below_policy, None, None, None, None, 12, 1_700_000_000)
+            .build_record(
+                canonical_public_burn(below_policy),
+                None,
+                None,
+                None,
+                None,
+                None,
+                12,
+                1_700_000_000,
+            )
             .expect("normalize below-policy burn");
         assert_eq!(
             failure.status,
@@ -1958,7 +2173,16 @@ mod tests {
         unknown_policy.policy_id = None;
         let inconsistent = fixture
             .service
-            .build_record(unknown_policy, None, None, None, None, 13, 1_700_000_000)
+            .build_record(
+                canonical_public_burn(unknown_policy),
+                None,
+                None,
+                None,
+                None,
+                None,
+                13,
+                1_700_000_000,
+            )
             .expect("normalize unknown policy");
         assert_eq!(
             inconsistent.status,
