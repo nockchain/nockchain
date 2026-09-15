@@ -6,12 +6,13 @@
 ++  proof-stream  ::  /lib/proof-stream
   ~%  %proof-stream  +>  ~
   |_  proof
+  ::
   ++  push
     ~/  %push
     |=  dat=proof-data
     ^-  proof
-    ::  Proof-stream bookkeeping must not erase the protocol version.  The v3
-    ::  FRI verifier uses this tag after earlier objects have been consumed.
+    ::  Proof-stream bookkeeping must not erase the protocol version. The v3
+    ::  and v5 FRI verifiers use this tag after earlier objects are consumed.
     =/  new-objects  (snoc objects dat)
     =/  new-hashes
       (snoc hashes (hash-hashable:tip5 (hashable-proof-data dat)))
@@ -20,6 +21,7 @@
       %1  [%1 new-objects new-hashes read-index]
       %2  [%2 new-objects new-hashes read-index]
       %3  [%3 new-objects new-hashes read-index]
+      %5  [%5 new-objects new-hashes read-index]
     ==
   ::
   ++  pull
@@ -35,6 +37,7 @@
       %1  [%1 objects new-hashes new-read-index]
       %2  [%2 objects new-hashes new-read-index]
       %3  [%3 objects new-hashes new-read-index]
+      %5  [%5 objects new-hashes new-read-index]
     ==
   ::
   ++  prover-fiat-shamir

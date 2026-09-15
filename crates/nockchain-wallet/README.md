@@ -5,6 +5,56 @@ Owner: Nockchain Maintainers
 Last Reviewed: 2026-04-01
 Canonical/Legacy: Canonical (Tier 1 scoped authority for wallet CLI behavior and operational usage; protocol authority remains in [`PROTOCOL.md`](../../PROTOCOL.md))
 
+`nockchain-wallet` manages local keys and watch-only identifiers, synchronizes
+notes through Nockchain gRPC, plans and signs transactions, and submits them to a
+node. It is a client of consensus, not a consensus implementation.
+
+## Place in the system
+
+```text
+local key store + user request + synchronized notes
+                         |
+                 nockchain-wallet
+              plan -> encode -> sign
+                         |
+                  public/private gRPC
+                         |
+                node and Hoon validation
+```
+
+`wallet-tx-builder` performs deterministic note selection, fee estimation, lock
+resolution, and value allocation. `nockchain-types` provides the Rust mirrors of
+transaction nouns. The wallet owns local signing and files; the node owns
+admission, mempool state, chain inclusion, and finality.
+
+## Maintained invariants and security properties
+
+- Private keys and seed phrases remain local unless the user explicitly exports
+  them. Watch-only state never acquires signing authority.
+- Addresses, public keys, and payee hashes are decoded as explicit versions;
+  visually similar strings do not bypass key-type checks.
+- Transaction planning conserves value, uses checked arithmetic, and represents
+  gifts, bridge amounts, fees, and refund separately.
+- Fee and timelock decisions use synchronized chain context. A stale view may
+  produce a transaction the node rejects, never authority to spend a different
+  note.
+- The wallet signs the exact canonical transaction noun it displays and saves.
+  Changing recipients, fees, note data, locks, or witnesses changes the signed
+  digest.
+- Manual legacy-v0 and v1 flows retain their distinct ownership and refund
+  rules; mixed-version inputs are rejected where the kernel cannot validate
+  them as one transaction.
+- gRPC acknowledgement is not confirmation. Pending transactions may be
+  replaced or rejected, and clients must wait for canonical-chain inclusion.
+- Imported key material, exported key files, saved transactions, and local
+  wallet state are sensitive operator data and require filesystem protection
+  and backups.
+
+Cryptographic safety relies on the Cheetah/Schnorr implementation, secure
+entropy for key generation, deterministic derivation, canonical noun hashing,
+and `nockchain-types` matching Hoon transaction molds. The node rechecks every
+signature, lock, fee, and conservation rule.
+
 ## Canonical Scope
 
 This document is Tier 1 canonical for:
@@ -27,7 +77,7 @@ This document is NOT canonical for:
 When wallet CLI behavior or flags change, update this doc in the same change.
 
 Minimum validation:
-- `make -C open docs-check`
+- `make docs-check`
 - `cargo check -p nockchain-wallet`
 
 ## Setup
@@ -85,12 +135,12 @@ Can be used for:
 
 ### Connecting to a Nockchain API server
 
-The wallet talks to the gRPC APIs exposed by a running nockchain instance. You can target either the **public** API (default) or the **private** API that is typically bound to `localhost`. You must run a nockchain instance to connect to the private API. The wallet connects to a public Nockchain API server at `23.252.122.18:5556` by default.
+The wallet talks to the gRPC APIs exposed by a running nockchain instance. You can target either the **public** API (default) or the **private** API that is typically bound to `localhost`. You must run a nockchain instance to connect to the private API. The wallet connects to a public Nockchain API server at `216.158.95.10:5556` by default.
 
 #### Public API (default)
 
 ```bash
-# Use the default public endpoint (23.252.122.18:5556)
+# Use the default public endpoint (216.158.95.10:5556)
 nockchain-wallet list-notes
 
 # Or point at a different remote public listener
@@ -223,7 +273,7 @@ Displays the aggregate wallet balance, including the total number of notes and t
 
 We support transactions with any amount of input notes going to any number of recipients.
 
-For the common case — paying one or more single-signer p2pkh addresses — you can skip the JSON entirely and pass paired `--to`/`--amount` flags, where **amounts are in nocks**:
+For the common case—paying one or more single-signer p2pkh addresses—use paired `--to`/`--amount` flags. Amounts are in whole nocks:
 
 ```bash
 # Ergonomic: send 100 nocks to a p2pkh address (amount is in whole NOCKS, not nicks).
@@ -245,29 +295,18 @@ nockchain-wallet create-tx --to <p2pkh-b58> --amount-nicks 6553600 --fee-nicks 6
 nockchain-wallet create-tx --bridge-deposit 100000 --to-evm-address 0x0c8d9cf278d4f3e23b00ea0a16bba2d05c07a7b6
 ```
 
-`--to A --amount 100` is exactly equivalent to `--recipient '{"kind":"p2pkh","address":"A","amount":6553600}'` (100 × 65536 nicks). Amounts are whole nocks only — there is no decimal input. `--to`/`--amount` and `--recipient` may be combined in one command. Use `--amount-nicks` to give a `--to` amount in raw nicks (mutually exclusive with `--amount`), `--fee` for a fee override in nocks, and `--fee-nicks` for a fee override in nicks (mutually exclusive with `--fee`). To move funds onto the Base bridge instead of paying a p2pkh, pass `--bridge-deposit <nocks> --to-evm-address <0x...>` (only one bridge deposit is allowed per transaction).
+Use `--to <p2pkh-b58> --amount <nocks>` for normal payments. Repeat the pair
+to create multiple outputs. `--amount` and `--fee` use whole nocks; use
+`--amount-nicks` or `--fee-nicks` when raw protocol units are required. Each
+nocks flag is mutually exclusive with its nicks counterpart.
 
-The full JSON form is still available for multisig and bridge outputs, and for entering amounts directly in nicks:
+Use `--bridge-deposit <nocks> --to-evm-address <0x...>` for a Base bridge
+deposit. Only one bridge deposit is allowed per transaction.
 
-```bash
-# Auto-select spendable notes and compute fee
-nockchain-wallet create-tx \
-  --recipient '{"kind":"p2pkh","address":"<p2pkh-b58>","amount":10000}'
-
-# Send to a single P2PKH recipient
-nockchain-wallet create-tx \
-  --names "[first1 last1],[first2 last2]" \
-  --recipient '{"kind":"p2pkh","address":"<p2pkh-b58>","amount":10000}' \
-  --fee-nicks 10
-
-# Send to a multisig recipient
-nockchain-wallet create-tx \
-  --names "[first1 last1],[first2 last2]" \
-  --recipient '{"kind":"multisig","threshold":2,"addresses":["<pkh-a>","<pkh-b>","<pkh-c>"],"amount":9000}' \
-  --fee-nicks 10
-```
-
-`--recipient` gifts are denominated in nicks (65536 nicks = 1 nock); the ergonomic `--amount` and `--fee` are denominated in whole nocks, while `--amount-nicks` and `--fee-nicks` are in nicks.
+The existing `--recipient` argument remains available for advanced multisig
+outputs, explicit raw-nick specifications, and compatibility with older
+commands. It can be combined with the simpler flags; see
+[Advanced Recipient Format](#advanced-recipient-format).
 
 #### Common Parameters
 
@@ -275,9 +314,9 @@ nockchain-wallet create-tx \
 - Auto-selection remains v1-only
 - Manual `--names` selection may spend either an all-v1 set or an all-v0 set; mixed-version manual sets are rejected
 - The optional `--fee` argument overrides the planner-computed fee, denominated in whole nocks (65536 nicks = 1 nock); `--fee-nicks` is the same override in nicks (mutually exclusive with `--fee`)
-- Provide multiple `--recipient` flags (or multiple paired `--to`/`--amount` flags) to fan out to several outputs
-- Each `--recipient` is either a JSON object (preferred) or a legacy `<p2pkh>:<amount>` string
-- `--to <p2pkh-b58> --amount <nocks>` is a shorthand for a p2pkh `--recipient`; amounts are whole nocks (use `--amount-nicks` for raw nicks), and each `--to` must be paired with exactly one `--amount`/`--amount-nicks`
+- Repeat paired `--to`/`--amount` flags to fan out to several p2pkh outputs
+- `--to <p2pkh-b58> --amount <nocks>` is the preferred p2pkh form; use `--amount-nicks` for raw nicks, and pair every `--to` with exactly one amount
+- The advanced `--recipient` option remains available as a JSON object or legacy `<p2pkh>:<amount>` string
 - `--bridge-deposit <nocks> --to-evm-address <0x...>` is a shorthand for a Base bridge deposit output (one per transaction); see [Bridge Deposits](#bridge-deposits)
 - `address`/`addresses` fields expect base58-encoded pay-to-pubkey-hash values
 - Provide `--sign-key <index[:hardened]>` multiple times to explicitly choose signing keys. If omitted, the wallet uses the master key or the `--index/--hardened` pair.
@@ -335,7 +374,7 @@ Notes:
 - The command may create multiple transactions, not just one: it creates up to one migration tx per active local v0 signer under the active master
 - Inspect the migration summary before submitting anything. It tells you which signer each tx belongs to, how many notes were selected, the fee, the expected migrated amount, where the tx was saved, and how to submit it
 - Watch-only imports are not enough; the wallet must hold the matching v0 signing key
-- If you are using the bridge helper scripts, `open/crates/bridge/scripts/wallet.sh --new` imports both the default v1 fakenet key and the legacy v0 fakenet key
+- Import the matching v0 signing key before migrating legacy v0 notes.
 
 ### Manual V0 Fan-In With `create-tx`
 
@@ -344,7 +383,8 @@ If you need to pin the exact legacy inputs instead of sweeping every spendable v
 ```bash
 nockchain-wallet create-tx \
   --names "[first1 last1],[first2 last2]" \
-  --recipient '{"kind":"p2pkh","address":"<v1-p2pkh-b58>","amount":10000}' \
+  --to <v1-p2pkh-b58> \
+  --amount-nicks 10000 \
   --refund-pkh <v1-p2pkh-b58>
 ```
 
@@ -356,9 +396,9 @@ Rules for manual legacy spends:
 - Fee may be planner-computed or overridden with `--fee`
 - Omit `--names` if you want normal auto-selection; auto-selection does not pick v0 notes
 
-#### Recipient JSON Format
+#### Advanced Recipient Format
 
-`--recipient` accepts JSON objects in addition to the legacy `<p2pkh>:<amount>` syntax (legacy supports simple 1-of-1 P2PKH locks only). Wrap JSON in single quotes (or escape the quotes) when invoking the CLI. The supported shapes are:
+For advanced output shapes, `--recipient` accepts JSON objects in addition to the legacy `<p2pkh>:<amount>` syntax. Wrap JSON in single quotes (or escape the quotes) when invoking the CLI. The supported shapes are:
 
 ```json
 {"kind":"p2pkh","address":"<base58-pkh>","amount":10000}
@@ -373,9 +413,20 @@ Rules for manual legacy spends:
 
 Provide multiple `--recipient` flags to fan out to several recipients in one transaction.
 
-### Multisig Recipients
+### Multisig Transactions and Recipients
 
-Multisig outputs are expressed via the JSON form. Supply each output as:
+For a normal p2pkh payment from multisig-held funds, use the same simple output
+flags:
+
+```bash
+nockchain-wallet create-multisig-tx \
+  --threshold 2 \
+  --participants <pkh-a>,<pkh-b>,<pkh-c> \
+  --to <p2pkh-b58> \
+  --amount 100
+```
+
+Creating a multisig output still requires the advanced `--recipient` form:
 
 ```json
 {"kind":"multisig","threshold":<M>,"addresses":["<pkh-a>", ...],"amount":<nicks>}
@@ -400,7 +451,7 @@ nockchain-wallet create-tx \
   --to-evm-address 0x0c8d9cf278d4f3e23b00ea0a16bba2d05c07a7b6
 ```
 
-The equivalent explicit JSON form (amount in nicks) also works:
+The equivalent advanced `--recipient` form (amount in nicks) also remains available:
 
 ```bash
 nockchain-wallet create-tx \

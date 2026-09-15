@@ -306,6 +306,7 @@ fn generates_stream_windows_for_public_proof_versions() {
         (1, ProofVersion::V1),
         (2, ProofVersion::V2),
         (3, ProofVersion::V3),
+        (5, ProofVersion::V5),
     ] {
         let path = generate_stream_window(version_arg, 1, 0, Some(1), "stream-version");
         let bytes = fs::read(&path).expect("read stream window");
@@ -661,6 +662,12 @@ fn rejects_non_power_of_two_puzzle_length() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+#[test]
+fn v5_preflight_matches_the_nonce_bound_full_proof() {
+    let output = run_roswell(&["test-puzzle", "5", "1"]);
+    assert_success(output, "preflight, prove, and verify v5 proof");
 }
 
 #[test]

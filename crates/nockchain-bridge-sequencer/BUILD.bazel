@@ -17,7 +17,6 @@ SEQUENCER_DAEMON_DEPS = [
     "//crates/nockapp",
     "//crates/nockchain:nockchain-lib",
     "//crates/nockvm/rust/nockvm",
-    "//crates/zkvm-jetpack",
 ]
 
 SEQUENCER_CTL_DEPS = [

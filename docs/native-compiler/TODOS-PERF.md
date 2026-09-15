@@ -42,19 +42,25 @@ The head comparison in util::dor (reached from gor/mor mug ties and direct dor/s
 - **Cached standard JAM cloned before write** → `jam_product` now `take()`s the `Vec<u8>` (`standard_jam.take()`, H1b).
 - **Dead cool/chip cache stubs** → `cool_cache_*`/`chip_cache_*` deleted (they were no-op plumbing).
 
-### OPEN — native prelude mint blows up (memory AND runtime): the headline finding
-honk's native mint of hoon-138 (`HONK_NATIVE_PARITY=1`, or `just honk-138-parity`) does NOT complete: resident memory grows ~linearly at ~4 GB/min with no plateau, and it OOMs before finishing (reproduced 2026-06-14 on a 128 GB machine; ~30–50 min to exhaustion). Application kernels are unaffected — they compile against the embedded precompiled prelude. Ranked causes (full analysis in `docs/OSS-NEXT-PLAN.md`):
-1. **Leaked, never-freed bump slab + one monolithic `ut.mint`** — `NounSlab` has no free/reset/compaction (only `Drop`, which never runs on the `Box::leak`'d Ut slab) and the whole prelude is minted in one call, so memory = cumulative allocation. This is the linear curve.
-2. **No type interning / hash-consing** — `ty_*` re-allocate structurally-equal types at fresh addresses, defeating `noun_eq`'s pointer short-circuit and collapsing every mug/raw-pointer cache → super-linear deep walks (the runtime half) and permanent duplicate bytes.
-3. **Subject-deepening** — `mint_core`/`play_core` embed the whole current subject as each core's context, so name resolution walks an O(arms-so-far) spine per reference → O(N²) over ~530 arms. hoon-138's monolithic 6-layer cumulative-subject core is the worst case.
-4. **Redundant unconditional full-prelude `ut.play`** in `seed_honc_type_with_ut` — output-neutral; inhibiting it is byte-identical and shaves ~5 s off kernel builds, but it is not the dominant cost.
-5. **Recursive molds + wet gates** (`type`/`hoon` are `$`-recursive with `%fork`/`%hold`; ~193 `|*`) hit honk's heaviest paths, amplified by (2).
-6. **Never-cleared `lazy_resolvers`/fan interners + H2 context-widened cache keys** rarely collapse on the recursive prelude → re-misses.
+### RESOLVED — native prelude self-mint is bounded and byte-exact
 
-**KEYSTONE FIX: type interning at the `ty_*` constructors** (generalize the in-tree `ty_hold_cached` pattern). It improves BOTH memory (dedup) and runtime (restores cache hits + O(1) equality), it is the precondition for a bounded arena, and it also targets the 60 s roswell gate. Then bound memory for real via a NockStack-style frame arena or chunked per-core generation. See the self-hosting plan in `OSS-NEXT-PLAN.md`.
+The Hoon, type, formula, value, and seminoun arena migrations plus the chunked
+prelude driver replaced the unbounded monolithic path described in the original
+2026-06 investigation. `HONK_NATIVE_PARITY=1` now completes the full hoon-138
+self-mint, and `just honk-138-parity` is a strict byte-equality gate against
+hoonc. The RSS guard remains as a regression ceiling. See the arena design
+records and the post-rebase validation report for current measurements; the
+ranked causes from the original OOM investigation remain in git history rather
+than being presented here as open work.
 
-### OPEN — 60 s roswell gate
-Roswell native compile is ~71–76 s (> 60 s). Not recovered by the redundant-play shave; needs the interning keystone above plus the H4/H9 items below.
+### OPEN — 60 s Roswell gate is a near miss
+
+An isolated post-rebase production build on an Apple M5 Max completed in
+63.71 s with 8.93 GiB peak RSS and emitted the byte-exact production artifact.
+The old 71–76 s measurement is obsolete, but the existing `<60s` target still
+misses by 3.71 s (6.2%). Keep the threshold and use it as the secondary gate for
+the next measured optimization; the current CPU profile ranks noun/value
+transport first and map/cache growth second.
 
 ### OPEN — incremental honk perf (H4 / H9; not yet executed)
 - **Standard batch recomputes the directory mug per entry** (`exact_directory_mug` / `directory_mug_with_files`): O(entries × dir size) I/O. Fix: cache per-batch directory manifests/content hashes; avoid `WalkDir` when a manifest file list is supplied.

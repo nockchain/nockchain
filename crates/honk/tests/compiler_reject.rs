@@ -1,8 +1,10 @@
 //! In-process rejection/acceptance sweep of the type-probe corpus.
 //!
-//! The same .hoon files are pair-tested against hoonc at the artifact level
-//! by //crates/honk/test-assets/type-probes (Bazel, strict cmp for accepts /
-//! both-must-reject verdicts); this harness runs them through `ut.mint` with
+//! The same .hoon files are normally pair-tested against hoonc at the artifact
+//! level by //crates/honk/test-assets/type-probes (Bazel, strict cmp for
+//! accepts / both-must-reject verdicts). `divergent_bunt` is native-only
+//! because canonical hoonc runs away instead of rejecting within the test
+//! budget. This harness runs all of them through `ut.mint` with
 //! the embedded canonical hoon-138 subject type — the same subject the honk
 //! binary compiles files against — so the exercised type-checker branches
 //! (mint-nice/vain/lost, find/find-fork, fish-core/loop, fire-dry, mull,

@@ -84,6 +84,30 @@ pub fn permute(sponge: &mut [u64; 16]) {
     }
 }
 
+/// Round count for the **paper-spec 5-round Tip5 variant** (Tip5 paper IACR
+/// ePrint 2023/107 §2.4, N=5). Distinct from the canonical [`NUM_ROUNDS`] (= 7).
+/// Used ONLY by the ai-pow-zk recursive-certificate proving stack; the canonical
+/// Nockchain hash remains the 7-round [`permute`].
+pub const NUM_ROUNDS_5ROUND: usize = 5;
+
+/// **5-round Tip5 variant for ai-pow-zk recursive-certificate proving** —
+/// identical to [`permute`] (same S-box, same cyclomul MDS, same round-constant
+/// schedule) but iterating only the first 5 rounds
+/// (`ROUND_CONSTANTS_MONT_7[0..5*STATE_SIZE]`). It must match the in-circuit
+/// Tip5 adapter the recursion uses.
+///
+/// **Do not use this for canonical Nockchain hashing** — use 7-round [`permute`].
+pub fn permute_5round(sponge: &mut [u64; 16]) {
+    for i in 0..NUM_ROUNDS_5ROUND {
+        let a = sbox_layer(array_ref![sponge, 0, STATE_SIZE]);
+        let b = mds_cyclomul(&a);
+
+        for j in 0..STATE_SIZE {
+            sponge[j] = badd(ROUND_CONSTANTS_MONT_7[i * STATE_SIZE + j], b[j]);
+        }
+    }
+}
+
 fn sbox_layer(state: &[u64; STATE_SIZE]) -> [u64; STATE_SIZE] {
     let mut res: [u64; STATE_SIZE] = [0; STATE_SIZE];
 
@@ -433,5 +457,50 @@ mod tests {
         }
 
         assert_eq!(mds_cyclomul(&state), dense_mds_reference(&state));
+    }
+
+    fn parse_fixture_state(line: &str, prefix: &str, vector_index: usize) -> [u64; STATE_SIZE] {
+        let Some(rest) = line.strip_prefix(prefix) else {
+            panic!("vector {vector_index}: expected {prefix:?} line, got {line:?}");
+        };
+        let mut state = [0u64; STATE_SIZE];
+        let mut fields = rest.split_whitespace();
+        for (i, slot) in state.iter_mut().enumerate() {
+            *slot = fields
+                .next()
+                .unwrap_or_else(|| panic!("vector {vector_index}: missing {prefix} field {i}"))
+                .parse()
+                .unwrap_or_else(|err| {
+                    panic!("vector {vector_index}: invalid {prefix} field {i}: {err}")
+                });
+        }
+        assert!(
+            fields.next().is_none(),
+            "vector {vector_index}: too many {prefix} fields"
+        );
+        state
+    }
+
+    #[test]
+    fn tip5_5round_matches_ai_pow_zk_golden_fixture() {
+        let fixture = include_str!("../../../ai-pow-zk/tests/fixtures/tip5_5round_golden_kat.txt");
+        let mut lines = fixture
+            .lines()
+            .filter(|line| line.starts_with("IN ") || line.starts_with("OUT "));
+        let mut vector_index = 0usize;
+
+        while let Some(input_line) = lines.next() {
+            let expected_line = lines
+                .next()
+                .unwrap_or_else(|| panic!("vector {vector_index}: missing OUT line"));
+            let mut state = parse_fixture_state(input_line, "IN ", vector_index);
+            let expected = parse_fixture_state(expected_line, "OUT ", vector_index);
+
+            permute_5round(&mut state);
+            assert_eq!(state, expected, "vector {vector_index}");
+            vector_index += 1;
+        }
+
+        assert_eq!(vector_index, 315, "fixture vector count changed");
     }
 }

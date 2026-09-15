@@ -1,9 +1,6 @@
-//! Translates kernel `%span %new-heaviest-chain` and `%new-heaviest-miner`
-//! effects (emitted by inner.hoon's `accept-block` and miner candidate paths)
-//! into stdout-visible structured events. Downstream observers (cluster
-//! tests, monitoring tools) parse these `new_heaviest_chain` log lines
-//! (matching `block_height=`, `heaviest_block_digest=`, `block_target=`) to
-//! follow per-node chain state from stdout.
+//! Translates kernel `%span` effects into stdout-visible structured events.
+//! Downstream observers parse these log lines to follow per-node chain state
+//! and correlate accepted AI-PoW candidate commitments with submitted work.
 
 use std::collections::HashMap;
 
@@ -15,6 +12,7 @@ use tracing::{debug, error, field, info, span, Level};
 
 const NEW_HEAVIEST_CHAIN: &str = "new_heaviest_chain";
 const NEW_HEAVIEST_MINER: &str = "new_heaviest_miner";
+const AI_POW_ACCEPTED: &str = "ai_pow_accepted";
 
 pub fn traces_driver() -> IODriverFn {
     make_driver(|handle| async move {
@@ -66,12 +64,21 @@ pub fn traces_driver() -> IODriverFn {
                             continue;
                         }
 
-                        let height = num_fields.get("block_height").copied().unwrap_or(0);
+                        let height = num_fields
+                            .get("block_height")
+                            .or_else(|| num_fields.get("new_height"))
+                            .copied()
+                            .unwrap_or(0);
                         let digest = str_fields
                             .get("heaviest_block_digest")
                             .cloned()
                             .unwrap_or_default();
                         let target = str_fields.get("block_target").cloned().unwrap_or_default();
+                        let block_id = str_fields.get("block_id").cloned().unwrap_or_default();
+                        let candidate_commitment = str_fields
+                            .get("candidate_commitment")
+                            .cloned()
+                            .unwrap_or_default();
 
                         match name.as_str() {
                             "new-heaviest-chain" => {
@@ -109,17 +116,46 @@ pub fn traces_driver() -> IODriverFn {
                                     "new_heaviest_miner"
                                 );
                             }
-                            "orphaned-block" => {
-                                debug!(
+                            "ai-pow-accepted" => {
+                                let span = span!(
+                                    Level::INFO,
+                                    AI_POW_ACCEPTED,
+                                    block_height = field::Empty,
+                                    block_id = field::Empty,
+                                    candidate_commitment = field::Empty
+                                );
+                                span.record("block_height", height);
+                                span.record("block_id", block_id.as_str());
+                                span.record("candidate_commitment", candidate_commitment.as_str());
+                                let _g = span.enter();
+                                info!(
                                     block_height = height,
-                                    block_digest = digest.as_str(),
+                                    block_id = block_id.as_str(),
+                                    candidate_commitment = candidate_commitment.as_str(),
+                                    "ai_pow_accepted"
+                                );
+                            }
+                            "orphaned-block" => {
+                                info!(
+                                    block_height = height,
+                                    block_id = block_id.as_str(),
+                                    event_type = str_fields
+                                        .get("event_type")
+                                        .map(|s| s.as_str())
+                                        .unwrap_or(""),
+                                    new_heaviest_block = str_fields
+                                        .get("new_heaviest_block")
+                                        .map(|s| s.as_str())
+                                        .unwrap_or(""),
                                     "orphaned_block"
                                 );
                             }
                             "chain-reorg" => {
-                                debug!(
+                                info!(
                                     block_height = height,
-                                    new_tip_digest = digest.as_str(),
+                                    block_id = block_id.as_str(),
+                                    new_heaviest_height =
+                                        num_fields.get("new_heaviest_height").copied().unwrap_or(0),
                                     "chain_reorg"
                                 );
                             }

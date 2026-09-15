@@ -279,7 +279,12 @@ pub fn recipient_tokens_to_specs(
     tokens: Vec<RecipientSpecToken>,
 ) -> Result<Vec<RecipientSpec>, NockAppError> {
     if tokens.is_empty() {
-        return Err(CrownError::Unknown("At least one --recipient must be provided".into()).into());
+        return Err(CrownError::Unknown(
+            "At least one output must be provided with --to/--amount, \
+             --bridge-deposit/--to-evm-address, or --recipient"
+                .into(),
+        )
+        .into());
     }
     tokens
         .into_iter()
@@ -655,7 +660,7 @@ mod tests {
     #[test]
     fn recipient_tokens_to_specs_rejects_empty() {
         let err = recipient_tokens_to_specs(vec![]).expect_err("missing recipients");
-        assert!(format!("{err}").contains("At least one --recipient"));
+        assert!(format!("{err}").contains("At least one output must be provided"));
     }
 
     #[test]

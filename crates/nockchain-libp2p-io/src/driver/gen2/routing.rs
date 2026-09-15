@@ -208,10 +208,6 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
         NockchainFact::HeardBlock(block_id, _) => Some(block_id.clone()),
         _ => None,
     };
-    // The peer answered, so free its elders slot for the walk's next step.
-    if matches!(&response, NockchainFact::HeardElders(..)) {
-        driver_state.lock().await.clear_elders_inflight(&peer);
-    }
     let received_block_height = match &response {
         NockchainFact::HeardBlock(_, fact_poke) => {
             heard_block_height_from_fact_poke(fact_poke).ok()

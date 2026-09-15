@@ -197,6 +197,8 @@
           %3  k(test-proof `p)
           %0  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
           %1  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
+          %4  ~|("verifier benchmark cannot construct AI proof artifacts" !!)
+          %5  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
         ==
     [%exit -.res]~
   ::
@@ -207,6 +209,8 @@
         %3  (need test-proof.k)
         %0  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
         %1  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
+        %4  ~|("verifier benchmark cannot verify AI proof artifacts" !!)
+        %5  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
       ==
     =/  suc=?  (test-verify:lib bench-proof)
     :_  k

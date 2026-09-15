@@ -16,7 +16,7 @@ A complete proof is a four-field noun:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `version` | `%0`, `%1`, `%2`, or `%3` | Proof version. |
+| `version` | `%0`, `%1`, `%2`, `%3`, or `%5` | ZK proof version. `%4` is reserved for the structured AI-PoW artifact and is not a proof-stream version. |
 | `objects` | `(list proof-data)` | Ordered transcript objects. |
 | `hashes` | `(list noun-digest:tip5)` | Incremental transcript-hash cache. |
 | `read-index` | `@` | Number of transcript objects consumed. |
@@ -55,7 +55,7 @@ Every transcript object is a tagged noun. Tuple notation below is Hoon noun nota
 
 The `%puzzle` payload preserves the puzzle noun itself. Rust derives flattened leaf and Dyck-word caches when decoding it; those caches are not separate wire fields.
 
-Each object is converted to a typed, tag-domain-separated Tip5 hashable value before it enters the Fiat-Shamir transcript. The transcript commits to the semantic object representation rather than to a jam byte slice.
+Each object is converted to a typed, tag-domain-separated Tip5 hashable value before it enters the Fiat-Shamir transcript. The transcript commits to the semantic object representation rather than to a jam byte slice. This includes `%puzzle`'s actual mining nonce for every proof version.
 
 ## Object Sequence
 
@@ -75,11 +75,13 @@ The prover emits the following fixed prefix:
 | 9 | `%evals` | Trace evaluations at the DEEP point. |
 | 10 | `%evals` | Composition-piece evaluations at the DEEP point. |
 
-The PoW digest commits to objects `0` through `6`, inclusive. In particular, the `%poly` object is within the mined prefix. Versions `%0` through `%2` use the raw transcript-prefix digest for consensus compatibility. Version `%3` hashes that digest once more as `[leaf+%zkpow-v3 hash+prefix-digest]`, separating mining output from Fiat-Shamir output without adding codeword commitments to the mining loop.
+For versions `%0` through `%3`, the PoW digest commits to objects `0` through `6`, inclusive. In particular, the `%poly` object is within the mined prefix. Versions `%0` through `%2` use the raw transcript-prefix digest for consensus compatibility. Version `%3` hashes that digest once more as `[leaf+%zkpow-v3 hash+prefix-digest]`, separating mining output from Fiat-Shamir output without adding codeword commitments to the mining loop.
 
-### Version 3 post-commitment binding
+Version `%5` commits its PoW only to object `0`, the block-bound `%puzzle` object, and hashes that raw object digest as `[leaf+%zkpow-v5 hash+object-0-digest]`. The submitted object includes the block commitment, actual nonce, puzzle length, and raw puzzle-result noun. The miner can evaluate this object and check its digest before constructing the remaining proof objects. After a nonce meets the target, the prover constructs one complete proof for that exact nonce; the verifier evaluates the nonce-bound puzzle statement and absorbs the actual object into the Fiat-Shamir transcript.
 
-Version `%3` retains the same proof-object sequence and the version `%2` AIR. It adds a verifier equation at the existing DEEP challenge `y`, which is sampled only after the mega-extension and composition Merkle roots (objects `7` and `8`) have been absorbed:
+### Hardened proof verification
+
+Versions `%3` and `%5` retain the same proof-object sequence and the version `%2` AIR. They add a verifier equation at the existing DEEP challenge `y`, which is sampled only after the mega-extension and composition Merkle roots (objects `7` and `8`) have been absorbed:
 
 ```text
 C_extra(trace_evaluations_at_y, y) = P(y)
@@ -87,7 +89,7 @@ C_extra(trace_evaluations_at_y, y) = P(y)
 
 Object `9` supplies `trace_evaluations_at_y`; the subsequent DEEP/FRI checks bind those claims to the committed trace codewords. This second equation prevents a miner from changing `P`, repairing object `6` at its pre-commitment challenge, and reusing the expensive trace work.
 
-The Merkle roots themselves deliberately remain outside the PoW prefix. Putting a codeword root directly into the mining digest would permit cheap root grinding by changing one received-word leaf and updating one Merkle path; a small number of spot checks is unlikely to query that leaf. Version `%3` instead makes any fixed, inconsistent `P` satisfy a fresh extension-field equation only with the polynomial-identity error probability, while preserving winner-only Merkle construction.
+The Merkle roots deliberately remain outside every PoW prefix. Putting a codeword root directly into the mining digest would permit cheap root grinding by changing one received-word leaf and updating one Merkle path; a small number of spot checks is unlikely to query that leaf. The hardened verifier instead makes any fixed, inconsistent `P` satisfy a fresh extension-field equation only with the polynomial-identity error probability, while preserving winner-only Merkle construction. Version `%5` narrows the mined prefix to the nonce-bound puzzle object; admission still verifies the complete proof.
 
 Let `r` be the FRI round count and `s` the FRI spot-check count. The suffix contains:
 

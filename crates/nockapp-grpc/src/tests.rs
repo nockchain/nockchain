@@ -102,17 +102,48 @@ mod tests {
         // Give the server a tiny moment to come up.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // ── 4. Connect a client and open WatchEffects with head_filter = [b"mine"].
+        // A miner enables mining immediately after this RPC returns. The first
+        // candidate emitted by that poke must reach the new subscriber.
         let mut client = PrivateNockAppGrpcClient::connect(server_url.clone())
             .await
             .expect("client connect");
+        for candidate in 0..32u64 {
+            let mut stream = client
+                .watch_effects(1, vec![b"mine".to_vec()])
+                .await
+                .expect("watch_effects subscribe");
+            let mut slab = NounSlab::new();
+            let head = D(tas!(b"mine"));
+            let root = T(&mut slab, &[head, D(candidate)]);
+            slab.set_root(root);
+            effect_tx.send(slab).expect("publish first mine effect");
+
+            let received = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("first stream.next within timeout")
+                .expect("first stream not closed")
+                .expect("first client received slab");
+            let space = received.noun_space();
+            let received_noun = unsafe { *received.root() };
+            let cell = received_noun
+                .in_space(&space)
+                .as_cell()
+                .expect("first effect is a cell");
+            assert!(cell.head().eq_bytes("mine"));
+            assert_eq!(
+                cell.tail()
+                    .as_atom()
+                    .expect("first payload atom")
+                    .as_u64()
+                    .expect("first payload fits u64"),
+                candidate
+            );
+        }
+
         let mut stream = client
             .watch_effects(1, vec![b"mine".to_vec()])
             .await
             .expect("watch_effects subscribe");
-
-        // Pause briefly so the server-side subscriber registers before we publish.
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // ── 5. Push a `[%mine 42]` effect → client should receive.
         {

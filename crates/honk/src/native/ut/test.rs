@@ -1,18 +1,18 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::rc::{Rc, Rc as NRc};
 
 use hatch::ast::hoon::{BaseType, Hoon, NounExpr, ParsedAtom, Pint, Skin, Spec, Spot, Tome};
 use nockapp::noun::slab::NounSlab;
 use nockvm::ext::AtomExt;
 use nockvm::noun::{Atom, Noun, NounAllocator, D, T};
+use num_bigint::BigUint;
 
 use super::{
     cell_type, coil_from_parts, coil_parts, find_face_axis_skip, hoon_to_noun,
     is_const_bool_formula, map_to_noun, native_of, noun_eq, term_to_noun, ty_atom, ty_cell,
     ty_core, ty_face, ty_face_tool, ty_fork, ty_hint, ty_hold, ty_noun, ty_void, type_core_parts,
     type_face_name_if_atom, type_face_tool, type_fork_options, type_tag, CompilerError, Limb, NTy,
-    NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, StructNounPairSet,
+    NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, Sig64, StructNounPairSet,
     StructNounSet, Ut, Way,
 };
 use crate::native::ut::wet::RedoState;
@@ -74,6 +74,88 @@ fn struct_noun_set_remove_missing_returns_false() {
     let mut set = StructNounSet::new();
     assert!(set.insert(&mut ut, noun).expect("insert"));
     assert!(!set.remove(&mut ut, missing).expect("missing remove"));
+}
+
+#[test]
+fn complete_seminouns_share_structural_value_identity() {
+    let mut slab = NounSlab::new();
+    let left = T(&mut slab, &[D(1), D(2), D(3)]);
+    let right = T(&mut slab, &[D(1), D(2), D(3)]);
+    assert!(!unsafe { left.raw_equals(&right) });
+
+    let mut ut = Ut::new(&mut slab);
+    let left_semi = ut.semi_full_complete(left);
+    let right_semi = ut.semi_full_complete(right);
+    assert_eq!(
+        ut.semi_complete_value_id(left_semi)
+            .expect("left value identity"),
+        ut.semi_complete_value_id(right_semi)
+            .expect("right value identity"),
+    );
+}
+
+#[test]
+fn native_seminoun_combine_fragment_and_mutate_preserve_values() {
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+    let one = ut.semi_full_complete(D(1));
+    let two = ut.semi_full_complete(D(2));
+    let pair = ut.semi_combine(one, two).expect("combine complete values");
+
+    let (data, _) = ut
+        .semi_full_complete_data(pair)
+        .expect("combined value is complete");
+    let expected = T(ut.slab, &[D(1), D(2)]);
+    assert!(noun_eq(data, expected, &ut.slab.noun_space()).expect("combined value equality"));
+
+    let head = ut
+        .semi_fragment(2, pair)
+        .expect("fragment head")
+        .expect("head exists");
+    assert_eq!(
+        ut.semi_complete_value_id(head).expect("head value"),
+        ut.semi_complete_value_id(one).expect("one value"),
+    );
+    let three = ut.semi_full_complete(D(3));
+    let mutated = ut
+        .semi_mutate(3, three, pair)
+        .expect("mutate tail")
+        .expect("mutation succeeds");
+    let (data, _) = ut
+        .semi_full_complete_data(mutated)
+        .expect("mutated value is complete");
+    let expected = T(ut.slab, &[D(1), D(3)]);
+    assert!(noun_eq(data, expected, &ut.slab.noun_space()).expect("mutated value equality"));
+}
+
+#[test]
+fn encoded_half_seminoun_import_preserves_complete_and_blocked_sides() {
+    let mut slab = NounSlab::new();
+    let full_mask = T(&mut slab, &[D(super::SEMI_TAG_FULL), D(0)]);
+    let root_blocks = T(&mut slab, &[D(0), D(0), D(0)]);
+    let blocked_mask = T(&mut slab, &[D(super::SEMI_TAG_FULL), root_blocks]);
+    let half_mask = T(
+        &mut slab,
+        &[D(super::SEMI_TAG_HALF), full_mask, blocked_mask],
+    );
+    let data = T(&mut slab, &[D(7), D(0)]);
+    let encoded = T(&mut slab, &[half_mask, data]);
+
+    let mut ut = Ut::new(&mut slab);
+    let semi = ut.semi_import_noun(encoded).expect("import half seminoun");
+    let head = ut
+        .semi_fragment(2, semi)
+        .expect("fragment head")
+        .expect("head exists");
+    let tail = ut
+        .semi_fragment(3, semi)
+        .expect("fragment tail")
+        .expect("tail exists");
+    assert!(matches!(
+        ut.semi_arena.node(head),
+        super::SemiNode::Complete(_)
+    ));
+    assert!(matches!(ut.semi_arena.node(tail), super::SemiNode::Blocked));
 }
 
 #[test]
@@ -155,7 +237,7 @@ fn struct_noun_pair_set_signature_is_order_independent() {
 #[test]
 fn type_tag_kind_matches_core_type_tags_without_string_dispatch() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let cell_head = ty_noun(&mut slab);
     let cell_tail = ty_noun(&mut slab);
     let cell = ty_cell(&mut slab, cell_head, cell_tail);
@@ -276,7 +358,7 @@ fn nest_pair_set_is_structural_via_interner() {
 fn nest_cell_branch_resets_hold_seen_guards() {
     let mut slab = NounSlab::new();
     let hold_inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, hold_inner, hoon_noun);
 
     // List-like tail shape: [@ hold(@)] against [@ @].
@@ -297,7 +379,7 @@ fn nest_cell_branch_resets_hold_seen_guards() {
     let mut memo = Default::default();
 
     assert!(
-        seen_sut_holds.insert_id(Rc::<NTy>::as_ptr(&hold_n) as u64),
+        seen_sut_holds.insert_id(u64::from(hold_n.arena_id().0)),
         "seed insert should succeed"
     );
 
@@ -316,7 +398,7 @@ fn nest_cell_branch_resets_hold_seen_guards() {
 fn nest_hold_seen_guard_still_applies_outside_cell() {
     let mut slab = NounSlab::new();
     let hold_inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, hold_inner, hoon_noun);
     let ref_ = ty_atom(&mut slab, "ud", None);
 
@@ -329,7 +411,7 @@ fn nest_hold_seen_guard_still_applies_outside_cell() {
     let mut gil = NestPairSet::new();
     let mut memo = Default::default();
     assert!(
-        seen_sut_holds.insert_id(Rc::<NTy>::as_ptr(&hold_n) as u64),
+        seen_sut_holds.insert_id(u64::from(hold_n.arena_id().0)),
         "seed insert should succeed"
     );
 
@@ -379,7 +461,7 @@ fn core_with_payload_face_and_same_named_arm(slab: &mut NounSlab, name: &str) ->
     let garb_poly = term_to_noun(slab, "dry");
     let garb_vair = term_to_noun(slab, "gold");
     let garb = T(slab, &[garb_name, garb_poly, garb_vair]);
-    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis(1));
+    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis((1u64).into()));
     let arm_key = term_to_noun(slab, name);
     let arms = map_to_noun(slab, vec![(arm_key, arm_hoon)]).expect("arms map");
     let tome = T(slab, &[D(0), arms]);
@@ -410,7 +492,7 @@ fn core_with_named_arm_and_vair(slab: &mut NounSlab, name: &str, vair: &str) -> 
     let garb_poly = term_to_noun(slab, "dry");
     let garb_vair = term_to_noun(slab, vair);
     let garb = T(slab, &[garb_name, garb_poly, garb_vair]);
-    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis(1));
+    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis((1u64).into()));
     let arm_key = term_to_noun(slab, name);
     let arms = map_to_noun(slab, vec![(arm_key, arm_hoon)]).expect("arms map");
     let tome = T(slab, &[D(0), arms]);
@@ -452,7 +534,7 @@ fn algebra_type_corpus(slab: &mut NounSlab) -> Vec<(&'static str, Noun)> {
     let face_atom = ty_face(slab, "face", atom);
     let hint_cell = ty_hint(slab, noun, D(0), cell_atom_noun);
     let fork_atom_cell = ty_fork(slab, vec![atom, cell_zero_one]);
-    let axis_one_hoon = hoon_to_noun(slab, &Hoon::Axis(1));
+    let axis_one_hoon = hoon_to_noun(slab, &Hoon::Axis((1u64).into()));
     let hold_atom = ty_hold(slab, atom, axis_one_hoon);
 
     vec![
@@ -625,13 +707,13 @@ fn type_algebra_peek_distributes_over_forks() {
     let fork = ty_fork(&mut slab, vec![left, right]);
     let mut ut = Ut::new(&mut slab);
 
-    let head = ut.peek_noun(fork, Way::Free, 2).expect("peek fork head");
+    let head = ut.peek_noun(fork, Way::Free, 2u64).expect("peek fork head");
     let expected_head = ut
         .fork_from_options(vec![left_head, right_head])
         .expect("expected head fork");
     assert!(noun_eq(head, expected_head, &ut.slab.noun_space()).expect("head noun_eq"));
 
-    let tail = ut.peek_noun(fork, Way::Free, 3).expect("peek fork tail");
+    let tail = ut.peek_noun(fork, Way::Free, 3u64).expect("peek fork tail");
     let expected_tail = ut
         .fork_from_options(vec![left_tail, right_tail])
         .expect("expected tail fork");
@@ -654,17 +736,18 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     let redo_out = ty_face(&mut slab, "b", redo_out_inner);
     let inner_redo_out_inner = ty_noun(&mut slab);
     let _inner_redo_out = ty_face(&mut slab, "c", inner_redo_out_inner);
-    let mint_gen = hoon_to_noun(&mut slab, &Hoon::Axis(11));
-    let mull_gen = hoon_to_noun(&mut slab, &Hoon::Axis(12));
+    let mint_gen = hoon_to_noun(&mut slab, &Hoon::Axis((11u64).into()));
+    let mull_gen = hoon_to_noun(&mut slab, &Hoon::Axis((12u64).into()));
     let rest_inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let rest_hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let rest_hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let rest_cache_inner = ty_atom(&mut slab, "@", Some(D(8)));
-    let rest_cache_hoon = hoon_to_noun(&mut slab, &Hoon::Axis(2));
+    let rest_cache_hoon = hoon_to_noun(&mut slab, &Hoon::Axis((2u64).into()));
     let rest_legs = [(rest_cache_inner, rest_cache_hoon)];
     let rest_sut = ty_hold(&mut slab, rest_cache_inner, rest_cache_hoon);
 
     let mut ut = Ut::new(&mut slab);
     ut.set_vet(false);
+    let mull_gen_sig = ut.noun_mug_cached(mull_gen) as u64;
     // The mull cache is native-keyed (C8/C-final); native_of the noun sut/gol/ref
     // for the mull_cache_store/lookup calls (the other caches stay noun-keyed).
     let space = ut.slab.noun_space();
@@ -678,7 +761,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     let rest_legs_noun = ut.rest_legs_noun(&rest_legs);
     ut.mint_boundary_store_exact(sut, gol, mint_gen, ty, formula)
         .expect("mint boundary store");
-    ut.mull_cache_store(&sut_n, &gol_n, &ref_n, mull_gen, ty_n, inner_ty_n)
+    ut.mull_cache_store(&sut_n, &gol_n, &ref_n, mull_gen_sig, ty_n, inner_ty_n)
         .expect("mull boundary store");
     ut.redo_boundary_store(sut, redo_ref, redo_out)
         .expect("redo boundary store");
@@ -691,7 +774,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
         .expect("mint boundary lookup")
         .is_some());
     assert!(ut
-        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
         .expect("mull boundary lookup")
         .is_some());
     assert!(ut
@@ -742,7 +825,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
             // native mull_cache_lookup is scope-keyed; sut is a %core (no holds)
             // so the active leg is unreachable -> scoped key 0 -> HIT when scoped.
             assert_eq!(
-                ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+                ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
                     .expect("inner mull boundary lookup")
                     .is_some(),
                 scoped
@@ -782,7 +865,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
         .expect("post mint boundary lookup")
         .is_some());
     assert!(ut
-        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
         .expect("post mull boundary lookup")
         .is_some());
     assert!(ut
@@ -810,7 +893,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
             .expect("repeat inner mint boundary lookup")
             .is_none());
         assert_eq!(
-            ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+            ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
                 .expect("repeat inner mull boundary lookup")
                 .is_some(),
             scoped
@@ -838,11 +921,103 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
 }
 
 #[test]
+fn hoon_ast_identity_is_scoped_to_the_borrowed_root_lifetime() {
+    let root = Hoon::Pair(
+        Box::new(Hoon::Axis(2u64.into())),
+        Box::new(Hoon::Pair(
+            Box::new(Hoon::Axis(6u64.into())),
+            Box::new(Hoon::ZapZap),
+        )),
+    );
+    let child = match &root {
+        Hoon::Pair(child, _) => child.as_ref(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        Sig64::hoon_signature_spot_sensitive(&root),
+        Sig64::hoon_signature_spot_sensitive(&root.clone()),
+        "structurally equal ASTs must retain one cache identity"
+    );
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+
+    let (outermost, entered_root_id) = ut.enter_hoon_ast_scope(&root);
+    assert!(outermost);
+    assert_eq!(ut.hoon_ast_scope_depth, 1);
+    assert_eq!(ut.hoon_arena.entries.len(), 5);
+    let child_id = ut
+        .hoon_arena
+        .id_for(child)
+        .expect("borrowed child must have a dense arena identity");
+    assert!(ut.hoon_arena.entry(child_id).signature.is_some());
+    let child_noun = ut.hoon_noun_for_node(child);
+    assert_eq!(
+        ut.hoon_arena
+            .entry(child_id)
+            .noun
+            .map(|noun| unsafe { noun.as_raw() }),
+        Some(unsafe { child_noun.as_raw() })
+    );
+    let root_id = ut
+        .hoon_arena
+        .id_for(&root)
+        .expect("borrowed root must have a dense arena identity");
+    assert_eq!(entered_root_id, root_id);
+    assert_eq!(ut.hoon_arena.child_count(root_id), 2);
+    assert_eq!(ut.hoon_arena.child(root_id, 0), child_id);
+    let _ = ut.open_cached(&root);
+    assert!(
+        ut.hoon_arena.entry(root_id).opened.is_some(),
+        "positive and negative open results must both be dense arena properties"
+    );
+
+    let (nested, entered_child_id) = ut.enter_hoon_ast_scope(child);
+    assert!(!nested);
+    assert_eq!(entered_child_id, child_id);
+    ut.leave_hoon_ast_scope(nested);
+    assert_eq!(ut.hoon_ast_scope_depth, 1);
+    assert_eq!(ut.hoon_arena.entries.len(), 5);
+
+    let lowered = Hoon::Pair(Box::new(Hoon::Axis(14u64.into())), Box::new(Hoon::ZapZap));
+    let (lowered_scope, lowered_id) = ut.enter_hoon_ast_scope(&lowered);
+    assert!(lowered_scope);
+    assert_eq!(ut.hoon_ast_scope_depth, 2);
+    assert_eq!(ut.hoon_arena.id_for(&lowered), Some(lowered_id));
+    assert!(ut.hoon_arena.id_for(&root).is_none());
+    ut.leave_hoon_ast_scope(lowered_scope);
+    assert_eq!(ut.hoon_ast_scope_depth, 1);
+    assert_eq!(ut.hoon_arena.id_for(&root), Some(root_id));
+
+    ut.leave_hoon_ast_scope(outermost);
+    assert_eq!(ut.hoon_ast_scope_depth, 0);
+    assert!(ut.hoon_arena.entries.is_empty());
+    assert!(ut.hoon_arena.by_ptr.is_empty());
+    assert!(ut.hoon_arena_stack.is_empty());
+}
+
+#[test]
+fn hoon_ast_arena_clears_on_unwind_before_the_root_can_drop() {
+    let root = Hoon::Pair(Box::new(Hoon::Axis(2u64.into())), Box::new(Hoon::ZapZap));
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let scope = ut.hoon_ast_scope(&root);
+        assert_eq!(scope.hoon_arena.entries.len(), 3);
+        panic!("exercise Hoon arena unwind guard");
+    }));
+    assert!(unwind.is_err());
+    assert_eq!(ut.hoon_ast_scope_depth, 0);
+    assert!(ut.hoon_arena.entries.is_empty());
+    assert!(ut.hoon_arena.by_ptr.is_empty());
+    assert!(ut.hoon_arena_stack.is_empty());
+}
+
+#[test]
 fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let mut slab = NounSlab::new();
     let sut = ty_noun(&mut slab);
     let inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let gol = ty_hold(&mut slab, inner, hoon);
     let ty = ty_atom(&mut slab, "@", Some(D(9)));
     let formula = T(&mut slab, &[D(1), D(123)]);
@@ -853,6 +1028,7 @@ fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
     let ty_n = native_of(&mut ut.cx, ty, &space).expect("native ty");
+    let formula = ut.formula_import(formula).expect("native formula");
 
     ut.mint_cache_store(&sut_n, &gol_n, gen_sig, ty_n, formula)
         .expect("store mint cache");
@@ -886,7 +1062,7 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let mut slab = NounSlab::new();
     let sut = ty_noun(&mut slab);
     let inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let gol = ty_hold(&mut slab, inner, hoon);
     let tomes_map = D(0);
     let prefix = None::<String>;
@@ -899,6 +1075,7 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
     let core_type_n = native_of(&mut ut.cx, core_type, &space).expect("native core type");
+    let formula = ut.formula_import(formula).expect("native formula");
 
     ut.core_mint_cache_store(
         &sut_n, &gol_n, tomes_map, &prefix, poly, core_type_n, formula,
@@ -926,10 +1103,10 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
 fn active_rest_fan_context_partitions_rest_boundary() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let cached = ty_atom(&mut slab, "@", Some(D(42)));
     let outer_inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let outer_hoon = hoon_to_noun(&mut slab, &Hoon::Axis(2));
+    let outer_hoon = hoon_to_noun(&mut slab, &Hoon::Axis((2u64).into()));
     let rest_sut = ty_hold(&mut slab, inner, hoon);
 
     let mut ut = Ut::new(&mut slab);
@@ -1036,9 +1213,9 @@ fn active_rest_fan_context_partitions_rest_boundary() {
 fn active_rest_fan_context_is_order_insensitive_for_same_leg_set() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner_b = core_with_context_face_only(&mut slab, "node");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(2));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((2u64).into()));
 
     let mut ut = Ut::new(&mut slab);
     let key_ab = ut
@@ -1062,9 +1239,9 @@ fn active_rest_fan_context_is_order_insensitive_for_same_leg_set() {
 fn active_rest_fan_context_is_structural_for_equivalent_leg_pairs() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner_b = core_with_context_face_only(&mut slab, "tree");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
 
     assert!(noun_eq(inner_a, inner_b, &slab.noun_space()).expect("inner noun_eq"));
     assert!(noun_eq(hoon_a, hoon_b, &slab.noun_space()).expect("hoon noun_eq"));
@@ -1116,7 +1293,7 @@ fn repo_noncanonical_cell_errors_with_repo_fltt() {
 fn repo_hold_matches_rest_singleton_leg() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let legs = [(inner, hoon_noun)];
 
@@ -1140,7 +1317,7 @@ fn repo_hold_matches_rest_singleton_leg() {
 fn rest_allows_duplicate_legs_in_one_call() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let single = [(inner, hoon_noun)];
     let duplicate = [(inner, hoon_noun), (inner, hoon_noun)];
 
@@ -1168,7 +1345,7 @@ fn rest_allows_duplicate_legs_in_one_call() {
 fn hold_repo_fan_leg_id_shortcuts_exact_hold_raw() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let hold_raw = unsafe { hold.as_raw() };
     let mut ut = Ut::new(&mut slab);
@@ -1191,10 +1368,10 @@ fn hold_repo_fan_leg_id_shortcuts_exact_hold_raw() {
 fn hold_repo_fan_leg_id_shortcuts_structurally_equal_hold() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_a = ty_hold(&mut slab, inner_a, hoon_a);
     let inner_b = core_with_context_face_only(&mut slab, "tree");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_b = ty_hold(&mut slab, inner_b, hoon_b);
     assert!(noun_eq(hold_a, hold_b, &slab.noun_space()).expect("hold noun_eq"));
     assert!(!unsafe { hold_a.raw_equals(&hold_b) });
@@ -1217,10 +1394,10 @@ fn hold_repo_fan_leg_id_shortcuts_structurally_equal_hold() {
 fn gain_atom_skin_hold_guard_is_structural() {
     let mut slab = NounSlab::new();
     let inner_a = ty_atom(&mut slab, "@", None);
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_a = ty_hold(&mut slab, inner_a, hoon_a);
     let inner_b = ty_atom(&mut slab, "@", None);
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_b = ty_hold(&mut slab, inner_b, hoon_b);
     let sut_noun = ty_noun(&mut slab);
     assert!(noun_eq(hold_a, hold_b, &slab.noun_space()).expect("hold noun_eq"));
@@ -1233,7 +1410,7 @@ fn gain_atom_skin_hold_guard_is_structural() {
     let hold_a_n = native_of(&mut ut.cx, hold_a, &ut.slab.noun_space()).expect("native hold_a");
     let hold_b_n = native_of(&mut ut.cx, hold_b, &ut.slab.noun_space()).expect("native hold_b");
     let mut seen: HashSet<u64> = HashSet::new();
-    assert!(seen.insert(NRc::as_ptr(&hold_a_n) as u64), "seed guard");
+    assert!(seen.insert(u64::from(hold_a_n.arena_id().0)), "seed guard");
     let out = ut
         .gain_atom_skin(sut, hold_b_n, "@", &mut seen)
         .expect("gain atom skin");
@@ -1248,10 +1425,10 @@ fn gain_atom_skin_hold_guard_is_structural() {
 fn lose_leaf_skin_hold_guard_is_structural() {
     let mut slab = NounSlab::new();
     let inner_a = ty_atom(&mut slab, "@", None);
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_a = ty_hold(&mut slab, inner_a, hoon_a);
     let inner_b = ty_atom(&mut slab, "@", None);
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_b = ty_hold(&mut slab, inner_b, hoon_b);
     let sut_noun = ty_noun(&mut slab);
     assert!(noun_eq(hold_a, hold_b, &slab.noun_space()).expect("hold noun_eq"));
@@ -1262,7 +1439,7 @@ fn lose_leaf_skin_hold_guard_is_structural() {
     let hold_a_n = native_of(&mut ut.cx, hold_a, &ut.slab.noun_space()).expect("native hold_a");
     let hold_b_n = native_of(&mut ut.cx, hold_b, &ut.slab.noun_space()).expect("native hold_b");
     let mut seen: HashSet<u64> = HashSet::new();
-    assert!(seen.insert(NRc::as_ptr(&hold_a_n) as u64), "seed guard");
+    assert!(seen.insert(u64::from(hold_a_n.arena_id().0)), "seed guard");
     let out = ut
         .lose_leaf_skin(sut, hold_b_n, "@", &ParsedAtom::Small(7), &mut seen)
         .expect("lose leaf skin");
@@ -1277,9 +1454,9 @@ fn lose_leaf_skin_hold_guard_is_structural() {
 fn ty_hold_cached_constructs_structurally_equal_hold_nouns() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner_b = core_with_context_face_only(&mut slab, "tree");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let mut ut = Ut::new(&mut slab);
 
     let hold_a = ut
@@ -1299,7 +1476,7 @@ fn ty_hold_cached_constructs_structurally_equal_hold_nouns() {
 fn take_none_fork_branches_do_not_share_hold_seen_guard() {
     let mut slab = NounSlab::new();
     let inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let left = ty_face(&mut slab, "left", hold);
     let right = ty_face(&mut slab, "right", hold);
@@ -1388,7 +1565,7 @@ fn strict_ktsg_blow_collapses_done_to_constant_formula() {
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut
-        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis(1))))
+        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis((1u64).into()))))
         .expect("^+ mint should succeed");
     let expected = T(&mut slab, &[D(1), D(41)]);
     assert!(
@@ -1589,7 +1766,7 @@ fn mint_wthx_leaf_exact_match_collapses_to_constant_formula() {
     let gol = ty_noun(&mut slab);
     let gen = Hoon::WutHax(
         Skin::Leaf("@".to_string(), ParsedAtom::Small(7)),
-        vec![Limb::Axis(1)],
+        vec![Limb::Axis((1u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
 
@@ -1606,7 +1783,7 @@ fn mint_wthx_null_exact_nonzero_remains_dynamic_formula() {
     let mut slab = NounSlab::new();
     let sut = ty_atom(&mut slab, "$", Some(D(7)));
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Null), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Null), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1625,7 +1802,7 @@ fn mint_wthx_flag_exact_nonflag_remains_dynamic_formula() {
     let mut slab = NounSlab::new();
     let sut = ty_atom(&mut slab, "$", Some(D(2)));
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1648,7 +1825,7 @@ fn mint_wthx_flag_on_noun_includes_atom_guard_formula() {
     let mut slab = NounSlab::new();
     let sut = ty_noun(&mut slab);
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1677,7 +1854,7 @@ fn mint_wthx_base_cell_on_core_collapses_to_constant_formula() {
     let mut slab = NounSlab::new();
     let sut = core_with_context_face_only(&mut slab, "ctx");
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Cell), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Cell), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1695,7 +1872,7 @@ fn mint_wthx_base_atom_on_core_collapses_to_constant_formula() {
     let gol = ty_noun(&mut slab);
     let gen = Hoon::WutHax(
         Skin::Base(BaseType::Atom("$".to_string())),
-        vec![Limb::Axis(1)],
+        vec![Limb::Axis((1u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
 
@@ -1717,7 +1894,7 @@ fn mint_wthx_cell_skin_on_core_collapses_to_constant_formula() {
             Box::new(Skin::Base(BaseType::NounExpr)),
             Box::new(Skin::Base(BaseType::NounExpr)),
         ),
-        vec![Limb::Axis(1)],
+        vec![Limb::Axis((1u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
 
@@ -1734,7 +1911,7 @@ fn miss_noun_with_hold_that_expands_to_void_uses_nest() {
     let mut slab = NounSlab::new();
     let noun = ty_noun(&mut slab);
     let void = ty_void(&mut slab);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, void, hoon_noun);
     let mut ut = Ut::new(&mut slab);
 
@@ -1756,7 +1933,7 @@ fn strict_ktsg_blow_preserves_formula_when_apex_waits() {
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut
-        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis(1))))
+        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis((1u64).into()))))
         .expect("^+ mint should succeed");
     let expected = T(&mut slab, &[D(0), D(1)]);
     assert!(
@@ -1773,7 +1950,7 @@ fn strict_ktsg_blow_core_branch_uses_coil_semi() {
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut
-        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis(2))))
+        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis((2u64).into()))))
         .expect("^+ mint on core should succeed");
     let expected = T(&mut slab, &[D(1), D(42)]);
     assert!(
@@ -1793,7 +1970,11 @@ fn strict_ktsg_blow_fork_inputs_remain_blocked() {
     let mut ut = Ut::new(&mut slab);
 
     let (_fork_ty, fork_formula) = ut
-        .mint_noun(fork, gol, &Hoon::KetSig(Box::new(Hoon::Axis(1))))
+        .mint_noun(
+            fork,
+            gol,
+            &Hoon::KetSig(Box::new(Hoon::Axis((1u64).into()))),
+        )
         .expect("^+ mint on fork should succeed");
     assert!(
         noun_eq(fork_formula, slot_one, &slab.noun_space()).expect("noun_eq should not fail"),
@@ -1913,7 +2094,7 @@ fn strict_find_does_not_treat_dollar_prefixed_axis_as_subject_alias() {
     let head = ty_noun(&mut slab);
     let tail = ty_noun(&mut slab);
     let sut = cell_type(&mut slab, head, tail).expect("cell type");
-    let wing = vec![Limb::Term("$".to_string()), Limb::Axis(2)];
+    let wing = vec![Limb::Term("$".to_string()), Limb::Axis((2u64).into())];
     let mut ut = Ut::new(&mut slab);
 
     assert!(
@@ -1967,7 +2148,7 @@ fn strict_play_wing_dollar_prefixed_axis_is_not_subject_alias_projection() {
     let head = ty_face(&mut slab, "head", head_inner);
     let tail = ty_noun(&mut slab);
     let sut = cell_type(&mut slab, head, tail).expect("cell type");
-    let wing = vec![Limb::Term("$".to_string()), Limb::Axis(2)];
+    let wing = vec![Limb::Term("$".to_string()), Limb::Axis((2u64).into())];
     let mut ut = Ut::new(&mut slab);
     let sut = crate::native::ir::intern::native_of(&mut ut.cx, sut, &ut.slab.noun_space())
         .expect("native sut");
@@ -1985,7 +2166,7 @@ fn strict_mint_wing_dollar_prefixed_axis_is_not_subject_alias_projection() {
     let head = ty_face(&mut slab, "head", head_inner);
     let tail = ty_noun(&mut slab);
     let sut = cell_type(&mut slab, head, tail).expect("cell type");
-    let wing = vec![Limb::Term("$".to_string()), Limb::Axis(2)];
+    let wing = vec![Limb::Term("$".to_string()), Limb::Axis((2u64).into())];
     let gol = ty_noun(&mut slab);
     let mut ut = Ut::new(&mut slab);
 
@@ -2207,9 +2388,10 @@ fn mull_cnts_mixed_ports_errors() {
     let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
     let dox_n = native_of(&mut ut.cx, dox, &space).expect("native dox");
+    let synth_formula = ut.formula_slot_u64(0);
     let lug_p = Port::Synthetic {
         typ: native_of(&mut ut.cx, synth_typ, &space).expect("native synth typ"),
-        formula: D(0),
+        formula: synth_formula,
     };
     let lug_q = Port::Palo(Palo {
         vein: Vec::new(),
@@ -2235,7 +2417,7 @@ fn mull_endo_mismatch_returns_noun_error() {
     let palo_arm = Palo {
         vein: Vec::new(),
         opal: Opal::Arm {
-            axis: 1,
+            axis: BigUint::from(1u32),
             arms: Vec::new(),
         },
     };
@@ -2343,7 +2525,7 @@ fn redo_cell_projects_free_over_fork_reference() {
 #[test]
 fn miss_strips_matching_faces_before_hold_comparison() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let left_head = ty_noun(&mut slab);
     let left_tail = ty_noun(&mut slab);
     let left_inner = ty_cell(&mut slab, left_head, left_tail);
@@ -2385,7 +2567,7 @@ fn redo_fork_prunes_faced_atom_and_keeps_matching_cell_face() {
 #[test]
 fn redo_fork_prunes_held_atom_and_keeps_matching_held_cell_face() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let payload_head = ty_noun(&mut slab);
     let payload_tail = ty_noun(&mut slab);
     let payload = ty_cell(&mut slab, payload_head, payload_tail);
@@ -2413,7 +2595,7 @@ fn redo_sint_reference_hold_respects_hod_flag() {
     let payload = ty_atom(&mut slab, "ud", None);
     let held_payload = ty_atom(&mut slab, "ud", None);
     let held = ty_face(&mut slab, "a", held_payload);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let reference = ty_hold(&mut slab, held, hoon_noun);
     let mut ut = Ut::new(&mut slab);
 
@@ -2449,7 +2631,7 @@ fn redo_sint_reference_hold_respects_hod_flag() {
 fn redo_subject_hold_restores_unchanged_hold() {
     let mut slab = NounSlab::new();
     let inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let payload = ty_hold(&mut slab, inner, hoon_noun);
 
     let hinted_subject = ty_noun(&mut slab);
@@ -2469,7 +2651,7 @@ fn redo_subject_hold_restores_unchanged_hold() {
 fn redo_subject_hold_stops_at_active_fan_loop() {
     let mut slab = NounSlab::new();
     let inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let payload = ty_hold(&mut slab, inner, hoon_noun);
     let reference_inner = ty_atom(&mut slab, "ud", None);
     let reference = ty_face(&mut slab, "a", reference_inner);
@@ -2521,7 +2703,7 @@ fn fork_from_options_preserves_hinted_member_when_flattening_nested_fork() {
 #[test]
 fn fuse_hold_seen_is_scoped_to_branch() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner = ty_noun(&mut slab);
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let sut = ty_fork(&mut slab, vec![hold, hold]);
@@ -2537,7 +2719,7 @@ fn fuse_hold_seen_is_scoped_to_branch() {
 #[test]
 fn crop_hold_seen_is_scoped_to_branch() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner = ty_noun(&mut slab);
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let sut = ty_fork(&mut slab, vec![hold, hold]);
@@ -2560,7 +2742,7 @@ fn mull_wthx_does_not_call_skin_match_static() {
     let gol = ty_noun(&mut slab);
     let gen = Hoon::WutHax(
         Skin::Base(BaseType::Atom("ud".to_string())),
-        vec![Limb::Axis(2)],
+        vec![Limb::Axis((2u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
     ut.skin_match_static_calls = 0;
@@ -2623,8 +2805,12 @@ fn musk_mack_core_cache_reuses_runtime_copy() {
     let context = &mut ut.musk.context as *mut _;
 
     unsafe {
-        let first = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
-        let second = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        let first = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("core copy");
+        let second = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("cached core copy");
 
         // The copy shares structure: every cell of the core gets its own
         // cache entry ([[1 2] [3 4]] = root + two leaves).
@@ -2643,9 +2829,13 @@ fn musk_mack_core_cache_persists_across_runtime_frames() {
     let context = &mut ut.musk.context as *mut _;
 
     unsafe {
-        let first = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        let first = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("core copy");
         (*context).with_stack_frame(0, |_context| D(0));
-        let second = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        let second = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("cached core copy");
         assert!(first.raw_equals(&second));
         assert_eq!(ut.musk.mack_core_cache_raw.len(), 3);
     }
@@ -2660,12 +2850,82 @@ fn musk_mack_core_cache_clears_when_runtime_is_reset() {
     let context = &mut ut.musk.context as *mut _;
 
     unsafe {
-        ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("core copy");
     }
     assert_eq!(ut.musk.mack_core_cache_raw.len(), 3);
 
     ut.clear_musk_context_dependent_caches();
     assert!(ut.musk.mack_core_cache_raw.is_empty());
+}
+
+fn mack_copy_exhaustion_test_core(slab: &mut NounSlab) -> Noun {
+    let mut core = D(0);
+    for value in 0..256 {
+        core = T(slab, &[D(value), core]);
+    }
+    core
+}
+
+#[test]
+fn musk_mack_recovers_when_call_core_copy_exhausts_eval_stack() {
+    let mut slab = NounSlab::new();
+    let large_core = mack_copy_exhaustion_test_core(&mut slab);
+    let small_core = mack_cache_test_core(&mut slab, 1, 2, 3, 4);
+    let mut ut = Ut::new(&mut slab);
+
+    ut.musk.context.stack.set_alloc_floor_budget(Some(64));
+    assert!(
+        ut.musk_interpret_mack(large_core, 2).is_none(),
+        "an exhausted call-core copy must decline the fold"
+    );
+    assert!(
+        ut.musk.mack_core_cache_raw.is_empty(),
+        "recovery must discard cache entries into rolled-back stack storage"
+    );
+
+    let wide_axis = Atom::from_bytes(&mut *ut.slab, &[0, 0, 0, 0, 0, 0, 0, 0, 1]).as_noun();
+    ut.musk.context.stack.set_alloc_floor_budget(Some(64));
+    assert!(
+        ut.musk_interpret_mack_axis_noun(large_core, wide_axis)
+            .expect("wide-axis mack")
+            .is_none(),
+        "the wide-axis path must use the same guarded call-core copy"
+    );
+    assert!(
+        ut.musk.mack_core_cache_raw.is_empty(),
+        "wide-axis recovery must also discard partial cache entries"
+    );
+
+    ut.musk.context.stack.set_alloc_floor_budget(None);
+    assert!(
+        ut.musk_interpret_mack(small_core, 2).is_some(),
+        "the eval context must remain usable after copy exhaustion"
+    );
+}
+
+#[test]
+fn musk_rejects_a_self_recursive_partial_arm() {
+    let mut slab = NounSlab::new();
+    // A partial core whose battery immediately kicks itself. The payload is
+    // blocked, so op 9 follows the seminoun arm path and rediscovers the exact
+    // same (subject, formula) pair. This is the minimal shape behind a mold
+    // with a divergent recursive bunt.
+    let formula = T(&mut slab, &[D(9), D(2), D(0), D(1)]);
+    let mut ut = Ut::new(&mut slab);
+    let battery = ut.semi_full_complete(formula);
+    let payload = ut.semi_full_blocked();
+    let core = ut
+        .semi_combine(battery, payload)
+        .expect("partial core construction");
+
+    let err = ut
+        .musk_apex_output(core, formula)
+        .expect_err("a compile-time evaluation cycle must be rejected");
+    assert!(
+        matches!(err, CompilerError::Noun(message) if message == "musk-loop"),
+        "recursive partial evaluation should report musk-loop"
+    );
 }
 
 // Validates the Step-2 chunked prelude mint mechanism on a small `=>` chain:
@@ -2719,14 +2979,6 @@ fn chunked_tisgar_chain_matches_monolithic_mint() {
 // resolver), and a recursive trap (`|-`/`$`) inside `c` that drives `%hold`/
 // fan-leg interning. Must mint deterministically run-to-run (a fresh `Context`
 // per compile gives each an isolated cache universe).
-//
-// PRE-EXISTING failure (NOT introduced by the nest/C8 flip): with a FRESH native
-// intern context, minting this bare-%noun-subject wet-`|-` core fails with
-// `arm c: arm $: coil missing tail: not a cell` — confirmed by A/B against the
-// pre-C8 commit, where it also fails in isolation. Same bare-%noun wet-mint
-// corner as `wet_gate_function_sample_mint_deterministic`. Tracked in
-// docs/native-compiler/ATOMIC-FLIP-TRACKER.md.
-#[ignore = "pre-existing bare-%noun wet-|- mint failure; see ATOMIC-FLIP-TRACKER.md"]
 #[test]
 fn core_mint_deterministic() {
     use std::path::Path;
@@ -2770,7 +3022,7 @@ fn core_mint_deterministic() {
 // (mod.rs:2548) for the FIRST (non-last) argument of a multi-arg cen-sig
 // (`~(arm core a b ...)`): `wing_axe = peg(6,2) = 12`. `fond` (find.rs) resolves
 // `Axis(12)` first via `peek`, then applies the nameless `Parent(0,None)` via
-// `fond_name`. When `peek(sut, Rite, 12)` returns `NTy::Void`, the nameless-parent
+// `fond_name`. When `peek(sut, Rite, 12u64)` returns `NTy::Void`, the nameless-parent
 // walk returns `Pony::Void` and `find` errors.
 //
 // This source mints in <1ms (no prelude / no 153s dumb compile) and currently
@@ -2844,5 +3096,23 @@ fn wet_gate_function_sample_mint_deterministic() {
         mint_jam(),
         mint_jam(),
         "wet-gate mint must be deterministic run-to-run (fresh Context per compile)"
+    );
+}
+
+// `|%  --` (an empty battery) is valid Hoon; hoonc compiles it to [[1 0] 0 1].
+#[test]
+fn empty_core_battery_mints() {
+    let mut slab = NounSlab::new();
+    let noun_ty = ty_noun(&mut slab);
+    let mut ut = Ut::new(&mut slab);
+    let (_ty, formula) = ut
+        .mint_noun(noun_ty, noun_ty, &Hoon::BarCen(None, HashMap::new()))
+        .expect("empty |% core should mint");
+    let battery = T(&mut slab, &[D(1), D(0)]);
+    let payload = T(&mut slab, &[D(0), D(1)]);
+    let expected = T(&mut slab, &[battery, payload]);
+    assert!(
+        noun_eq(formula, expected, &slab.noun_space()).expect("noun_eq"),
+        "empty core should compile to [[1 0] 0 1]"
     );
 }

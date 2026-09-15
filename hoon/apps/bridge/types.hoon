@@ -245,7 +245,7 @@
   $:  %2
       config=node-config-legacy                             ::  node configuration
       constants=bridge-constants                            ::  static bridge parameters
-      nockchain-constants=(unit blockchain-constants:t)     ::  node-reported tx-engine constants from boot-time handshake
+      nockchain-constants=(unit blockchain-constants-v1-pre-ai:dumb) ::  pre-Logos node-reported constants
       hash-state=hash-state-2-old                           ::  hashlogged cross-chain state
       last-nock-deposit-height=@                            ::  last nockchain height containing a deposit (0 = none)
       last-block=page:t                                     ::  for determining proposer
@@ -257,6 +257,17 @@
   $:  %3
       config=node-config                                    ::  node configuration
       constants=bridge-constants                            ::  static bridge parameters
+      nockchain-constants=(unit blockchain-constants-v1-pre-ai:dumb) ::  pre-Logos node-reported constants
+      hash-state=hash-state                                 ::  hashlogged cross-chain state
+      last-nock-deposit-height=@                            ::  last nockchain height containing a deposit (0 = none)
+      last-block=page:t                                     ::  for determining proposer
+      stop=(unit stop-info)                                 ::  flag to stop the bridge. populated with last known good block hashes if stop is true.
+  ==
+::
++$  bridge-state-4
+  $:  %4
+      config=node-config                                    ::  node configuration
+      constants=bridge-constants                            ::  static bridge parameters
       nockchain-constants=(unit blockchain-constants:t)     ::  node-reported tx-engine constants from boot-time handshake
       hash-state=hash-state                                 ::  hashlogged cross-chain state
       last-nock-deposit-height=@                            ::  last nockchain height containing a deposit (0 = none)
@@ -264,14 +275,68 @@
       stop=(unit stop-info)                                 ::  flag to stop the bridge. populated with last known good block hashes if stop is true.
   ==
 ::
+::
 +$  versioned-bridge-state
   $%  bridge-state-0
       bridge-state-1
       bridge-state-2
       bridge-state-3
+      bridge-state-4
   ==
 ::
-+$  bridge-state  bridge-state-3
++$  bridge-state  bridge-state-4
+++  upgrade-pre-ai-constants
+  |=  old=blockchain-constants-v1-pre-ai:dumb
+  ^-  blockchain-constants:t
+  =/  current=blockchain-constants:t  *blockchain-constants:t
+  :*  v1-phase.old
+      bythos-phase.old
+      data.old
+      base-fee.old
+      input-fee-divisor.old
+      :*  max-block-size.old
+          blocks-per-epoch.old
+          target-epoch-duration.old
+          update-candidate-interval.old
+          max-future-timestamp.old
+          min-past-blocks.old
+          genesis-target-atom.old
+          max-target-atom.old
+          check-pow-flag.old
+          coinbase-timelock-min.old
+          pow-len.old
+          max-coinbase-split.old
+          first-month-coinbase-min.old
+      ==
+      :*  asert-phase.old
+          asert-anchor-height.old
+          asert-anchor-target-atom.old
+          asert-ideal-block-time.old
+          asert-half-life.old
+          asert-anchor-min-timestamp.old
+      ==
+      zk-asert-post-ai.current
+      ai-pow-activation-height.current
+      ai-asert.current
+  ==
+::
+++  upgrade-pre-logos-state
+  |=  old=bridge-state-3
+  ^-  bridge-state
+  =/  upgraded-constants=(unit blockchain-constants:t)
+    ?~  nockchain-constants.old
+      ~
+    [~ (upgrade-pre-ai-constants u.nockchain-constants.old)]
+  :*  %4
+      config.old
+      constants.old
+      upgraded-constants
+      hash-state.old
+      last-nock-deposit-height.old
+      last-block.old
+      stop.old
+  ==
+::
 ::
 ++  get-stop-info
   |=  state=bridge-state

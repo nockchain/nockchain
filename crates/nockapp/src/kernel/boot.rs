@@ -298,6 +298,9 @@ pub struct Cli {
         help = "Override the full data directory for this nockapp instance (expects the directory that contains checkpoints/)"
     )]
     pub data_dir: Option<PathBuf>,
+    /// Direct children that may exist before `--new` validates the data directory.
+    #[arg(skip)]
+    pub new_data_dir_allowlist: Vec<PathBuf>,
     #[arg(long, help = "Override the SQLite event-log path")]
     pub event_log_path: Option<PathBuf>,
 
@@ -962,6 +965,75 @@ INSERT INTO events (
         assert!(export_path.parent().expect("export parent").exists());
 
         stop_app(&mut app).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn setup_allows_new_state_jam_with_allowlisted_setup_dir() {
+        let temp = TempDir::new().expect("tempdir");
+        let source_data_dir = temp.path().join("state-jam-source");
+        let state_jam_path = temp.path().join("kernel.state.jam");
+        let target_data_dir = temp.path().join("state-jam-target");
+
+        let mut source = setup_test_app(&source_data_dir).await;
+        poke_inc(&source).await;
+        wait_for_serf_idle(&source).await;
+        export_kernel_state::<NockJammer, _>(
+            &source.kernel,
+            state_jam_path.to_str().expect("state jam path"),
+        )
+        .await
+        .expect("export state jam");
+        stop_app(&mut source).await;
+
+        let setup_dir = target_data_dir.join("ai-pow");
+        fs::create_dir_all(&setup_dir).expect("create setup dir");
+        fs::write(setup_dir.join("verifier-cache.bin"), b"setup").expect("write setup artifact");
+
+        let jam = load_test_jam_bytes();
+        let mut cli = durable_test_boot_cli(true);
+        cli.data_dir = Some(target_data_dir.clone());
+        cli.state_jam = Some(state_jam_path.to_string_lossy().into_owned());
+        cli.new_data_dir_allowlist.push("ai-pow".into());
+
+        let mut app = match setup_::<NockJammer>(&jam, cli, &[], "boot-test", None)
+            .await
+            .expect("setup should allow the verifier setup directory")
+        {
+            SetupResult::App(app) => app,
+            SetupResult::ExportedState => panic!("unexpected export"),
+        };
+        assert_counter_state(&mut app, 1).await;
+        stop_app(&mut app).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn setup_rejects_new_with_allowlisted_setup_dir_and_chain_data() {
+        let temp = TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("mixed-data-dir");
+        fs::create_dir_all(data_dir.join("ai-pow")).expect("create setup dir");
+        fs::write(data_dir.join("ai-pow").join("verifier-cache.bin"), b"setup")
+            .expect("write setup artifact");
+        fs::create_dir_all(data_dir.join("checkpoints")).expect("create checkpoints dir");
+        fs::write(
+            data_dir.join("checkpoints").join("existing.chkjam"),
+            b"keep",
+        )
+        .expect("write existing checkpoint");
+
+        let jam = load_test_jam_bytes();
+        let mut cli = default_boot_cli(true);
+        cli.data_dir = Some(data_dir);
+        cli.new_data_dir_allowlist.push("ai-pow".into());
+
+        let err = match setup_::<NockJammer>(&jam, cli, &[], "boot-test", None).await {
+            Ok(_) => panic!("setup should reject chain data beside the setup cache"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("--new requires an empty data directory"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2274,6 +2346,7 @@ pub fn default_boot_cli(new: bool) -> Cli {
         pma_initial_size: None,
         pma_reserved_size: None,
         data_dir: None,
+        new_data_dir_allowlist: Vec::new(),
         event_log_path: None,
         disable_fsync: false,
     }
@@ -2288,7 +2361,7 @@ pub fn ephemeral_test_boot_cli(new: bool) -> Cli {
     cli
 }
 
-fn dir_has_entries(path: &std::path::Path) -> std::io::Result<bool> {
+fn dir_has_unexpected_entries(path: &Path, allowlist: &[PathBuf]) -> std::io::Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -2297,8 +2370,15 @@ fn dir_has_entries(path: &std::path::Path) -> std::io::Result<bool> {
         return Ok(true);
     }
 
-    let mut entries = std::fs::read_dir(path)?;
-    Ok(entries.next().transpose()?.is_some())
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if !allowlist.iter().any(|allowed| {
+            allowed.components().count() == 1 && allowed.as_os_str() == entry.file_name()
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn event_log_sidecar_paths(event_log_path: &std::path::Path) -> [PathBuf; 3] {
@@ -2516,7 +2596,7 @@ pub async fn setup_<J: Jammer + Send + 'static>(
         .unwrap_or_else(|| data_dir.join("event-log.sqlite3"));
 
     if cli.new && !ephemeral {
-        if dir_has_entries(&data_dir)? {
+        if dir_has_unexpected_entries(&data_dir, &cli.new_data_dir_allowlist)? {
             warn!(
                 path = %data_dir.display(),
                 "Refusing --new because the target data directory already contains data or setup artifacts; use a fresh path or remove it manually"

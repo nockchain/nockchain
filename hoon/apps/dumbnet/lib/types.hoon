@@ -20,7 +20,19 @@
       kernel-state-9
       kernel-state-10
       kernel-state-11
+      kernel-state-12
   ==
+::
+::  Branch-local per-puzzle ASERT state. Counts provide each puzzle's virtual
+::  height and heads provide its latest median timestamp. Anchor target and
+::  timestamp come from the shared puzzle-keyed re-pin schedule.
++$  puzzle-asert-state
+  $:  zk-count=@
+      ai-count=@
+      zk-head=(unit block-id:dt)
+      ai-head=(unit block-id:dt)
+  ==
+::
 ::
 +$  kernel-state-0
   $:  %0
@@ -125,6 +137,23 @@
       asert-half-life=@
   ==
 ::
+::  Frozen pre-AI snapshot of blockchain-constants:v1. State 10 was serialized
+::  before the per-puzzle schedules replaced these six flat ASERT fields.
++$  blockchain-constants-v1-pre-ai
+  $:  v1-phase=@
+      bythos-phase=@
+      data=[max-size=@ min-fee=@]
+      base-fee=@
+      input-fee-divisor=@
+      blockchain-constants:v0:dt
+      asert-phase=@
+      asert-anchor-height=@
+      asert-anchor-target-atom=@
+      asert-ideal-block-time=@
+      asert-half-life=@
+      asert-anchor-min-timestamp=@
+  ==
+::
 ::  kernel-state-7 originally had the same shape as kernel-state-6 but
 ::  tracked the schema change in blockchain-constants:v1: five ASERT fields
 ::  (asert-phase, anchor-height, anchor-target-atom, ideal-block-time,
@@ -168,7 +197,7 @@
       constants=blockchain-constants:v1:dt
   ==
 :::
-::  kernel-state-10 records scheduled re-anchor median timestamps per accepted branch.
+::  Kernel state 10 carries the pre-AI constants shape.
 +$  kernel-state-10
   $:  %10
       c=consensus-state-10
@@ -176,12 +205,12 @@
       m=mining-state-9
     ::
       d=derived-state-9
-      constants=blockchain-constants:v1:dt
+      constants=blockchain-constants-v1-pre-ai
   ==
 ::
-::  kernel-state-11 marks adoption of Zoe's proof and ASERT cutover semantics.
-::  Its payload is unchanged; migration re-audits accepted state and rebuilds
-::  mining work before events resume.
+::  Kernel state 11 marks adoption of Zoe's proof and ASERT cutover semantics.
+::  Its payload is frozen so old persistent states decode independently of later
+::  state changes.
 +$  kernel-state-11
   $:  %11
       c=consensus-state-10
@@ -192,7 +221,18 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-11
+::  Kernel state 12 stores proof and branch-local puzzle metadata.
++$  kernel-state-12
+  $:  %12
+      c=consensus-state-12
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-12
+      constants=blockchain-constants:v1:dt
+  ==
+::
++$  kernel-state  kernel-state-12
 ::
 +$  consensus-state-0
   $+  consensus-state-0
@@ -426,7 +466,44 @@
   ==
 
 ::
-+$  consensus-state  consensus-state-10
+::
+::  consensus-state-12 records proof versions for blocks whose puzzle type is
+::  not derivable from height alone.
++$  consensus-state-12
+  $+  consensus-state-12
+  ::
+  ::  indexes and not-fully-validated state
+  $:
+    $:
+    :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        blocks-needed-by=(h-jug tx-id:dt block-id:dt) :: dependencies
+        excluded-txs=(h-set tx-id:dt) :: transactions unneeded by any block
+    ::
+    ::  every tx-id in spent-by must be in raw-txs and vice-versa
+        spent-by=(h-jug nname:dt tx-id:dt)
+    ::
+        pending-blocks=(h-map block-id:dt [=page:dt heard-at=@])  :: pending blocks
+    ==
+  ::
+  ::  core consensus state
+    $:  balance=(h-mip block-id:dt nname:dt nnote:dt)
+        txs=(h-mip block-id:dt tx-id:dt tx:dt) ::  fully validated transactions
+      ::
+        raw-txs=(h-map tx-id:dt [=raw-tx:dt heard-at=@]) :: raw transactions
+      ::
+        blocks=(h-map block-id:dt local-page:dt)
+        heaviest-block=(unit block-id:dt)
+        min-timestamps=(h-map block-id:dt @)
+        asert-anchor-min-timestamps=(map @tas (h-map block-id:dt @))
+        epoch-start=(h-map block-id:dt block-id:dt)
+        targets=(h-map block-id:dt bignum:bignum:dt)
+        btc-data=(unit (unit btc-hash:dt))
+        =genesis-seal:dt
+        block-versions=(h-map block-id:dt proof-version:sp)
+    ==
+  ==
+::
++$  consensus-state  consensus-state-12
 ::
 ::  you will not have lost any chain state if you lost pending state, you'd just have to
 ::  request data again from peers and reset your mining state
@@ -511,7 +588,16 @@
 ::
 +$  derived-state-9  $+(derived-state-9 derived-state-8)
 ::
-+$  derived-state  derived-state-9
+::  Current derived state. `puzzle-asert-states` is complete for every accepted
+::  post-activation block and follows forks independently.
++$  derived-state-12
+  $+  derived-state-12
+  $:  highest-block-height=(unit page-number:dt)
+      heaviest-chain=(z-map page-number:dt block-id:dt)
+      puzzle-asert-states=(h-map block-id:dt puzzle-asert-state)
+  ==
+::
++$  derived-state  derived-state-12
 ::
 +$  mining-state-0
   $+  mining-state-0
@@ -586,14 +672,35 @@
     %.y
   (canonical-pow-polynomials proof)
 :::
++$  ai-blake  ai-blake:dt
++$  ai-pow-nonce  ai-pow-nonce:dt
++$  ai-ext2  ai-ext2:dt
++$  ai-ext2s  ai-ext2s:dt
++$  ai-ext2-vec  ai-ext2-vec:dt
++$  ai-pow-commitments  ai-pow-commitments:dt
++$  ai-pow-public-inputs  ai-pow-public-inputs:dt
++$  ai-proof-node  ai-proof-node:dt
++$  ai-recursive-certificate  ai-recursive-certificate:dt
++$  ai-pow-certificate  ai-pow-certificate:dt
++$  ai-pow-artifact  ai-pow-artifact:dt
+::
+::  Tagged union of proof-of-work variants. The miner pokes the consensus
+::  kernel with `[%command %pow pv=pow-variant]`; the consensus kernel
+::  dispatches on `-.pv` so additional puzzle types (e.g. %ai-pow) can be
+::  added without changing the outer `%command` shape.
 +$  pow-variant
   $+  pow-variant
-  $%  [%dumb-zkpow prf=proof:sp dig=tip5-hash-atom:zeke bc=noun-digest:tip5:zeke nonce=noun-digest:tip5:zeke]
+  $%  [%dumb-zkpow prf=proof:sp dig=tip5-hash-atom:zeke bc=noun-digest:tip5:zeke nonce=noun-digest:tip5:zeke]  ::  the existing puzzle-nock STARK PoW
+      ::  AI matmul PoW wire shape. Carries a Rust-owned nonce plus the
+      ::  recursive certificate only; raw Layer-0 proofs and the plain
+      ::  MatmulProof are not persisted in blocks. This arm is verified via
+      ::  the recursive-certificate jet (%ai-pow-verify).
+      [%ai-pow nonce=ai-pow-nonce cert=ai-pow-certificate]
   ==
 ::
 +$  command
   $+  command
-  $%  [%pow pv=pow-variant]  :: check a ZK proof of work and issue its block
+  $%  [%pow pv=pow-variant]  ::  check if a proof of work is good for the next block, issue a block if so
       [%set-mining-key v0=@t v1=@t]  ::  set $lock for coinbase in mined blocks
       [%set-mining-key-advanced v0=(list [share=@ m=@ keys=(list @t)]) v1=(list [share=@ phk=@t])]  :: multisig and/or split coinbases
       [%enable-mining p=?]  ::  switch for generating candidate blocks for mining
@@ -644,7 +751,11 @@
       [%request p=request]  :: request specific tx or block
       [%track p=track]  :: runtime tracking of blocks for %liar-block-id effect
       [%seen p=seen]    ::  seen so don't reprocess
+      ::  Mining candidate emissions. `%mine-zk` is emitted when the
+      ::  candidate block changes. `%mine-ai` is emitted for the AI puzzle
+      ::  once at/after the AI-PoW activation height.
       [%mine-zk mine-start]
+      [%mine-ai mine-start]
       lie
       span-effect
       [%exit code=@]
@@ -655,6 +766,10 @@
       [%1 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%2 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%3 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
+      ::  %4 identifies the AI-PoW artifact emitted only through %mine-ai.
+      [%4 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
+      ::  %5 is the post-147500 ZK proof version.
+      [%5 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
   ==
 ::
 +$  seen
@@ -710,11 +825,10 @@
       ::  poke.
       [%liar-peer p=peer-id cause=term]  ::  block-id is wrong, or raw-tx did not validate
       ::
-      ::  block-id is correct, block did not validate. this is only returned once
-      ::  a block's fields are all checked as having been valid - so we know
-      ::  the block-id and powork are valid in particular. so only bad tx data
-      ::  can cause this to be emitted - and the libp2p driver will ban all nodes
-      ::  that sent us this block-id as a result.
+      ::  block-id is correct, but a failure shared by every representation of
+      ::  that semantic block was found. the libp2p driver will ban all nodes
+      ::  that sent us this block-id as a result. do not use this for a v5 proof
+      ::  witness failure: the block ID intentionally excludes that envelope.
       [%liar-block-id p=block-id:dt cause=term]
   ==
 ::

@@ -107,6 +107,10 @@ KERNELS = {
         name = "{}_native".format(kernel),
         src = KERNELS[kernel][0],
         deps = KERNELS[kernel][1],
+        # Optional pre-primed incremental cache; empty until
+        # `just bazel prime-honk-cache` populates .honk-cache/, and the
+        # compile is simply cold when it is. See //:honk_build_cache.
+        cache_state = "//:honk_build_cache",
     )
     for kernel in KERNELS
 ]

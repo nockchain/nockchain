@@ -127,6 +127,9 @@ This spec focuses on:
      an interval in which withdrawals are disabled; it replaces the stored
      value with the connected node's value and verifies that the kernel
      persisted it before continuing
+   - `withdrawal_processing_enabled` defaults to false. When false, nodes track
+     and acknowledge Base withdrawal events but do not assemble, sign, exchange,
+     or submit withdrawal proposals
    - the ingress-side withdrawal proposal transport remains in the main bridge
      process, while the sequencer gRPC surface is now hosted on the Nockchain
      API node process

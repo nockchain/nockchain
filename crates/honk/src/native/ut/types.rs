@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
-use std::rc::Rc as NRc;
 use std::sync::Arc;
 
 use hatch::ast::hoon::WingType;
@@ -9,7 +8,9 @@ use nockvm::noun::{NounAllocator, NounSpace};
 use num_bigint::BigUint;
 
 use crate::errors::Result;
-use crate::native::ir::ty::Type as NTy;
+use crate::native::ir::formula_dag::FormulaId;
+use crate::native::ir::semi_dag::SemiId;
+use crate::native::ir::ty::{Type as NTy, TypeRef as NRc};
 use crate::native::ut::{noun_eq, Ut};
 
 // Compiler inputs are not attacker-controlled; prefer a fast, non-cryptographic hasher for
@@ -152,7 +153,6 @@ pub type RestBoundaryKey = (u32, u32, u8, u64);
 pub type NestBoundaryRawKey = (u64, u64, u64);
 pub type NestBoundaryKey = (u32, u32, u8, u64);
 pub type TypeBinaryBoundaryKey = (u32, u32, u8, u64);
-pub type FishBoundaryKey = (u32, u64, u8, u64);
 pub type CoolMemoKey = (u32, u32, u8, u64, u64);
 pub type ChipMemoKey = (u32, u8, u8, u8, u8, u64, u64, u64, u64);
 pub type WingAxisMemoKey = (u32, u64, u64);
@@ -166,11 +166,11 @@ pub type HoldRepoCoreMemoKey = (u32, u32, u32, u32, u32, u64);
 #[derive(Clone)]
 pub struct BranSemiCacheEntry {
     // Native re-key (Phase-2 tail): the bran subject + the active hold scope are
-    // interned native types, matched by `NRc::ptr_eq`. The `semi` output stays a
-    // seminoun (the semi_* algebra is noun-based).
+    // interned native types, matched by `NRc::ptr_eq`. The output is a compact
+    // identity in the compile-local native seminoun arena.
     pub sut: NRc<NTy>,
     pub seen_holds: Vec<NRc<NTy>>,
-    pub semi: Noun,
+    pub semi: SemiId,
 }
 
 pub struct BoundaryMemoSet {
@@ -179,7 +179,6 @@ pub struct BoundaryMemoSet {
     pub mull: BucketMemo<MullBoundaryKey, MullCacheEntry>,
     pub redo: BucketMemo<RedoBoundaryKey, UnaryTypeBoundaryEntry>,
     pub rest: BucketMemo<RestBoundaryKey, RestCacheEntry>,
-    pub fish: BucketMemo<FishBoundaryKey, FishCacheEntry>,
     pub nest_raw: RawMemoMap<NestBoundaryRawKey, bool>,
     pub nest: BucketMemo<NestBoundaryKey, NestCacheEntry>,
     pub crop: BucketMemo<TypeBinaryBoundaryKey, UnaryTypeBoundaryEntry>,
@@ -194,7 +193,6 @@ impl Default for BoundaryMemoSet {
             mull: Default::default(),
             redo: Default::default(),
             rest: Default::default(),
-            fish: Default::default(),
             nest_raw: Default::default(),
             nest: Default::default(),
             crop: Default::default(),
@@ -214,7 +212,6 @@ impl BoundaryMemoSet {
         self.mull.clear();
         self.redo.clear();
         self.rest.clear();
-        self.fish.clear();
         self.nest_raw.clear();
         self.nest.clear();
         self.crop.clear();
@@ -903,7 +900,7 @@ pub enum Vair {
 #[derive(Clone, Debug)]
 pub enum Port {
     Palo(Palo),
-    Synthetic { typ: NRc<NTy>, formula: Noun },
+    Synthetic { typ: NRc<NTy>, formula: FormulaId },
 }
 
 #[derive(Clone, Debug)]
@@ -916,7 +913,7 @@ pub struct Palo {
 pub enum Opal {
     Leg(NRc<NTy>),
     Arm {
-        axis: u64,
+        axis: BigUint,
         arms: Vec<(NRc<NTy>, Noun)>,
     },
 }
@@ -926,7 +923,7 @@ pub enum Pony {
     Void,
     Palo(Palo),
     Unmatched(u64),
-    Synthetic { typ: NRc<NTy>, formula: Noun },
+    Synthetic { typ: NRc<NTy>, formula: FormulaId },
 }
 
 #[derive(Clone, Debug)]
@@ -975,13 +972,6 @@ pub struct RestCacheEntry {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct FishCacheEntry {
-    pub sut: Noun,
-    pub axis: u64,
-    pub result: Noun,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct NestCacheEntry {
     pub sut: Noun,
     pub ref_: Noun,
@@ -1019,9 +1009,9 @@ pub struct LazyResolverContext {
     // pushed during the same core's arm builds.
     pub core_type: NRc<NTy>,
     pub poly: Poly,
-    pub arms_by_axis: HashMap<u64, LazyResolverArmEntry>,
-    pub cached_formula_by_axis: HashMap<u64, Noun>,
-    pub in_progress_axes: HashSet<u64>,
+    pub arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
+    pub cached_formula_by_axis: HashMap<BigUint, FormulaId>,
+    pub in_progress_axes: HashSet<BigUint>,
 }
 
 #[derive(Clone, Debug)]

@@ -911,6 +911,15 @@ impl<'a> CellHandle<'a> {
         NounHandle::new(self.cell.tail(self.space), self.space)
     }
 
+    #[inline(always)]
+    pub fn head_tail(self) -> (NounHandle<'a>, NounHandle<'a>) {
+        let (head, tail) = self.cell.head_tail(self.space);
+        (
+            NounHandle::new(head, self.space),
+            NounHandle::new(tail, self.space),
+        )
+    }
+
     pub unsafe fn raw_pointer(self) -> *const CellMemory {
         self.cell.to_raw_pointer(self.space)
     }
@@ -3098,6 +3107,19 @@ mod private {
 mod tests {
     use crate::jets::util::test::init_context;
     use crate::noun::{Cell, NounSpace, Slots, D};
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn cell_handle_head_tail_matches_individual_accessors() {
+        let mut context = init_context();
+        let space = NounSpace::stack_only(&context.stack);
+        let cell = Cell::new(&mut context.stack, D(1), D(2));
+        let handle = cell.in_space(&space);
+        let (head, tail) = handle.head_tail();
+
+        assert!(unsafe { head.noun().raw_equals(&handle.head().noun()) });
+        assert!(unsafe { tail.noun().raw_equals(&handle.tail().noun()) });
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]

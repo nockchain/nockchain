@@ -23,7 +23,6 @@ metrics_struct![
     (requests_peeked_none, "nockchain-libp2p-io.requests_peeked_none", Count),
     (requests_erred_block_by_height, "nockchain-libp2p-io.requests_erred_block_by_height", Count),
     (requests_erred_elders_by_id, "nockchain-libp2p-io.requests_erred_elders_by_id", Count),
-    (elders_requests_suppressed, "nockchain-libp2p-io.elders_requests_suppressed", Count),
     (requests_erred_raw_tx_by_id, "nockchain-libp2p-io.requests_erred_raw_tx_by_id", Count),
     (requests_dropped, "nockchain-libp2p-io.requests_dropped", Count),
     (requests_crown_error_external, "nockchain-libp2p-io.requests_crown_error_external", Count),

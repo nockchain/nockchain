@@ -2,27 +2,26 @@ use super::*;
 
 impl<'a> Ut<'a> {
     // ATOMIC FLIP (C-final fire): `fine` reads the now-native Port (typ: NRc<NTy>)
-    // and returns a NATIVE typ (+ noun formula). `fire` is native end-to-end: arm
+    // and returns a native type plus canonical formula ID. `fire` is native end-to-end: arm
     // CORES are native `NRc<NTy>` (the deepening-subject site), foot stays a noun
     // (it carries poly + the hoon arm-spec). The Type<->Noun round-trips that
     // bracketed every fire call (`live_to_noun` the arm cores in, `native_of` the
     // result out) are gone — the arm cores in `Opal::Arm` are already native, and
     // the result feeds native `nice`/`fond`/find natively.
-    pub(super) fn fine(&mut self, port: &Port) -> Result<(NRc<NTy>, Noun)> {
+    pub(super) fn fine(&mut self, port: &Port) -> Result<(NRc<NTy>, FormulaId)> {
         match port {
             Port::Synthetic { typ, formula } => Ok((typ.clone(), *formula)),
             Port::Palo(palo) => match &palo.opal {
                 Opal::Leg(typ) => {
                     let axis = tend_big(&palo.vein)?;
-                    Ok((typ.clone(), slot_formula_axis_big(self.slab, axis)))
+                    Ok((typ.clone(), self.formula_slot(axis)))
                 }
                 Opal::Arm { axis, arms } => {
                     let axe = tend_big(&palo.vein)?;
                     // fire is native: the arm cores are already `NRc<NTy>`.
                     let ty = self.fire(arms)?;
-                    let slot = slot_formula_axis_big(self.slab, axe);
-                    let arm_axis_noun = noun_u64(self.slab, *axis);
-                    let formula = T(self.slab, &[D(9), arm_axis_noun, slot]);
+                    let slot = self.formula_slot(axe);
+                    let formula = self.formula_arena.kick(axis.clone(), slot);
                     Ok((ty, formula))
                 }
             },
@@ -35,7 +34,7 @@ impl<'a> Ut<'a> {
 
     fn fire_is_wet_axis_one(&mut self, hoon: Noun) -> bool {
         self.hoon_ast_lookup(hoon)
-            .map(|ast| matches!(ast.as_ref(), Hoon::Axis(1)))
+            .map(|ast| matches!(ast.as_ref(), Hoon::Axis(axis) if axis.is_one()))
             .unwrap_or(false)
     }
 
@@ -145,7 +144,7 @@ impl<'a> Ut<'a> {
     /// (hoon-138.hoon:9529) stores it: holds carry the verbatim tome hoon and
     /// `++open` lowering happens only when a hold is forced (repo/rest/play).
     fn cons_hold(&mut self, inner: NRc<NTy>, hoon: Noun) -> NRc<NTy> {
-        let gene = NLeaf::from_noun_raw(hoon, &self.slab.noun_space());
+        let gene = live_leaf_from_noun(&mut self.cx, hoon, &self.slab.noun_space());
         live_intern(
             &mut self.cx,
             NTy::Hold {

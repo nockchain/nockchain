@@ -1739,6 +1739,106 @@ impl<T: Nounable + Copy + mem::Preserve> Nounable for Hamt<T> {
     }
 }
 
+/// Decode a cold-state noun that is already resident in `stack`'s space,
+/// borrowing every member noun in place instead of deep-copying it.
+///
+/// `Cold::from_noun` copies each key, battery, and path element into `stack`
+/// because in general the source noun may live in a different allocator. When
+/// the caller has just cued the noun into this same stack — the compiler's
+/// embedded cold-state loads — those copies duplicate every battery core for
+/// nothing. The decoded structures still allocate their own list spines here;
+/// only the member-noun copies are skipped, so the result is reachable exactly
+/// as the copying decode's result would be.
+///
+/// Sound only when `noun` is resident in `stack`'s space and the decoded
+/// structures do not outlive that residency (the copying decode has the same
+/// lifetime shape — its copies land on the same stack).
+pub fn cold_from_noun_resident<A: NounAllocator>(
+    stack: &mut A,
+    noun: &Noun,
+    space: &NounSpace,
+) -> NounableResult<<Cold as Nounable>::Target> {
+    let mut battery_to_paths = Vec::new();
+    let mut root_to_paths = Vec::new();
+    let mut path_to_batteries = Vec::new();
+
+    let battery_to_paths_noun = noun.slot(2, space)?;
+    let root_to_paths_noun = noun.slot(6, space)?;
+    let path_to_batteries_noun = noun.slot(7, space)?;
+
+    for item in NounListIterator::new(battery_to_paths_noun, space) {
+        let cell = item.in_space(space).as_cell()?;
+        let value = noun_list_from_noun_resident(stack, &cell.tail().noun(), space)?;
+        battery_to_paths.push((cell.head().noun(), value));
+    }
+    for item in NounListIterator::new(root_to_paths_noun, space) {
+        let cell = item.in_space(space).as_cell()?;
+        let value = noun_list_from_noun_resident(stack, &cell.tail().noun(), space)?;
+        root_to_paths.push((cell.head().noun(), value));
+    }
+    for item in NounListIterator::new(path_to_batteries_noun, space) {
+        let cell = item.in_space(space).as_cell()?;
+        let value = batteries_list_from_noun_resident(stack, &cell.tail().noun(), space)?;
+        path_to_batteries.push((cell.head().noun(), value));
+    }
+    battery_to_paths.reverse();
+    root_to_paths.reverse();
+    path_to_batteries.reverse();
+    Ok((battery_to_paths, root_to_paths, path_to_batteries))
+}
+
+fn noun_list_from_noun_resident<A: NounAllocator>(
+    stack: &mut A,
+    noun: &Noun,
+    space: &NounSpace,
+) -> NounableResult<NounList> {
+    let mut result = NOUN_LIST_NIL;
+    for item in NounListIterator::new(*noun, space) {
+        let list_mem_ptr: *mut NounListMem = unsafe { stack.alloc_struct(1) };
+        unsafe {
+            list_mem_ptr.write(NounListMem {
+                element: item,
+                next: result,
+            });
+        }
+        result = NounList(list_mem_ptr);
+    }
+    Ok(result)
+}
+
+fn batteries_list_from_noun_resident<A: NounAllocator>(
+    stack: &mut A,
+    noun: &Noun,
+    space: &NounSpace,
+) -> NounableResult<BatteriesList> {
+    let mut batteries_list = BATTERIES_LIST_NIL;
+    for item in NounListIterator::new(*noun, space) {
+        let mut batteries = NO_BATTERIES;
+        for pair in NounListIterator::new(item, space) {
+            let cell = pair.in_space(space).as_cell()?;
+            let parent_axis = cell.tail().noun().as_atom()?;
+            let batteries_mem: *mut BatteriesMem = unsafe { stack.alloc_struct(1) };
+            unsafe {
+                batteries_mem.write(BatteriesMem {
+                    battery: cell.head().noun(),
+                    parent_axis,
+                    parent_batteries: batteries,
+                });
+            }
+            batteries = Batteries(batteries_mem);
+        }
+        let batteries_list_mem: *mut BatteriesListMem = unsafe { stack.alloc_struct(1) };
+        unsafe {
+            batteries_list_mem.write(BatteriesListMem {
+                batteries,
+                next: batteries_list,
+            });
+        }
+        batteries_list = BatteriesList(batteries_list_mem);
+    }
+    Ok(batteries_list)
+}
+
 // This blows up into an ugly refactor around a concrete NockStack, better to have a separate conversion function
 pub fn hamt_from_vec<T: Nounable + Copy + mem::Preserve>(
     stack: &mut NockStack,
@@ -2463,6 +2563,72 @@ pub(crate) mod test {
             "decoded element should not retain the foreign pointer"
         );
         verify_noun_stack_allocated(elem, &dest_space, "decoded noun list element");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn resident_cold_decode_matches_copying_decode() {
+        use crate::serialization::jam;
+
+        let mut stack = make_test_stack(DEFAULT_STACK_SIZE);
+        let space = stack.noun_space();
+
+        // A nontrivial cold noun: shared battery nouns, one root, multi-entry
+        // batteries with parent axes, and a batteries list reused by two paths.
+        let battery_a = T(&mut stack, &[D(11), D(12), D(13)]);
+        let battery_b = T(&mut stack, &[D(21), D(22)]);
+        let root = D(9);
+        let path_a = T(&mut stack, &[D(101), D(0)]);
+        let path_b = T(&mut stack, &[D(102), D(101), D(0)]);
+        let paths_a = T(&mut stack, &[path_a, D(0)]);
+        let paths_ab = T(&mut stack, &[path_a, path_b, D(0)]);
+        let batteries_one = {
+            let pair = T(&mut stack, &[battery_a, D(3)]);
+            T(&mut stack, &[pair, D(0)])
+        };
+        let batteries_two = {
+            let pair_a = T(&mut stack, &[battery_a, D(3)]);
+            let pair_b = T(&mut stack, &[battery_b, D(7)]);
+            T(&mut stack, &[pair_a, pair_b, D(0)])
+        };
+        let batteries_list = T(&mut stack, &[batteries_one, batteries_two, D(0)]);
+        let battery_to_paths = {
+            let entry = T(&mut stack, &[battery_a, paths_ab]);
+            T(&mut stack, &[entry, D(0)])
+        };
+        let root_to_paths = {
+            let entry = T(&mut stack, &[root, paths_a]);
+            T(&mut stack, &[entry, D(0)])
+        };
+        let path_to_batteries = {
+            let entry_a = T(&mut stack, &[path_a, batteries_list]);
+            let entry_b = T(&mut stack, &[path_b, batteries_list]);
+            T(&mut stack, &[entry_a, entry_b, D(0)])
+        };
+        let cold_noun = T(
+            &mut stack,
+            &[battery_to_paths, root_to_paths, path_to_batteries],
+        );
+
+        let copied = Cold::from_noun(&mut stack, &cold_noun, &space).expect("copying decode");
+        let resident =
+            cold_from_noun_resident(&mut stack, &cold_noun, &space).expect("resident decode");
+
+        fn encode(stack: &mut NockStack, decoded: <Cold as Nounable>::Target) -> Noun {
+            let (battery_to_paths, root_to_paths, path_to_batteries) = decoded;
+            let cold = Cold::from_vecs(stack, battery_to_paths, root_to_paths, path_to_batteries);
+            cold.into_noun(stack)
+        }
+        let copied_noun = encode(&mut stack, copied);
+        let resident_noun = encode(&mut stack, resident);
+        let copied_jam = jam(&mut stack, copied_noun);
+        let resident_jam = jam(&mut stack, resident_noun);
+        let space = stack.noun_space();
+        assert_eq!(
+            copied_jam.in_space(&space).as_ne_bytes(),
+            resident_jam.in_space(&space).as_ne_bytes(),
+            "resident decode must be observationally identical to the copying decode"
+        );
     }
 
     #[test]

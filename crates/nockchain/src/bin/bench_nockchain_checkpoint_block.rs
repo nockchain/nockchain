@@ -89,6 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         pma_initial_size: Some(PmaSize::from_words(args.stack_size.stack_words())),
         pma_reserved_size: None,
         data_dir: None,
+        new_data_dir_allowlist: Vec::new(),
         event_log_path: None,
         disable_fsync: false,
     };
@@ -339,6 +340,7 @@ async fn boot_peer(
         pma_initial_size: Some(PmaSize::from_words(stack_size.stack_words())),
         pma_reserved_size: None,
         data_dir: Some(data_dir),
+        new_data_dir_allowlist: Vec::new(),
         event_log_path: None,
         disable_fsync: false,
     };

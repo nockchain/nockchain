@@ -5,7 +5,11 @@ from **Nouns** to **native Rust data structures** (`Type`, `Formula` enums with
 `Rc` sharing + hash-consing), emitting Nouns only at well-defined, provenanced
 boundaries. Dedicated branch effort.
 
-Status: PLAN (pre-implementation), **v2**.
+Status: HISTORICAL IMPLEMENTATION PLAN, **v2**. The arena migration is now
+implemented; `ARENA-HOON-IR.md`, `ARENA-TYPE-IR.md`, `ARENA-FORMULA-IR.md`,
+`ARENA-SEMINOUN-IR.md`, and `POST-ARENA-PERFORMANCE-FRONTIER.md` describe the
+landed architecture and validation. The OOM and noun-based design below record
+the starting point, not the current compiler.
 Review provenance: self-reviewed once, then **red-teamed** against the honk
 source — see `NATIVE-TYPES-MIGRATION-RT.md` (18 findings RT-01…RT-18, all
 verified against code: 17 confirmed, RT-01 mostly-confirmed). This v2

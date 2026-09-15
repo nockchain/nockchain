@@ -6,8 +6,8 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
+jemalloc = []
 tracing-heap = ["tracy-client"]
-jemalloc = ["tikv-jemallocator"]
 
 [dependencies]
 bridge = { path = "../bridge" }
@@ -15,11 +15,10 @@ clap.workspace = true
 nockapp.workspace = true
 nockchain.workspace = true
 nockvm.workspace = true
-tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemallocator.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracy-client = { workspace = true, optional = true }
-zkvm-jetpack.workspace = true
 
 [lints]
 workspace = true

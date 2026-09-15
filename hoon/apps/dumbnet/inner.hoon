@@ -14,14 +14,15 @@
 ::  alias, otherwise the blockchain constants set in the kernel
 ::  will not be active.
 ::
+~%  %dumb-inner-lib  ..ut  ~
 |%
 ++  moat  (keep kernel-state:dk)
 ++  inner
-  ~%  %dumb-inner  ..ut  ~
+  ~%  %dumb-inner  ..inner  ~
   |_  k=kernel-state:dk
-  +*  min      ~(. dumb-miner m.k constants.k)
+  +*  min      ~(. dumb-miner m.k d.k constants.k)
       der      ~(. dumb-derived d.k constants.k)
-      con      ~(. dumb-consensus c.k constants.k)
+      con      ~(. dumb-consensus c.k d.k constants.k)
       t        ~(. c-transact constants.k)
   ::
   ::  We should be calling the inner kernel load in case of update
@@ -41,8 +42,8 @@
     ::  print unlabelled, are attributable
     ~>  %slog.[0 'load: begin']
     =/  ks=kernel-state:dk
-      ~>  %slog.[0 'load: [1/5] state-n-to-11: migrating state to version 11']
-      ~>  %bout  (state-n-to-11 arg)
+      ~>  %slog.[0 'load: [1/5] state-n-to-12: migrating state to version 12']
+      ~>  %bout  (state-n-to-12 arg)
     =.  ks
       ~>  %slog.[0 'load: [2/5] check-checkpoints: verifying checkpointed digests']
       ~>  %bout  (check-checkpoints ks)
@@ -55,15 +56,40 @@
     =.  c.k
       ~>  %slog.[0 'load: [5/5] repair-orphaned-claims: releasing txs stranded by past reorgs']
       ~>  %bout  repair-orphaned-claims:con
-    ~|  %v1-phase-must-be-lte-asert-phase
-    ?>  (lte v1-phase.constants.k asert-phase.constants.k)
+    ~|  %v1-phase-must-be-lte-zk-asert-phase
+    ?>  (lte v1-phase.constants.k phase.zk-asert.constants.k)
+    ::  The ZK re-pin and the introduction of the AI ASERT are the same event.
+    ::  A chain where one has happened and the other has not has no defined
+    ::  cross-puzzle regime: one puzzle would be retargeting under the dual
+    ::  cadence while the other is not, and +dual-puzzle-phase -- the height from
+    ::  which heaviness is priced per puzzle -- would not describe either.
+    ~|  %zk-asert-re-pin-and-ai-asert-must-be-simultaneous
+    ?>  =(phase.zk-asert-post-ai.constants.k phase.ai-asert.constants.k)
+    ::  Each schedule pin anchors at the preceding accepted block. This lets
+    ::  every puzzle recover its anchor timestamp through the shared cache.
+    ~|  %zk-asert-post-ai-anchor-must-precede-phase
+    ?>  =(+(anchor-height.zk-asert-post-ai.constants.k) phase.zk-asert-post-ai.constants.k)
+    ~|  %ai-asert-anchor-must-precede-phase
+    ?>  =(+(anchor-height.ai-asert.constants.k) phase.ai-asert.constants.k)
+    ::  The original Aletheia ZK pin predates the dual puzzle.
+    ~|  %zk-asert-phase-must-precede-the-dual-puzzle-phase
+    ?>  (lte phase.zk-asert.constants.k dual-puzzle-phase:page:t)
+    ::  From +dual-puzzle-phase on, a block's heaviness is the expected work at
+    ::  its own target for the puzzle named by its pow artifact. Only the v1
+    ::  candidate builder prices the puzzle; the v0 one derives work from the
+    ::  target alone. So a v0 page at or above that height could store an
+    ::  accumulated-work validation rejects, and no miner could build on the
+    ::  chain.
+    ~|  %v1-phase-must-be-lte-dual-puzzle-phase
+    ?>  (lte v1-phase.constants.k dual-puzzle-phase:page:t)
     ~>  %slog.[0 'load: complete']
     k
-    ::  this arm should be renamed each state upgrade to state-n-to-[latest] and extended to loop through all upgrades
-    ++  state-n-to-11
+    ::  This arm names the current schema and chains every frozen persisted
+    ::  payload through its next transition.
+    ++  state-n-to-12
       |=  arg=load-kernel-state:dk
       ^-  kernel-state:dk
-      ?.  ?=(%11 -.arg)
+      ?.  ?=(%12 -.arg)
         ~>  %slog.[0 'load: State upgrade required']
         ?-  -.arg
             ::
@@ -78,34 +104,26 @@
           %8  $(arg (state-8-to-9 arg))
           %9  $(arg (state-9-to-10 arg))
           %10  $(arg (state-10-to-11 arg))
+          %11  $(arg (state-11-to-12 arg))
         ==
       arg
     ::
-    ::  Version 11 is the one-time marker for Zoe's proof and ASERT schedule.  A
-    ::  version-10 state whose accepted canonical tip crossed the cutover used
-    ::  the prior anchor and cannot be reinterpreted safely.  Reset it instead
-    ::  of scanning or rebuilding ancestry; the existing boot cleanup removes
-    ::  noncanonical work before events resume.  A version-9 late upgrade past
-    ::  the first dynamic re-pin likewise arrives through version 10 with an
-    ::  empty cache; fail safely here rather than leaving the kernel unable to
-    ::  compute its next target.
-    ::
-    ::  Pending Zoe pages were header-checked under the old target and are
-    ::  rejected through +reject-pending-block so their transaction indexes
-    ::  remain consistent.  The miner candidate is rebuilt immediately through
-    ::  the normal candidate constructor, before +born can emit mining work.
+    ::  State 11 applies Zoe's proof and ASERT cutover. A version-10 state
+    ::  can be preserved only before that cutover with readable anchor data.
     ++  state-10-to-11
       |=  arg=kernel-state-10:dk
       ^-  kernel-state-11:dk
-      =/  cleaned-c=consensus-state:dk
-        (reject-post-zoe-pending-pages c.arg constants.arg)
+      =/  cleaned-c=consensus-state-10:dk
+        (reject-post-zoe-pending-pages-10 c.arg)
+      =/  current-constants=blockchain-constants:t
+        (upgrade-pre-ai-constants constants.arg)
       =/  upgraded=kernel-state-11:dk
         :*  %11
             c=cleaned-c
             a=a.arg
             m=m.arg(candidate-block *page:t, candidate-acc *tx-acc:t)
             d=d.arg
-            constants=constants.arg
+            constants=current-constants
         ==
       =/  accepted-tip-height=(unit page-number:t)
         ?~  heaviest-block.c.arg  ~
@@ -124,20 +142,126 @@
         (~(has h-by min-timestamps.c.arg) u.heaviest-block.c.arg)
       =/  dynamic-cache-ready=?
         ?~  accepted-tip-height  %.y
-        ?:  (lth u.accepted-tip-height first-dynamic-asert-anchor-height:con)
+        ?:  (lth u.accepted-tip-height asert-phase.constants.arg)
           %.y
         =/  timestamps=(unit (h-map block-id:t @))
           (~(get by asert-anchor-min-timestamps.c.arg) %zk)
         ?~  timestamps  %.n
         (~(has h-by u.timestamps) (need heaviest-block.c.arg))
+      =/  before-ai=?
+        ?~  accepted-tip-height  %.y
+        (lth u.accepted-tip-height ai-pow-activation-height.current-constants)
       ?:  ?&  accepted-state-readable
               !crossed-zoe
               min-timestamp-ready
               dynamic-cache-ready
+              before-ai
           ==
-        upgraded(m (rebuild-mining-candidate c.upgraded m.upgraded constants.arg))
-      ~>  %slog.[1 'load: Stale Zoe state during state-11 migration, resetting state']
-      (reset-consensus-state upgraded)
+        upgraded
+      ~>  %slog.[1 'load: State requires reset before version-11 migration']
+      (reset-consensus-state-11 upgraded)
+    ::
+    ++  upgrade-pre-ai-constants
+      |=  old=blockchain-constants-v1-pre-ai:dk
+      ^-  blockchain-constants:t
+      =/  current=blockchain-constants:t  *blockchain-constants:t
+      :*  v1-phase.old
+          bythos-phase.old
+          data.old
+          base-fee.old
+          input-fee-divisor.old
+          :*  max-block-size.old
+              blocks-per-epoch.old
+              target-epoch-duration.old
+              update-candidate-interval.old
+              max-future-timestamp.old
+              min-past-blocks.old
+              genesis-target-atom.old
+              max-target-atom.old
+              check-pow-flag.old
+              coinbase-timelock-min.old
+              pow-len.old
+              max-coinbase-split.old
+              first-month-coinbase-min.old
+          ==
+          :*  asert-phase.old
+              asert-anchor-height.old
+              asert-anchor-target-atom.old
+              asert-ideal-block-time.old
+              asert-half-life.old
+              asert-anchor-min-timestamp.old
+          ==
+          zk-asert-post-ai.current
+          ai-pow-activation-height.current
+          ai-asert.current
+      ==
+    ++  freeze-pre-ai-constants
+      |=  current=blockchain-constants:t
+      ^-  blockchain-constants-v1-pre-ai:dk
+      :*  v1-phase.current
+          bythos-phase.current
+          data.current
+          base-fee.current
+          input-fee-divisor.current
+          :*  max-block-size.current
+              blocks-per-epoch.current
+              target-epoch-duration.current
+              update-candidate-interval.current
+              max-future-timestamp.current
+              min-past-blocks.current
+              genesis-target-atom.current
+              max-target-atom.current
+              check-pow-flag.current
+              coinbase-timelock-min.current
+              pow-len.current
+              max-coinbase-split.current
+              first-month-coinbase-min.current
+          ==
+          phase.zk-asert.current
+          anchor-height.zk-asert.current
+          anchor-target-atom.zk-asert.current
+          ideal-block-time.zk-asert.current
+          half-life.zk-asert.current
+          anchor-min-timestamp.zk-asert.current
+      ==
+    ::  State 12 records proof and per-puzzle metadata. Valid state 11 is
+    ::  represented by the version-12 schema without reapplying Zoe's boundary.
+    ++  state-11-to-12
+      |=  zoe=kernel-state-11:dk
+      ^-  kernel-state-12:dk
+      =/  new-c=consensus-state-12:dk
+        %*  .  *consensus-state-12:dk
+          blocks-needed-by                blocks-needed-by.c.zoe
+          excluded-txs                    excluded-txs.c.zoe
+          spent-by                        spent-by.c.zoe
+          pending-blocks                  pending-blocks.c.zoe
+          balance                         balance.c.zoe
+          txs                             txs.c.zoe
+          raw-txs                         raw-txs.c.zoe
+          blocks                          blocks.c.zoe
+          heaviest-block                  heaviest-block.c.zoe
+          min-timestamps                  min-timestamps.c.zoe
+          asert-anchor-min-timestamps    asert-anchor-min-timestamps.c.zoe
+          epoch-start                     epoch-start.c.zoe
+          targets                         targets.c.zoe
+          btc-data                        btc-data.c.zoe
+          genesis-seal                    genesis-seal.c.zoe
+          block-versions                  *(h-map block-id:t proof-version:sp)
+        ==
+      =/  new-d=derived-state-12:dk
+        :*  highest-block-height.d.zoe
+            heaviest-chain.d.zoe
+            puzzle-asert-states=*(h-map block-id:t puzzle-asert-state:dk)
+        ==
+      =/  upgraded=kernel-state-12:dk
+        :*  %12
+            c=new-c
+            a=a.zoe
+            m=m.zoe(candidate-block *page:t, candidate-acc *tx-acc:t)
+            d=new-d
+            constants=constants.zoe
+        ==
+      upgraded(m (rebuild-mining-candidate c.upgraded d.upgraded m.upgraded constants.zoe))
     ::
     ::  upgrade kernel state 9 to kernel state 10 with typed dynamic anchor timestamps
     ++  state-9-to-10
@@ -166,8 +290,9 @@
           a=a.arg
           m=m.arg
           d=d.arg
-          constants=constants.arg
+          constants=(freeze-pre-ai-constants constants.arg)
       ==
+
     ::  upgrade kernel state 8 to kernel state 9
     ::    h-zoon replaces the remaining consensus z containers with
     ::    digest-keyed h containers. kernel-state-8 already carries the
@@ -254,7 +379,7 @@
             =((hash:page-msg:t ~(msg get:local-page:t u.genesis)) realnet-genesis-msg:dk)
           %.n
         =(realnet-genesis-msg:dk msg-hash.u.genesis-seal.c.arg)
-      =/  phase  asert-phase:*blockchain-constants:t
+      =/  phase  phase.zk-asert:*blockchain-constants:t
       ?:  &(on-mainnet ?=(^ highest-block-height.d.arg) (gte u.highest-block-height.d.arg phase))
         ~>  %slog.[0 'FATAL: late-upgrade - mainnet chain crossed ASERT activation under pre-ASERT rules']
         !!
@@ -478,14 +603,24 @@
       =.  constants.nk  constants.arg
       nk
     ::
-    ::  Rebuild a discarded candidate through the same path used after a new
-    ::  heaviest block.  +load has no wall clock, so use the accepted parent's
-    ::  median timestamp (the validation lower bound already stored for the
-    ::  candidate) as a seed; the first normal event refreshes it to current
-    ::  time.  Shifting by 64 reconstructs an exact-second @da, the inverse of
-    ::  +time-in-secs for this purpose.
+    ++  reset-consensus-state-11
+      |=  arg=kernel-state-11:dk
+      ^-  kernel-state-11:dk
+      =|  nk=kernel-state-11:dk
+      =.  mining.m.nk  mining.m.arg
+      =.  shares.m.nk  shares.m.arg
+      =.  v0-shares.m.nk  v0-shares.m.arg
+      =.  init.a.nk  init.a.arg
+      =.  btc-data.c.nk  btc-data.c.arg
+      =.  genesis-seal.c.nk  genesis-seal.c.arg
+      =.  constants.nk  constants.arg
+      nk
+    ::
+    ::  Candidate construction on load has no wall clock. The accepted parent
+    ::  median timestamp supplies the seed that the next event refreshes.
     ++  rebuild-mining-candidate
       |=  $:  con-state=consensus-state:dk
+              der-state=derived-state:dk
               cleared-mining=mining-state:dk
               bc=blockchain-constants:t
           ==
@@ -495,21 +630,39 @@
       =/  seed-seconds=(unit @)
         (~(get h-by min-timestamps.con-state) u.heaviest-block.con-state)
       ?~  seed-seconds  cleared-mining
-      (~(heard-new-block dumb-miner cleared-mining bc) con-state (lsh 6 u.seed-seconds))
+      (~(heard-new-block dumb-miner cleared-mining der-state bc) con-state (lsh 6 u.seed-seconds))
     ::
-    ++  reject-post-zoe-pending-pages
-      |=  [con-state=consensus-state:dk bc=blockchain-constants:t]
-      ^-  consensus-state:dk
+    ::  Pending Zoe pages use the target regime that state 10 cannot retain.
+    ++  reject-post-zoe-pending-pages-10
+      |=  c=consensus-state-10:dk
+      ^-  consensus-state-10:dk
       =/  stale=(list block-id:t)
-        %-  ~(rep h-by pending-blocks.con-state)
+        %-  ~(rep h-by pending-blocks.c)
         |=  [[block-id=block-id:t pag=page:t heard-at=@] ids=(list block-id:t)]
         ?:  (gte ~(height get:page:t pag) proof-version-3-start:con)
           [block-id ids]
         ids
       %+  roll  stale
-      |=  [block-id=block-id:t current=_con-state]
-      (~(reject-pending-block dumb-consensus current bc) block-id)
+      |=  [block-id=block-id:t current=_c]
+      (reject-pending-block-10 current block-id)
     ::
+    ++  reject-pending-block-10
+      |=  [c=consensus-state-10:dk block-id=block-id:t]
+      ^-  consensus-state-10:dk
+      ?<  (~(has h-by blocks.c) block-id)
+      =/  pag  page:(~(got h-by pending-blocks.c) block-id)
+      =.  c
+        %-  ~(rep z-in ~(tx-ids get:page:t pag))
+        |=  [tx-id=tx-id:t c=_c]
+        =.  blocks-needed-by.c  (~(del h-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))
+        =?  excluded-txs.c
+            ?&  ?!((~(has h-by blocks-needed-by.c) tx-id))
+                (~(has h-by raw-txs.c) tx-id)
+            ==
+          (~(put h-in excluded-txs.c) tx-id)
+        c
+      =.  pending-blocks.c  (~(del h-by pending-blocks.c) ~(digest get:page:t pag))
+      c
     ++  stored-postactivation-pages-valid
       |=  [arg=kernel-state:dk only-noncanonical=?]
       ^-  ?
@@ -523,10 +676,14 @@
       %-  ~(rep h-by blocks.c.arg)
       |=  [[block-id=block-id:t local=local-page:t] valid=?]
       ?.  valid  %.n
-      ::  Height lives outside the jammed proof in local-page.  Read it first
-      ::  so historical proofs never need to be decoded by this audit.
+      ::  Audit every artifact from the first consensus change that adds a
+      ::  versioned proof path. Earlier pages retain their historical encoding.
       =/  height=page-number:t  ~(height get:local-page:t local)
-      ?:  (lth height proof-version-3-start:con)
+      =/  first-versioned-height=page-number:t
+        ?:  (lth ai-pow-activation-height.constants.arg proof-version-3-start:con)
+          ai-pow-activation-height.constants.arg
+        proof-version-3-start:con
+      ?:  (lth height first-versioned-height)
         %.y
       =/  canonical-id  (~(get z-by heaviest-chain.d.arg) height)
       =/  canonical=?
@@ -995,10 +1152,10 @@
     ~/  %poke
     |=  [wir=wire eny=@ our=@ux now=@da dat=*]
     ^-  [(list effect:dk) kernel-state:dk]
-    =<  $
-    ~%  %poke-helpers  ..ut  ~
+    =<  main
+    ~%  %dumb-poke  +  ~
     |%
-    ++  $
+    ++  main
       =/  old-state  m.k
       =/  cause  ((soft cause:dk) dat)
       ?~  cause
@@ -1013,7 +1170,14 @@
       ::~&  "inner dumbnet cause: {<[-.cause -.+.cause]>}"
       =^  effs  k
         ?+    wir  ~|("Unsupported wire: {<wir>}" !!)
-            [%poke src=?(%nc %timer %sys %zk-pow-miner %grpc) ver=@ *]
+            [%poke src=?(%nc %timer %sys %zk-pow-miner %ai-pow-miner %grpc) ver=@ *]
+          ::  miner sources: the legacy `%miner` source is split into
+          ::  per-puzzle sources (`%zk-pow-miner`, `%ai-pow-miner`) so the
+          ::  kernel can route by source as well as by inner pow-variant
+          ::  tag (see `pow-variant` in lib/types.hoon). Both miner sources
+          ::  share the same command/fact dispatch path here; the inner
+          ::  pow-variant tag is what determines which puzzle verifier runs
+          ::  on a `%pow` command (see do-pow).
           ?-  -.cause
             %command  (handle-command now eny p.cause)
             %fact     (handle-fact wir eny our now p.cause)
@@ -1027,17 +1191,27 @@
       =^  candidate-changed  m.k  (update-candidate-block:min c.k now)
       :_  k
       ?.  candidate-changed  effs
-      :_  effs
       =/  version=proof-version:sp
-        (height-to-proof-version:con ~(height get:page:t candidate-block.m.k))
-      =/  target  ~(target get:page:t candidate-block.m.k)
+        (height-to-proof-version-legacy:con ~(height get:page:t candidate-block.m.k))
+      =/  zk-target  ~(target get:page:t candidate-block.m.k)
       =/  commit  (block-commitment:page:t candidate-block.m.k)
-      ?-  version
-        %0  [%mine-zk %0 commit target pow-len:t]
-        %1  [%mine-zk %1 commit target pow-len:t]
-        %2  [%mine-zk %2 commit target pow-len:t]
-        %3  [%mine-zk %3 commit target pow-len:t]
-      ==
+      =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
+      =/  parent-bid=block-id:t  ~(parent get:page:t candidate-block.m.k)
+      =/  zk-effect
+        ?-  version
+          %0  [%mine-zk %0 commit zk-target pow-len:t]
+          %1  [%mine-zk %1 commit zk-target pow-len:t]
+          %2  [%mine-zk %2 commit zk-target pow-len:t]
+          %3  [%mine-zk %3 commit zk-target pow-len:t]
+          %4  ~|(%unexpected-v4-ai-in-zk-candidate !!)
+          %5  [%mine-zk %5 commit zk-target pow-len:t]
+        ==
+      ?:  (gte candidate-height ai-pow-activation-height.constants.k)
+        =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
+        =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
+        =/  ai-target  ~(target get:page:t ai-cand)
+        [[%mine-ai %4 ai-commit ai-target pow-len:t] zk-effect effs]
+      [zk-effect effs]
     ::
     ::  +heard-genesis-block: check if block is a genesis block and decide whether to keep it
     ++  heard-genesis-block
@@ -1068,6 +1242,17 @@
         ::  heard genesis block
         ~>  %slog.[0 leaf+"heard-block: Heard genesis block"]
         (heard-genesis-block wir now eny pag)
+      ::  Reject a raw proof that claims AI discriminator %4 before digest
+      ::  validation reaches the proof-stream hash path.
+      =/  legacy-v4=?
+        =/  pow=(unit pow-artifact:t)  ~(pow get:page:t pag)
+        ?~  pow
+          %.n
+        (legacy-v4-proof-artifact:con u.pow)
+      ?:  legacy-v4
+        :_  k
+        [(liar-effect wir %legacy-v4-proof-artifact)]~
+      ::
       ?~  heaviest-block.c.k
         =/  peer-id=(unit @)  (get-peer-id wir)
         ?~  peer-id
@@ -1098,9 +1283,10 @@
         [%seen %block ~(digest get:page:t pag) ~]~
       ::
       ::  check to see if the .digest is valid. if it is not, we
-      ::  emit a %liar-peer. if it is, then any further %liar effects
-      ::  should be %liar-block-id. this tells the runtime that
-      ::  anybody who sends us this block id is a liar
+      ::  emit a %liar-peer. Most later failures are semantic block failures and
+      ::  may use %liar-block-id. A v5 proof suffix is only a witness, however,
+      ::  so its failure must remain peer-specific: another envelope with the
+      ::  same proof-independent block ID may be valid.
       ?.  (check-digest:page:t pag)
         ~>  %slog.[1 leaf+"heard-block: Digest is not valid"]
         :_  k
@@ -1138,6 +1324,13 @@
       ::
       ?.  (check-pow pag)
         ~>  %slog.[1 leaf+"heard-block: Failed PoW check"]
+        =/  pow  (need ~(pow get:page:t pag))
+        ?:  =(%5 (pow-artifact-to-proof-version:con pow))
+          ::  Do not emit the earlier %track %add or poison this shared block
+          ::  ID. The exact v5 envelope failed, not necessarily the semantic
+          ::  block represented by object 0.
+          :_  k
+          [(liar-effect wir %failed-pow-witness)]~
         :_  k
         %+  snoc  block-effs
         [%liar-block-id ~(digest get:page:t pag) %failed-pow-check]
@@ -1202,14 +1395,6 @@
         ::  either oldest is genesis OR we must have received exactly 24 ids
         :_  k
         [[%liar-peer u.peer-id %less-than-24-parent-hashes]~]
-      ::  +get-elders seeds its accumulator with the block at the top of the
-      ::  window, so an elders response naming no ancestor at all is not one
-      ::  this kernel can produce. Rejecting it also keeps the walk below,
-      ::  which starts at .oldest + .ids-lent - 1, from decrementing zero.
-      ?:  =(0 ids-lent)
-        ~>  %slog.[1 'heard-elders: No parent hashes received']
-        :_  k
-        [[%liar-peer u.peer-id %no-parent-hashes]~]
       ::
       =/  log-message
         %^  cat  3
@@ -1221,12 +1406,9 @@
         =/  height  (dec (add oldest ids-lent))
         |-
         ?~  ids  ~
+        ?:  =(height 0)  ~
         ?:  (~(has h-by blocks.c.k) i.ids)
           `[i.ids height]
-        ::  a window reaching genesis intersects there or not at all: genesis is
-        ::  the last id such a window carries, and its height cannot be
-        ::  decremented. the membership test must therefore precede this.
-        ?:  =(height *page-number:t)  ~
         $(ids t.ids, height (dec height))
       ?~  latest-known
         ?:  =(oldest *page-number:t)
@@ -1280,14 +1462,20 @@
      =/  pow  ~(pow get:page:t pag)
      =/  check-pow-hash=?
       ?.  check-pow-flag:t
-         ::  this case only happens during testing
-         ::~&  "skipping pow hash check for {(trip (to-b58:hash:t ~(digest get:page:t pag)))}"
-         %.y
-       ?~  pow
-         %.n
-       %-  check-target:mine
-       :_  ~(target get:page:t pag)
-       (proof-to-pow:zeke u.pow)
+        %.y
+      =/  pow=(unit pow-artifact:t)  ~(pow get:page:t pag)
+      ?~  pow
+        %.n
+      ?:  (legacy-v4-proof-artifact:con u.pow)
+        %.n
+      ?:  ?=([%ai-pow *] u.pow)
+        %.n
+      =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
+      ?~  prf
+        %.n
+      %-  check-target:mine
+      :_  ~(target get:page:t pag)
+      (proof-to-pow:zeke u.prf)
      =/  check-pow-valid=?  (check-pow pag)
      ::
      ::  check if timestamp is in base field, this will anchor subsequent timestamp checks
@@ -1347,6 +1535,14 @@
          check-btc-hash
          check-checkpoint
      ==
+    ::  +check-pow dispatches a version-%4 (%ai-pow) block to the door-level
+    ::  +ai-pow-verify arm (the mandatory Rust jet; see its doc at the top of
+    ::  %dumb-inner). Sample: the transparent structured artifact
+    ::  `[%ai-pow nonce certificate]`, the structured block-commitment noun
+    ::  (jammed + BLAKE3'd inside the jet to match the miner), and the target as a
+    ::  `merge:bignum` LE atom. Safe: `validate-page-without-txs-da` rejects
+    ::  pre-activation `%ai-pow` (via `proof-version-valid-at-height`) before
+    ::  `check-pow` runs.
     ++  check-pow
       ~/  %check-pow
       |=  pag=page:t
@@ -1355,20 +1551,29 @@
       ?~  pow
         ::  Missing proofs are permitted only by explicit test configuration.
         ?:(check-pow-flag:t %.n %.y)
-      ?.  (proof-version-valid:con [~(height get:page:t pag) u.pow])
+      ?.  %+  proof-version-valid-at-height:con
+            (pow-artifact-to-proof-version:con u.pow)
+          ~(height get:page:t pag)
         %.n
       ?.  check-pow-flag:t
         ~>  %slog.[1 'check-pow: check-pow-flag is off, skipping expensive pow check']
-        ::  Version selection remains enforced in this test-only case.
         %.y
+      ?:  (legacy-v4-proof-artifact:con u.pow)
+        %.n
+      ?:  ?=([%ai-pow *] u.pow)
+        %+  ai-pow-verify:mine  u.pow
+        [(block-commitment:page:t pag) (merge:bignum:t ~(target get:page:t pag))]
+      =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
+      ?~  prf
+        %.n
       ::
       ::  validate that powork puzzle in the proof is correct.
-      ?&  (check-pow-puzzle u.pow pag)
-          (canonical-pow-proof:dk [~(height get:page:t pag) u.pow])
+      ?&  (check-pow-puzzle u.prf pag)
+          (canonical-pow-proof:dk [~(height get:page:t pag) u.prf])
           ::
           ::  validate the powork. this is done separately since the
           ::  other checks are much cheaper.
-          (verify:nv u.pow ~ eny)
+          (verify:nv u.prf ~ eny)
       ==
     ::
     ++  check-pow-puzzle
@@ -1510,23 +1715,6 @@
         ~>  %slog.[1 (cat 3 'heard-tx: Transaction context invalid: ' +.ctx-valid)]
         `k
       ::
-      ::  a tx must pay what a block carrying it will require. +v1-to-v1
-      ::  applies this bound during block validation and candidate packing, so
-      ::  a tx paying less can never be mined; admitting one anyway leaves it
-      ::  gossiped, retained, re-gossiped on every new heaviest block and
-      ::  re-processed by the miner on every candidate refresh, with its
-      ::  inputs pinned in .spent-by so the sender cannot replace it. the bound
-      ::  is measured at the earliest height that could carry the tx, which is
-      ::  the height +v1-to-v1 will measure it at.
-      =/  fee-sufficient=?
-        ?^  -.raw  %.y
-        =/  next-height=page-number:t  +(get-cur-height:con)
-        %+  gte  (roll-fees:spends:t spends.raw)
-        (calculate-min-fee:spends:t [spends.raw next-height])
-      ?.  fee-sufficient
-        ~>  %slog.[1 'heard-tx: Fee below what a block would require, discarding']
-        `k
-      ::
       =^  work  c.k
         (add-raw-tx:con raw)
       :: no blocks were depending on this so work should be empty
@@ -1613,13 +1801,16 @@
       =.  c.k  (accept-page:con pag acc now)
       =/  print-var
         =/  pow-print=@t
-          ?:  check-pow-flag:t
-            =/  pow  ~(pow get:page:t pag)
-            ?>  ?=(^ pow)
-            %+  rap  3
-            :~  ' with proof version '  (rsh [3 2] (scot %ui version.u.pow))
-            ==
-          '. Skipping pow check because check-pow-flag was disabled'
+          =/  pow  ~(pow get:page:t pag)
+          ?>  ?=(^ pow)
+          ?:  ?=([%ai-pow *] u.pow)
+            ' with ai-pow certificate'
+          =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
+          ?~  prf
+            ' with malformed proof'
+          %+  rap  3
+          :~  ' with proof version '  (rsh [3 2] (scot %ui version.u.prf))
+          ==
         %-  trip
         ^-  @t
         %+  rap  3
@@ -1635,6 +1826,19 @@
           ::  tell driver we've seen this block so don't process it again
           [%seen %block ~(digest get:page:t pag) `~(height get:page:t pag)]
         ~
+      =/  ai-acceptance=(unit effect:dk)
+        =/  pow  ~(pow get:page:t pag)
+        ?.  ?=(^ pow)  ~
+        ?.  ?=([%ai-pow *] u.pow)  ~
+        =/  commit  (block-commitment:page:t pag)
+        :-  ~
+        :+  %span  %ai-pow-accepted
+        :~  'block_height'^n+~(height get:page:t pag)
+            'block_id'^s+(to-b58:hash:t ~(digest get:page:t pag))
+            'candidate_commitment'^s+(scot %ux (digest-to-atom:tip5:zeke commit))
+        ==
+      =?  effs  ?=(^ ai-acceptance)
+        [u.ai-acceptance effs]
       ::
       =/  old-heavy  heaviest-block.c.k
       =.  c.k  (update-heaviest:con pag)
@@ -1755,9 +1959,13 @@
         ~|  'liar-effect: ATTN: received a bad block or tx via grpc driver'
         !!
       ::
-          [%poke %zk-pow-miner *]
-        ::  A failed ZK-miner block is a local construction failure.
-        ~|  'liar-effect: ATTN: zk-pow-miner or +do-genesis produced a bad block!'
+          [%poke ?(%zk-pow-miner %ai-pow-miner) *]
+        ::  this indicates that one of the miner modules built a bad block
+        ::  and then told the kernel about it. alternatively, +do-genesis
+        ::  produced a bad genesis block. this should never happen — it
+        ::  indicates a serious bug otherwise. The wire's second
+        ::  component identifies which miner produced the bad block.
+        ~|  'liar-effect: ATTN: miner or +do-genesis produced a bad block!'
         !!
       ::
           [%poke %sys *]
@@ -1882,8 +2090,9 @@
       ++  do-pow
         ^-  [(list effect:dk) kernel-state:dk]
         ?>  ?=([%pow *] command)
-        ?-  -.pv.command
-            %dumb-zkpow
+        ::  Dispatch on the inner pow-variant tag.
+        ?-    -.pv.command
+        %dumb-zkpow
           =/  commit=block-commitment:t
             (block-commitment:page:t candidate-block.m.k)
           ?.  =(bc.pv.command commit)
@@ -1893,10 +2102,43 @@
               ~(target get:page:t candidate-block.m.k)
             =.  m.k  (set-pow:min prf.pv.command)
             =.  m.k  set-digest:min
+            ::  Synthesize a `/poke/zk-pow-miner` wire — the block was
+            ::  produced by the zk-pow-miner puzzle path.
             =^  heard-block-effs  k  (heard-block /poke/zk-pow-miner now candidate-block.m.k eny)
             :_  k
             heard-block-effs
           [~ k]
+        ::
+            %ai-pow
+          ::  Activation gate: AI puzzle is invalid for any block whose
+          ::  height is below ai-pow-activation-height. Reject silently
+          ::  (no liar-effect — this is a misconfigured miner, not a
+          ::  bad-faith block proposer).
+          =/  candidate-height  ~(height get:page:t candidate-block.m.k)
+          ?:  (lth candidate-height ai-pow-activation-height.constants.k)
+            ~>  %slog.[0 'do-pow: %ai-pow pre-activation; rejected']
+            [~ k]
+          ::  An unverified artifact cannot change the shared ZK candidate. Build the
+          ::  deterministic AI-targeted variant locally, validate it, then publish it
+          ::  as the candidate only after the certificate has verified.
+          =/  ai-candidate=page:t
+            (build-ai-candidate:con candidate-block.m.k shares.m.k)
+          =/  ai-mining=mining-state:dk
+            m.k(candidate-block ai-candidate)
+          =/  ai-miner  ~(. dumb-miner ai-mining d.k constants.k)
+          =.  ai-mining  (set-pow:ai-miner pv.command)
+          =/  ai-candidate=page:t  candidate-block.ai-mining
+          ?.  (check-pow ai-candidate)
+            ~>  %slog.[1 'do-pow: %ai-pow certificate failed verification; rejected']
+            [~ k]
+          =/  ai-miner-with-pow  ~(. dumb-miner ai-mining d.k constants.k)
+          =.  ai-mining  set-digest:ai-miner-with-pow
+          =.  candidate-block.m.k  candidate-block.ai-mining
+          ::  Synthesize a `/poke/ai-pow-miner` wire — the block was produced by the
+          ::  ai-pow-miner puzzle path.
+          =^  heard-block-effs  k  (heard-block /poke/ai-pow-miner now candidate-block.m.k eny)
+          :_  k
+          heard-block-effs
         ==
       ::
       ++  do-set-mining-key
@@ -1926,8 +2168,7 @@
         ?:  (gth (lent v1.command) 2)
         ~>  %slog.[1 'do-set-mining-key-advanced: Coinbase split for more than two public-key hashes not yet supported, exiting']
           [[%exit 1]~ k]
-        ::  A standalone v1 miner supplies no legacy v0 signatures; only an
-        ::  entirely empty reward configuration is invalid.
+        ::  Mining needs a recipient in either reward era; empty share maps are invalid.
         ?:  ?&(?=(~ v0.command) ?=(~ v1.command))
           ~>  %slog.[1 'do-set-mining-key-advanced: No keys provided, exiting.']
           [[%exit 1]~ k]
@@ -2064,17 +2305,30 @@
           `k
         =/  commit=block-commitment:t
           (block-commitment:page:t candidate-block.m.k)
-        =/  target  ~(target get:page:t candidate-block.m.k)
-        =/  proof-version  (height-to-proof-version:con ~(height get:page:t candidate-block.m.k))
-        =/  mine-start
+        =/  zk-target  ~(target get:page:t candidate-block.m.k)
+        =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
+        =/  proof-version  (height-to-proof-version-legacy:con candidate-height)
+        =/  zk-mine-start
           ?-  proof-version
-            %0  [%0 commit target pow-len:t]
-            %1  [%1 commit target pow-len:t]
-            %2  [%2 commit target pow-len:t]
-            %3  [%3 commit target pow-len:t]
+            %0  [%0 commit zk-target pow-len:t]
+            %1  [%1 commit zk-target pow-len:t]
+            %2  [%2 commit zk-target pow-len:t]
+            %3  [%3 commit zk-target pow-len:t]
+            %4  ~|(%unexpected-v4-ai-in-zk-mine-start !!)
+            %5  [%5 commit zk-target pow-len:t]
           ==
+        =/  zk-effect  [%mine-zk zk-mine-start]
         :_  k
-        [%mine-zk mine-start]~
+        ::  do-mine (new-heaviest-block / born) re-emits the ZK candidate, and
+        ::  post-activation ALSO the %mine-ai candidate — the same block re-targeted
+        ::  to the AI ASERT target (+build-ai-candidate) — matching the
+        ::  candidate-update poke path, so AI miners re-target immediately here too.
+        ?:  (gte candidate-height ai-pow-activation-height.constants.k)
+          =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
+          =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
+          =/  ai-target  ~(target get:page:t ai-cand)
+          [[%mine-ai %4 ai-commit ai-target pow-len:t] zk-effect ~]
+        [zk-effect ~]
       ::
       ::  only send a %elders request for reasonable heights
       ++  missing-parent-effects

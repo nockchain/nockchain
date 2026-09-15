@@ -1,8 +1,8 @@
 ::  tests/dumb/mod/unit/asert-mainnet-vectors.hoon
 ::
 ::    Phase-2 cross-check: verify that ASERT targets computed using the
-::    cutover constants (the hardcoded asert-anchor-min-timestamp,
-::    asert-anchor-target-atom, and asert-anchor-height baked into
+::    cutover constants (the hardcoded anchor-min-timestamp.zk-asert,
+::    anchor-target-atom.zk-asert, and anchor-height.zk-asert baked into
 ::    blockchain-constants:v1) match the targets observed on canonical
 ::    mainnet for a range of post-activation blocks.
 ::
@@ -122,18 +122,18 @@
   =/  bc  *blockchain-constants:txe
   ;:  weld
     %+  expect-eq  !>(anchor-min-timestamp)
-    !>(asert-anchor-min-timestamp.bc)
+    !>(anchor-min-timestamp.zk-asert.bc)
   ::
     %+  expect-eq  !>(anchor-target-atom)
-    !>(asert-anchor-target-atom.bc)
+    !>(anchor-target-atom.zk-asert.bc)
   ::
     %+  expect-eq  !>(anchor-height)
-    !>(asert-anchor-height.bc)
+    !>(anchor-height.zk-asert.bc)
   ::
     %+  expect-eq  !>(ideal-block-time)
-    !>(asert-ideal-block-time.bc)
+    !>(ideal-block-time.zk-asert.bc)
   ::
     %+  expect-eq  !>(half-life)
-    !>(asert-half-life.bc)
+    !>(half-life.zk-asert.bc)
   ==
 --

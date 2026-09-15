@@ -20,9 +20,9 @@ Important constraints:
 - The caret-after-plus-header case is intentionally narrow: it should match the canonical doc-block shape without broadening ordinary arm comments.
 - Parser helpers that detect an arm body start should prefer the first doc content line only when that is the canonical body anchor; otherwise they should return the actual body rune.
 
-Relevant open implementation area:
+Relevant implementation area:
 
-- `open/crates/hatch/src/utils.rs`
+- `crates/hatch/src/utils.rs`
 
 ## Test expectations
 
@@ -30,5 +30,5 @@ For parser changes that affect compiler parity, run parser unit tests in release
 
 ```bash
 cargo test --release -p hatch --lib
-bazel test //open/crates/honk/test-assets:hoon_138_arbitrary_parity_test
+bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
 ```

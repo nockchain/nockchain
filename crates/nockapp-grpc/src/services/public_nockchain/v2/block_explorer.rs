@@ -12,7 +12,9 @@ use nockapp_grpc_proto::pb::public::v2::{
 };
 use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::structs::HoonMapIter;
-use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Page};
+#[cfg(test)]
+use nockchain_types::tx_engine::common::Page;
+use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name};
 use nockchain_types::tx_engine::v0::{Lock, NoteV0, RawTx};
 use nockvm::noun::{Noun, NounAllocator, NounHandle, NounSpace, SIG};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
@@ -23,6 +25,13 @@ use crate::error::{NockAppGrpcError, Result as GrpcResult};
 use crate::pb::common::v1 as pb_common;
 use crate::public_nockchain::v2::metrics::NockchainGrpcApiMetrics;
 use crate::public_nockchain::v2::server::BalanceHandle;
+
+struct PageHeader {
+    digest: Hash,
+    parent: Hash,
+    timestamp: u64,
+    height: u64,
+}
 
 /// Minimal block metadata for block explorer
 #[derive(Debug, Clone)]
@@ -932,9 +941,9 @@ impl BlockExplorerCache {
         let result_noun = unsafe { result.root() };
         let space = result.noun_space();
         let result_noun_handle = result_noun.in_space(&space);
-        // Decode Option<Option<Page>>
-        let opt: Option<Option<Page>> =
-            NounDecode::from_noun_handle(&result_noun_handle).map_err(|e| {
+        let page_noun = decode_option_handle(result_noun_handle)
+            .and_then(|outer| outer.map(decode_option_handle).transpose())
+            .map_err(|e| {
                 error!(
                     "Failed to decode heaviest-block peek result.\n\
                  Decode error: {:?}\n\
@@ -942,23 +951,15 @@ impl BlockExplorerCache {
                     e
                 );
                 NockAppGrpcError::NounDecode(e)
+            })?
+            .flatten()
+            .ok_or_else(|| {
+                debug!("peek_heaviest_block returned None/empty");
+                NockAppGrpcError::PeekReturnedNoData
             })?;
-
-        debug!(
-            "peek_heaviest_block decoded: outer={:?}",
-            opt.as_ref().map(|o| o.is_some())
-        );
-
-        let page = opt.flatten().ok_or_else(|| {
-            debug!("peek_heaviest_block returned None/empty");
-            NockAppGrpcError::PeekReturnedNoData
-        })?;
-
-        let height = page.height;
-        let hash = page.digest;
-
-        debug!("peek_heaviest_block success: height={}", height);
-        Ok((height, hash))
+        let page = decode_page_header(page_noun).map_err(NockAppGrpcError::NounDecode)?;
+        debug!("peek_heaviest_block success: height={}", page.height);
+        Ok((page.height, page.digest))
     }
 
     /// Get the current heaviest chain tip, trying %heaviest-chain first,
@@ -1461,6 +1462,86 @@ struct PageAndTxs {
     txs: Vec<RawTx>,
 }
 
+fn decode_page_header(page: NounHandle) -> Result<PageHeader, NounDecodeError> {
+    let cell = page.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    let (digest, rest_after_digest) =
+        if let Ok(version_atom) = cell.head().as_atom() {
+            let version = version_atom.as_u64()?;
+            if version != 1 {
+                return Err(NounDecodeError::Custom(format!(
+                    "unknown page version: {version}"
+                )));
+            }
+            let rest = cell.tail().as_cell().map_err(|_| {
+                NounDecodeError::Custom("v1 page: expected cell after version".into())
+            })?;
+            let digest = Hash::from_noun_handle(&rest.head())
+                .map_err(|err| NounDecodeError::Custom(format!("v1 page digest: {err}")))?;
+            let rest_after_digest = rest.tail().as_cell().map_err(|_| {
+                NounDecodeError::Custom("v1 page: expected cell after digest".into())
+            })?;
+            (digest, rest_after_digest)
+        } else {
+            let digest = Hash::from_noun_handle(&cell.head())
+                .map_err(|err| NounDecodeError::Custom(format!("v0 page digest: {err}")))?;
+            let rest_after_digest = cell.tail().as_cell().map_err(|_| {
+                NounDecodeError::Custom("v0 page: expected cell after digest".into())
+            })?;
+            (digest, rest_after_digest)
+        };
+
+    let after_pow = rest_after_digest
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after pow".into()))?;
+    let parent = Hash::from_noun_handle(&after_pow.head())
+        .map_err(|err| NounDecodeError::Custom(format!("page parent: {err}")))?;
+
+    let after_tx_ids = after_pow
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after parent".into()))?
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after tx ids".into()))?;
+    let after_coinbase = after_tx_ids
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after coinbase".into()))?;
+    let timestamp = after_coinbase
+        .head()
+        .as_atom()
+        .map_err(|_| NounDecodeError::Custom("page timestamp: expected atom".into()))?
+        .as_u64()?;
+    let after_timestamp = after_coinbase
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after timestamp".into()))?;
+    let after_epoch_counter = after_timestamp
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after epoch counter".into()))?;
+    let after_target = after_epoch_counter
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after target".into()))?;
+    let height = after_target
+        .tail()
+        .as_cell()
+        .map_err(|_| NounDecodeError::Custom("page: expected cell after accumulated work".into()))?
+        .head()
+        .as_atom()
+        .map_err(|_| NounDecodeError::Custom("page height: expected atom".into()))?
+        .as_u64()?;
+
+    Ok(PageHeader {
+        digest,
+        parent,
+        timestamp,
+        height,
+    })
+}
+
 impl BlockRangeEntry {
     fn from_noun_handle(noun: &NounHandle) -> std::result::Result<Self, NounDecodeError> {
         let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
@@ -1476,18 +1557,14 @@ impl BlockRangeEntry {
             .tail()
             .as_cell()
             .map_err(|_| NounDecodeError::ExpectedCell)?;
-        let page = Page::from_noun_handle(&page_and_txs.head())?;
-        let txs = page_and_txs.tail();
-
-        let parent_id = page.parent;
-        let timestamp = page.timestamp;
-        let tx_ids = extract_tx_ids_from_map(&txs)?;
+        let page_header = decode_page_header(page_and_txs.head())?;
+        let tx_ids = extract_tx_ids_from_map(&page_and_txs.tail())?;
 
         Ok(Self {
             height: height.0 .0,
             block_id,
-            parent_id,
-            timestamp,
+            parent_id: page_header.parent,
+            timestamp: page_header.timestamp,
             tx_ids,
         })
     }
@@ -1546,20 +1623,16 @@ impl BlockEntryWithTxs {
             .tail()
             .as_cell()
             .map_err(|_| NounDecodeError::ExpectedCell)?;
-        let page = Page::from_noun_handle(&page_and_txs.head())?;
-        let txs = page_and_txs.tail();
-
-        let parent_id = page.parent;
-        let timestamp = page.timestamp;
-        let txs_full = extract_transactions_from_map(&txs)?;
+        let page_header = decode_page_header(page_and_txs.head())?;
+        let txs_full = extract_transactions_from_map(&page_and_txs.tail())?;
         let tx_ids = txs_full.iter().map(|(hash, _)| hash.clone()).collect();
 
         Ok(Self {
             metadata: BlockMetadata {
                 height: height.0 .0,
                 block_id,
-                parent_id,
-                timestamp,
+                parent_id: page_header.parent,
+                timestamp: page_header.timestamp,
                 tx_ids,
             },
             txs: txs_full,
@@ -2693,7 +2766,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_block_range_entry_minimal() {
+    fn test_decode_block_range_entry_with_structured_pow() {
         let mut slab: NounSlab = NounSlab::new();
 
         // Create a minimal BlockRangeEntry structure
@@ -2709,7 +2782,9 @@ mod tests {
 
         // page structure: [digest pow parent tx-ids coinbase timestamp epoch-counter target accumulated-work height msg]
         let digest = Hash([Belt(10), Belt(11), Belt(12), Belt(13), Belt(14)]);
-        let pow = nockvm::noun::D(0); // empty unit
+        let proof_node = nockvm::noun::T(&mut slab, &[nockvm::noun::D(1), nockvm::noun::D(2)]);
+        let proof_list = nockvm::noun::T(&mut slab, &[proof_node, nockvm::noun::D(0)]);
+        let pow = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), proof_list]);
         let tx_ids_set = nockvm::noun::D(0); // empty z-set
         let coinbase = nockvm::noun::D(0);
         let timestamp = Belt(1234567890);

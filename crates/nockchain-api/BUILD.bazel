@@ -19,7 +19,6 @@ rust_binary(
         "//crates/nockapp",
         "//crates/nockchain:nockchain-lib",
         "//crates/nockvm/rust/nockvm",
-        "//crates/zkvm-jetpack",
     ] + all_crate_deps(),
 )
 

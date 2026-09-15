@@ -2,6 +2,7 @@
 /=  dcon  /apps/dumbnet/lib/consensus
 /=  dmin  /apps/dumbnet/lib/miner
 /=  dder  /apps/dumbnet/lib/derived
+/=  dumb  /apps/dumbnet/inner
 /=  helpers  /tests/dumb/helpers
 /=  tx-engine  /common/tx-engine
 /=  *  /apps/dumbnet/lib/types
@@ -12,11 +13,15 @@
 +*  t  ~(. tx-engine constants)
     h  ~(. helpers constants)
 ::
+::  +der: pre-activation derived-state (read-only extra door arg); arms that
+::  need the real derived-state shadow this with a local `=/  der`.
+++  der  ^-  derived-state  *derived-state
+::
 ++  test-garbage-collect-after-genesis
   =/  con=consensus-state  initial-consensus-state:h
-  =.  con  (~(garbage-collect dcon con constants) default-retain:h)
+  =.  con  (~(garbage-collect dcon con der constants) default-retain:h)
   =/  balance=(h-map nname:t nnote:t)
-    ~(get-cur-balance dcon con constants)
+    ~(get-cur-balance dcon con der constants)
   ;:  weld
     %+  expect-eq
       !>  default-genesis-id:h
@@ -33,7 +38,7 @@
   ::  get ancestors of page 2, should only return 3 blocks including genesis
   =/  der=derived-state  (update:dder con genesis-test-page)
   =/  genesis-ancestors=(unit [page-number:t (list block-id:t)])
-    %+  ~(get-elders dcon con constants)
+    %+  ~(get-elders dcon con der constants)
       der
     ~(digest get:page:t genesis-test-page)
   ?~  genesis-ancestors
@@ -58,7 +63,7 @@
   ::  get ancestors of last page
   ~&  >  "getting ancestors of last page: {<~(digest get:page:t last-page)>}"
   =/  ancestors=(unit [page-number:t (list block-id:t)])
-    %+  ~(get-elders dcon con constants)
+    %+  ~(get-elders dcon con der constants)
       der
     ~(digest get:page:t last-page)
   ?~  ancestors
@@ -82,4 +87,43 @@
   %+  expect-eq
     !>  [%.y %.y %.y]
   !>  [len-check height-check id-check]
+:::
+++  test-state-12-loads-frozen-pre-ai-state
+  =/  legacy=kernel-state-10  *kernel-state-10
+  =/  loaded=kernel-state  (load:inner:dumb legacy)
+  %+  expect-eq
+    !>  [%12 %.y 0]
+    !>  :*  -.loaded
+            ?=(~ heaviest-block.c.loaded)
+            ~(wyt h-by blocks.c.loaded)
+        ==
+::
+++  test-state-12-loads-frozen-zoe-state
+  =/  legacy=kernel-state-11  *kernel-state-11
+  =/  loaded=kernel-state  (load:inner:dumb legacy)
+  %+  expect-eq
+    !>  [%12 %.y 0]
+    !>  :*  -.loaded
+            ?=(~ heaviest-block.c.loaded)
+            ~(wyt h-by blocks.c.loaded)
+        ==
+++  test-anthropos-zk-v5-activation-preserves-ai-v4-discriminator
+  =/  con=consensus-state  *consensus-state
+  =/  v5-start=page-number:t  zk-pow-v5-phase:page:t
+  %+  expect-eq
+    !>([147.500 %3 %5 %5 %ai-pow %dumb-zkpow %.y %.n %.n %.y %.y %.y])
+  !>  :*  v5-start
+          (height-to-proof-version-legacy:dcon (dec v5-start))
+          (height-to-proof-version-legacy:dcon v5-start)
+          (height-to-proof-version-legacy:dcon +(v5-start))
+          (version-to-puzzle-type:dcon %4)
+          (version-to-puzzle-type:dcon %5)
+          (~(proof-version-valid-at-height dcon con der constants) %3 (dec v5-start))
+          (~(proof-version-valid-at-height dcon con der constants) %5 (dec v5-start))
+          (~(proof-version-valid-at-height dcon con der constants) %3 v5-start)
+          (~(proof-version-valid-at-height dcon con der constants) %5 v5-start)
+          (~(proof-version-valid-at-height dcon con der constants) %4 (dec v5-start))
+          (~(proof-version-valid-at-height dcon con der constants) %4 v5-start)
+      ==
+::
 --

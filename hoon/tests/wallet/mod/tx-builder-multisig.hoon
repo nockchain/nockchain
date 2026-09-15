@@ -20,7 +20,7 @@
 ::    seckeys, so this asserts the resolved required-key set IS exactly the four
 ::    participant pkhs at threshold 3 (so any participant key passes the wallet's
 ::    signable check and a non-participant fails), and that the resolved
-::    spend-condition binds to +fund-address (so consensus +check-multisig-lock
+::    spend-condition binds to +protocol-fund-address (so consensus +check-multisig-lock
 ::    accepts a spend revealing it). The schnorr signing itself is the generic,
 ::    already-tested multisig path.
 ++  test-fund-note-pull-resolves-multisig
@@ -39,8 +39,8 @@
   ;:  weld
     ::  pull resolves the fund note to the real multisig, not the wrapped pkh
     (expect-eq !>(fund-multisig-lock:t) !>(u.resolved))
-    ::  the multisig binds to the consensus fund-address (so a spend is accepted)
-    (expect-eq !>(fund-address:t) !>((hash:lock:t fund-multisig-lock:t)))
+    ::  the multisig binds to the consensus protocol-fund-address (so a spend is accepted)
+    (expect-eq !>(protocol-fund-address:t) !>((hash:lock:t fund-multisig-lock:t)))
     ::  threshold 3, four signers
     (expect-eq !>(3) !>(m.pkh-payload))
     (expect-eq !>(4) !>(~(wyt z-in:zo h.pkh-payload)))

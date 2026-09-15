@@ -2865,6 +2865,7 @@ fn write_bridge_configs(
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
+            withdrawal_processing_enabled: true,
             withdrawal_activation_nock_next_height: Some(nock_activation_height),
             ingress_listen_address: Some(format!("127.0.0.1:{}", ingress_ports[node_id])),
             nodes: (0..5usize)
@@ -4387,6 +4388,7 @@ mod tests {
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
+            withdrawal_processing_enabled: false,
             withdrawal_activation_nock_next_height: Some(1),
             ingress_listen_address: None,
             nodes: Vec::new(),
@@ -4416,6 +4418,7 @@ mod tests {
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
+            withdrawal_processing_enabled: false,
             withdrawal_activation_nock_next_height: Some(1),
             ingress_listen_address: None,
             nodes: Vec::new(),

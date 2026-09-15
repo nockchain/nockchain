@@ -22,6 +22,7 @@
       %1  nock-common-v0-v1
       %2  nock-common-v2
       %3  nock-common-v2
+      %5  nock-common-v2
     ==
   =/  pre=preprocess-data
     ?-  version.proof
@@ -29,6 +30,7 @@
       %1  p.pre-0-1.prep.stark-config
       %2  p.pre-2.prep.stark-config
       %3  p.pre-2.prep.stark-config
+      %5  p.pre-2.prep.stark-config
     ==
   ::
   =/  verify  ~(verify verify-door [nock-common pre])
@@ -51,7 +53,7 @@
     |=  [=proof override=(unit (list term)) verifier-eny=@ test-mode=?]
     ^-  verify-result
     =/  original-version=proof-version  version.proof
-    ?>  ?|  !=(%3 original-version)
+    ?>  ?|  !?=(?(%3 %5) original-version)
             (proof-arrays-valid proof)
         ==
     ?>  =(~ hashes.proof)
@@ -224,12 +226,13 @@
     ::
     =^  extra-comp-bpoly  proof
       =^(c proof ~(pull proof-stream proof) ?>(?=(%poly -.c) p.c^proof))
-    ::  Version 3 admits one canonical encoding of object 5 and caps it at the
-    ::  declared degree bound.  The degree-processing bound is D-1, so at most
-    ::  D coefficients are allowed.  Canonicalization removes trailing-zero
-    ::  transcript entropy without rejecting an honestly lower-degree result.
+    ::  Hardened ZK versions admit one canonical encoding of object 5 and cap
+    ::  it at the declared degree bound. The degree-processing bound is D-1,
+    ::  so at most D coefficients are allowed. Canonicalization removes
+    ::  trailing-zero transcript entropy without rejecting an honestly
+    ::  lower-degree result.
     =/  extra-dp  (degree-processing heights constraint-map.pre %.y)
-    ?>  ?|  !=(%3 original-version)
+    ?>  ?|  !?=(?(%3 %5) original-version)
             ?&  (lte len.extra-comp-bpoly (add 1 fri-deg-bound.extra-dp))
                 ~(cank bop extra-comp-bpoly)
                 =(extra-comp-bpoly (bpcan extra-comp-bpoly))
@@ -317,7 +320,7 @@
     ::  read the composition piece codewords
     =^  comp-root  proof
       =^(c proof ~(pull proof-stream proof) ?>(?=(%comp-m -.c) [p.c num.c]^proof))
-    ?>  ?|  !=(%3 original-version)
+    ?>  ?|  !?=(?(%3 %5) original-version)
             =(+.comp-root (get-max-constraint-degree cd.pre))
         ==
     ::
@@ -347,12 +350,12 @@
     ?>  =(len.trace-evaluations (mul 2 total-cols))
     ?>  ~(chck fop trace-evaluations)
     ::
-    ::  Version 3 binds the PoW-mutable extra composition polynomial to
-    ::  committed trace codewords at the post-commitment DEEP challenge.
+    ::  Hardened ZK versions bind the PoW-mutable extra composition polynomial
+    ::  to committed trace codewords at the post-commitment DEEP challenge.
     ::  Earlier versions intentionally retain their historical acceptance
     ::  rules so old blocks remain verifiable.
     =/  extra-composition-deep-check=?
-      ?.  =(%3 original-version)
+      ?.  ?=(?(%3 %5) original-version)
         %.y
       =/  extra-composition-deep-eval=felt
         %-  eval-composition-poly
@@ -419,7 +422,7 @@
     =/  num-base-deep-weights=@
       :(add len.trace-evaluations len.extra-trace-evaluations len.composition-piece-evaluations)
     =/  num-deep-weights=@
-      ?:  =(%3 original-version)
+      ?:  ?=(?(%3 %5) original-version)
         (add num-base-deep-weights total-cols)
       num-base-deep-weights
     =^  deep-weights=fpoly  rng
@@ -473,9 +476,10 @@
       =^  comp-opening  proof
         =^(mp proof ~(pull proof-stream proof) ?>(?=(%m-pathbf -.mp) p.mp^proof))
       ::
-      ::  In v3 every Merkle leaf has its committed semantic width.  A larger
-      ::  leaf or a forged logical length must not become an ignored root nonce.
-      ?>  ?|  !=(%3 original-version)
+      ::  In hardened ZK versions every Merkle leaf has its committed semantic
+      ::  width. A larger leaf or a forged logical length must not become an
+      ::  ignored root nonce.
+      ?>  ?|  !?=(?(%3 %5) original-version)
               ?&  =(len.leaf.base-trace-opening expected-base-opening-len)
                   =(len.leaf.ext-opening expected-ext-opening-len)
                   =(len.leaf.mega-ext-opening expected-mega-opening-len)
@@ -562,7 +566,7 @@
             extra-comp-eval-point
         ==
       =/  deep-eval=felt
-        ?.  =(%3 original-version)
+        ?.  ?=(?(%3 %5) original-version)
           base-deep-eval
         %+  fadd  base-deep-eval
         %-  evaluate-trace-degree-normalization

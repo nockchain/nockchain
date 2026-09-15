@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use hatch::ast::hoon::Hoon;
+use num_bigint::BigUint;
 
 use super::formula::Formula;
 use super::ty::Type;
@@ -49,7 +50,7 @@ pub struct LazyBattery {
     /// Per-arm compiled formulas, memoized for the whole compile. Resolution
     /// must use the DEFINING fan scope, not the caller's (RT-05) — the scope
     /// field is added with the native fan scope in Phase 3.
-    pub cache: RefCell<HashMap<u64 /* axis */, Rc<Formula>>>,
+    pub cache: RefCell<HashMap<BigUint, Rc<Formula>>>,
     // pub fan_scope: FanScope,  // defining scope — Phase 3 (plan §3.5)
 }
 

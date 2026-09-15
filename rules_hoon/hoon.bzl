@@ -214,11 +214,24 @@ def _honk_jam_impl(ctx):
     else:
         hoon_dir = "/".join(src_dir_parts[:2])
 
+    cache_state = ctx.files.cache_state if ctx.attr.cache_state else []
+
     honk_args = []
     env_vars = ""
     if ctx.attr.arbitrary:
         honk_args.append("--arbitrary")
-    else:
+    if cache_state:
+        # Seeded incremental compile. The pre-primed cache enters the sandbox
+        # as ordinary declared inputs; the action copies it somewhere writable
+        # and points --cache-dir at the copy, so honk reuses every product
+        # whose key still matches and recompiles only the changed closure.
+        # --new must NOT be passed here: it means "fresh cache", disabling
+        # reads. Writes land in the scratch copy and die with the sandbox —
+        # seeding is one-directional; reprime to pick up new products.
+        honk_args.append("--cache-dir \"$scratch_dir/cache\"")
+    elif not ctx.attr.arbitrary:
+        # No seeded cache: --new is a no-op without --cache-dir, kept for
+        # bit-for-bit invocation compatibility with prior rule behavior.
         honk_args.append("--new")
     if ctx.attr.native_parity:
         # Disable the embedded hoonc prelude substitution: honk mints the
@@ -231,6 +244,13 @@ def _honk_jam_impl(ctx):
     cmd.append("rm -rf \"$scratch_dir\"")
     cmd.append("mkdir -p \"$scratch_dir/home\" \"$scratch_dir/tmp\"")
     cmd.append("trap 'rm -rf \"$scratch_dir\"' EXIT")
+    if cache_state:
+        # Sandbox inputs are read-only; honk needs directory-write to add
+        # packs and metadata, so it gets a chmod'd copy in scratch.
+        cmd.append("mkdir -p \"$scratch_dir/cache\"")
+        cmd.append(
+            "if [ -d {0} ]; then cp -R {0}/. \"$scratch_dir/cache\" && chmod -R u+w \"$scratch_dir/cache\"; fi".format(ctx.attr.cache_root),
+        )
     if ctx.attr.deps_dir:
         cmd.append("mkdir -p {}".format(hoon_dir))
     home_dir = "$scratch_dir/home" if ctx.attr.deps_dir else hoon_dir
@@ -246,7 +266,7 @@ def _honk_jam_impl(ctx):
     ))
 
     ctx.actions.run_shell(
-        inputs = [src, prelude] + deps,
+        inputs = [src, prelude] + deps + cache_state,
         outputs = [output],
         tools = [ctx.executable._honk],
         command = "\n".join(cmd),
@@ -290,6 +310,24 @@ honk_jam = rule(
             doc = "Explicit dependency directory (created empty in the " +
                   "sandbox); overrides the src-derived hoon tree",
         ),
+        "cache_state": attr.label(
+            allow_files = True,
+            doc = "Pre-primed honk build cache (a filegroup globbing " +
+                  "cache_root, e.g. //:honk_build_cache). When non-empty " +
+                  "the action seeds a writable copy and passes --cache-dir, " +
+                  "reusing every product whose key still matches. Prime " +
+                  "with the Bazel-built honk (`just bazel " +
+                  "prime-honk-cache`): cache keys embed a per-build " +
+                  "compiler fingerprint, so a cargo-primed cache never " +
+                  "hits. Cache state only affects speed; artifact bytes " +
+                  "are cache-independent and the parity gates hold either " +
+                  "way.",
+        ),
+        "cache_root": attr.string(
+            default = ".honk-cache",
+            doc = "Workspace-relative directory the cache_state files " +
+                  "live under.",
+        ),
         "_honk": attr.label(
             default = Label("//crates/honk:honk"),
             executable = True,
@@ -306,6 +344,7 @@ def honk_library(
         arbitrary = False,
         native_parity = False,
         deps_dir = "",
+        cache_state = None,
         visibility = None):
     """honk twin of `hoon_library`: builds `<name>.jam` natively with honk."""
     jam_name = name + ".jam"
@@ -318,6 +357,7 @@ def honk_library(
         arbitrary = arbitrary,
         native_parity = native_parity,
         deps_dir = deps_dir,
+        cache_state = cache_state,
         visibility = ["//visibility:private"],
     )
 

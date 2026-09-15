@@ -12,6 +12,15 @@ path = "src/bin/extract_hoonc_octs_type.rs"
 name = "jam-diff"
 path = "src/bin/jam_diff.rs"
 
+[[bench]]
+name = "kernel_serialization"
+harness = false
+
 [dependencies]
 nockapp = { path = "../nockapp" }
 nockvm = { path = "../nockvm/rust/nockvm" }
+
+[dev-dependencies]
+bytes = { workspace = true }
+libc = { workspace = true }
+nockasm = { git = "https://github.com/bitemyapp/nockasm.git", rev = "9473f4ba3f30bbc06865a05fc098c8a45957bec7" }

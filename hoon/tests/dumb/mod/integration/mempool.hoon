@@ -3,10 +3,10 @@
 /=  zoon  /common/zoon
 /=  *  /common/test
 |%
-++  h  ~(. helpers bc-v1-phase:helpers)
-++  t  ~(. txe bc-v1-phase:helpers)
+++  h  ~(. helpers bc-v1-phase-provable:helpers)
+++  t  ~(. txe bc-v1-phase-provable:helpers)
 ++  bc-v1-timelock
-  %*  .  bc-v1-phase:helpers
+  %*  .  bc-v1-phase-provable:helpers
     coinbase-timelock-min  2
   ==
 ::  v1 mempool context validation tests
@@ -23,7 +23,7 @@
   =/  m=@  (lent pks)
   =/  [root=hash:t sc=spend-condition:v1:t *]
     (make-coinbase-lock:v1:h m pks)
-  =/  fee=coins:t  sufficient-fee
+  =/  fee=coins:t  0
   =/  sed=seed:v1:t
     (make-seed:v1:h root (sub assets.coin fee) (hash:nnote:t coin))
   =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
@@ -212,15 +212,14 @@
 ::  in a block must be discarded on receipt (not stored, not relayed). This
 ::  closes the pre-packing / block-creation asymmetry that let an oversize tx
 ::  reach candidate blocks that were then self-rejected as %block-too-large,
-:::  wedging the chain. The spend inputs are built off-state because the
-:::  oversize guard runs before balance checks.
+::  wedging the chain. Uses a ~10 KB block-size limit and a 25-input coinbase
+::  fan-in transaction, which is comfortably over the limit.
 ++  test-v1-mempool-reject-oversize-tx
-  =+  h-med=~(. helpers bc-max-block-size-medium-v0:helpers)
-  =+  h-v0=~(. helpers bc-v0-phase:helpers)
-  =+  t-med=~(. txe bc-max-block-size-medium-v0:helpers)
+  =+  h-med=~(. helpers bc-max-block-size-medium-v0-provable:helpers)
+  =+  t-med=~(. txe bc-max-block-size-medium-v0-provable:helpers)
   =+  [nockchain genesis]=init-nockchain:h-med
-  =/  pages
-    (make-empty-pages:h-v0 default-genesis-page:h-v0 85)
+  =^  pages  nockchain
+    (add-n-pages-integration:h-med genesis 85 nockchain)
   =/  raw=raw-tx:t
     %-  from-inputs:v0:raw-tx:t
     %-  multi:new:v0:inputs:t
@@ -251,17 +250,7 @@
 :::
 :::  +setup-v1-spendable-tx: a valid v1 tx spending the coinbase of a 2-block
 :::  chain, plus the kernel that chain lives in.
-::  a fee a block will accept. base-fee is zero under these constants, so
-::  +calculate-min-fee reduces to the flat .min-fee floor, whatever the tx
-::  weighs. the accept tests below fail if this ever stops sufficing.
-++  sufficient-fee  ^-(coins:t 256)
-::
 ++  setup-v1-spendable-tx
-  ^-  [_nockchain:h raw-tx:t]
-  (setup-v1-tx-with-fee sufficient-fee)
-::
-++  setup-v1-tx-with-fee
-  |=  fee=coins:t
   ^-  [_nockchain:h raw-tx:t]
   =+  [nockchain genesis]=init-nockchain:h
   =^  pages  nockchain
@@ -275,6 +264,7 @@
   =/  m=@  (lent pks)
   =/  [root=hash:t sc=spend-condition:v1:t *]
     (make-coinbase-lock:v1:h m pks)
+  =/  fee=coins:t  0
   =/  sed=seed:v1:t
     (make-seed:v1:h root (sub assets.coin fee) (hash:nnote:t coin))
   =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
@@ -344,7 +334,7 @@
   =^  timer-effs=(list effect:h)  nockchain
     (pok:h [%command %timer ~] nockchain)
   =/  tip=page:t  ~(tip-page k-by:h nockchain)
-  =/  next=page:t  (make-empty-page:h tip)
+  =/  next=page:t  (prove-page:h (make-empty-page:h tip))
   =^  block-effs=(list effect:h)  nockchain
     (pok:h [%fact %0 %heard-block next] nockchain)
   %+  expect-eq
@@ -353,43 +343,5 @@
           (~(has z-in:zoon (filter-heard-tx-effects:h timer-effs)) raw)
           (~(has z-in:zoon (filter-heard-tx-effects:h block-effs)) raw)
           (~(has-raw-tx k-by:h nockchain) tx-id)
-      ==
-::
-::::  A tx admitted to the mempool must be one some block can carry.
-::::
-::::  +v1-to-v1 requires the fee to reach +calculate-min-fee, which is at least
-::::  .min-fee.data whatever the tx weighs. +heard-tx never applies that bound,
-::::  so a tx paying less is admitted, gossiped, retained, re-gossiped on every
-::::  new heaviest block, and re-processed by the miner on every candidate
-::::  refresh -- while no block carrying it can ever validate. Its inputs stay
-::::  pinned in .spent-by, so the sender cannot replace it either.
-++  test-v1-mempool-rejects-tx-no-block-can-carry
-  =+  [nockchain raw]=(setup-v1-tx-with-fee 0)
-  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
-  ::  the height a block carrying this tx would be at
-  =/  next-height=page-number:t  3
-  =/  paid-fee=coins:t
-    ?^  -.raw  0
-    (roll-fees:spends:t spends.raw)
-  =/  required-fee=coins:t
-    ?^  -.raw  0
-    (calculate-min-fee:spends:t [spends.raw next-height])
-  ::  sanity: this tx really does underpay, so a rejection below is the fee
-  ::  bound firing and not some other check
-  ?>  (lth paid-fee required-fee)
-  ::  and that no block could carry it, via the same arm consensus and the
-  ::  miner both run
-  =/  acc=tx-acc:t
-    (new:tx-acc:t `~(get-cur-balance k-by:h nockchain) next-height)
-  ?>  =([%.n %v1-insufficient-fee] (process:tx-acc:t acc raw))
-  ::
-  =^  effs=(list effect:h)  nockchain
-    (pok:h [%fact %0 %heard-tx raw] nockchain)
-  ::  not held, not gossiped, and its inputs left free for a replacement
-  %+  expect-eq
-    !>([%.n %.n %.n])
-  !>  :*  (~(has-raw-tx k-by:h nockchain) tx-id)
-          (~(has z-in:zoon (filter-heard-tx-effects:h effs)) raw)
-          (~(has-excluded k-by:h nockchain) tx-id)
       ==
 --

@@ -1,7 +1,8 @@
 /=  *  /common/zeke
 /=  sp  /common/stark/prover
 /=  *  /common/test
-/=  *  /common/tx-engine
+/=  tx0  /common/tx-engine-0
+/=  tx1  /common/tx-engine-1
 /=  bp  /tests/loki/bad-pow
 /=  nv  /common/nock-verifier
 /=  np  /common/nock-prover
@@ -16,10 +17,12 @@
   =/  res  (verify:vrf pf ~ 4)
   (expect !>(res))
 ::
-++  test-v2-proof-relabelled-v3-is-bad
+++  test-v2-proof-relabelled-hardened-versions-are-bad
   =/  v3=proof  [%3 objects.pf ~ 0]
-  =/  res  (verify:vrf v3 ~ 4)
-  (expect !>(!res))
+  =/  v5=proof  [%5 objects.pf ~ 0]
+  =/  v3-res  (verify:vrf v3 ~ 4)
+  =/  v5-res  (verify:vrf v5 ~ 4)
+  (expect !>(?&(!v3-res !v5-res)))
 ::
 ++  test-v3-pow-is-domain-separated-from-fiat-shamir
   =/  v2=proof  [%2 objects.pf ~ 0]
@@ -31,17 +34,59 @@
   !>  :_  =((proof-to-pow v3) raw-pow)
       =((proof-to-pow v2) raw-pow)
 ::
-++  test-v3-version-is-bound-only-in-block-proof-digest
+++  test-v5-work-and-block-id-commit-to-object-zero-not-witness
+  =/  v5=proof  [%5 objects.pf ~ 0]
+  =/  heights=proof-data  (grab-proof-entry:bp v5 %heights 1)
+  ?>  ?=(%heights -.heights)
+  =/  changed-tail=proof
+    (replace-proof-entry:bp v5 %heights heights(p [0 p.heights]) 1)
+  =/  puzzle=proof-data  (grab-proof-entry:bp v5 %puzzle 1)
+  ?>  ?=(%puzzle -.puzzle)
+  =/  changed-nonce=proof
+    (replace-proof-entry:bp v5 %puzzle puzzle(nonce (twiddle-digest:bp nonce.puzzle)) 1)
+  =/  changed-commitment=proof
+    (replace-proof-entry:bp v5 %puzzle puzzle(commitment (twiddle-digest:bp commitment.puzzle)) 1)
+  =/  base-page-v0=form:page:tx0  *form:page:tx0
+  =/  original-page-v0=form:page:tx0  base-page-v0(pow `v5)
+  =/  changed-tail-page-v0=form:page:tx0  base-page-v0(pow `changed-tail)
+  =/  changed-nonce-page-v0=form:page:tx0  base-page-v0(pow `changed-nonce)
+  =/  changed-commitment-page-v0=form:page:tx0  base-page-v0(pow `changed-commitment)
+  =/  base-page-v1=form:page:tx1  *form:page:tx1
+  =/  original-page-v1=form:page:tx1  base-page-v1(pow `v5)
+  =/  changed-tail-page-v1=form:page:tx1  base-page-v1(pow `changed-tail)
+  =/  changed-nonce-page-v1=form:page:tx1  base-page-v1(pow `changed-nonce)
+  =/  changed-commitment-page-v1=form:page:tx1  base-page-v1(pow `changed-commitment)
+  %+  expect-eq
+    !>([%.y %.n %.y %.y %.y %.n %.n %.n %.n %.n %.n %.n %.n])
+  !>  :*  =((proof-to-pow v5) (proof-to-pow changed-tail))
+          =((hash-proof v5) (hash-proof changed-tail))
+          =((hash-proof-for-block v5) (hash-proof-for-block changed-tail))
+          =((compute-digest:page:tx0 original-page-v0) (compute-digest:page:tx0 changed-tail-page-v0))
+          =((compute-digest:page:tx1 original-page-v1) (compute-digest:page:tx1 changed-tail-page-v1))
+          =((proof-to-pow v5) (proof-to-pow changed-nonce))
+          =((hash-proof-for-block v5) (hash-proof-for-block changed-nonce))
+          =((compute-digest:page:tx0 original-page-v0) (compute-digest:page:tx0 changed-nonce-page-v0))
+          =((compute-digest:page:tx1 original-page-v1) (compute-digest:page:tx1 changed-nonce-page-v1))
+          =((proof-to-pow v5) (proof-to-pow changed-commitment))
+          =((hash-proof-for-block v5) (hash-proof-for-block changed-commitment))
+          =((compute-digest:page:tx0 original-page-v0) (compute-digest:page:tx0 changed-commitment-page-v0))
+          =((compute-digest:page:tx1 original-page-v1) (compute-digest:page:tx1 changed-commitment-page-v1))
+      ==
+::
+++  test-v5-block-id-excludes-proof-stream-bookkeeping
   =/  v2=proof  [%2 objects.pf ~ 0]
   =/  v3=proof  [%3 objects.pf ~ 0]
-  =/  v3-hashes=proof  v3(hashes ~[*noun-digest:tip5])
-  =/  v3-index=proof  v3(read-index 1)
+  =/  v5=proof  [%5 objects.pf ~ 0]
+  =/  v5-hashes=proof  v5(hashes ~[*noun-digest:tip5])
+  =/  v5-index=proof  v5(read-index 1)
   %+  expect-eq
-    !>([%.y %.n %.n %.n])
+    !>([%.y %.n %.n %.n %.y %.y])
   !>  :*  =((hash-proof v2) (hash-proof v3))
           =((hash-proof-for-block v2) (hash-proof-for-block v3))
-          =((hash-proof-for-block v3) (hash-proof-for-block v3-hashes))
-          =((hash-proof-for-block v3) (hash-proof-for-block v3-index))
+          =((hash-proof v3) (hash-proof v5))
+          =((hash-proof-for-block v3) (hash-proof-for-block v5))
+          =((hash-proof-for-block v5) (hash-proof-for-block v5-hashes))
+          =((hash-proof-for-block v5) (hash-proof-for-block v5-index))
       ==
 ::
 ++  test-bad-proof-empty-proof

@@ -25,7 +25,6 @@ nockchain.workspace = true
 nockvm.workspace = true
 tokio.workspace = true
 tracy-client = { workspace = true, optional = true }
-zkvm-jetpack.workspace = true
 
 [dev-dependencies]
 nockapp-grpc-proto = { workspace = true }

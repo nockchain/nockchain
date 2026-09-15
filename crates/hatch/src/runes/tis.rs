@@ -198,7 +198,7 @@ pub fn tisfas_wide<'src>(
         .then_ignore(just(' '))
         .then(hoon_wide.clone())
         .delimited_by(just('('), just(')'))
-        .map(|((p, q), r)| Hoon::TisFas(p, Box::new(r), Box::new(q)))
+        .map(|((p, q), r)| Hoon::TisFas(p, Box::new(q), Box::new(r)))
 }
 
 pub fn tismic_wide<'src>(

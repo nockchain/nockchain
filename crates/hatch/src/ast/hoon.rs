@@ -1,4 +1,5 @@
 use std::collections::*;
+use std::fmt;
 use std::ops::BitOr;
 
 use num_bigint::BigUint;
@@ -232,7 +233,80 @@ pub type Cord = String;
 pub type Tape = Vec<String>;
 pub type Path = Vec<Knot>;
 pub type Tyre = Vec<(Term, Hoon)>;
-pub type Axis = u64;
+
+/// A Nock axis is an atom, not a machine integer. Keeping the source and
+/// elaborated AST arbitrary-precision prevents deep records and wings from
+/// silently wrapping while the native compiler computes their paths.
+#[derive(Hash, Eq, PartialEq, Ord, PartialOrd, Clone)]
+pub struct Axis(BigUint);
+
+impl Axis {
+    pub fn as_biguint(&self) -> &BigUint {
+        &self.0
+    }
+
+    pub fn into_biguint(self) -> BigUint {
+        self.0
+    }
+
+    pub fn to_u64(&self) -> Option<u64> {
+        u64::try_from(&self.0).ok()
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0.is_zero()
+    }
+
+    pub fn is_one(&self) -> bool {
+        self.0 == BigUint::from(1u8)
+    }
+
+    pub fn bit_len(&self) -> u64 {
+        self.0.bits()
+    }
+}
+
+impl From<BigUint> for Axis {
+    fn from(value: BigUint) -> Self {
+        Self(value)
+    }
+}
+
+impl From<u64> for Axis {
+    fn from(value: u64) -> Self {
+        Self(BigUint::from(value))
+    }
+}
+
+impl From<&Axis> for Axis {
+    fn from(value: &Axis) -> Self {
+        value.clone()
+    }
+}
+
+impl fmt::Display for Axis {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl fmt::Debug for Axis {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Serialize for Axis {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.to_u64() {
+            Some(value) => serializer.serialize_u64(value),
+            None => serialize_biguint_decimal(&self.0, serializer),
+        }
+    }
+}
 
 pub type SemiNounExpr = (Stencil, NounExpr);
 
@@ -345,7 +419,7 @@ pub struct Spot {
 #[derive(serde::Serialize, PartialEq, Debug, Clone)]
 pub enum Limb {
     Term(String),
-    Axis(u64),
+    Axis(Axis),
     Parent(u64, Option<String>),
 }
 
@@ -397,11 +471,11 @@ pub enum Nock {
     IfThenElse(Box<Nock>, Box<Nock>, Box<Nock>),
     SerialCompose(Box<Nock>, Box<Nock>),
     PushSubject(Box<Nock>, Box<Nock>),
-    SelectArm(u64, Box<Nock>),
-    Edit((u64, Box<Nock>), Box<Nock>),
+    SelectArm(Axis, Box<Nock>),
+    Edit((Axis, Box<Nock>), Box<Nock>),
     Hint(NockHint, Box<Nock>),
     GrabData(Box<Nock>, Box<Nock>),
-    AxisSelect(u64),
+    AxisSelect(Axis),
 }
 
 #[derive(serde::Serialize, PartialEq, Debug, Clone)]
@@ -533,7 +607,7 @@ pub enum Hoon {
     Pair(Box<Hoon>, Box<Hoon>),
     // Hoon's version of a panic/crash
     ZapZap,
-    Axis(u64),
+    Axis(Axis),
     Base(BaseType),
     Bust(BaseType),
     Dbug(Spot, Box<Hoon>),

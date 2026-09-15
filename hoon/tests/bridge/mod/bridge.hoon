@@ -172,4 +172,50 @@
       (some r)
     ~
   (expect !>(?=(^ matches)))
+++  test-load-upgrades-pre-logos-state
+  ^-  tang
+  =/  current=blockchain-constants:t  *blockchain-constants:t
+  =/  legacy-constants=blockchain-constants-v1-pre-ai:dumb
+    :*  v1-phase.current
+        bythos-phase.current
+        data.current
+        base-fee.current
+        input-fee-divisor.current
+        :*  max-block-size.current
+            blocks-per-epoch.current
+            target-epoch-duration.current
+            update-candidate-interval.current
+            max-future-timestamp.current
+            min-past-blocks.current
+            genesis-target-atom.current
+            max-target-atom.current
+            check-pow-flag.current
+            coinbase-timelock-min.current
+            pow-len.current
+            max-coinbase-split.current
+            first-month-coinbase-min.current
+        ==
+        phase.zk-asert.current
+        anchor-height.zk-asert.current
+        anchor-target-atom.zk-asert.current
+        ideal-block-time.zk-asert.current
+        half-life.zk-asert.current
+        anchor-min-timestamp.zk-asert.current
+    ==
+  =/  base=bridge-state  *bridge-state
+  =/  old=bridge-state-3
+    :*  %3
+        config.base
+        constants.base
+        [~ legacy-constants]
+        hash-state.base
+        last-nock-deposit-height.base
+        last-block.base
+        stop.base
+    ==
+  =/  loaded=bridge-state  (upgrade-pre-logos-state old)
+  ;:  weld
+    (expect-eq !>(%4) !>(-.loaded))
+    (expect-eq !>([~ current]) !>(nockchain-constants.loaded))
+  ==
 --

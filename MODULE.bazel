@@ -163,7 +163,7 @@ crates.annotation(
     crate = "aws-lc-sys",
     patch_args = ["-p1"],
     patches = ["//third_party/patches:aws-lc-sys-macos-cflags-version-min.patch"],
-    version = "0.41.0",
+    version = "0.40.0",
 )
 crates.annotation(
     build_script_data_glob = ["tracy/**"],

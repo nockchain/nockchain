@@ -38,6 +38,7 @@ zkvm-jetpack = { workspace = true }
 [dev-dependencies]
 gnort = { workspace = true }
 ibig = { workspace = true }
+noun-serde = { workspace = true }
 once_cell = { workspace = true }
 tempfile = { workspace = true }
 

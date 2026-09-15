@@ -17,6 +17,20 @@ exports_files([
     "rustfmt.toml",
 ])
 
+# Pre-primed honk build cache, swept into honk_jam sandboxes as ordinary
+# inputs — the same glob trick that gave hoonc warm starts under Bazel:
+# park compiler state where the input globs can see it. Empty (and the
+# actions run cold) until primed with `just bazel prime-honk-cache`; the
+# directory is gitignored. Cache state only affects compile speed, never
+# artifact bytes — the strict parity gates hold with or without it.
+filegroup(
+    name = "honk_build_cache",
+    srcs = glob(
+        [".honk-cache/**"],
+        allow_empty = True,
+    ),
+)
+
 # Convenience aliases for the primary binaries.
 alias(
     name = "nockchain",

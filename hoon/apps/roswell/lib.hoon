@@ -1,6 +1,7 @@
 /=  *  /common/zeke
 /=  sp  /common/stark/prover
 /=  np  /common/nock-prover
+/=  mine  /common/pow
 /=  nv  /common/nock-verifier
 |%
 ++  prv  np
@@ -33,6 +34,8 @@
       %1  [%1 -:puzzle +:puzzle len]
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 -:puzzle +:puzzle len]
     ==
   (prove:prv in)
 ::
@@ -47,6 +50,8 @@
       %1  [%1 -:puzzle +:puzzle len]
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 -:puzzle +:puzzle len]
     ==
   (snapshot:prv in)
 ::
@@ -61,6 +66,8 @@
       %1  [%1 header nonce len]
       %2  [%2 header nonce len]
       %3  [%3 header nonce len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 header nonce len]
     ==
   (snapshot:prv in)
 ::
@@ -74,6 +81,8 @@
       %1  [%1 -:puzzle +:puzzle len]
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 -:puzzle +:puzzle len]
     ==
   (make-proof-stream-window:prv in range)
 ::
@@ -97,11 +106,45 @@
       %1  [%1 header nonce len]
       %2  [%2 header nonce len]
       %3  [%3 header nonce len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
+      %5  [%5 header nonce len]
     ==
+  =/  preflight=(unit [object-zero=proof-data:sp digest=tip5-hash-atom])
+    ?:  =(%5 v)
+      (some (v5-nonce-pow:mine header nonce len))
+    ~
   =/  res  (prove:prv in)
   ?>  ?=(%& -.res)
   ~&  %verifying
-  (verify:vrf proof.p.res override 0)
+  =/  verified=?  (verify:vrf proof.p.res override 0)
+  ?.  =(%5 v)  verified
+  ?>  ?=(^ preflight)
+  =/  [object-zero=proof-data:sp preflight-pow=tip5-hash-atom]
+    u.preflight
+  =/  objects=(list proof-data:sp)  objects.proof.p.res
+  ?>  ?=(^ objects)
+  =/  puzzle=proof-data:sp  i.objects
+  ?>  ?=(%puzzle -.puzzle)
+  =/  changed-first=@  ?:(=(0 -:nonce.puzzle) 1 0)
+  =/  changed-nonce=noun-digest:tip5  nonce.puzzle(- changed-first)
+  =/  changed-puzzle=proof-data:sp  puzzle(nonce changed-nonce)
+  =/  changed-proof=proof:sp  [%5 [changed-puzzle t.objects] ~ 0]
+  =/  changed-commitment-first=@
+    ?:(=(0 -:commitment.puzzle) 1 0)
+  =/  changed-commitment=noun-digest:tip5
+    commitment.puzzle(- changed-commitment-first)
+  =/  other-block-puzzle=proof-data:sp
+    puzzle(commitment changed-commitment)
+  =/  other-block-proof=proof:sp
+    [%5 [other-block-puzzle t.objects] ~ 0]
+  ?&  verified
+      =(object-zero puzzle)
+      =(preflight-pow (proof-to-pow:sp proof.p.res))
+      !=((proof-to-pow:sp proof.p.res) (proof-to-pow:sp changed-proof))
+      !(verify:vrf changed-proof override 0)
+      !=((proof-to-pow:sp proof.p.res) (proof-to-pow:sp other-block-proof))
+      !(verify:vrf other-block-proof override 0)
+  ==
 ::
 ::
 ++  compute

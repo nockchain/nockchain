@@ -583,8 +583,7 @@ fn resolve_effective_blockchain_constants(
         }
         Some(kernel_blockchain_constants) => {
             validate_blockchain_constants_match(
-                &kernel_blockchain_constants,
-                &connected_blockchain_constants,
+                &kernel_blockchain_constants, &connected_blockchain_constants,
             )?;
             Ok((
                 kernel_blockchain_constants,
@@ -764,6 +763,7 @@ async fn main() -> Result<(), BridgeError> {
 
     let nonce_epoch = build_deposit_nonce_epoch_config(&config_toml)?;
     let withdrawal_activation_cutoff = config_toml.withdrawal_activation_cutoff()?;
+    let withdrawal_processing_enabled = config_toml.withdrawal_processing_enabled;
     info!(
         "driver finality: base_confirmation_depth={}, nockchain_confirmation_depth={}",
         base_confirmation_depth, nockchain_confirmation_depth
@@ -790,8 +790,7 @@ async fn main() -> Result<(), BridgeError> {
         bootstrap_blockchain_constants(config_toml.grpc_address()).await?;
     let existing_kernel_blockchain_constants = peek_kernel_blockchain_constants(&mut app).await?;
     let (effective_blockchain_constants, boot_action) = resolve_effective_blockchain_constants(
-        existing_kernel_blockchain_constants,
-        connected_blockchain_constants,
+        existing_kernel_blockchain_constants, connected_blockchain_constants,
         cli.migrate_blockchain_constants,
     )?;
     match boot_action {
@@ -804,11 +803,13 @@ async fn main() -> Result<(), BridgeError> {
         }
         KernelBlockchainConstantsBootAction::MigrateKernel => {
             set_kernel_blockchain_constants(&mut app, &effective_blockchain_constants).await?;
-            let persisted = peek_kernel_blockchain_constants(&mut app).await?.ok_or_else(|| {
-                BridgeError::Runtime(
-                    "bridge kernel did not persist migrated blockchain constants".to_owned(),
-                )
-            })?;
+            let persisted = peek_kernel_blockchain_constants(&mut app)
+                .await?
+                .ok_or_else(|| {
+                    BridgeError::Runtime(
+                        "bridge kernel did not persist migrated blockchain constants".to_owned(),
+                    )
+                })?;
             if persisted != effective_blockchain_constants {
                 return Err(BridgeError::Runtime(
                     "bridge kernel did not persist migrated blockchain constants".to_owned(),
@@ -954,7 +955,8 @@ async fn main() -> Result<(), BridgeError> {
     let ingress_status_state = status_state.clone();
     let ingress_deposit_log = deposit_log.clone();
     let ingress_nonce_epoch = nonce_epoch.clone();
-    let ingress_withdrawal_transport = Some(withdrawal_transport.clone());
+    let ingress_withdrawal_transport =
+        withdrawal_processing_enabled.then(|| withdrawal_transport.clone());
     let ingress_withdrawal_tui_source = Some(WithdrawalTuiSource {
         registry: withdrawal_registry.clone(),
         sequencer: Some(withdrawal_sequencer_client.clone()),
@@ -1011,6 +1013,7 @@ async fn main() -> Result<(), BridgeError> {
             stop_controller: stop_controller.clone(),
             bridge_status: bridge_status.clone(),
             stop: stop_handle.clone(),
+            processing_enabled: withdrawal_processing_enabled,
             proposal_registry: withdrawal_registry.clone(),
             withdrawal_transport: withdrawal_transport.clone(),
             peers: peers.clone(),
@@ -1176,8 +1179,17 @@ async fn main() -> Result<(), BridgeError> {
         signing_policy: Default::default(),
         submission_policy: Default::default(),
     };
-    let _withdrawal_runtime_handles = spawn_withdrawal_runtime_loops(withdrawal_runtime);
-    info!("Spawned withdrawal runtime loops");
+    let _withdrawal_runtime_handles = if withdrawal_processing_enabled {
+        let handles = spawn_withdrawal_runtime_loops(withdrawal_runtime);
+        info!(target: "bridge.withdrawal", "spawned withdrawal runtime loops");
+        Some(handles)
+    } else {
+        info!(
+            target: "bridge.withdrawal",
+            "withdrawal processing paused; Base events remain tracked and proposal assembly, signing, peer exchange, and submission are disabled"
+        );
+        None
+    };
 
     let ack_handle = spawn_base_observer(base_bridge.clone(), bridge_status.clone());
 
@@ -1331,6 +1343,7 @@ mod tests {
             deposit_nonce_epoch_base: None,
             deposit_nonce_epoch_start_height: None,
             deposit_nonce_epoch_start_tx_id_base58: None,
+            withdrawal_processing_enabled: false,
             withdrawal_activation_nock_next_height: Some(200),
             ingress_listen_address: None,
             nodes: vec![

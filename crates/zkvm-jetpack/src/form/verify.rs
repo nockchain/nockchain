@@ -488,7 +488,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     )?;
     let degrees = preprocess_degrees(&version, &heights);
     let extra_comp_bpoly = read_poly(&mut stream)?;
-    if version == ProofVersion::V3 {
+    if version.uses_hardened_rules() {
         let expected_len = degrees
             .extra
             .fri_degree_bound
@@ -561,7 +561,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let comp_weight_map =
         build_weight_map(&comp_weights, &preprocess.count_map, heights.len(), false)?;
     let (comp_root, num_comp_pieces) = read_comp_root(&mut stream)?;
-    if version == ProofVersion::V3
+    if version.uses_hardened_rules()
         && num_comp_pieces != expected_composition_piece_count(preprocess)
     {
         return Err(VerifyError::Invalid(
@@ -580,10 +580,10 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         &trace_evaluations.0, "trace evaluations contain non-based elements",
     )?;
 
-    // V3 rechecks the extra composition polynomial at a challenge sampled
-    // only after the trace and composition codewords have been committed.
-    // V0-V2 deliberately keep their historical verification semantics.
-    if version == ProofVersion::V3 {
+    // Hardened ZK versions recheck the extra composition polynomial at a
+    // challenge sampled only after the trace and composition codewords have
+    // been committed. V0-V2 retain their historical verification semantics.
+    if version.uses_hardened_rules() {
         let extra_composition_deep_eval = eval_composition(
             &PolySlice(trace_evaluations.as_slice()),
             &heights,
@@ -642,7 +642,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let base_deep_weights_len = trace_evaluations.0.len()
         + extra_trace_evaluations.0.len()
         + composition_piece_evaluations.0.len();
-    let deep_weights_len = if version == ProofVersion::V3 {
+    let deep_weights_len = if version.uses_hardened_rules() {
         base_deep_weights_len
             .checked_add(total_cols)
             .ok_or(VerifyError::Invalid("deep weight count overflow"))?
@@ -652,7 +652,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let deep_weights = PolyVec(felts(&mut rng, deep_weights_len as u32));
 
     let deep_root = expect_mroot(&mut stream, "deep composition commitment")?;
-    let fri_output = fri_verify(&calc, &mut stream, deep_root, version == ProofVersion::V3)?;
+    let fri_output = fri_verify(&calc, &mut stream, deep_root, version.uses_hardened_rules())?;
 
     let mut merks = fri_output.merks;
     let mut elems = Vec::with_capacity(fri_output.indices.len());
@@ -679,7 +679,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
             path: comp_path,
         } = read_mpathbf(&mut stream)?;
 
-        if version == ProofVersion::V3
+        if version.uses_hardened_rules()
             && comp_leaf.0.len()
                 != usize::try_from(num_comp_pieces)
                     .map_err(|_| VerifyError::Invalid("composition opening length overflow"))?
@@ -740,7 +740,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         });
     }
 
-    if !verify_merk_proofs(&merks, verifier_eny, version == ProofVersion::V3) {
+    if !verify_merk_proofs(&merks, verifier_eny, version.uses_hardened_rules()) {
         return Err(VerifyError::Invalid("failed to verify merkle proofs"));
     }
 
@@ -764,7 +764,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
             &deep_challenge,
             &extra_comp_eval_point,
         )?;
-        if version == ProofVersion::V3 {
+        if version.uses_hardened_rules() {
             let x = fmul_(&Felt::lift(calc.fri.generator), &fpow_(&omega, elem.idx));
             let degree_eval = evaluate_trace_degree_normalization(
                 &elem.trace_elems,
@@ -1565,17 +1565,59 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v2_transcript_relabelled_as_v3() {
+    fn hardened_versions_reject_v2_transcript() {
+        for version in [crate::form::proof::ProofVersion::V3, crate::form::proof::ProofVersion::V5]
+        {
+            let mut proof = decode_proof(include_bytes!(
+                "../../../roswell/tests/fixtures/proof-v2-len1.jam"
+            ));
+            proof.version = version;
+            let result = verify(VerifyArgs {
+                proof,
+                table_override: None,
+                verifier_eny: 0,
+            });
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn v5_preserves_the_v3_nonce_bound_statement() {
         let mut proof = decode_proof(include_bytes!(
-            "../../../roswell/tests/fixtures/proof-v2-len1.jam"
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
         ));
-        proof.version = crate::form::proof::ProofVersion::V3;
+        proof.version = crate::form::proof::ProofVersion::V5;
         let result = verify(VerifyArgs {
             proof,
             table_override: None,
             verifier_eny: 0,
         });
-        assert!(result.is_err());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn v5_proof_cannot_be_reused_for_another_candidate_commitment() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
+        ));
+        proof.version = crate::form::proof::ProofVersion::V5;
+        let original = verify(VerifyArgs {
+            proof: proof.clone(),
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(original.is_ok());
+
+        match &mut proof.objects[0] {
+            ProofData::Puzzle { com, .. } => com[0] = if com[0] == 0 { 1 } else { 0 },
+            object => panic!("first v5 proof object is not a puzzle: {object:?}"),
+        }
+        let transplanted = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(transplanted.is_err());
     }
 
     #[test]

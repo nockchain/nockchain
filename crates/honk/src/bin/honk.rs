@@ -7,8 +7,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{cmp, env, fs, process};
 
+// The compile core is allocation-bound (slab, memo tables, AST churn): the
+// system zone allocator was ~25% of cold-build samples. Same allocator the
+// other workspace binaries use; disabled under Miri like theirs, and on MSVC
+// where tikv-jemallocator does not build (build_cache keeps a Windows path).
+#[cfg(all(not(miri), not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use hatch::ast::hoon::{Hoon, Limb};
 use hatch::utils::hoon_to_noun;
+use honk::build_cache::{BuildCache, CacheObjectKind, CacheRead, CacheWrite};
+use honk::nasm_bridge::SlabToNockasm;
 use honk::native::formula::comb;
 use honk::native::hot::native_hot_state;
 use honk::native::noun::term_to_noun;
@@ -29,7 +39,7 @@ use nockvm::jets::warm::Warm;
 use nockvm::jets::JetDispatchMode;
 use nockvm::mem::{AllocationError, NockStack};
 use nockvm::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
-use nockvm::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, T};
+use nockvm::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, DIRECT_MAX, T};
 use nockvm::serialization::jam as nock_jam;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
@@ -69,6 +79,8 @@ struct Cli {
     batch_manifest: Option<PathBuf>,
     wrapper_asset_dump: Option<PathBuf>,
     native_wrapper_asset_dump: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    fresh: bool,
     dbug: bool,
     vet: bool,
 }
@@ -129,7 +141,9 @@ fn usage(program: &str) -> String {
          Usage: {program} [--new] --batch-manifest <file> --prelude <hoon.hoon> [--sut-jam <file>] <deps_dir>\n\
          Usage: {program} --dump-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
          Usage: {program} --dump-native-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
-         --new is accepted for hoonc-script compatibility and has no effect. Vet checking is enabled by default and applies to the whole build (entry and dependency files, matching hoonc); pass --no-vet to disable strict/nice type-checking.\n\
+         Usage: {program} nockasm <export|verify|diff> ...\n\
+         Usage: {program} cache <stats|gc> --cache-dir <dir>\n\
+         --cache-dir enables the persistent content-addressed Nockasm cache; --new bypasses reads and atomically repopulates it. Vet checking is enabled by default and applies to the whole build (entry and dependency files, matching hoonc); pass --no-vet to disable strict/nice type-checking.\n\
          Example: {program} --new --output assets/native/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon"
     )
 }
@@ -142,6 +156,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
     let mut batch_manifest: Option<PathBuf> = None;
     let mut wrapper_asset_dump: Option<PathBuf> = None;
     let mut native_wrapper_asset_dump: Option<PathBuf> = None;
+    let mut cache_dir: Option<PathBuf> = None;
+    let mut fresh = false;
     let mut arbitrary = false;
     let mut dynock = false;
     let mut dynock_typed = false;
@@ -154,7 +170,7 @@ fn parse_args() -> std::result::Result<Cli, String> {
             "--arbitrary" => arbitrary = true,
             "--dynock" => dynock = true,
             "--dynock-typed" => dynock_typed = true,
-            "--new" => {}
+            "--new" => fresh = true,
             "--no-dbug" => dbug = false,
             "--dbug" => dbug = true,
             "--no-vet" => vet = false,
@@ -176,6 +192,12 @@ fn parse_args() -> std::result::Result<Cli, String> {
                     .next()
                     .ok_or_else(|| "missing value after --sut-jam".to_string())?;
                 sut_jam = Some(PathBuf::from(value));
+            }
+            "--cache-dir" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing value after --cache-dir".to_string())?;
+                cache_dir = Some(PathBuf::from(value));
             }
             "--batch-manifest" => {
                 let value = args
@@ -237,6 +259,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
             batch_manifest: None,
             wrapper_asset_dump: Some(wrapper_asset_dump),
             native_wrapper_asset_dump: None,
+            cache_dir,
+            fresh,
             dbug,
             vet,
         });
@@ -268,6 +292,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
             batch_manifest: None,
             wrapper_asset_dump: None,
             native_wrapper_asset_dump: Some(native_wrapper_asset_dump),
+            cache_dir,
+            fresh,
             dbug,
             vet,
         });
@@ -296,6 +322,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
             batch_manifest,
             wrapper_asset_dump: None,
             native_wrapper_asset_dump: None,
+            cache_dir,
+            fresh,
             dbug,
             vet,
         });
@@ -315,6 +343,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
         batch_manifest: None,
         wrapper_asset_dump: None,
         native_wrapper_asset_dump: None,
+        cache_dir,
+        fresh,
         dbug,
         vet,
     })
@@ -504,6 +534,31 @@ fn main() {
     reset_native_timing_totals();
 
     let program = env::args().next().unwrap_or_else(|| "honk".to_string());
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    if raw_args.first().map(String::as_str) == Some("nockasm") {
+        match honk::artifact::run_cli(&raw_args[1..]) {
+            Ok(message) => {
+                println!("{message}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("nockasm artifact operation failed: {error}");
+                process::exit(1);
+            }
+        }
+    }
+    if raw_args.first().map(String::as_str) == Some("cache") {
+        match honk::build_cache::run_cli(&raw_args[1..]) {
+            Ok(message) => {
+                println!("{message}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("cache operation failed: {error}");
+                process::exit(1);
+            }
+        }
+    }
     let cli = match parse_args() {
         Ok(parsed) => parsed,
         Err(err) if err.is_empty() => {
@@ -558,6 +613,30 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let batch_entries = cli
+        .batch_manifest
+        .as_ref()
+        .map(|manifest| parse_batch_manifest(manifest))
+        .transpose()?;
+    if let Some(entries) = batch_entries.as_deref() {
+        let mut requires_reference = false;
+        for entry in entries {
+            requires_reference |=
+                entry_uses_unpinned_softed_constraints(&entry.entry, &cli.directory)?;
+        }
+        if requires_reference {
+            for entry in entries {
+                compile_entry_with_hoonc(&entry.entry, &cli.directory, &entry.output, entry.mode)
+                    .await?;
+            }
+            return Ok(());
+        }
+    } else if let (Some(entry), Some(output)) = (cli.entry.as_deref(), cli.output.as_deref()) {
+        if entry_uses_unpinned_softed_constraints(entry, &cli.directory)? {
+            return compile_entry_with_hoonc(entry, &cli.directory, output, cli.mode).await;
+        }
+    }
+
     let prelude_source = fs::read_to_string(&cli.prelude)?;
     // hoonc compiles DEPENDENCY files (the prelude) with debug OFF: no `%spot`
     // anywhere in the prelude's formula, coil seminouns, or stored arm ASTs (only
@@ -599,14 +678,13 @@ async fn run(cli: Cli) -> Result<()> {
         return dump_native_wrapper_assets(&mut builder, out_dir);
     }
 
-    if let Some(manifest) = &cli.batch_manifest {
-        let entries = parse_batch_manifest(manifest)?;
+    if let Some(entries) = batch_entries.as_deref() {
         return compile_batch_with_shared_prelude(
             &cli,
             &prelude_expr,
             &prelude_source,
             subject_type_jam.as_deref(),
-            &entries,
+            entries,
         )
         .await;
     }
@@ -629,6 +707,7 @@ async fn run(cli: Cli) -> Result<()> {
     let mut product = builder.compile_entry(entry)?;
     let mut jam = builder.jam_product(&mut product, cli.mode, entry, None)?;
     pad_hoonc_jam_atom_bytes(&mut jam);
+    builder.flush_build_cache()?;
 
     if let Some(parent) = output
         .parent()
@@ -788,6 +867,15 @@ fn build_entry_wer(path: &Path, deps_dir: &Path, absolute_entry_wer: bool) -> Ve
     }
     let lexical_path = lexical_absolute_path(path).unwrap_or_else(|_| path.to_path_buf());
     let wer_path = path.canonicalize().unwrap_or(lexical_path);
+    // Prefer a cwd-relative wer: a raw absolute path bakes the build
+    // machine's directory layout into the artifact, so two builds of the
+    // same tree from different checkouts can never be byte-identical.
+    if let Ok(cwd) = std::env::current_dir() {
+        let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
+        if let Ok(rel) = wer_path.strip_prefix(&canonical_cwd) {
+            return path_components_for_dbug(rel);
+        }
+    }
     path_components_for_dbug(&wer_path)
 }
 
@@ -885,6 +973,32 @@ fn hoon_relative_components(path: &Path) -> Option<Vec<String>> {
 /// (they are jet-registration / data inputs, not compiler artifacts).
 fn native_parity_enabled() -> bool {
     std::env::var_os("HONK_NATIVE_PARITY").is_some()
+}
+
+fn native_cache_namespace(
+    cli: &Cli,
+    prelude_source: &str,
+    subject_type_jam: Option<&[u8]>,
+) -> blake3::Hash {
+    let mut hash = blake3::Hasher::new();
+    // Bump whenever native compilation semantics or the serialized cache
+    // payload changes. Source/dependency contents are Merkle-hashed separately.
+    hash.update(b"honk-native-cache-compiler-abi-2026-08-07-1\0");
+    hash.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hash.update(env!("HONK_NATIVE_COMPILER_FINGERPRINT").as_bytes());
+    hash.update(&[u8::from(cli.dbug), u8::from(cli.vet)]);
+    hash.update(&[u8::from(native_parity_enabled())]);
+    hash.update(blake3::hash(prelude_source.as_bytes()).as_bytes());
+    if let Some(subject_type_jam) = subject_type_jam {
+        hash.update(blake3::hash(subject_type_jam).as_bytes());
+    } else {
+        hash.update(&[0; 32]);
+    }
+    hash.update(blake3::hash(EMBEDDED_HONC_FORMULA_138_JAM).as_bytes());
+    hash.update(blake3::hash(EMBEDDED_HONC_TYPE_138_JAM).as_bytes());
+    hash.update(blake3::hash(EMBEDDED_HONC_COLD_138_JAM).as_bytes());
+    hash.update(blake3::hash(EMBEDDED_HOONC_OCTS_TYPE_138_JAM).as_bytes());
+    hash.finalize()
 }
 
 fn build_context_with_shared_prelude(
@@ -1039,6 +1153,9 @@ fn build_context_with_shared_prelude(
         canonical_data_octs_ty,
         cli.dbug,
         cli.vet,
+        cli.cache_dir.clone(),
+        cli.fresh,
+        native_cache_namespace(cli, prelude_source, subject_type_jam),
         ut,
         eval_context,
     );
@@ -1144,8 +1261,19 @@ fn build_context_with_dynamic_wrapper_prelude(
         .canonicalize()
         .unwrap_or_else(|_| cli.directory.clone());
     let mut builder = NativeBuildContext::new(
-        directory, prelude_vase, prelude_eval.value, wrapper_subject_ty, wrapper_subject_value,
-        canonical_data_octs_ty, cli.dbug, cli.vet, ut, eval_context,
+        directory,
+        prelude_vase,
+        prelude_eval.value,
+        wrapper_subject_ty,
+        wrapper_subject_value,
+        canonical_data_octs_ty,
+        cli.dbug,
+        cli.vet,
+        cli.cache_dir.clone(),
+        cli.fresh,
+        native_cache_namespace(cli, prelude_source, subject_type_jam),
+        ut,
+        eval_context,
     );
     trace_timed("building exact hoonc wrapper traps", || {
         builder.initialize_exact_wrappers(prelude_eval.formula, prelude_source)
@@ -1186,6 +1314,7 @@ async fn compile_batch_with_shared_prelude(
         }
         fs::write(&entry.output, jam)?;
     }
+    builder.flush_build_cache()?;
     Ok(())
 }
 
@@ -1198,6 +1327,21 @@ struct NativeVase {
 
 type PathCacheKey = PathBuf;
 type ContentCacheKey = blake3::Hash;
+
+#[derive(Clone)]
+struct DependencyMerkle {
+    key: blake3::Hash,
+    dependency_keys: Vec<blake3::Hash>,
+    logical_source: String,
+}
+
+struct PendingCacheObject {
+    key: blake3::Hash,
+    kind: CacheObjectKind,
+    merkle: DependencyMerkle,
+    root_name: String,
+    root: Noun,
+}
 
 struct PreludeEval {
     value: Noun,
@@ -1272,6 +1416,16 @@ struct NativeBuildContext<'a> {
     eval_context: Context,
     cache: HashMap<PathCacheKey, NativeVase>,
     content_cache: HashMap<ContentCacheKey, NativeVase>,
+    dependency_merkle: HashMap<PathBuf, DependencyMerkle>,
+    key_visiting: HashSet<PathBuf>,
+    build_cache: Option<BuildCache>,
+    pending_cache: Vec<PendingCacheObject>,
+    /// Per-pack lazily hydrated slab nouns, indexed by DAG node id and keyed
+    /// by the pack bundle's `Rc` address (stable: `BuildCache` retains every
+    /// loaded pack for the session). Roots hydrate on demand and reads of the
+    /// same pack share every already-built node.
+    pack_hydration: HashMap<usize, Vec<Option<Noun>>>,
+    cache_namespace: blake3::Hash,
     visiting: HashSet<PathBuf>,
     wrappers: ExactWrapperBatteries,
     empty_trap_vase: Noun,
@@ -1289,6 +1443,9 @@ impl<'a> NativeBuildContext<'a> {
         canonical_data_octs_ty: Option<Noun>,
         dbug: bool,
         entry_vet: bool,
+        cache_dir: Option<PathBuf>,
+        fresh_cache: bool,
+        cache_namespace: blake3::Hash,
         ut: Ut<'a>,
         eval_context: Context,
     ) -> Self {
@@ -1304,6 +1461,12 @@ impl<'a> NativeBuildContext<'a> {
             eval_context,
             cache: HashMap::new(),
             content_cache: HashMap::new(),
+            dependency_merkle: HashMap::new(),
+            key_visiting: HashSet::new(),
+            build_cache: cache_dir.map(|directory| BuildCache::new(directory, fresh_cache)),
+            pending_cache: Vec::new(),
+            pack_hydration: HashMap::new(),
+            cache_namespace,
             visiting: HashSet::new(),
             wrappers: ExactWrapperBatteries::empty(),
             empty_trap_vase: D(0),
@@ -1777,6 +1940,251 @@ impl<'a> NativeBuildContext<'a> {
         ))
     }
 
+    fn dependency_merkle_for_path(&mut self, path: &Path) -> Result<DependencyMerkle> {
+        let canonical = path.canonicalize()?;
+        if let Some(cached) = self.dependency_merkle.get(&canonical) {
+            return Ok(cached.clone());
+        }
+        if !self.key_visiting.insert(canonical.clone()) {
+            return Err(format!("cyclic native dependency at {}", canonical.display()).into());
+        }
+        let result = (|| -> Result<DependencyMerkle> {
+            let source = fs::read(path)?;
+            let logical_source = build_import_wer(path, &self.directory).join("/");
+            let imports =
+                pipeline::resolve_native_imports(path, &self.directory, ScopeMode::Standard)?;
+            let mut dependency_keys = Vec::with_capacity(imports.len());
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"honk-native-dependency-merkle-v1\0");
+            hash.update(self.cache_namespace.as_bytes());
+            hash.update(&(logical_source.len() as u64).to_le_bytes());
+            hash.update(logical_source.as_bytes());
+            hash.update(&(source.len() as u64).to_le_bytes());
+            hash.update(&source);
+            hash.update(&(imports.len() as u64).to_le_bytes());
+            for import in imports {
+                let face = import.face.as_deref().unwrap_or("");
+                hash.update(&(face.len() as u64).to_le_bytes());
+                hash.update(face.as_bytes());
+                let dependency_key = match import.kind {
+                    NativeImportKind::Hoon => self.dependency_merkle_for_path(&import.path)?.key,
+                    NativeImportKind::Data => {
+                        let data = fs::read(&import.path)?;
+                        let logical = build_import_wer(&import.path, &self.directory).join("/");
+                        let mut data_hash = blake3::Hasher::new();
+                        data_hash.update(b"honk-native-data-dependency-v1\0");
+                        data_hash.update(self.cache_namespace.as_bytes());
+                        data_hash.update(&(logical.len() as u64).to_le_bytes());
+                        data_hash.update(logical.as_bytes());
+                        data_hash.update(&(data.len() as u64).to_le_bytes());
+                        data_hash.update(&data);
+                        data_hash.finalize()
+                    }
+                };
+                hash.update(&[match import.kind {
+                    NativeImportKind::Hoon => 0,
+                    NativeImportKind::Data => 1,
+                }]);
+                hash.update(dependency_key.as_bytes());
+                dependency_keys.push(dependency_key);
+            }
+            Ok(DependencyMerkle {
+                key: hash.finalize(),
+                dependency_keys,
+                logical_source,
+            })
+        })();
+        self.key_visiting.remove(&canonical);
+        let merkle = result?;
+        self.dependency_merkle.insert(canonical, merkle.clone());
+        Ok(merkle)
+    }
+
+    fn cache_object_key(
+        merkle: blake3::Hash,
+        kind: CacheObjectKind,
+        need_eval: bool,
+    ) -> blake3::Hash {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"honk-native-cache-object-v1\0");
+        hash.update(merkle.as_bytes());
+        hash.update(&[match kind {
+            CacheObjectKind::DependencyVase => 0,
+            CacheObjectKind::EntryProduct => 1,
+        }]);
+        hash.update(&[u8::from(need_eval)]);
+        hash.finalize()
+    }
+
+    fn decode_cache_noun(&mut self, cached: &CacheRead) -> Result<Noun> {
+        let bundle = &cached.bundle;
+        let root_id = bundle
+            .roots()
+            .iter()
+            .find(|root| root.name() == cached.root_name)
+            .ok_or("cache pack has no indexed root")?
+            .id();
+        let values = self
+            .pack_hydration
+            .entry(std::rc::Rc::as_ptr(bundle) as usize)
+            .or_insert_with(|| vec![None; bundle.nodes().len()]);
+        hydrate_pack_root(&mut *self.ut.slab, bundle.nodes(), root_id, values)?;
+        values[root_id.index()].ok_or_else(|| "cache pack root failed to hydrate".into())
+    }
+
+    fn cached_vase_noun(&mut self, vase: &NativeVase) -> Noun {
+        let eval_flag = u64::from(vase.eval_value.is_some());
+        let eval_value = vase.eval_value.unwrap_or(D(0));
+        T(
+            &mut *self.ut.slab,
+            &[D(1), vase.ty, D(eval_flag), eval_value, vase.trap],
+        )
+    }
+
+    fn decode_cached_vase(&mut self, cached: &CacheRead) -> Result<NativeVase> {
+        let root = self.decode_cache_noun(cached)?;
+        let space = self.ut.slab.noun_space();
+        let fields = cache_tuple_fields(root, 5, &space)?;
+        if atom_u64(fields[0], &space) != Some(1) {
+            return Err("unsupported cached vase version".into());
+        }
+        let eval_value = match atom_u64(fields[2], &space) {
+            Some(0) => None,
+            Some(1) => Some(fields[3]),
+            _ => return Err("invalid cached vase eval flag".into()),
+        };
+        Ok(NativeVase {
+            ty: fields[1],
+            eval_value,
+            trap: fields[4],
+        })
+    }
+
+    fn cached_product_noun(&mut self, product: &NativeBuildProduct) -> Noun {
+        let eval_flag = u64::from(product.eval_value.is_some());
+        let trap_flag = u64::from(product.vase_trap.is_some());
+        T(
+            &mut *self.ut.slab,
+            &[
+                D(1),
+                product.ty,
+                D(eval_flag),
+                product.eval_value.unwrap_or(D(0)),
+                product.formula,
+                D(trap_flag),
+                product.vase_trap.unwrap_or(D(0)),
+            ],
+        )
+    }
+
+    fn decode_cached_product(&mut self, cached: &CacheRead) -> Result<NativeBuildProduct> {
+        let root = self.decode_cache_noun(cached)?;
+        let space = self.ut.slab.noun_space();
+        let fields = cache_tuple_fields(root, 7, &space)?;
+        if atom_u64(fields[0], &space) != Some(1) {
+            return Err("unsupported cached product version".into());
+        }
+        let eval_value = match atom_u64(fields[2], &space) {
+            Some(0) => None,
+            Some(1) => Some(fields[3]),
+            _ => return Err("invalid cached product eval flag".into()),
+        };
+        let vase_trap = match atom_u64(fields[5], &space) {
+            Some(0) => None,
+            Some(1) => Some(fields[6]),
+            _ => return Err("invalid cached product trap flag".into()),
+        };
+        Ok(NativeBuildProduct {
+            ty: fields[1],
+            eval_value,
+            formula: fields[4],
+            vase_trap,
+            // This depends on the standard build's directory hash and is
+            // intentionally regenerated from the cached trap.
+            standard_jam: None,
+        })
+    }
+
+    fn read_cache_object(
+        &mut self,
+        key: blake3::Hash,
+        kind: CacheObjectKind,
+    ) -> Result<Option<CacheRead>> {
+        match self.build_cache.as_mut() {
+            Some(cache) => cache.read(key, kind),
+            None => Ok(None),
+        }
+    }
+
+    fn reject_cache_payload(&mut self, key: blake3::Hash, error: &dyn Error) {
+        if let Some(cache) = self.build_cache.as_mut() {
+            cache.reject_loaded_payload(key);
+        }
+        eprintln!(
+            "[honk-cache] ignoring invalid payload {}: {error}",
+            key.to_hex()
+        );
+    }
+
+    fn queue_cache_object(
+        &mut self,
+        key: blake3::Hash,
+        kind: CacheObjectKind,
+        merkle: DependencyMerkle,
+        root: Noun,
+    ) {
+        self.pending_cache.push(PendingCacheObject {
+            key,
+            kind,
+            merkle,
+            root_name: key.to_hex().to_string(),
+            root,
+        });
+    }
+
+    fn flush_build_cache(&mut self) -> Result<()> {
+        if self.pending_cache.is_empty() || self.build_cache.is_none() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending_cache);
+        // One interner across every root so cross-product sharing survives,
+        // exactly as the old whole-list jam preserved it. The direct walk
+        // replaces a jam of every product and a cue of those bytes — two full
+        // serializations that existed only to change noun representations.
+        let space = self.ut.slab.noun_space();
+        let mut bridge = SlabToNockasm::new();
+        let mut roots = Vec::with_capacity(pending.len());
+        for object in &pending {
+            roots.push(bridge.convert(object.root, &space)?);
+        }
+        drop(bridge);
+        let inputs: Vec<_> = pending
+            .iter()
+            .zip(&roots)
+            .map(|(object, noun)| nockasm::DagInput {
+                name: &object.root_name,
+                noun,
+                mode: nockasm::DagMode::Noun,
+            })
+            .collect();
+        let bundle = nockasm::lift_bundle(&inputs)?;
+        let graph = bundle.to_bytes();
+        let entries: Vec<_> = pending
+            .iter()
+            .map(|object| CacheWrite {
+                key: object.key,
+                kind: object.kind,
+                logical_source: &object.merkle.logical_source,
+                dependency_keys: &object.merkle.dependency_keys,
+                root_name: &object.root_name,
+            })
+            .collect();
+        self.build_cache
+            .as_mut()
+            .expect("cache checked above")
+            .write_pack_prebuilt(&entries, std::rc::Rc::new(bundle), &graph)
+    }
+
     fn compile_entry(&mut self, path: &Path) -> Result<NativeBuildProduct> {
         // Entry/kernel compiles always use per-call `miss` memos, never the
         // cross-call persistent one. Persisting `miss` verdicts is only sound
@@ -1790,14 +2198,38 @@ impl<'a> NativeBuildContext<'a> {
         // time (all six kernels stay byte-exact and compile in <60s).
         self.ut.set_miss_memo_persistence(false);
         let canonical = path.canonicalize()?;
-        match self.compile_path_uncached(path, true, false, false, true, true)? {
-            NativeCompileOutput::Product(product) => Ok(product),
-            NativeCompileOutput::Vase(_) => Err(format!(
-                "missing top-level native product for {}",
-                canonical.display()
-            )
-            .into()),
+        let cache_identity = if self.build_cache.is_some() {
+            let merkle = self.dependency_merkle_for_path(path)?;
+            let key = Self::cache_object_key(merkle.key, CacheObjectKind::EntryProduct, true);
+            Some((key, merkle))
+        } else {
+            None
+        };
+        if let Some((cache_key, _)) = cache_identity.as_ref() {
+            if let Some(cached) =
+                self.read_cache_object(*cache_key, CacheObjectKind::EntryProduct)?
+            {
+                match self.decode_cached_product(&cached) {
+                    Ok(product) => return Ok(product),
+                    Err(error) => self.reject_cache_payload(*cache_key, &*error),
+                }
+            }
         }
+        let product = match self.compile_path_uncached(path, true, false, false, true, true)? {
+            NativeCompileOutput::Product(product) => product,
+            NativeCompileOutput::Vase(_) => {
+                return Err(format!(
+                    "missing top-level native product for {}",
+                    canonical.display()
+                )
+                .into());
+            }
+        };
+        if let Some((cache_key, merkle)) = cache_identity {
+            let root = self.cached_product_noun(&product);
+            self.queue_cache_object(cache_key, CacheObjectKind::EntryProduct, merkle, root);
+        }
+        Ok(product)
     }
 
     fn subject_vase_from_cached(vase: &NativeVase) -> SubjectVase {
@@ -1810,9 +2242,8 @@ impl<'a> NativeBuildContext<'a> {
 
     fn compile_path(&mut self, path: &Path, need_eval: bool) -> Result<SubjectVase> {
         let canonical = path.canonicalize()?;
-        let content_key = hoon_source_content_key(path)?;
+        let memory_content_key = hoon_source_content_key(path)?;
         let cache_key = canonical.clone();
-        let content_cache_key = content_key;
         if let Some(cached) = self.cache.get(&cache_key) {
             let cached = cached.clone();
             if need_eval && cached.eval_value.is_none() {
@@ -1821,7 +2252,7 @@ impl<'a> NativeBuildContext<'a> {
                 return Ok(Self::subject_vase_from_cached(&cached));
             }
         }
-        if let Some(cached) = self.content_cache.get(&content_cache_key) {
+        if let Some(cached) = self.content_cache.get(&memory_content_key) {
             let cached = cached.clone();
             if need_eval && cached.eval_value.is_none() {
                 // Recompile with evaluation if an earlier deferred-only pass cached the trap.
@@ -1835,6 +2266,33 @@ impl<'a> NativeBuildContext<'a> {
         } else if let Some(cached) = self.cache.get(&cache_key) {
             let cached = cached.clone();
             return Ok(Self::subject_vase_from_cached(&cached));
+        }
+        let persistent_identity = if self.build_cache.is_some() {
+            let merkle = self.dependency_merkle_for_path(path)?;
+            let key =
+                Self::cache_object_key(merkle.key, CacheObjectKind::DependencyVase, need_eval);
+            Some((key, merkle))
+        } else {
+            None
+        };
+        if let Some((persistent_key, _)) = persistent_identity.as_ref() {
+            if let Some(cached_object) =
+                self.read_cache_object(*persistent_key, CacheObjectKind::DependencyVase)?
+            {
+                match self.decode_cached_vase(&cached_object) {
+                    Ok(cached) if !need_eval || cached.eval_value.is_some() => {
+                        self.cache.insert(cache_key.clone(), cached.clone());
+                        self.content_cache
+                            .insert(memory_content_key, cached.clone());
+                        return Ok(Self::subject_vase_from_cached(&cached));
+                    }
+                    Ok(_) => self.reject_cache_payload(
+                        *persistent_key,
+                        &std::io::Error::other("cached vase omitted required eval value"),
+                    ),
+                    Err(error) => self.reject_cache_payload(*persistent_key, &*error),
+                }
+            }
         }
         if !self.visiting.insert(canonical.clone()) {
             return Err(format!("cyclic native dependency at {}", canonical.display()).into());
@@ -1857,8 +2315,17 @@ impl<'a> NativeBuildContext<'a> {
             eval_value: subject_vase.eval_value,
             trap: subject_vase.trap,
         };
+        if let Some((persistent_key, merkle)) = persistent_identity {
+            let root = self.cached_vase_noun(&native_vase);
+            self.queue_cache_object(
+                persistent_key,
+                CacheObjectKind::DependencyVase,
+                merkle,
+                root,
+            );
+        }
         self.cache.insert(cache_key, native_vase.clone());
-        self.content_cache.insert(content_cache_key, native_vase);
+        self.content_cache.insert(memory_content_key, native_vase);
         Ok(subject_vase)
     }
 
@@ -2000,6 +2467,7 @@ impl<'a> NativeBuildContext<'a> {
         self.mint_with_sut(sut, expr, vet)
     }
 
+    #[allow(clippy::result_large_err)]
     fn mint_with_sut(&mut self, sut: Noun, expr: &Hoon, vet: bool) -> Result<(Noun, Noun)> {
         let gol = ty_noun(&mut *self.ut.slab);
         let ut = &mut self.ut;
@@ -2465,6 +2933,18 @@ impl<'a> NativeBuildContext<'a> {
     }
 }
 
+impl Drop for NativeBuildContext<'_> {
+    fn drop(&mut self) {
+        if let Some(cache) = self.build_cache.as_ref() {
+            let stats = cache.stats();
+            eprintln!(
+                "[honk-cache] hits={} misses={} writes={} corrupt={}",
+                stats.hits, stats.misses, stats.writes, stats.corrupt
+            );
+        }
+    }
+}
+
 enum NativeCompileOutput {
     Vase(SubjectVase),
     Product(NativeBuildProduct),
@@ -2566,8 +3046,8 @@ fn should_reset_eval_memo(_path: &Path) -> bool {
 fn shot_gene() -> Hoon {
     Hoon::CenSig(
         vec![Limb::Term("$".to_string())],
-        Box::new(Hoon::Axis(2)),
-        vec![Hoon::Axis(3)],
+        Box::new(Hoon::Axis((2u64).into())),
+        vec![Hoon::Axis((3u64).into())],
     )
 }
 
@@ -2613,10 +3093,12 @@ fn seed_honc_type_with_ut(
 /// `chunked_tisgar_chain_matches_monolithic_mint`).
 /// Peel transparent wrappers the parser adds around the prelude (a single-
 /// element `=~`/TisSig, and `Dbug`/`Note` spot/hint wrappers) to reach the
-/// underlying compose node. NOTE: this is for NAVIGATION only — minting the
-/// peeled layers loses the outer `Dbug` location stack, so chunked output is
-/// NOT byte-exact under dbug=true yet (spot preservation is follow-on work);
-/// it is correct for measuring the memory trajectory and for dbug=false.
+/// underlying compose node. This is for NAVIGATION only: peeling would lose an
+/// outer `Dbug` location stack if the prelude were parsed with debugging spots.
+/// The native-parity route intentionally parses the prelude with `dbug=false`
+/// (see `prelude_dbug`), and the strict hoon-138 gate proves that configuration
+/// byte-exact against hoonc. A future caller that enables prelude dbug must
+/// preserve the peeled wrappers before treating chunked output as byte-exact.
 fn peel_transparent(mut hoon: &Hoon) -> &Hoon {
     loop {
         hoon = match hoon {
@@ -2801,12 +3283,13 @@ fn evaluate_honc_isolated(
     }
 }
 
-// honk cannot natively compile softed-constraints.hoon (it cues two large
-// constraint jams and `soft`s them), so it substitutes the cued jam pair
-// directly. That shortcut is valid ONLY for the exact source + jam content it
-// was proven against; key it on content hashes rather than the bare filename,
-// and hard-error on drift so a source/jam change cannot silently ship a stale
-// substitution. Pins are blake3 hex of the corresponding files.
+// Compiling the canonical softed-constraints.hoon is needlessly expensive: it
+// cues two large constraint jams and `soft`s them even though the result is
+// already known. Substitute the cued jam pair only for the exact source + jam
+// content against which the shortcut was proven. A build using changed content
+// is delegated to hoonc before native compilation begins: /dat nodes require
+// eager evaluation, and emitting an unevaluated native trap would silently
+// change /# import semantics. Pins are blake3 hex of the corresponding files.
 const SOFTED_CONSTRAINTS_SOURCE_B3: &str =
     "4fe81e9738b06b217b6fe13810dc23f650cc4b95d80d7671ac2392e6cb7e3c80";
 const CONSTRAINTS_0_1_JAM_B3: &str =
@@ -2820,46 +3303,93 @@ fn native_value_override(
     directory: &Path,
 ) -> Result<Option<Noun>> {
     if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
-        validate_softed_constraints_pins(path, directory)?;
-        return Ok(Some(softed_constraints_value(context, directory)?));
+        if softed_constraints_pins_match(path, directory)? {
+            return Ok(Some(softed_constraints_value(context, directory)?));
+        }
+        return Err(std::io::Error::other(format!(
+            "unpinned {} reached native compilation instead of the hoonc fallback",
+            path.display()
+        ))
+        .into());
     }
     Ok(None)
 }
 
-fn validate_softed_constraints_pins(path: &Path, directory: &Path) -> Result<()> {
+fn softed_constraints_pins_match(path: &Path, directory: &Path) -> Result<bool> {
     let checks = [
-        (
-            path.to_path_buf(),
-            SOFTED_CONSTRAINTS_SOURCE_B3,
-            "softed-constraints.hoon source",
-        ),
+        (path.to_path_buf(), SOFTED_CONSTRAINTS_SOURCE_B3),
         (
             directory.join("jams/constraints-0-1.jam"),
             CONSTRAINTS_0_1_JAM_B3,
-            "jams/constraints-0-1.jam",
         ),
         (
             directory.join("jams/constraints-2.jam"),
             CONSTRAINTS_2_JAM_B3,
-            "jams/constraints-2.jam",
         ),
     ];
-    let mut stale = Vec::new();
-    for (file, expected, label) in checks {
-        let actual = blake3::hash(&fs::read(&file)?).to_hex();
+    for (file, expected) in checks {
+        let bytes = match fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let actual = blake3::hash(&bytes).to_hex();
         if actual.as_str() != expected {
-            stale.push(format!("{label}: actual {actual}, pinned {expected}"));
+            return Ok(false);
         }
     }
-    if !stale.is_empty() {
-        return Err(format!(
-            "softed-constraints native shortcut is stale ({}). honk substitutes a fixed cued \
-             jam pair for this exact content; re-validate byte parity and update the pins in \
-             honk.rs.",
-            stale.join("; "),
-        )
-        .into());
+    Ok(true)
+}
+
+fn entry_uses_unpinned_softed_constraints(entry: &Path, directory: &Path) -> Result<bool> {
+    let mut pending = vec![entry.to_path_buf()];
+    let mut seen = HashSet::new();
+    while let Some(path) = pending.pop() {
+        let canonical = path.canonicalize()?;
+        if !seen.insert(canonical) {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
+            return Ok(!softed_constraints_pins_match(&path, directory)?);
+        }
+        for import in pipeline::resolve_native_imports(&path, directory, ScopeMode::Standard)? {
+            if import.kind == NativeImportKind::Hoon {
+                pending.push(import.path);
+            }
+        }
     }
+    Ok(false)
+}
+
+async fn compile_entry_with_hoonc(
+    entry: &Path,
+    directory: &Path,
+    output: &Path,
+    mode: CompileMode,
+) -> Result<()> {
+    info!(
+        entry = %entry.display(),
+        "delegating build with unpinned softed constraints to hoonc"
+    );
+    let mut request = pipeline::CompileRequest::new(entry.to_path_buf(), directory.to_path_buf());
+    request.out_dir = Some(output.to_path_buf());
+    request.arbitrary = mode == CompileMode::Arbitrary;
+    request.dynock = mode == CompileMode::Dynock;
+    request.dynock_typed = mode == CompileMode::DynockTyped;
+    // Keep hoonc's state reusable across delegated batch entries. Forcing a
+    // fresh state here makes the first entry succeed and every later entry
+    // fail because the shared state directory is no longer empty. An absent
+    // state still initializes normally, while hoonc's dependency hashes make
+    // reuse safe for a changed source tree.
+    request.new = false;
+    let jam = pipeline::build_jam(request).await?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, jam)?;
     Ok(())
 }
 
@@ -3190,7 +3720,8 @@ fn swet_trap_payload_gun(trap: Noun, space: &NounSpace) -> Result<(Noun, Noun)> 
 }
 
 fn axis_formula(slab: &mut NounSlab<NockJammer>, axis: u64) -> Noun {
-    T(slab, &[D(0), D(axis)])
+    let axis = Atom::new(slab, axis).as_noun();
+    T(slab, &[D(0), axis])
 }
 
 fn constant_formula(slab: &mut NounSlab<NockJammer>, noun: Noun) -> Noun {
@@ -3248,6 +3779,156 @@ fn jam_ut_noun(ut: &mut Ut<'_>, noun: Noun) -> Vec<u8> {
     ut.slab.jam().to_vec()
 }
 
+/// Build slab nouns for `root` and everything reachable from it, reusing any
+/// nodes hydrated by earlier reads of the same pack. Node ids are
+/// topologically ordered by construction (`NasmBundle::from_bytes` rejects
+/// forward references), so one forward pass hydrates children before parents.
+/// Mirrors `nockasm`'s `lower_root_node` for every node kind, but builds
+/// directly into the slab: the old path lowered the whole pack to nockasm
+/// nouns, jammed every root into one buffer, and cued the bytes back — three
+/// extra full traversals on every warm start, for every root in the pack.
+fn hydrate_pack_root(
+    slab: &mut NounSlab,
+    nodes: &[nockasm::DagNode],
+    root: nockasm::DagId,
+    values: &mut [Option<Noun>],
+) -> Result<()> {
+    if values[root.index()].is_some() {
+        return Ok(());
+    }
+    let mut reachable = vec![false; nodes.len()];
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let index = id.index();
+        // Already-hydrated nodes stop the walk: their children are hydrated too.
+        if reachable[index] || values[index].is_some() {
+            continue;
+        }
+        reachable[index] = true;
+        push_pack_children(&nodes[index], &mut stack);
+    }
+    for index in 0..nodes.len() {
+        if !reachable[index] || values[index].is_some() {
+            continue;
+        }
+        values[index] = Some(build_pack_node(slab, &nodes[index], values));
+    }
+    Ok(())
+}
+
+fn push_pack_children(node: &nockasm::DagNode, output: &mut Vec<nockasm::DagId>) {
+    use nockasm::{DagNode, DagOp};
+    match node {
+        DagNode::Atom(_) | DagNode::Op(DagOp::Slot(_)) => {}
+        DagNode::Cell(a, b)
+        | DagNode::Op(DagOp::Eval(a, b))
+        | DagNode::Op(DagOp::Eq(a, b))
+        | DagNode::Op(DagOp::Comp(a, b))
+        | DagNode::Op(DagOp::Push(a, b))
+        | DagNode::Op(DagOp::Hint(a, b))
+        | DagNode::Op(DagOp::Scry(a, b))
+        | DagNode::Op(DagOp::Edit(_, a, b)) => output.extend([*a, *b]),
+        DagNode::Nock(a)
+        | DagNode::Op(DagOp::Const(a))
+        | DagNode::Op(DagOp::Isa(a))
+        | DagNode::Op(DagOp::Inc(a))
+        | DagNode::Op(DagOp::Call(_, a)) => output.push(*a),
+        DagNode::Op(DagOp::If(a, b, c)) | DagNode::Op(DagOp::Hintd(a, b, c)) => {
+            output.extend([*a, *b, *c]);
+        }
+    }
+}
+
+/// One node into the slab. Children are always hydrated first (topological
+/// order), so the lookups cannot miss. The op arms reproduce nockasm's
+/// `lower_op` noun shapes exactly; cache packs are written in `Noun` mode and
+/// should only contain atoms and cells, but a pack is untrusted input and the
+/// old decode path lowered every node kind, so this does too.
+fn build_pack_node(slab: &mut NounSlab, node: &nockasm::DagNode, values: &[Option<Noun>]) -> Noun {
+    use nockasm::{DagNode, DagOp};
+    let get =
+        |id: &nockasm::DagId| values[id.index()].expect("pack children hydrate before parents");
+    match node {
+        DagNode::Atom(atom) => nasm_atom_to_slab(slab, atom),
+        DagNode::Cell(head, tail) => {
+            let (head, tail) = (get(head), get(tail));
+            T(slab, &[head, tail])
+        }
+        DagNode::Nock(raw) => get(raw),
+        DagNode::Op(op) => match op {
+            DagOp::Slot(axis) => {
+                let axis = nasm_atom_to_slab(slab, axis);
+                T(slab, &[D(0), axis])
+            }
+            DagOp::Const(value) => {
+                let value = get(value);
+                T(slab, &[D(1), value])
+            }
+            DagOp::Eval(subject, formula) => {
+                let (subject, formula) = (get(subject), get(formula));
+                T(slab, &[D(2), subject, formula])
+            }
+            DagOp::Isa(formula) => {
+                let formula = get(formula);
+                T(slab, &[D(3), formula])
+            }
+            DagOp::Inc(formula) => {
+                let formula = get(formula);
+                T(slab, &[D(4), formula])
+            }
+            DagOp::Eq(left, right) => {
+                let (left, right) = (get(left), get(right));
+                T(slab, &[D(5), left, right])
+            }
+            DagOp::If(condition, then_, else_) => {
+                let (condition, then_, else_) = (get(condition), get(then_), get(else_));
+                T(slab, &[D(6), condition, then_, else_])
+            }
+            DagOp::Comp(first, second) => {
+                let (first, second) = (get(first), get(second));
+                T(slab, &[D(7), first, second])
+            }
+            DagOp::Push(value, body) => {
+                let (value, body) = (get(value), get(body));
+                T(slab, &[D(8), value, body])
+            }
+            DagOp::Call(axis, formula) => {
+                let formula = get(formula);
+                let axis = nasm_atom_to_slab(slab, axis);
+                T(slab, &[D(9), axis, formula])
+            }
+            DagOp::Edit(axis, value, formula) => {
+                let (value, formula) = (get(value), get(formula));
+                let axis = nasm_atom_to_slab(slab, axis);
+                let target = T(slab, &[axis, value]);
+                T(slab, &[D(10), target, formula])
+            }
+            DagOp::Hint(tag, formula) => {
+                let (tag, formula) = (get(tag), get(formula));
+                T(slab, &[D(11), tag, formula])
+            }
+            DagOp::Hintd(tag, clue, formula) => {
+                let (tag, clue, formula) = (get(tag), get(clue), get(formula));
+                let pair = T(slab, &[tag, clue]);
+                T(slab, &[D(11), pair, formula])
+            }
+            DagOp::Scry(reference, path) => {
+                let (reference, path) = (get(reference), get(path));
+                T(slab, &[D(12), reference, path])
+            }
+        },
+    }
+}
+
+fn nasm_atom_to_slab(slab: &mut NounSlab, atom: &nockasm::Atom) -> Noun {
+    if let Some(value) = atom.as_u64() {
+        if value <= DIRECT_MAX {
+            return D(value);
+        }
+    }
+    <Atom as nockvm::ext::AtomExt>::from_bytes(slab, &atom.to_le_bytes()).as_noun()
+}
+
 fn cue_subject_type_to_slab(slab: &mut NounSlab<NockJammer>, raw: &[u8]) -> Result<Noun> {
     let mut stack = NockStack::new(NOCK_STACK_SIZE_MEDIUM, 0);
     let root = <Noun as NounExt>::cue_bytes_slice(&mut stack, raw)
@@ -3270,19 +3951,32 @@ fn cue_noun_to_slab(slab: &mut NounSlab<NockJammer>, raw: &[u8], label: &str) ->
 }
 
 fn load_cold_state(context: &mut Context, raw: &[u8], label: &str) -> Result<()> {
-    let cold_noun = <Noun as NounExt>::cue_bytes_slice(&mut context.stack, raw)
-        .map_err(|err| format!("cue {label} cold jam: {err:?}"))?;
+    let cold_noun = trace_timed(format!("{label} cold cue"), || {
+        <Noun as NounExt>::cue_bytes_slice(&mut context.stack, raw)
+            .map_err(|err| format!("cue {label} cold jam: {err:?}").into())
+    })?;
     let stack_space = context.stack.noun_space();
     let (battery_to_paths, root_to_paths, path_to_batteries) =
-        Cold::from_noun(&mut context.stack, &cold_noun, &stack_space)
-            .map_err(|err| format!("decode {label} cold state: {err:?}"))?;
-    context.cold = Cold::from_vecs(
-        &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
-    );
-    context.warm = Warm::init(
-        &mut context.stack, &mut context.cold, &context.hot, &context.test_jets,
-        context.jet_dispatch,
-    );
+        trace_timed(format!("{label} cold from_noun"), || {
+            // The cold noun was cued into this same stack above, so the
+            // resident decode borrows batteries and paths in place instead of
+            // deep-copying every core a second time.
+            nockvm::jets::cold::cold_from_noun_resident(
+                &mut context.stack, &cold_noun, &stack_space,
+            )
+            .map_err(|err| format!("decode {label} cold state: {err:?}").into())
+        })?;
+    context.cold = trace_timed(format!("{label} cold from_vecs"), || {
+        Ok(Cold::from_vecs(
+            &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
+        ))
+    })?;
+    context.warm = trace_timed(format!("{label} warm init"), || {
+        Ok(Warm::init(
+            &mut context.stack, &mut context.cold, &context.hot, &context.test_jets,
+            context.jet_dispatch,
+        ))
+    })?;
     Ok(())
 }
 
@@ -3589,6 +4283,23 @@ fn atom_text(noun: Noun, space: &NounSpace) -> Option<String> {
 
 fn atom_u64(noun: Noun, space: &NounSpace) -> Option<u64> {
     noun.in_space(space).as_atom().ok()?.as_u64().ok()
+}
+
+fn cache_tuple_fields(mut noun: Noun, count: usize, space: &NounSpace) -> Result<Vec<Noun>> {
+    if count < 2 {
+        return Err("cache tuple must have at least two fields".into());
+    }
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count - 1 {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| "cached payload has the wrong tuple shape")?;
+        fields.push(cell.head().noun());
+        noun = cell.tail().noun();
+    }
+    fields.push(noun);
+    Ok(fields)
 }
 
 fn copy_noun_to_allocator<A: NounAllocator>(
@@ -4058,6 +4769,17 @@ fn entry_path_for_hoon(entry: &Path, deps_dir: &Path) -> Result<String> {
         }
     }
 
+    // Same reproducibility concern as build_entry_wer: an absolute target
+    // key makes the dir-hash (and so the artifact) depend on where the
+    // repo happens to be checked out.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(canonical_cwd) = cwd.canonicalize() {
+            if let Ok(stripped) = entry_canonical.strip_prefix(&canonical_cwd) {
+                return Ok(hoon_path_from_relative(stripped));
+            }
+        }
+    }
+
     Ok(entry_canonical.to_string_lossy().into_owned())
 }
 
@@ -4108,7 +4830,13 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::{build_entry_wer, entry_path_for_hoon};
+    use nockapp::noun::slab::NounSlab;
+    use nockvm::noun::{NounAllocator, DIRECT_MAX};
+
+    use crate::{
+        axis_formula, build_entry_wer, entry_path_for_hoon, entry_uses_unpinned_softed_constraints,
+        softed_constraints_pins_match,
+    };
 
     fn temp_test_dir(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -4126,6 +4854,68 @@ mod tests {
         std::os::unix::fs::symlink(original, link).expect("symlink");
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(original, link).expect("symlink");
+    }
+
+    #[test]
+    fn axis_formula_allocates_atoms_above_the_direct_limit() {
+        let mut slab = NounSlab::new();
+        let axis = DIRECT_MAX + 1;
+        let formula = axis_formula(&mut slab, axis);
+        let space = slab.noun_space();
+        let formula = formula
+            .in_space(&space)
+            .as_cell()
+            .expect("slot formula must be a cell");
+        let encoded_axis = formula
+            .tail()
+            .as_atom()
+            .expect("slot formula axis must be an atom");
+
+        assert!(encoded_axis.is_indirect());
+        assert_eq!(encoded_axis.as_u64().expect("axis must fit u64"), axis);
+    }
+
+    #[test]
+    fn forked_softed_constraints_misses_the_pinned_fast_path() {
+        let temp_dir = temp_test_dir("forked-softed-constraints");
+        let jams_dir = temp_dir.join("jams");
+        fs::create_dir_all(&jams_dir).expect("jams dir");
+        let source = temp_dir.join("softed-constraints.hoon");
+        fs::write(&source, ":: forked source").expect("source");
+        fs::write(jams_dir.join("constraints-0-1.jam"), b"forked 0-1").expect("0-1 jam");
+        fs::write(jams_dir.join("constraints-2.jam"), b"forked 2").expect("2 jam");
+
+        assert!(
+            !softed_constraints_pins_match(&source, &temp_dir).expect("pin comparison"),
+            "changed content must not use the pinned result"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn entry_with_forked_softed_constraints_requires_reference_compilation() {
+        let temp_dir = temp_test_dir("forked-softed-constraints-entry");
+        fs::create_dir_all(temp_dir.join("common")).expect("common dir");
+        fs::create_dir_all(temp_dir.join("dat")).expect("dat dir");
+        fs::create_dir_all(temp_dir.join("jams")).expect("jams dir");
+        let entry = temp_dir.join("common/entry.hoon");
+        fs::write(&entry, "/#  softed-constraints\n0\n").expect("entry");
+        fs::write(
+            temp_dir.join("dat/softed-constraints.hoon"),
+            ":: forked source\n0\n",
+        )
+        .expect("forked source");
+        fs::write(temp_dir.join("jams/constraints-0-1.jam"), b"forked 0-1").expect("0-1 jam");
+        fs::write(temp_dir.join("jams/constraints-2.jam"), b"forked 2").expect("2 jam");
+
+        assert!(
+            entry_uses_unpinned_softed_constraints(&entry, &temp_dir)
+                .expect("dependency inspection"),
+            "an entry importing changed softed constraints must use hoonc"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 
     #[test]

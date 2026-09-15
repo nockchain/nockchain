@@ -7,14 +7,10 @@
 # HONK_NATIVE_PARITY=1 disables that substitution so honk mints the prelude
 # itself — the build this test exercises.
 #
-# STATUS (reproduced 2026-06-14): honk's native mint of the full hoon-138
-# prelude does not complete — memory grows ~linearly (~4 GB/min) with no
-# plateau and exhausts RAM before producing an artifact (the original 49-min
-# OOM is current, not a transient bug). So this test currently reports the
-# memory blowup rather than a parity result. It is wired to become a real
-# byte-parity gate once honk's native-mint memory use is bounded. The honk
-# side is run under an RSS guard so it aborts safely instead of OOM-killing
-# the machine.
+# The arena and chunked-prelude implementations make this a real byte-parity
+# gate: the native self-mint now completes with bounded memory. The honk side
+# remains under an RSS guard so future memory regressions fail safely instead
+# of putting the host under memory pressure.
 #
 # hoon/common/hoon.hoon is a symlink to crates/hoonc/hoon/hoon-138.hoon, so
 # both compilers see identical source; any artifact diff is compiler behavior,
@@ -56,7 +52,7 @@ while kill -0 "${honk_pid}" 2>/dev/null; do
     elapsed=$(( $(date +%s) - start ))
     kill -9 "${honk_pid}" 2>/dev/null
     awk -v k="${rss_kb}" -v t="${elapsed}" 'BEGIN{printf "BLOWUP: honk native mint hit %.1f GB at %ds without completing\n", k/1048576, t}' >&2
-    echo "  honk cannot natively mint hoon-138 in available memory; the embedded prelude remains a feasibility (not just speed) shortcut." >&2
+    echo "  honk native hoon-138 mint exceeded the parity gate's RSS ceiling." >&2
     exit 2
   fi
   sleep 5

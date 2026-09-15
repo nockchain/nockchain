@@ -1,34 +1,27 @@
-//! Hash-cons intern table for [`super::ty::Type`] (plan §3.3) — the keystone of
-//! the memory win.
+//! Hash-cons table for [`super::ty::Type`].
 //!
-//! Returns the canonical `Rc<Type>` for a structurally-equal type, so equal
-//! subtrees — including pointer-distinct ones produced by minting — collapse to
-//! ONE shared `Rc`. This is what fixes subject-deepening: the repeated embedded
-//! subjects become a single shared node instead of O(N²) duplicated structure.
-//!
-//! Interning is BOTTOM-UP: children are interned first, so a node's hash/eq use
-//! the children's canonical `Rc` IDENTITY (`Rc::ptr_eq`) plus its own leaf
-//! content — O(1) per node (no deep recursion in the compare), O(total) overall.
-//!
-//! NOTE: this operates on the Phase-1 boundary `Type` (native skeleton + carried
-//! leaves). It already dedups the native skeleton — crucially the recursive
-//! payload/cell/inner/subject chains where subject-deepening lives. Phase 2
-//! nativizes the carried leaves (coil/treap/gene) so the deduplication reaches
-//! inside cores/forks too; the table mechanism here is unchanged by that.
+//! A [`TypeTable`] owns boxed slots for one compiler context. Equal nodes map to
+//! one dense [`super::ty::TypeId`] and one stable [`super::ty::TypeRef`], so the
+//! repeated subjects produced while minting share their representation. Nodes
+//! are interned bottom-up; child IDs make shallow hashing and exact comparison
+//! constant-time with respect to descendant depth. Exact Hoon nouns retained by
+//! leaves and forks remain the serialization witnesses at noun boundaries.
 #![allow(dead_code)]
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::rc::Rc as SharedRc;
 
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
+use num_bigint::BigUint;
 
+use super::formula_dag::FormulaId;
 use super::leaf::Leaf;
-use super::ty::{tas, Garb, Type};
+use super::ty::{tas, BoundaryType, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
-use crate::native::noun::noun_pair;
+use crate::native::noun::{noun_eq, noun_pair};
 
 /// Decode a type noun into the native IR AND intern it in one O(n) pass, using a
 /// persistent pointer-identity `memo` so the noun DAG (and anything carried over
@@ -69,8 +62,8 @@ fn intern_type_noun(
     let node = if tag.eq_bytes(b"atom") {
         let (aura, bits) = pair(tail, space)?;
         Type::Atom {
-            aura: Leaf::from_noun_raw(aura, space),
-            bits: Leaf::from_noun_raw(bits, space),
+            aura: table.intern_live_leaf(aura, space),
+            bits: table.intern_live_leaf(bits, space),
         }
     } else if tag.eq_bytes(b"cell") {
         let (h, t) = pair(tail, space)?;
@@ -87,29 +80,31 @@ fn intern_type_noun(
             payload: intern_type_noun(table, memo, payload, space)?,
             garb: Garb::from_noun(garb, space)?,
             context: intern_type_noun(table, memo, context, space)?,
-            rest: Leaf::from_noun_raw(rest, space),
+            rest: table.intern_live_leaf(rest, space),
         }
     } else if tag.eq_bytes(b"face") {
         let (tool, inner) = pair(tail, space)?;
         Type::Face {
-            tool: Leaf::from_noun_raw(tool, space),
+            tool: table.intern_live_leaf(tool, space),
             inner: intern_type_noun(table, memo, inner, space)?,
         }
     } else if tag.eq_bytes(b"hint") {
         let (head, payload) = pair(tail, space)?;
         Type::Hint {
-            head: Leaf::from_noun_raw(head, space),
+            head: table.intern_live_leaf(head, space),
             payload: intern_type_noun(table, memo, payload, space)?,
         }
     } else if tag.eq_bytes(b"fork") {
         Type::Fork {
-            set: Leaf::from_noun_raw(tail, space),
+            set: table.intern_live_leaf(tail, space),
+            options: Default::default(),
+            options_seen: Default::default(),
         }
     } else if tag.eq_bytes(b"hold") {
         let (subject, gene) = pair(tail, space)?;
         Type::Hold {
             subject: intern_type_noun(table, memo, subject, space)?,
-            gene: Leaf::from_noun_raw(gene, space),
+            gene: table.intern_live_leaf(gene, space),
         }
     } else {
         return Err(CompilerError::Decode(
@@ -194,9 +189,10 @@ impl LiveIntern {
 /// each compile an isolated cache universe (replacing the old per-compile
 /// `live_reset`).
 ///
-/// `new`/`reset` start every field empty (and `live` is eagerly constructed,
-/// replacing the former thread-local's lazy `Option<LiveIntern>` +
-/// `get_or_insert_with`).
+/// `new` starts every field empty (and `live` is eagerly constructed, replacing
+/// the former thread-local's lazy `Option<LiveIntern>` + `get_or_insert_with`).
+/// Dropping the owning `Ut` drops this context and every handle together; the
+/// arena is deliberately not reset while `TypeRef` handles may be live.
 pub struct Context {
     // --- LIVE (hash-cons core): was `static LIVE: RefCell<Option<LiveIntern>>` ---
     // `LiveIntern` bundles `table: TypeTable`, `memo: InternMemo`, `cores`,
@@ -206,24 +202,24 @@ pub struct Context {
     live: LiveIntern,
 
     // --- encode memos ---
-    to_noun_memo: HashMap<usize, Noun>, // was TO_NOUN_MEMO
-    leaf_memo: HashMap<usize, Noun>,    // was LEAF_MEMO
+    to_noun_memo: HashMap<u32, Noun>, // was TO_NOUN_MEMO
+    leaf_memo: HashMap<usize, Noun>,  // was LEAF_MEMO
 
     // --- boundary caches (key/value tuples copied verbatim) ---
-    nest_cache: HashMap<(usize, usize, u8, u64), bool>, // NEST_CACHE
+    nest_cache: HashMap<(u32, u32, u8, u64), bool>, // NEST_CACHE
     #[allow(clippy::type_complexity)]
-    core_mint_cache: HashMap<(usize, usize, u64, u8, u8, u64, u64, u64), (Rc<Type>, Noun)>, // CORE_MINT_CACHE
+    core_mint_cache: HashMap<(u32, u32, u64, u8, u8, u64, u64, u64), (Rc<Type>, FormulaId)>, // CORE_MINT_CACHE
     #[allow(clippy::type_complexity)]
-    mint_cache: HashMap<(usize, usize, u8, u64, u64, u64, u64), (Rc<Type>, Noun)>, // MINT_CACHE
+    mint_cache: HashMap<(u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, FormulaId)>, // MINT_CACHE
     #[allow(clippy::type_complexity)]
-    mull_cache: HashMap<(usize, usize, usize, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
-    fuse_cache: HashMap<(usize, usize, u8, u64), Rc<Type>>, // FUSE_CACHE
-    crop_cache: HashMap<(usize, usize, u8, u64), Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<(usize, u64, u8, u64), Noun>,       // FISH_CACHE
+    mull_cache: HashMap<(u32, u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
+    fuse_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // FUSE_CACHE
+    crop_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // CROP_CACHE
+    fish_cache: HashMap<(u32, BigUint, u8, u64), FormulaId>, // FISH_CACHE
 
     // --- native_of content-keyed decode cache + fork cache ---
     native_of_mug_memo: HashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
-    fork_cache: HashMap<Vec<usize>, Rc<Type>>,       // FORK_CACHE
+    fork_cache: HashMap<Vec<u32>, Rc<Type>>,         // FORK_CACHE
 
     // --- scope-precise fan key support (reachable %hold legs per type) ---
     // `legset_memo` maps an interned `Rc<Type>` pointer to the sorted-deduped set
@@ -231,7 +227,7 @@ pub struct Context {
     // Sound because `intern_node` hash-conses (ptr == structural identity), so the
     // legset is a pure function of the pointer; computed bottom-up over the Rc DAG
     // and memoized so each distinct node is visited once (O(1) amortized).
-    legset_memo: HashMap<usize, Rc<[u64]>>,
+    legset_memo: HashMap<u32, SharedRc<[u64]>>,
 }
 
 impl Context {
@@ -252,20 +248,17 @@ impl Context {
             legset_memo: HashMap::new(),
         }
     }
-
-    /// Re-init every field (mirrors the `live_reset` body exactly). Provided for a
-    /// later `live_reset()` -> `self.cx.reset()` swap even though the chosen wiring
-    /// constructs a fresh `Context` per compile.
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        *self = Context::new();
-    }
 }
 
 impl Default for Context {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[inline(always)]
+fn canonical_id(ty: &Rc<Type>) -> u32 {
+    ty.arena_id().0
 }
 
 static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -280,26 +273,26 @@ static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::
 /// `cons_fork` miss costs a full mug-treap rebuild (fork_from_options:
 /// set_put_mug/slab_mug) PLUS a decode+jam of the treap leaf (native_of). This
 /// memo collapses the recurrence to O(1). Byte-exact: returns the SAME interned
-/// `Rc` the rebuild would. Cleared with the table by `Context::reset`.
-pub fn fork_cache_lookup(cx: &Context, key: &[usize]) -> Option<Rc<Type>> {
+/// `Rc` the rebuild would. Its lifetime is the lifetime of the owning `Context`.
+pub fn fork_cache_lookup(cx: &Context, key: &[u32]) -> Option<Rc<Type>> {
     cx.fork_cache.get(key).cloned()
 }
 
 /// Store a `cons_fork` result keyed by its canonical option-pointer key.
-pub fn fork_cache_store(cx: &mut Context, key: Vec<usize>, fork: Rc<Type>) {
+pub fn fork_cache_store(cx: &mut Context, key: Vec<u32>, fork: Rc<Type>) {
     cx.fork_cache.insert(key, fork);
 }
 
 /// Look up the memoized reachable-leg set for an interned type pointer.
-/// `ptr` is `Rc::as_ptr(t) as usize`; the value is the sorted-deduped set of
+/// `ptr` is `canonical_id(t)`; the value is the sorted-deduped set of
 /// %hold leg-ids reachable from `t`. See `reachable_legs` in ut/mod.rs.
-pub fn legset_memo_lookup(cx: &Context, ptr: usize) -> Option<Rc<[u64]>> {
-    cx.legset_memo.get(&ptr).cloned()
+pub fn legset_memo_lookup(cx: &Context, id: u32) -> Option<SharedRc<[u64]>> {
+    cx.legset_memo.get(&id).cloned()
 }
 
 /// Store a memoized reachable-leg set for an interned type pointer.
-pub fn legset_memo_store(cx: &mut Context, ptr: usize, legs: Rc<[u64]>) {
-    cx.legset_memo.insert(ptr, legs);
+pub fn legset_memo_store(cx: &mut Context, id: u32, legs: SharedRc<[u64]>) {
+    cx.legset_memo.insert(id, legs);
 }
 
 /// Content-keyed `native_of` fast path (see `Context::native_of_mug_memo`).
@@ -332,10 +325,10 @@ pub fn core_mint_cache_lookup(
     fan: u64,
     arm_epoch: u64,
     placeholder: u64,
-) -> Option<(Rc<Type>, Noun)> {
+) -> Option<(Rc<Type>, FormulaId)> {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         tomes_sig,
         vet,
         poly,
@@ -359,11 +352,11 @@ pub fn core_mint_cache_store(
     arm_epoch: u64,
     placeholder: u64,
     core_type: Rc<Type>,
-    formula: Noun,
+    formula: FormulaId,
 ) {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         tomes_sig,
         vet,
         poly,
@@ -387,10 +380,10 @@ pub fn mint_cache_lookup(
     fan: u64,
     arm_epoch: u64,
     placeholder: u64,
-) -> Option<(Rc<Type>, Noun)> {
+) -> Option<(Rc<Type>, FormulaId)> {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         vet,
         gen_sig,
         fan,
@@ -412,11 +405,11 @@ pub fn mint_cache_store(
     arm_epoch: u64,
     placeholder: u64,
     ty: Rc<Type>,
-    formula: Noun,
+    formula: FormulaId,
 ) {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         vet,
         gen_sig,
         fan,
@@ -442,9 +435,9 @@ pub fn mull_cache_lookup(
     placeholder: u64,
 ) -> Option<(Rc<Type>, Rc<Type>)> {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
-        Rc::as_ptr(dox) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
+        canonical_id(dox),
         vet,
         gen_sig,
         fan,
@@ -470,9 +463,9 @@ pub fn mull_cache_store(
     q_ty: Rc<Type>,
 ) {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
-        Rc::as_ptr(dox) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
+        canonical_id(dox),
         vet,
         gen_sig,
         fan,
@@ -490,12 +483,7 @@ pub fn nest_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<bool> {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.nest_cache.get(&key).copied()
 }
 
@@ -508,12 +496,7 @@ pub fn nest_cache_store(
     fan: u64,
     result: bool,
 ) {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.nest_cache.insert(key, result);
 }
 
@@ -526,12 +509,7 @@ pub fn fuse_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<Rc<Type>> {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.fuse_cache.get(&key).cloned()
 }
 
@@ -544,12 +522,7 @@ pub fn fuse_cache_store(
     fan: u64,
     result: Rc<Type>,
 ) {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.fuse_cache.insert(key, result);
 }
 
@@ -562,12 +535,7 @@ pub fn crop_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<Rc<Type>> {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.crop_cache.get(&key).cloned()
 }
 
@@ -580,39 +548,35 @@ pub fn crop_cache_store(
     fan: u64,
     result: Rc<Type>,
 ) {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.crop_cache.insert(key, result);
 }
 
 /// Look up a native `fish` result by interned (sut) pointer + (axis, vet, fan).
-/// Returns the cached NOCK FORMULA `Noun` directly.
+/// Returns the cached canonical formula ID directly.
 pub fn fish_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
-    axis: u64,
+    axis: &BigUint,
     vet: u8,
     fan: u64,
-) -> Option<Noun> {
-    let key = (Rc::as_ptr(sut) as usize, axis, vet, fan);
-    cx.fish_cache.get(&key).copied()
+) -> Option<FormulaId> {
+    cx.fish_cache
+        .get(&(canonical_id(sut), axis.clone(), vet, fan))
+        .copied()
 }
 
-/// Store a native `fish` result (formula `Noun`) by interned (sut) pointer +
+/// Store a native `fish` result by interned (sut) pointer +
 /// (axis, vet, fan).
 pub fn fish_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
-    axis: u64,
+    axis: &BigUint,
     vet: u8,
     fan: u64,
-    result: Noun,
+    result: FormulaId,
 ) {
-    let key = (Rc::as_ptr(sut) as usize, axis, vet, fan);
+    let key = (canonical_id(sut), axis.clone(), vet, fan);
     cx.fish_cache.insert(key, result);
 }
 
@@ -637,7 +601,7 @@ pub fn live_enabled() -> bool {
 /// so the address is stable + not reused) and the bridges always lower into the
 /// one compile slab; reset per compile via `live_reset`.
 pub fn live_to_noun(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) -> Noun {
-    let ptr = Rc::as_ptr(native) as usize;
+    let ptr = canonical_id(native);
     if let Some(noun) = cx.to_noun_memo.get(&ptr).copied() {
         return noun;
     }
@@ -707,7 +671,7 @@ fn live_to_noun_node(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) ->
             let p = live_to_noun(&mut *cx, payload, dst);
             T(dst, &[D(tas("hint")), h, p])
         }
-        Type::Fork { set } => {
+        Type::Fork { set, .. } => {
             let s = live_leaf_to_noun(&mut *cx, set, dst);
             T(dst, &[D(tas("fork")), s])
         }
@@ -799,6 +763,14 @@ pub fn native_of(cx: &mut Context, noun: Noun, space: &NounSpace) -> Result<Rc<T
     intern_type_noun(&mut cx.live.table, &mut cx.live.memo, noun, space)
 }
 
+/// Canonicalize a carried live noun before embedding it in a native type node.
+/// Pointer-distinct but structurally equal leaves pay one exact comparison on
+/// first sight and thereafter share the same raw noun, making hot type-table
+/// equality checks pointer-fast.
+pub fn live_leaf_from_noun(cx: &mut Context, noun: Noun, space: &NounSpace) -> Leaf {
+    cx.live.table.intern_live_leaf(noun, space)
+}
+
 /// Memoized leaf lowering for the flipped consumers: lower a carried `Leaf`
 /// (core coil, fork set, hold gene, atom aura/bits, face tool, hint head) to a
 /// noun for the still-noun leaf helpers (coil_parts/fork_set_options/garb_*/fitz),
@@ -847,6 +819,18 @@ pub fn assert_native_eq(noun: Noun, native: &Rc<Type>, space: &NounSpace) {
 #[derive(Default)]
 pub struct TypeTable {
     buckets: HashMap<u64, Vec<Rc<Type>>>,
+    /// Source-noun identity to its canonical carried leaf.
+    live_leaves_by_raw: HashMap<u64, Leaf>,
+    /// Mug buckets for the one exact comparison needed to canonicalize a new
+    /// source identity. The full noun comparison protects against mug
+    /// collisions; equal leaves then share one raw noun.
+    live_leaves_by_mug: HashMap<u32, Vec<Leaf>>,
+    /// Stable ownership for canonical nodes. Handles point into these boxes and
+    /// therefore clone without touching a reference count. The boxes are
+    /// required: growing the outer vector must not move slots while `TypeRef`
+    /// handles point at them.
+    #[allow(clippy::vec_box)]
+    slots: Vec<Box<TypeSlot<Type>>>,
     /// Total node-constructions seen by `intern` (the un-shared structural size).
     pub interned_calls: u64,
     /// Distinct canonical nodes retained (the hash-consed size).
@@ -860,38 +844,95 @@ impl TypeTable {
         Self::default()
     }
 
-    /// Intern a type tree bottom-up, returning its canonical `Rc`.
-    pub fn intern(&mut self, t: &Type) -> Rc<Type> {
+    fn intern_live_leaf(&mut self, noun: Noun, space: &NounSpace) -> Leaf {
+        if noun.is_direct() {
+            return Leaf::from_noun_raw(noun, space);
+        }
+        let raw = unsafe { noun.as_raw() };
+        if let Some(canonical) = self.live_leaves_by_raw.get(&raw) {
+            return canonical.clone();
+        }
+        let leaf = Leaf::from_noun_raw(noun, space);
+        let Leaf::Noun(_, mug) = &leaf else {
+            return leaf;
+        };
+
+        let canonical = self.live_leaves_by_mug.get(mug).and_then(|bucket| {
+            bucket
+                .iter()
+                .find(|candidate| {
+                    let Leaf::Noun(existing, _) = candidate else {
+                        unreachable!("live leaf mug buckets contain only raw nouns")
+                    };
+                    noun_eq(*existing, noun, space)
+                        .expect("live native-type leaves must be valid slab nouns")
+                })
+                .cloned()
+        });
+        if let Some(canonical) = canonical {
+            self.live_leaves_by_raw.insert(raw, canonical.clone());
+            return canonical;
+        }
+
+        self.live_leaves_by_mug
+            .entry(*mug)
+            .or_default()
+            .push(leaf.clone());
+        self.live_leaves_by_raw.insert(raw, leaf.clone());
+        leaf
+    }
+
+    /// Intern the independently-owned boundary decoder tree. This path only
+    /// serves the optional public stats oracle; live compilation constructs
+    /// canonical arena nodes directly through `intern_shallow`.
+    pub(super) fn intern_boundary(&mut self, t: &BoundaryType) -> Rc<Type> {
         let node = match t {
-            Type::Void => Type::Void,
-            Type::Noun => Type::Noun,
-            Type::Atom { aura, bits } => Type::Atom {
+            BoundaryType::Void => Type::Void,
+            BoundaryType::Noun => Type::Noun,
+            BoundaryType::Atom { aura, bits } => Type::Atom {
                 aura: aura.clone(),
                 bits: bits.clone(),
             },
-            Type::Cell(h, tl) => Type::Cell(self.intern(h), self.intern(tl)),
-            Type::Core {
+            BoundaryType::Cell(head, tail) => {
+                Type::Cell(self.intern_boundary(head), self.intern_boundary(tail))
+            }
+            BoundaryType::Core {
                 payload,
                 garb,
                 context,
                 rest,
             } => Type::Core {
-                payload: self.intern(payload),
+                payload: self.intern_boundary(payload),
                 garb: garb.clone(),
-                context: self.intern(context),
+                context: self.intern_boundary(context),
                 rest: rest.clone(),
             },
-            Type::Face { tool, inner } => Type::Face {
+            BoundaryType::Face { tool, inner } => Type::Face {
                 tool: tool.clone(),
-                inner: self.intern(inner),
+                inner: self.intern_boundary(inner),
             },
-            Type::Hint { head, payload } => Type::Hint {
+            BoundaryType::Hint { head, payload } => Type::Hint {
                 head: head.clone(),
-                payload: self.intern(payload),
+                payload: self.intern_boundary(payload),
             },
-            Type::Fork { set } => Type::Fork { set: set.clone() },
-            Type::Hold { subject, gene } => Type::Hold {
-                subject: self.intern(subject),
+            BoundaryType::Fork { set, options } => {
+                let native_options = std::cell::OnceCell::new();
+                native_options
+                    .set(
+                        options
+                            .iter()
+                            .map(|option| self.intern_boundary(option))
+                            .collect(),
+                    )
+                    .expect("fresh fork options cell");
+                Type::Fork {
+                    set: set.clone(),
+                    options: native_options,
+                    options_seen: std::cell::Cell::new(true),
+                }
+            }
+            BoundaryType::Hold { subject, gene } => Type::Hold {
+                subject: self.intern_boundary(subject),
                 gene: gene.clone(),
             },
         };
@@ -916,7 +957,13 @@ impl TypeTable {
                 }
             }
         }
-        let rc = Rc::new(node);
+        let id = TypeId(
+            u32::try_from(self.slots.len())
+                .expect("one compiler context cannot contain more than u32::MAX type nodes"),
+        );
+        let slot = Box::new(TypeSlot::new(id, node));
+        let rc = Rc::from_arena_slot(&slot);
+        self.slots.push(slot);
         self.buckets.entry(h).or_default().push(Rc::clone(&rc));
         self.distinct += 1;
         rc
@@ -924,11 +971,14 @@ impl TypeTable {
 }
 
 /// Shallow structural hash: variant + children by canonical `Rc` pointer + leaf
-/// content. Valid only when children are already interned (bottom-up).
+/// content. Valid only when children are already interned (bottom-up). A fork's
+/// adaptive `options`/`options_seen` state is deliberately excluded: both are
+/// pure caches of the exact `set` witness, and interior mutation must never
+/// change a key after insertion into `TypeTable`.
 fn node_hash(t: &Type) -> u64 {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
-    let p = |rc: &Rc<Type>, h: &mut DefaultHasher| (Rc::as_ptr(rc) as usize).hash(h);
+    let p = |rc: &Rc<Type>, h: &mut DefaultHasher| (canonical_id(rc)).hash(h);
     match t {
         Type::Void | Type::Noun => {}
         Type::Atom { aura, bits } => {
@@ -958,7 +1008,7 @@ fn node_hash(t: &Type) -> u64 {
             head.hash(&mut h);
             p(payload, &mut h);
         }
-        Type::Fork { set } => set.hash(&mut h),
+        Type::Fork { set, .. } => set.hash(&mut h),
         Type::Hold { subject, gene } => {
             p(subject, &mut h);
             gene.hash(&mut h);
@@ -967,7 +1017,9 @@ fn node_hash(t: &Type) -> u64 {
     h.finish()
 }
 
-/// Shallow structural equality (children by canonical `Rc` identity).
+/// Shallow structural equality (children by canonical `Rc` identity). As with
+/// `node_hash`, fork equality is defined by the exact set witness rather than its
+/// lazily populated native-edge cache.
 fn node_eq(a: &Type, b: &Type) -> bool {
     use Type::*;
     match (a, b) {
@@ -1008,7 +1060,7 @@ fn node_eq(a: &Type, b: &Type) -> bool {
                 payload: p2,
             },
         ) => h1 == h2 && Rc::ptr_eq(p1, p2),
-        (Fork { set: s1 }, Fork { set: s2 }) => s1 == s2,
+        (Fork { set: s1, .. }, Fork { set: s2, .. }) => s1 == s2,
         (
             Hold {
                 subject: s1,
@@ -1025,6 +1077,8 @@ fn node_eq(a: &Type, b: &Type) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use nockvm::noun::NounAllocator;
+
     use super::*;
     use crate::native::ir::leaf::Leaf;
 
@@ -1038,19 +1092,56 @@ mod tests {
     #[test]
     fn dedups_structurally_equal_to_one_rc() {
         let mut tab = TypeTable::new();
-        let r1 = tab.intern(&atom());
-        let r2 = tab.intern(&atom()); // distinct allocation, equal structure
+        let r1 = tab.intern_shallow(atom());
+        let r2 = tab.intern_shallow(atom());
         assert!(Rc::ptr_eq(&r1, &r2), "equal atoms intern to one Rc");
         assert_eq!(tab.distinct, 1);
         assert_eq!(tab.hits, 1);
 
         // Equal cells over equal children also collapse.
-        let c1 = Type::Cell(Rc::new(atom()), Rc::new(atom()));
-        let c2 = Type::Cell(Rc::new(atom()), Rc::new(atom()));
-        let rc1 = tab.intern(&c1);
-        let rc2 = tab.intern(&c2);
+        let rc1 = tab.intern_shallow(Type::Cell(r1, r1));
+        let rc2 = tab.intern_shallow(Type::Cell(r2, r2));
         assert!(Rc::ptr_eq(&rc1, &rc2), "equal cells intern to one Rc");
         assert_eq!(tab.distinct, 2, "only the atom and the cell are distinct");
+    }
+
+    #[test]
+    fn live_leaf_interning_canonicalizes_equal_distinct_nouns() {
+        let mut slab: NounSlab = NounSlab::new();
+        let first = T(&mut slab, &[D(1), D(2)]);
+        let second = T(&mut slab, &[D(1), D(2)]);
+        assert!(!unsafe { first.raw_equals(&second) });
+        let space = slab.noun_space();
+        let mut tab = TypeTable::new();
+
+        let first_leaf = tab.intern_live_leaf(first, &space);
+        let second_leaf = tab.intern_live_leaf(second, &space);
+        let (Leaf::Noun(first_noun, _), Leaf::Noun(second_noun, _)) = (&first_leaf, &second_leaf)
+        else {
+            panic!("cell leaves must remain raw nouns")
+        };
+
+        assert!(unsafe { first_noun.raw_equals(second_noun) });
+        assert_eq!(tab.live_leaves_by_raw.len(), 2);
+        assert_eq!(
+            tab.live_leaves_by_mug.values().map(Vec::len).sum::<usize>(),
+            1
+        );
+    }
+
+    #[test]
+    fn arena_handles_are_one_word_copies_with_dense_ids() {
+        assert_eq!(
+            std::mem::size_of::<Rc<Type>>(),
+            std::mem::size_of::<usize>()
+        );
+        let mut tab = TypeTable::new();
+        let atom = tab.intern_shallow(atom());
+        let noun = tab.intern_shallow(Type::Noun);
+        let atom_copy = atom;
+        assert!(Rc::ptr_eq(&atom, &atom_copy));
+        assert_eq!(atom.arena_id(), TypeId(0));
+        assert_eq!(noun.arena_id(), TypeId(1));
     }
 
     // The subject-deepening fix in miniature: a fully-duplicated balanced cell
@@ -1058,16 +1149,18 @@ mod tests {
     // hash-consing — O(2^n) → O(n).
     #[test]
     fn hash_consing_collapses_duplicated_structure() {
-        fn build(depth: u32) -> Type {
+        fn build(tab: &mut TypeTable, depth: u32) -> Rc<Type> {
             if depth == 0 {
-                atom()
+                tab.intern_shallow(atom())
             } else {
-                Type::Cell(Rc::new(build(depth - 1)), Rc::new(build(depth - 1)))
+                let head = build(tab, depth - 1);
+                let tail = build(tab, depth - 1);
+                tab.intern_shallow(Type::Cell(head, tail))
             }
         }
         let depth = 12;
         let mut tab = TypeTable::new();
-        let _root = tab.intern(&build(depth));
+        let _root = build(&mut tab, depth);
         assert_eq!(
             tab.distinct as u32,
             depth + 1,
@@ -1077,6 +1170,42 @@ mod tests {
             tab.interned_calls,
             (1u64 << (depth + 1)) - 1,
             "the full duplicated tree was walked"
+        );
+    }
+
+    #[test]
+    fn fork_edge_materialization_does_not_change_intern_identity() {
+        let empty_edges = std::cell::OnceCell::new();
+        let fork = Type::Fork {
+            set: Leaf::Direct(123),
+            options: empty_edges,
+            options_seen: Default::default(),
+        };
+        let mut tab = TypeTable::new();
+        let canonical = tab.intern_shallow(fork);
+        let hash_before = node_hash(&canonical);
+
+        let Type::Fork { options, .. } = &*canonical else {
+            unreachable!()
+        };
+        options
+            .set(vec![tab.intern_shallow(atom())])
+            .expect("first fork-edge materialization");
+        assert_eq!(
+            hash_before,
+            node_hash(&canonical),
+            "interior edge caching must not mutate the interner key"
+        );
+
+        let duplicate = Type::Fork {
+            set: Leaf::Direct(123),
+            options: std::cell::OnceCell::new(),
+            options_seen: Default::default(),
+        };
+        let reinterned = tab.intern_shallow(duplicate);
+        assert!(
+            Rc::ptr_eq(&canonical, &reinterned),
+            "the exact set witness remains fork identity after edge caching"
         );
     }
 }

@@ -311,17 +311,24 @@
   ^-  bridge-state
   |^
   |-
-  ?:  ?=(%3 -.old)
+  ?:  ?=(%4 -.old)
     old
   ~>  %slog.[0 'bridge: +load state upgrade required']
   ?-  -.old
+    %3  $(old state-3-4)
     %2  $(old state-2-3)
     %1  $(old state-1-2)
     %0  $(old state-0-1)
   ==
   ::
-  ++  state-2-3
+  ++  state-3-4
     ^-  bridge-state
+    ?>  ?=(%3 -.old)
+    ~>  %slog.[0 'bridge: upgrade state %3 -> %4']
+    (upgrade-pre-logos-state old)
+  ::
+  ++  state-2-3
+    ^-  bridge-state-3
     ?>  ?=(%2 -.old)
     ~>  %slog.[0 'bridge: upgrade state %2 -> %3']
     =/  new-config=node-config

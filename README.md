@@ -1,38 +1,145 @@
 # Nockchain
 
-Status: Active
-Owner: Nockchain Maintainers
-Last Reviewed: 2026-02-19
-Canonical/Legacy: Canonical (quickstart lane; protocol authority routes through [`PROTOCOL.md`](./PROTOCOL.md))
+## What is Nockchain?
 
-**Nockchain is programmable gold that scales.**
+Nockchain is a Proof-of-Work blockchain built around verifiable Nock
+computation. Its Hoon consensus kernel runs as a NockApp on NockVM; miners prove
+block-bound Nock execution with STARKs, while nodes verify proofs and maintain a
+UTXO ledger. Applications execute offchain as sovereign NockApps and can settle
+verifiable results to the shared chain.
 
-Nockchain is a ZK-Proof of Work blockchain that combines sound money incentives with modern research into data availability, app-rollups, and intent-based composability.
+For a guide to the open Rust crates, see [`TOC.md`](./TOC.md).
 
-For a guide to the open Rust crates, see [open/TOC.md](./TOC.md).
+Nockchain is experimental software with unaudited components. This repository
+contains the current node, runtime, wallet, miners, proof systems, Hoon kernels,
+and protocol candidates. Protocol activation and consensus authority come from
+[`PROTOCOL.md`](./PROTOCOL.md) and the versioned specifications under
+[`changelog/protocol/`](./changelog/protocol/), not from summaries in this
+README.
 
-*Nockchain is entirely experimental and many parts are unaudited. We make no representations or guarantees as to the behavior of this software.*
+## Core thesis and components
 
-> [!IMPORTANT]
-> For docs read order, trust policy, and canonical sources, start with [`START_HERE.md`](./START_HERE.md).
-> Consensus/protocol authority is indexed in [`PROTOCOL.md`](./PROTOCOL.md), with canonical upgrade source files in [`changelog/protocol/`](./changelog/protocol/).
-> This README remains a quickstart for setup and operations.
-> Operators upgrading to a PMA-enabled release should also read [`PMA-FAQ.md`](./PMA-FAQ.md).
+The [vision overview](./vision/nockchain-eli5.md) states the core thesis:
+**Private, programmable money powered by energy and Compute.**
+The product is private, programmable money. Proof-of-Work grounds it in
+expended energy, while Compute Networks organize useful computation into
+consensus security.
 
-## This is the first release of the persistent memory arena
+That thesis has three connected components:
 
-The PMA is a major re-architecting of `nockvm`, the runtime for Nockchain, and it significantly reduces the steady-state memory requirements of Nockchain peers and NockApps. We have tested it and run it ourselves but please report any bugs or problems.
+1. [**Money.**](./vision/nockchain-eli5.md#money) `NOCK` is Nockchain's native
+   money: a scarce common asset with a fixed 2³²-unit supply cap, used for
+   transfers, fees, and block rewards. NockApps make that money programmable
+   while the base asset stays simple.
+2. [**NockApps.**](./vision/nockchain-eli5.md#nockapps) NockApps are sovereign
+   applications written as Nock programs. The proposed general-purpose Nock
+   ZKVM design lets a NockApp prove a private or expensive state transition so
+   nodes can verify the result without rerunning the program or seeing its
+   private inputs.
+3. [**Compute Networks.**](./vision/nockchain-eli5.md#compute-networks) Each
+   Compute Network defines computation that can produce valid Nockchain blocks.
+   Independent providers perform the work, winning attempts earn `NOCK`, and
+   nodes combine each network's independently measured work in the chain's
+   accumulated-work fork choice.
 
-High-level take-aways for PMA:
-- Steady-state RAM (RSS) usage has dropped from ~20 GiB to ~1.8 GiB
-- Maximum RAM usage has dropped from ~40 GiB to ~20 GiB. This is much less frequent in the PMA version, but it will happen temporarily with the checkpoint bootstrap on the first post-PMA boot and to a lesser extent garbage collection. During the first boot you will see the RSS be elevated initially (~12-16 GiB) until your first garbage collection, then you should see ~1.8 GiB RSS typically.
-- You should still provision a swap partition of at least 32 GiB as the PMA enables paging out without swapping for the Arvo (persistent state, which includes the entirety of the chain state) but not `nockvm`'s NockStack itself, this is by design to conserve predictable and efficient execution performance in the NockStack.
-- Transaction throughput is improved, 600-700 milliseconds of per-event overhead has been traded down to 2-4 milliseconds of per-event durability overhead. This has a particularly noticeable impact for cheap interstitial events like the timer, duplicate blocks, etc. When we tested baseline against PMA the PMA instance managed to get more than 1,000 blocks ahead of the baseline in a few hours of syncing blocks in the 52k-62k range. This improvement is because the PMA moves the Arvo out of the NockStack and spares the NockStack compacting the entirety of the chain state after every event.
-- Write-through burden on SSD disks is markedly lower, about 2x, than the pre-PMA baseline's behavior. This is based on procfs statistics and not our own measurements so the numbers should be sound. This will vary depending on how you configure the snapshot and garbage collection intervals.
-- No more 2-3 minute checkpoints bookending one after another. Incremental, efficient persistence to disk through the PMA slab.
-- Garbage collection causes a ~5-10 second spike in RSS but it's a lower peak than checkpointing and shouldn't be nearly as susceptible to OOMs as checkpointing was.
-- NockStack gets `madvise` trimmed after every event with a high watermark higher than 512 MiB to align the pages allocated for the Nockchain/NockApp process with what's actually needed/used in practice.
-- PMA includes the PMA slab and .meta sidecar itself, a sqlite3 event log, and snapshots of the slabs aligned to event log positions. Durability is considerably more robust and efficient now. `fsync`/`fdatasync` ordering during post-event the durability cycle is strictly and carefully designed to make the detection of corrupted PMA slabs due to `SIGKILL`, power cuts, etc. trivially cheap and highly reliable.
+The economic loop connects the three: users and NockApps request useful
+computation; independent providers serve those requests and use the same work as
+mining attempts; winning attempts produce blocks and `NOCK` rewards; and
+Nockchain settles transfers and proven application state changes. Most attempts
+do not produce a block, but still deliver the useful result requested by the
+customer.
+
+The first two Compute Network designs show how that loop applies to specific
+workloads:
+
+- [**The ZK Compute Network**](./vision/zk-compute-network-eli5.md) currently
+  secures Nockchain with a fixed ZK puzzle. The proposed general-purpose design
+  uses customer-requested Nock proofs both for NockApp state transitions and as
+  mining attempts.
+- [**The AI Compute Network**](./vision/ai-compute-network-eli5.md) is the
+  proposed AI-inference design: independent inference miners serve customers
+  through competing aggregators and use the same matrix work as mining attempts.
+
+The current transaction engine does not yet verify general NockApp proofs.
+`NOCK` privacy, general NockApp proof verification, and the useful-work ZK and
+AI designs are proposed rather than active consensus rules. The vision documents
+explain the intended system; [`PROTOCOL.md`](./PROTOCOL.md)
+and [`changelog/protocol/`](./changelog/protocol/) remain authoritative for
+what the live protocol accepts. For more background, see the public project [overview](https://docs.nockchain.org/architecture/why-nockchain),
+the [NockApp guide](https://docs.nockchain.org/nockapp/what-is-nockapp), and the [tokenomics guide](https://docs.nockchain.org/usdnock-asset/overview).
+
+## Choose a path
+
+- **Understand the vision:** read the
+  [Nockchain overview](./vision/nockchain-eli5.md), then the focused
+  [ZK Compute Network](./vision/zk-compute-network-eli5.md) and
+  [AI Compute Network](./vision/ai-compute-network-eli5.md) explanations.
+- **Operate a node:** use the public
+  [node operator guide](https://docs.nockchain.org/architecture/why-nockchain/running-a-node)
+  for the network and deployment model, then the [setup](#setup) and
+  [running nodes](#running-nodes) sections below for repository commands.
+- **Use `$NOCK`:** start with the public
+  [wallet guide](https://docs.nockchain.org/architecture/why-nockchain/using-a-wallet),
+  then use the [`nockchain-wallet` README](crates/nockchain-wallet/README.md)
+  for CLI commands, key versions, syncing, and transaction flows.
+- **Build or contribute:** read [`START_HERE.md`](./START_HERE.md) for
+  documentation authority and repository orientation, then use the relevant
+  crate README for its interfaces, invariants, and validation commands.
+
+## How the system fits together
+
+```text
+wallets and applications              external miners
+          |                                  |
+      gRPC / nouns                     candidate effects
+          |                                  |
+          +---------- nockchain node --------+
+                         |
+                Rust drivers and jets
+                         |
+              Hoon consensus kernel
+                         |
+                       NockVM
+                         |
+             persistent event/state store
+                         |
+                 libp2p peer network
+```
+
+- **Hoon kernels** define consensus and application state transitions.
+- **NockVM and NockApp** execute kernels, persist state, and connect effects to
+  Rust drivers.
+- **The node** connects the kernel to peers, gRPC, timers, metrics, and native
+  cryptographic jets.
+- **Miners** run out of process, consume puzzle-specific candidates, and submit
+  proofs that the node validates independently.
+- **Wallet and API crates** construct transactions and expose derived chain
+  state without becoming consensus authorities.
+
+## Repository guide
+
+| Area | Entry points |
+|---|---|
+| Vision and Compute Networks | [Nockchain](vision/nockchain-eli5.md), [ZK Compute Network](vision/zk-compute-network-eli5.md), [AI Compute Network](vision/ai-compute-network-eli5.md) |
+| Node and runtime | [`crates/nockchain`](crates/nockchain/), [`crates/nockapp`](crates/nockapp/), [`crates/nockvm`](crates/nockvm/) |
+| Consensus and kernels | [`hoon/apps/dumbnet`](hoon/apps/dumbnet/), [`changelog/protocol`](changelog/protocol/) |
+| Networking and APIs | [`crates/nockchain-libp2p-io`](crates/nockchain-libp2p-io/), [`crates/nockapp-grpc`](crates/nockapp-grpc/), [`crates/nockchain-api`](crates/nockchain-api/) |
+| Core types and math | [`crates/nockchain-types`](crates/nockchain-types/), [`crates/nockchain-math`](crates/nockchain-math/) |
+| Wallets and transactions | [`crates/nockchain-wallet`](crates/nockchain-wallet/), [`crates/wallet-tx-builder`](crates/wallet-tx-builder/) |
+| ZK-PoW mining | [`crates/zk-pow-miner`](crates/zk-pow-miner/), [`crates/nockchain-mining-common`](crates/nockchain-mining-common/) |
+| AI-PoW protocol candidate | [`crates/ai-pow`](crates/ai-pow/), [`crates/ai-pow-zk`](crates/ai-pow-zk/), [`crates/ai-pow-miner`](crates/ai-pow-miner/), [`crates/ai-pow-jets`](crates/ai-pow-jets/) |
+| Hoon/proof conformance | [`crates/roswell`](crates/roswell/) |
+
+Start with [`START_HERE.md`](./START_HERE.md) for repository documentation
+authority and reading order. Use the crate READMEs for implementation
+boundaries, maintained invariants, and security assumptions.
+
+## Persistence
+
+NockApp persists kernel state through NockVM's persistent memory arena (PMA),
+event log, and snapshots. Operators upgrading or diagnosing persistence should
+use [`PMA-FAQ.md`](./PMA-FAQ.md) and [`docs/pma/`](./docs/pma/) for memory,
+durability, recovery, and storage guidance.
 
 ## Setup
 
