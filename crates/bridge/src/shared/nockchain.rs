@@ -36,7 +36,6 @@ const NOCK_GRPC_RESPONSE_TOO_LARGE_MARKER: &str = "message length too large";
 pub const DEFAULT_NOCK_GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const NOCK_BLOCK_BATCH_SIZE: u64 = 64;
 const NOCK_TIP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-const NOCK_WATCHER_MAX_DECODING_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 pub const BLOCKCHAIN_CONSTANTS_PATH: &str = "blockchain-constants";
 
 /// Default nockchain confirmation depth used by the driver if not specified in config.
@@ -111,7 +110,7 @@ impl NockGrpcSource {
         request_timeout: Duration,
     ) -> Self {
         Self {
-            client: client.with_max_decoding_message_size(NOCK_WATCHER_MAX_DECODING_MESSAGE_SIZE),
+            client,
             request_timeout,
         }
     }
@@ -315,14 +314,26 @@ fn nock_block_still_waiting_for_kernel(
     in_flight_height.is_some() && in_flight_height == next_needed_height
 }
 
-fn truncate_after_first_transaction_block(
-    blocks: &mut Vec<NockBlockEvent>,
-) -> Option<&mut NockBlockEvent> {
+fn retain_hydratable_prefix(blocks: &mut Vec<NockBlockEvent>) -> Option<&mut NockBlockEvent> {
     let index = blocks
         .iter()
         .position(|block| !block.block.tx_ids.is_empty())?;
-    blocks.truncate(index + 1);
-    blocks.last_mut()
+    if index == 0 {
+        blocks.truncate(1);
+        blocks.first_mut()
+    } else {
+        blocks.truncate(index);
+        None
+    }
+}
+
+fn buffered_transaction_requires_tip_refresh(
+    blocks: &VecDeque<NockBlockEvent>,
+    next_needed_height: Option<u64>,
+) -> bool {
+    blocks.front().is_some_and(|block| {
+        Some(block.block.height) == next_needed_height && !block.block.tx_ids.is_empty()
+    })
 }
 
 #[async_trait]
@@ -444,7 +455,7 @@ impl NockGrpcSource {
             }
         };
 
-        if let Some(block) = truncate_after_first_transaction_block(&mut blocks) {
+        if let Some(block) = retain_hydratable_prefix(&mut blocks) {
             Self::hydrate_block_transactions_from_client(client, block, request_timeout).await?;
         }
         Ok(blocks)
@@ -847,6 +858,9 @@ impl NockchainWatcher {
                 self.config.confirmation_depth,
             );
             let tip_refresh_due = prefetched_blocks.is_empty()
+                || buffered_transaction_requires_tip_refresh(
+                    &prefetched_blocks, next_needed_height,
+                )
                 || tip_refreshed_at
                     .map(|refreshed_at| refreshed_at.elapsed() >= NOCK_TIP_REFRESH_INTERVAL)
                     .unwrap_or(true);
@@ -1499,6 +1513,24 @@ mod tests {
     }
 
     #[test]
+    fn buffered_transaction_boundary_requires_fresh_tip() {
+        let mut blocks =
+            VecDeque::from([sample_block_event(10, false), sample_block_event(11, true)]);
+
+        assert!(!buffered_transaction_requires_tip_refresh(
+            &blocks,
+            Some(10)
+        ));
+        blocks.pop_front();
+        assert!(buffered_transaction_requires_tip_refresh(&blocks, Some(11)));
+        assert!(!buffered_transaction_requires_tip_refresh(
+            &blocks,
+            Some(12)
+        ));
+        assert!(!buffered_transaction_requires_tip_refresh(&blocks, None));
+    }
+
+    #[test]
     fn cached_tip_only_covers_confirmed_heights() {
         let tip = NockTipInfo {
             height: 1_000,
@@ -1550,8 +1582,7 @@ mod tests {
     }
 
     #[test]
-
-    fn range_stops_at_first_block_requiring_transaction_hydration() {
+    fn range_returns_blocks_before_future_transaction_hydration() {
         let mut blocks = vec![
             sample_block_event(10, false),
             sample_block_event(11, false),
@@ -1560,16 +1591,27 @@ mod tests {
         ];
 
         let hydration_height =
-            truncate_after_first_transaction_block(&mut blocks).map(|block| block.block.height);
+            retain_hydratable_prefix(&mut blocks).map(|block| block.block.height);
 
-        assert_eq!(hydration_height, Some(12));
+        assert_eq!(hydration_height, None);
         assert_eq!(
             blocks
                 .iter()
                 .map(|block| block.block.height)
                 .collect::<Vec<_>>(),
-            vec![10, 11, 12]
+            vec![10, 11]
         );
+    }
+
+    #[test]
+    fn range_hydrates_only_current_transaction_block() {
+        let mut blocks = vec![sample_block_event(12, true), sample_block_event(13, true)];
+
+        let hydration_height =
+            retain_hydratable_prefix(&mut blocks).map(|block| block.block.height);
+
+        assert_eq!(hydration_height, Some(12));
+        assert_eq!(blocks.len(), 1);
     }
     #[test]
     fn block_range_decoder_owns_each_page_noun() {

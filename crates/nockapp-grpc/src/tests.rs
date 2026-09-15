@@ -44,7 +44,7 @@ mod tests {
         use nockapp::driver::{IOAction, NockAppHandle};
         use nockapp::noun::slab::NounSlab;
         use nockapp::NockAppExit;
-        use nockvm::noun::{NounAllocator, D, T};
+        use nockvm::noun::{IndirectAtom, NounAllocator, D, T};
         use nockvm_macros::tas;
         use once_cell::sync::Lazy;
         use tokio::sync::{broadcast, mpsc, Mutex};
@@ -216,6 +216,39 @@ mod tests {
                 .as_u64()
                 .expect("u64"),
             7
+        );
+
+        const LARGE_EFFECT_BYTES: usize = 5 * 1024 * 1024;
+        let payload = vec![0xab; LARGE_EFFECT_BYTES];
+        let mut slab = NounSlab::new();
+        let head = D(tas!(b"mine"));
+        let payload_atom = unsafe {
+            let mut atom = IndirectAtom::new_raw_bytes(&mut slab, payload.len(), payload.as_ptr());
+            let space = slab.noun_space();
+            atom.normalize_as_atom(&space).as_noun()
+        };
+        let root = T(&mut slab, &[head, payload_atom]);
+        slab.set_root(root);
+        effect_tx.send(slab).expect("publish large mine effect");
+
+        let received = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("large stream.next within timeout")
+            .expect("large stream not closed")
+            .expect("client received large slab");
+        let space = received.noun_space();
+        let received_noun = unsafe { *received.root() };
+        let cell = received_noun
+            .in_space(&space)
+            .as_cell()
+            .expect("large effect is a cell");
+        assert!(cell.head().eq_bytes("mine"));
+        assert_eq!(
+            cell.tail()
+                .as_atom()
+                .expect("large payload atom")
+                .bit_size(),
+            LARGE_EFFECT_BYTES * 8
         );
 
         // ── 8. Tear down.
