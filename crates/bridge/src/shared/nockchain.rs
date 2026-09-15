@@ -32,6 +32,7 @@ use crate::withdrawal::snapshot::BridgeNoteSnapshotService;
 
 const CLIENT_PID: i32 = 1;
 const NOCK_GRPC_TIMEOUT_MARKER: &str = " timed out after ";
+const NOCK_GRPC_RESPONSE_TOO_LARGE_MARKER: &str = "message length too large";
 pub const DEFAULT_NOCK_GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const NOCK_BLOCK_BATCH_SIZE: u64 = 64;
 const NOCK_TIP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -183,6 +184,18 @@ fn is_nock_grpc_timeout_error(err: &BridgeError) -> bool {
         err,
         BridgeError::EventMonitoring(message) if message.contains(NOCK_GRPC_TIMEOUT_MARKER)
     )
+}
+
+fn is_nock_grpc_response_too_large_error(err: &BridgeError) -> bool {
+    matches!(
+        err,
+        BridgeError::EventMonitoring(message)
+            if message.contains(NOCK_GRPC_RESPONSE_TOO_LARGE_MARKER)
+    )
+}
+
+fn reduced_batch_end(start: u64, end: u64) -> u64 {
+    start.saturating_add(end.saturating_sub(start) / 2)
 }
 
 pub async fn bootstrap_blockchain_constants(
@@ -369,56 +382,165 @@ impl NockGrpcSource {
         if start > end {
             return Ok(Vec::new());
         }
-        let range_path = vec![
-            Bytes::from("heaviest-chain-blocks-range"),
-            Bytes::from(start.to_bytes()?),
-            Bytes::from(end.to_bytes()?),
-        ];
-        let range_bytes = jam_path(&range_path)?;
-        let response =
-            peek_private_nockapp(client, "block range peek", range_bytes, request_timeout).await?;
-        let mut blocks = decode_block_range_response(response)?;
+
+        let mut range_end = end;
+        let mut blocks = loop {
+            let range_path = vec![
+                Bytes::from("heaviest-chain-blocks-range"),
+                Bytes::from(start.to_bytes()?),
+                Bytes::from(range_end.to_bytes()?),
+            ];
+            let range_bytes = jam_path(&range_path)?;
+            match peek_private_nockapp(client, "block range peek", range_bytes, request_timeout)
+                .await
+            {
+                Ok(response) => break decode_block_range_response(response)?,
+                Err(err) if is_nock_grpc_response_too_large_error(&err) && range_end > start => {
+                    let requested_end = range_end;
+                    range_end = reduced_batch_end(start, range_end);
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        start,
+                        requested_end,
+                        reduced_end = range_end,
+                        "nock block range response exceeded gRPC limit; retrying a smaller range"
+                    );
+                }
+                Err(err) if is_nock_grpc_response_too_large_error(&err) => {
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        height = start,
+                        "single-block range response exceeded gRPC limit; falling back to individual peeks"
+                    );
+                    return Ok(Self::fetch_single_block_from_client(
+                        client, start, request_timeout,
+                    )
+                    .await?
+                    .into_iter()
+                    .collect());
+                }
+                Err(err) => return Err(err),
+            }
+        };
+
         for block in &mut blocks {
-            if block.block.tx_ids.is_empty() {
-                continue;
-            }
-            let txs = Self::fetch_block_transactions_from_client(
-                client, &block.block.digest, request_timeout,
-            )
-            .await?;
-            let complete = txs.len() == block.block.tx_ids.len()
-                && block
-                    .block
-                    .tx_ids
-                    .iter()
-                    .all(|expected| txs.iter().any(|(actual, _)| actual == expected));
-            if !complete {
-                return Err(BridgeError::EventMonitoring(format!(
-                    "block transaction map does not match page at height {}: expected {} transactions, got {}",
-                    block.block.height,
-                    block.block.tx_ids.len(),
-                    txs.len()
-                )));
-            }
-            block.txs = txs;
+            Self::hydrate_block_transactions_from_client(client, block, request_timeout).await?;
         }
         Ok(blocks)
+    }
+
+    async fn fetch_single_block_from_client(
+        client: &mut PrivateNockAppGrpcClient,
+        height: u64,
+        request_timeout: Duration,
+    ) -> Result<Option<NockBlockEvent>, BridgeError> {
+        let path = vec![Bytes::from("heavy-n"), Bytes::from(height.to_bytes()?)];
+        let response = peek_private_nockapp(
+            client,
+            "height block peek",
+            jam_path(&path)?,
+            request_timeout,
+        )
+        .await?;
+        let Some(mut block) = decode_block_page_response(response)? else {
+            return Ok(None);
+        };
+        if block.block.height != height {
+            return Err(BridgeError::EventMonitoring(format!(
+                "height block peek returned height {}, expected {height}",
+                block.block.height
+            )));
+        }
+        Self::hydrate_block_transactions_from_client(client, &mut block, request_timeout).await?;
+        Ok(Some(block))
+    }
+
+    async fn hydrate_block_transactions_from_client(
+        client: &mut PrivateNockAppGrpcClient,
+        block: &mut NockBlockEvent,
+        request_timeout: Duration,
+    ) -> Result<(), BridgeError> {
+        if block.block.tx_ids.is_empty() {
+            return Ok(());
+        }
+        let txs = Self::fetch_block_transactions_from_client(
+            client, &block.block.digest, &block.block.tx_ids, request_timeout,
+        )
+        .await?;
+        let complete = txs.len() == block.block.tx_ids.len()
+            && block
+                .block
+                .tx_ids
+                .iter()
+                .all(|expected| txs.iter().any(|(actual, _)| actual == expected));
+        if !complete {
+            return Err(BridgeError::EventMonitoring(format!(
+                "block transaction map does not match page at height {}: expected {} transactions, got {}",
+                block.block.height,
+                block.block.tx_ids.len(),
+                txs.len()
+            )));
+        }
+        block.txs = txs;
+        Ok(())
     }
 
     async fn fetch_block_transactions_from_client(
         client: &mut PrivateNockAppGrpcClient,
         block_id: &BlockId,
+        tx_ids: &[TxId],
         request_timeout: Duration,
     ) -> Result<Vec<(TxId, Tx)>, BridgeError> {
         let path = vec![Bytes::from("block-transactions"), Bytes::from(block_id.to_base58())];
-        let response = peek_private_nockapp(
+        match peek_private_nockapp(
             client,
             "block transactions peek",
             jam_path(&path)?,
             request_timeout,
         )
-        .await?;
-        decode_block_transactions_response(response)
+        .await
+        {
+            Ok(response) => decode_block_transactions_response(response),
+            Err(err) if is_nock_grpc_response_too_large_error(&err) => {
+                warn!(
+                    target: "bridge.nock-watcher",
+                    block_id = %block_id.to_base58(),
+                    txs_count = tx_ids.len(),
+                    "block transaction map exceeded gRPC limit; fetching transactions individually"
+                );
+                Self::fetch_transactions_individually_from_client(
+                    client, block_id, tx_ids, request_timeout,
+                )
+                .await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn fetch_transactions_individually_from_client(
+        client: &mut PrivateNockAppGrpcClient,
+        block_id: &BlockId,
+        tx_ids: &[TxId],
+        request_timeout: Duration,
+    ) -> Result<Vec<(TxId, Tx)>, BridgeError> {
+        let block_id = block_id.to_base58();
+        let mut txs = Vec::with_capacity(tx_ids.len());
+        for tx_id in tx_ids {
+            let path = vec![
+                Bytes::from("block-transaction"),
+                Bytes::from(block_id.clone()),
+                Bytes::from(tx_id.to_base58()),
+            ];
+            let response = peek_private_nockapp(
+                client,
+                "block transaction peek",
+                jam_path(&path)?,
+                request_timeout,
+            )
+            .await?;
+            txs.push((tx_id.clone(), decode_block_transaction_response(response)?));
+        }
+        Ok(txs)
     }
 }
 
@@ -1106,6 +1228,52 @@ fn decode_unit_payload(
     Ok(Some(cell.tail().noun()))
 }
 
+fn decode_block_page_response(bytes: Vec<u8>) -> Result<Option<NockBlockEvent>, BridgeError> {
+    let (response_slab, response_noun) = cue_response(bytes)?;
+    let response_space = response_slab.noun_space();
+    let Some(inner) = decode_unit_payload(response_noun, &response_space, "block page outer")?
+    else {
+        return Ok(None);
+    };
+    let Some(source_page_noun) = decode_unit_payload(inner, &response_space, "block page inner")?
+    else {
+        return Ok(None);
+    };
+    let page = Page::from_noun(&source_page_noun, &response_space).map_err(|err| {
+        BridgeError::EventMonitoring(format!("failed to decode block page: {err}"))
+    })?;
+    let mut page_slab = NounSlab::<NockJammer>::new();
+    let page_noun = page_slab.copy_into(source_page_noun, &response_space);
+    page_slab.set_root(page_noun);
+    Ok(Some(NockBlockEvent {
+        block: page,
+        page_slab,
+        page_noun,
+        txs: Vec::new(),
+    }))
+}
+
+fn decode_block_transaction_response(bytes: Vec<u8>) -> Result<Tx, BridgeError> {
+    let (response_slab, response_noun) = cue_response(bytes)?;
+    let response_space = response_slab.noun_space();
+    let Some(inner) =
+        decode_unit_payload(response_noun, &response_space, "block transaction outer")?
+    else {
+        return Err(BridgeError::EventMonitoring(
+            "block transaction response has no outer payload".into(),
+        ));
+    };
+    let Some(tx_noun) = decode_unit_payload(inner, &response_space, "block transaction inner")?
+    else {
+        return Err(BridgeError::EventMonitoring(
+            "block transaction response has no transaction".into(),
+        ));
+    };
+    Tx::from_noun(&tx_noun, &response_space).map_err(|err| {
+        BridgeError::EventMonitoring(format!("failed to decode block transaction: {err}"))
+    })
+}
+
 fn decode_block_transactions_response(bytes: Vec<u8>) -> Result<Vec<(TxId, Tx)>, BridgeError> {
     let (response_slab, response_noun) = cue_response(bytes)?;
     let response_space = response_slab.noun_space();
@@ -1226,6 +1394,25 @@ mod tests {
         String::from_utf8(bytes).expect("utf8")
     }
 
+    fn sample_page(height: u64) -> Page {
+        use nockchain_math::belt::Belt;
+        use nockchain_types::tx_engine::common::{BigNum, CoinbaseSplit, Hash};
+
+        Page {
+            digest: Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
+            pow: None,
+            parent: Hash([Belt(6), Belt(7), Belt(8), Belt(9), Belt(10)]),
+            tx_ids: Vec::new(),
+            coinbase: CoinbaseSplit::V0(Vec::new()),
+            timestamp: 1_717_171,
+            epoch_counter: 42,
+            target: BigNum::from_u64(1_000),
+            accumulated_work: BigNum::from_u64(2_000),
+            height,
+            msg: Vec::new(),
+        }
+    }
+
     #[test]
     fn jam_path_roundtrips_through_cue() {
         let path = vec![Bytes::from("block"), Bytes::from("42")];
@@ -1280,22 +1467,7 @@ mod tests {
 
     #[test]
     fn block_range_decoder_owns_each_page_noun() {
-        use nockchain_math::belt::Belt;
-        use nockchain_types::tx_engine::common::{BigNum, CoinbaseSplit, Hash};
-
-        let page = Page {
-            digest: Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
-            pow: None,
-            parent: Hash([Belt(6), Belt(7), Belt(8), Belt(9), Belt(10)]),
-            tx_ids: Vec::new(),
-            coinbase: CoinbaseSplit::V0(Vec::new()),
-            timestamp: 1_717_171,
-            epoch_counter: 42,
-            target: BigNum::from_u64(1_000),
-            accumulated_work: BigNum::from_u64(2_000),
-            height: 77,
-            msg: Vec::new(),
-        };
+        let page = sample_page(77);
         let mut slab = NounSlab::<NockJammer>::new();
         let block_id = page.digest.to_noun(&mut slab);
         let page_noun = page.to_noun(&mut slab);
@@ -1315,6 +1487,25 @@ mod tests {
         assert_eq!(event.block, page);
         assert!(event.txs.is_empty());
 
+        let owned_space = event.page_slab.noun_space();
+        let owned_page =
+            Page::from_noun(&event.page_noun, &owned_space).expect("owned page noun decodes");
+        assert_eq!(owned_page, page);
+    }
+
+    #[test]
+    fn single_block_fallback_decoder_owns_page_noun() {
+        let page = sample_page(88);
+        let mut slab = NounSlab::<NockJammer>::new();
+        let page_noun = page.to_noun(&mut slab);
+        let inner = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), page_noun]);
+        let outer = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), inner]);
+        slab.set_root(outer);
+
+        let event = decode_block_page_response(slab.jam().to_vec())
+            .expect("decode single block")
+            .expect("block payload");
+        assert_eq!(event.block, page);
         let owned_space = event.page_slab.noun_space();
         let owned_page =
             Page::from_noun(&event.page_noun, &owned_space).expect("owned page noun decodes");
@@ -1352,6 +1543,21 @@ mod tests {
         assert!(is_nock_grpc_timeout_error(&timeout_err));
         assert!(!is_nock_grpc_timeout_error(&event_monitoring_err));
         assert!(!is_nock_grpc_timeout_error(&runtime_err));
+    }
+
+    #[test]
+    fn nock_grpc_response_size_classifier_and_reduction_are_bounded() {
+        let oversized = BridgeError::EventMonitoring(
+            "gRPC status error: Error, decoded message length too large: found 20 bytes, the limit is: 10 bytes"
+                .to_string(),
+        );
+        let unrelated = BridgeError::EventMonitoring("connection unavailable".to_string());
+
+        assert!(is_nock_grpc_response_too_large_error(&oversized));
+        assert!(!is_nock_grpc_response_too_large_error(&unrelated));
+        assert_eq!(reduced_batch_end(100, 163), 131);
+        assert_eq!(reduced_batch_end(100, 101), 100);
+        assert_eq!(reduced_batch_end(100, 100), 100);
     }
 
     #[test]
