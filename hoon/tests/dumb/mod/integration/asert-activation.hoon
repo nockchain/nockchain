@@ -157,9 +157,9 @@
   (expect-eq !>(anchor-target-atom.zk-asert.bc) !>((merge:bignum got-bn)))
 ::
 ::  The test schedule starts at the canonical anchor and changes at height 8.
-::  A dynamic re-pin cannot scan ancestors: the accepted anchor must have
-::  populated the puzzle-keyed timestamp cache before its child is targeted.
-++  test-asert-repin-requires-cached-timestamp
+::  A dynamic re-pin prefers the puzzle-keyed timestamp cache, but a node parked
+::  at the predecessor may recover the timestamp from the retained anchor block.
+++  test-asert-repin-uses-retained-anchor-fallback
   =/  bc  bc-asert
   =/  con  (initial-consensus-state-custom:h bc)
   =^  par=page:t  con  (add-n-pages:h 7 con default-retain:h)
@@ -177,27 +177,40 @@
   =/  anchor-min-ts=@  (~(got h-by min-timestamps.con) anchor-id)
   =/  uncached
     con(asert-anchor-min-timestamps (~(del by asert-anchor-min-timestamps.con) %zk))
-  =/  got-bn
+  =/  cached-got-bn
     (~(compute-target-asert dcon con der bc) %zk 8 anchor-id)
+  =/  uncached-got-bn
+    (~(compute-target-asert dcon uncached der bc) %zk 8 anchor-id)
   =/  expected-target  anchor-target-atom.zk-asert-post-ai.bc
-  ;:  weld
-    %+  expect-fail
-      |.  (~(compute-target-asert dcon uncached der bc) %zk 8 anchor-id)
-    ~
   %+  expect-eq
     !>  :*  %.y
               %.y
               %.y
               expected-target
+              expected-target
+              anchor-min-ts
               anchor-min-ts
           ==
   !>  :*  =(before `expected-original)
             =(active `expected-reanchor)
             =(wrong-type ~)
-            (merge:bignum got-bn)
+            (merge:bignum cached-got-bn)
+            (merge:bignum uncached-got-bn)
             (~(get-asert-anchor-min-timestamp dcon con der bc) %zk 7 anchor-id)
+            (~(get-asert-anchor-min-timestamp dcon uncached der bc) %zk 7 anchor-id)
         ==
-  ==
+::  The retained-block fallback is valid only for the scheduled anchor height.
+::  A mismatched schedule cannot reuse the timestamp for the same block ID.
+++  test-asert-repin-rejects-wrong-height-fallback
+  =/  bc  bc-asert
+  =/  con  (initial-consensus-state-custom:h bc)
+  =^  par=page:t  con  (add-n-pages:h 7 con default-retain:h)
+  =/  anchor-id=block-id:t  ~(digest get:page:t par)
+  =/  uncached
+    con(asert-anchor-min-timestamps (~(del by asert-anchor-min-timestamps.con) %zk))
+  %+  expect-fail
+    |.  (~(get-asert-anchor-min-timestamp dcon uncached der bc) %zk 6 anchor-id)
+  ~
 ::  Zoe preserves the 150-second ZK cadence before Logos. The two Logos re-pins
 ::  are scheduled anchors whose timestamps are recovered from the validated
 ::  branch, not from puzzle-local ad hoc state.
