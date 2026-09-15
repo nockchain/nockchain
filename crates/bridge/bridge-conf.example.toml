@@ -33,6 +33,9 @@ grpc_address = "http://localhost:5555"
 base_confirmation_depth = 300
 nockchain_confirmation_depth = 400
 
+# Versioned withdrawal wire, amount, and fee policy.
+withdrawal_policy = "withdrawal-policy-v1"
+
 # Deposit nonce epoch base.
 # This exists because deposit nonce semantics were corrected by an ad-hoc
 # update about a month after launch. Set it to the last successful deposit

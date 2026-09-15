@@ -7,6 +7,7 @@ use bridge::shared::config::{
     BridgeConfigToml, NodeInfoToml, SequencerConfigToml, CANONICAL_TESTING_BRIDGE_LOCK_ROOT_B58,
     CANONICAL_TESTING_BRIDGE_NODE_PKHS_B58,
 };
+use bridge::shared::types::WITHDRAWAL_POLICY_V1_ID;
 use nockchain_math::belt::{Belt, PRIME};
 use nockchain_types::tx_engine::common::{Hash as NockPkh, SchnorrPubkey};
 use num_bigint::BigUint;
@@ -487,6 +488,7 @@ fn node_config_requires_matching_nock_signer_before_enabling_withdrawals() {
         nockchain_sequencer_api_address: None,
         base_confirmation_depth: 0,
         nockchain_confirmation_depth: 0,
+        withdrawal_policy: WITHDRAWAL_POLICY_V1_ID.to_string(),
         deposit_nonce_epoch_base: None,
         deposit_nonce_epoch_start_height: None,
         deposit_nonce_epoch_start_tx_id_base58: None,
@@ -1269,6 +1271,7 @@ fn sequencer_config_parses_public_facts_without_bridge_private_keys() {
         r#"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 nockchain_confirmation_depth = 100
+withdrawal_policy = "withdrawal-policy-v1"
 
 [sequencer_journal]
 enabled = false
@@ -1276,7 +1279,7 @@ enabled = false
 [constants]
 min_signers = 3
 total_signers = 5
-minimum_event_nocks = 1000000
+minimum_event_nocks = 100000
 nicks_fee_per_nock = 195
 base_blocks_chunk = 100
 base_start_height = 33387036
@@ -1304,6 +1307,20 @@ nockchain_start_height = 25
     assert!(!config.sequencer_journal.enabled);
     assert_eq!(
         config
+            .withdrawal_policy()
+            .expect("withdrawal policy should validate")
+            .id,
+        WITHDRAWAL_POLICY_V1_ID
+    );
+    assert_eq!(
+        config
+            .bridge_constants()
+            .expect("bridge constants should match policy")
+            .minimum_event_nocks,
+        100_000
+    );
+    assert_eq!(
+        config
             .validated_nodes()
             .expect("sequencer nodes should validate")
             .len(),
@@ -1321,11 +1338,12 @@ fn sequencer_config_defaults_journal_when_section_is_omitted() {
         r#"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 nockchain_confirmation_depth = 100
+withdrawal_policy = "withdrawal-policy-v1"
 
 [constants]
 min_signers = 3
 total_signers = 5
-minimum_event_nocks = 1000000
+minimum_event_nocks = 100000
 nicks_fee_per_nock = 195
 base_blocks_chunk = 100
 base_start_height = 33387036

@@ -45,7 +45,11 @@ fn is_rate_limit_error<E: std::fmt::Display>(e: &E) -> bool {
 use crate::deposit::types::{BaseDepositSettlementEntry, DepositSettlement, DepositSettlementData};
 use crate::shared::types::{
     zero_tip5_hash, AtomBytes, BaseBlockRef, BaseEvent, BaseEventContent, BaseEventId, EthAddress,
-    NullTag, Tip5Hash,
+    NullTag, Tip5Hash, WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NICK,
+};
+#[cfg(test)]
+use crate::shared::types::{
+    WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NOCK, WITHDRAWAL_POLICY_V1_NICKS_PER_NOCK,
 };
 use crate::withdrawal::types::{BaseWithdrawalEntry, Withdrawal};
 
@@ -91,14 +95,16 @@ alloy::sol!(
 );
 
 /// Base unit for Nock token (10^16) - Nock.sol uses 16 decimals, not 18
-pub(crate) const NOCK_BASE_UNIT: u128 = 10_000_000_000_000_000;
+#[cfg(test)]
+pub(crate) const NOCK_BASE_UNIT: u128 = WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NOCK;
 
 /// Nicks per NOCK on Nockchain (2^16)
-const NICKS_PER_NOCK: u128 = 65_536;
+#[cfg(test)]
+const NICKS_PER_NOCK: u128 = WITHDRAWAL_POLICY_V1_NICKS_PER_NOCK as u128;
 
 /// Conversion factor: NOCK base units per nick
 /// 1 nick = 10^16 / 65,536 = 152,587,890,625 NOCK base units
-pub(crate) const NOCK_BASE_PER_NICK: u128 = NOCK_BASE_UNIT / NICKS_PER_NOCK;
+pub(crate) const NOCK_BASE_PER_NICK: u128 = WITHDRAWAL_POLICY_V1_BASE_UNITS_PER_NICK;
 
 pub(crate) use self::MessageInbox as MessageInboxContract;
 
@@ -1375,6 +1381,60 @@ mod tests {
         "BRIDGE_REFUNDED_WITHDRAWAL_BASE_RPC_URL";
     const BASE_RPC_URL_ENV: &str = "BASE_RPC_URL";
 
+    const WITHDRAWAL_WIRE_V1_VECTORS_JSON: &str =
+        include_str!("../../test-fixtures/withdrawal_wire_v1_vectors.json");
+
+    #[derive(Debug, serde::Deserialize)]
+    struct WithdrawalWireFixture {
+        schema_version: u64,
+        protocol: String,
+        constants: WithdrawalWireConstantsFixture,
+        valid_vectors: Vec<WithdrawalWireValidFixture>,
+        amount_policy_vectors: Vec<WithdrawalAmountPolicyFixture>,
+        invalid_vectors: Vec<WithdrawalWireInvalidFixture>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct WithdrawalWireConstantsFixture {
+        commitment_domain: String,
+        calldata_length: usize,
+        base_calldata_length: usize,
+        trailer_magic_ascii: String,
+        full_lock_root_length: usize,
+        tip5_prime: String,
+        nock_base_units_per_nick: String,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct WithdrawalWireValidFixture {
+        name: String,
+        nock_token_address: String,
+        burner_address: String,
+        amount_base_units: String,
+        lock_root_limbs: Vec<String>,
+        selector: String,
+        commitment: String,
+        calldata: String,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct WithdrawalAmountPolicyFixture {
+        name: String,
+        amount_base_units: String,
+        expected: String,
+        amount_nicks: Option<String>,
+        bridge_fee_nicks: Option<String>,
+        amount_after_bridge_fee_nicks: Option<String>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct WithdrawalWireInvalidFixture {
+        name: String,
+        base_vector: String,
+        calldata: String,
+        expected_error: String,
+    }
+
     fn b256_from_u64(value: u64) -> B256 {
         let mut bytes = [0u8; 32];
         bytes[24..].copy_from_slice(&value.to_be_bytes());
@@ -1532,6 +1592,259 @@ mod tests {
 
     fn format_tx_hash_hex(tx_hash: &B256) -> String {
         format!("0x{}", hex_encode(tx_hash.as_slice()))
+    }
+
+    fn parse_fixture_lock_root(limbs: &[String], vector_name: &str) -> Result<Tip5Hash> {
+        if limbs.len() != 5 {
+            bail!(
+                "vector {vector_name} has {} lock-root limbs, expected 5",
+                limbs.len()
+            );
+        }
+        let limbs = limbs
+            .iter()
+            .enumerate()
+            .map(|(index, raw)| {
+                raw.parse::<u64>().with_context(|| {
+                    format!("vector {vector_name} has invalid lock-root limb {index}")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let limbs: [u64; 5] = limbs.try_into().map_err(|limbs: Vec<u64>| {
+            anyhow::anyhow!(
+                "vector {vector_name} has {} parsed lock-root limbs, expected 5",
+                limbs.len()
+            )
+        })?;
+        Ok(Tip5Hash::from_limbs(&limbs))
+    }
+
+    fn burn_decode_error_kind(error: &BurnForWithdrawalDecodeError) -> &'static str {
+        match error {
+            BurnForWithdrawalDecodeError::NotBurnForWithdrawal(_) => "not_burn_for_withdrawal",
+            BurnForWithdrawalDecodeError::AmountNotDivisible { .. } => "amount_not_divisible",
+            BurnForWithdrawalDecodeError::AmountOverflow { .. } => "amount_overflow",
+            BurnForWithdrawalDecodeError::MissingCalldataTrailer { .. } => {
+                "missing_calldata_trailer"
+            }
+            BurnForWithdrawalDecodeError::MalformedCalldata { .. } => "malformed_calldata",
+            BurnForWithdrawalDecodeError::CalldataAmountMismatch { .. } => {
+                "calldata_amount_mismatch"
+            }
+            BurnForWithdrawalDecodeError::CalldataCommitmentMismatch { .. } => {
+                "calldata_commitment_mismatch"
+            }
+            BurnForWithdrawalDecodeError::CommitmentMismatch { .. } => "commitment_mismatch",
+            BurnForWithdrawalDecodeError::InvalidLockRoot { .. } => "invalid_lock_root",
+        }
+    }
+
+    #[test]
+    fn withdrawal_wire_v1_valid_vectors_match_canonical_codec() -> Result<()> {
+        let fixture: WithdrawalWireFixture = serde_json::from_str(WITHDRAWAL_WIRE_V1_VECTORS_JSON)
+            .context("decoding WithdrawalWireV1 fixture")?;
+
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.protocol, "WithdrawalWireV1");
+        assert_eq!(
+            fixture.constants.commitment_domain.as_bytes(),
+            WITHDRAWAL_BURN_COMMITMENT_DOMAIN
+        );
+        assert_eq!(
+            fixture.constants.calldata_length,
+            WITHDRAWAL_BURN_CALLDATA_LEN
+        );
+        assert_eq!(
+            fixture.constants.base_calldata_length,
+            WITHDRAWAL_BURN_BASE_CALLDATA_LEN
+        );
+        assert_eq!(
+            fixture.constants.trailer_magic_ascii.as_bytes(),
+            WITHDRAWAL_BURN_TRAILER_MAGIC
+        );
+        assert_eq!(
+            fixture.constants.full_lock_root_length,
+            WITHDRAWAL_BURN_FULL_LOCK_ROOT_LEN
+        );
+        assert_eq!(fixture.constants.tip5_prime.parse::<u64>()?, PRIME);
+        assert_eq!(
+            fixture.constants.nock_base_units_per_nick.parse::<u128>()?,
+            NOCK_BASE_PER_NICK
+        );
+
+        for vector in &fixture.valid_vectors {
+            let nock_contract_address = Address::from_str(&vector.nock_token_address)
+                .with_context(|| format!("vector {} token address", vector.name))?;
+            let burner = Address::from_str(&vector.burner_address)
+                .with_context(|| format!("vector {} burner address", vector.name))?;
+            let amount_raw = U256::from_str(&vector.amount_base_units)
+                .with_context(|| format!("vector {} amount", vector.name))?;
+            let lock_root = parse_fixture_lock_root(&vector.lock_root_limbs, &vector.name)?;
+            let expected_selector = parse_fixed_hex::<4>(&vector.selector, "selector")?;
+            let expected_commitment =
+                B256::from(parse_fixed_hex::<32>(&vector.commitment, "commitment")?);
+            let expected_calldata = parse_hex_bytes(&vector.calldata, "calldata")?;
+
+            assert_eq!(
+                withdrawal_burn_selector(),
+                expected_selector,
+                "selector mismatch for {}",
+                vector.name
+            );
+            assert_eq!(
+                withdrawal_burn_commitment(nock_contract_address, burner, amount_raw, &lock_root,),
+                expected_commitment,
+                "commitment mismatch for {}",
+                vector.name
+            );
+            let calldata = encode_withdrawal_burn_calldata(
+                nock_contract_address, burner, amount_raw, &lock_root,
+            );
+            assert_eq!(
+                calldata.as_ref(),
+                expected_calldata,
+                "calldata mismatch for {}",
+                vector.name
+            );
+
+            let log = withdrawal_burn_log(
+                nock_contract_address, burner, amount_raw, expected_commitment,
+            );
+            let decoded = decode_burn_for_withdrawal_log_with_calldata(
+                &log,
+                &b256_from_u64(0xabcd),
+                Some(7),
+                nock_contract_address,
+                calldata.as_ref(),
+            )
+            .with_context(|| format!("decoding valid vector {}", vector.name))?;
+            assert_eq!(decoded.burner, eth_address_from_alloy(burner));
+            assert_eq!(
+                decoded.amount,
+                (amount_raw / U256::from(NOCK_BASE_PER_NICK)).to::<u64>()
+            );
+            assert_eq!(decoded.lock_root, lock_root);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn withdrawal_wire_v1_invalid_vectors_match_rejection_taxonomy() -> Result<()> {
+        let fixture: WithdrawalWireFixture = serde_json::from_str(WITHDRAWAL_WIRE_V1_VECTORS_JSON)
+            .context("decoding WithdrawalWireV1 fixture")?;
+
+        for invalid in &fixture.invalid_vectors {
+            let base = fixture
+                .valid_vectors
+                .iter()
+                .find(|vector| vector.name == invalid.base_vector)
+                .with_context(|| {
+                    format!(
+                        "invalid vector {} references missing base {}",
+                        invalid.name, invalid.base_vector
+                    )
+                })?;
+            let nock_contract_address = Address::from_str(&base.nock_token_address)
+                .with_context(|| format!("vector {} token address", base.name))?;
+            let burner = Address::from_str(&base.burner_address)
+                .with_context(|| format!("vector {} burner address", base.name))?;
+            let amount_raw = U256::from_str(&base.amount_base_units)
+                .with_context(|| format!("vector {} amount", base.name))?;
+            let event_commitment =
+                B256::from(parse_fixed_hex::<32>(&base.commitment, "commitment")?);
+            let calldata = parse_hex_bytes(&invalid.calldata, "calldata")?;
+            let log =
+                withdrawal_burn_log(nock_contract_address, burner, amount_raw, event_commitment);
+
+            let error = decode_burn_for_withdrawal_log_with_calldata(
+                &log,
+                &b256_from_u64(0xabcd),
+                Some(7),
+                nock_contract_address,
+                &calldata,
+            )
+            .expect_err("invalid WithdrawalWireV1 vector must be rejected");
+            assert_eq!(
+                burn_decode_error_kind(&error),
+                invalid.expected_error,
+                "unexpected rejection for invalid vector {}: {error}",
+                invalid.name
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn withdrawal_policy_v1_amount_vectors_match_backend_boundaries() -> Result<()> {
+        let fixture: WithdrawalWireFixture = serde_json::from_str(WITHDRAWAL_WIRE_V1_VECTORS_JSON)
+            .context("decoding WithdrawalWireV1 fixture")?;
+        let policy = crate::shared::types::WithdrawalPolicy::v1();
+        let minimum_nicks = policy
+            .minimum_gross_nocks
+            .checked_mul(policy.nicks_per_nock)
+            .context("withdrawal policy minimum overflowed")?;
+
+        for vector in &fixture.amount_policy_vectors {
+            let amount_raw = U256::from_str(&vector.amount_base_units)
+                .with_context(|| format!("vector {} amount", vector.name))?;
+            let base_units_per_nick = U256::from(policy.base_units_per_nick);
+            let actual = if amount_raw == U256::ZERO {
+                "amount_not_positive"
+            } else if amount_raw % base_units_per_nick != U256::ZERO {
+                "amount_not_divisible"
+            } else {
+                let amount_nicks = amount_raw / base_units_per_nick;
+                if amount_nicks > U256::from(policy.maximum_nicks) {
+                    "amount_overflow"
+                } else if amount_nicks < U256::from(minimum_nicks) {
+                    "amount_below_minimum"
+                } else {
+                    "valid"
+                }
+            };
+            assert_eq!(
+                actual, vector.expected,
+                "unexpected policy result for {}",
+                vector.name
+            );
+
+            if actual == "valid" {
+                let amount_nicks = (amount_raw / base_units_per_nick).to::<u64>();
+                let bridge_fee = wallet_tx_builder::fee::compute_bridge_fee(
+                    amount_nicks, policy.bridge_fee_nicks_per_started_nock,
+                );
+                assert_eq!(
+                    Some(amount_nicks),
+                    vector.amount_nicks.as_deref().map(str::parse).transpose()?,
+                    "amount nicks mismatch for {}",
+                    vector.name
+                );
+                assert_eq!(
+                    Some(bridge_fee),
+                    vector
+                        .bridge_fee_nicks
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()?,
+                    "bridge fee mismatch for {}",
+                    vector.name
+                );
+                assert_eq!(
+                    Some(amount_nicks - bridge_fee),
+                    vector
+                        .amount_after_bridge_fee_nicks
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()?,
+                    "post-bridge-fee amount mismatch for {}",
+                    vector.name
+                );
+            }
+        }
+
+        Ok(())
     }
 
     #[test]
