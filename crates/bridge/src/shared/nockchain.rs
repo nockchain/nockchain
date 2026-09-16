@@ -336,6 +336,29 @@ fn buffered_block_requires_tip_refresh(
         .is_some_and(|block| Some(block.block.height) == next_needed_height)
 }
 
+enum TipRevalidatedRange {
+    Current(Vec<NockBlockEvent>),
+    Stale(Option<NockTipInfo>),
+}
+
+async fn fetch_tip_revalidated_range<S>(
+    source: &mut S,
+    planned_tip: &NockTipInfo,
+    start: u64,
+    end: u64,
+) -> Result<TipRevalidatedRange, BridgeError>
+where
+    S: NockSourcePort,
+{
+    let blocks = source.fetch_blocks_in_range(start, end).await?;
+    let refreshed_tip = source.tip_info().await?;
+    if refreshed_tip.as_ref() == Some(planned_tip) {
+        Ok(TipRevalidatedRange::Current(blocks))
+    } else {
+        Ok(TipRevalidatedRange::Stale(refreshed_tip))
+    }
+}
+
 #[async_trait]
 impl NockSourcePort for NockGrpcSource {
     async fn tip_info(&mut self) -> Result<Option<NockTipInfo>, BridgeError> {
@@ -974,11 +997,19 @@ impl NockchainWatcher {
                 Ok(prefetched_blocks.pop_front())
             } else {
                 prefetched_blocks.clear();
+                let planned_tip = cached_tip_info.as_ref().ok_or_else(|| {
+                    BridgeError::EventMonitoring(
+                        "nock block range fetch planned without a heaviest-chain tip".into(),
+                    )
+                })?;
                 let batch_end = target_height
                     .saturating_add(NOCK_BLOCK_BATCH_SIZE - 1)
                     .min(confirmed_target);
-                match source.fetch_blocks_in_range(target_height, batch_end).await {
-                    Ok(blocks) => {
+                match fetch_tip_revalidated_range(source, planned_tip, target_height, batch_end)
+                    .await
+                {
+                    Ok(TipRevalidatedRange::Current(blocks)) => {
+                        tip_refreshed_at = Some(Instant::now());
                         let first_unexpected = blocks.iter().enumerate().find(|(index, event)| {
                             event.block.height != target_height.saturating_add(*index as u64)
                         });
@@ -992,6 +1023,22 @@ impl NockchainWatcher {
                             prefetched_blocks.extend(blocks);
                             Ok(prefetched_blocks.pop_front())
                         }
+                    }
+                    Ok(TipRevalidatedRange::Stale(refreshed_tip)) => {
+                        debug!(
+                            target: "bridge.nock-watcher",
+                            planned_height = planned_tip.height,
+                            planned_hash = planned_tip.tip_hash.as_str(),
+                            refreshed_height = refreshed_tip.as_ref().map(|tip| tip.height),
+                            refreshed_hash = refreshed_tip.as_ref().map(|tip| tip.tip_hash.as_str()),
+                            "nock tip changed during block range fetch; discarding fetched blocks"
+                        );
+                        cached_tip_info = refreshed_tip;
+                        tip_refreshed_at = Some(Instant::now());
+                        if let Some(info) = &cached_tip_info {
+                            self.update_tip_hash(info.tip_hash.clone());
+                        }
+                        continue;
                     }
                     Err(err) => Err(err),
                 }
@@ -1048,7 +1095,7 @@ impl NockchainWatcher {
                             target: "bridge.nock-watcher",
                             target = target_height,
                             error=%err,
-                            "failed to fetch block range after nock gRPC timeout; reconnecting nock gRPC source"
+                            "failed to fetch or revalidate block range after nock gRPC timeout; reconnecting nock gRPC source"
                         );
                         return Err(err);
                     }
@@ -1056,7 +1103,7 @@ impl NockchainWatcher {
                         target: "bridge.nock-watcher",
                         target = target_height,
                         error=%err,
-                        "failed to fetch block range"
+                        "failed to fetch or revalidate block range"
                     );
                 }
             }
@@ -1570,6 +1617,62 @@ mod tests {
         ));
         assert!(tip_change_invalidates_prefetch(Some(&previous), None));
         assert!(!tip_change_invalidates_prefetch(None, Some(&extension)));
+    }
+
+    struct ReorgDuringRangeSource {
+        refreshed_tip: Option<NockTipInfo>,
+        blocks: Vec<NockBlockEvent>,
+    }
+
+    #[async_trait]
+    impl NockSourcePort for ReorgDuringRangeSource {
+        async fn tip_info(&mut self) -> Result<Option<NockTipInfo>, BridgeError> {
+            Ok(self.refreshed_tip.take())
+        }
+
+        async fn fetch_block_at_height(
+            &mut self,
+            _height: u64,
+        ) -> Result<Option<NockBlockEvent>, BridgeError> {
+            Ok(None)
+        }
+
+        async fn fetch_blocks_in_range(
+            &mut self,
+            _start: u64,
+            _end: u64,
+        ) -> Result<Vec<NockBlockEvent>, BridgeError> {
+            Ok(std::mem::take(&mut self.blocks))
+        }
+    }
+
+    #[tokio::test]
+    async fn range_tip_regression_discards_first_fetched_block_before_emission() {
+        let planned_tip = NockTipInfo {
+            height: 500,
+            tip_hash: "planned-tip".to_string(),
+        };
+        let refreshed_tip = NockTipInfo {
+            height: 499,
+            tip_hash: "reorged-tip".to_string(),
+        };
+        let mut source = ReorgDuringRangeSource {
+            refreshed_tip: Some(refreshed_tip.clone()),
+            blocks: vec![sample_block_event(100, false)],
+        };
+
+        let result = fetch_tip_revalidated_range(&mut source, &planned_tip, 100, 100)
+            .await
+            .expect("range fetch and tip revalidation");
+
+        match result {
+            TipRevalidatedRange::Stale(actual) => {
+                assert_eq!(actual, Some(refreshed_tip));
+            }
+            TipRevalidatedRange::Current(_) => {
+                panic!("range fetched from a stale chain view must not become emit-ready");
+            }
+        }
     }
 
     #[test]

@@ -666,7 +666,10 @@
 ++  poke
   |=  [=wire eny=@ our=@ux now=@da dat=*]
   ^-  [(list effect) bridge-state]
-  =/  =cause  !<(cause [-:!>(*cause) dat])
+  =/  soft-cause  ((soft cause) dat)
+  ?~  soft-cause
+    ~&  "bridge: could not mold poke: {<dat>}"  !!
+  =/  =cause  u.soft-cause
   =/  tag  +<.cause
   =/  =(pole)  wire
   ~&  >  "poke: saw cause {<;;(@t tag)>} on wire {<wire>}"
