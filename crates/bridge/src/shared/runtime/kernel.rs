@@ -1493,6 +1493,32 @@ mod tests {
         slab.set_root(cause);
         slab
     }
+    fn malformed_nockchain_txs_slab() -> NounSlab<NockJammer> {
+        use nockchain_types::tx_engine::common::{BigNum, CoinbaseSplit, Hash, Page};
+
+        let page = Page {
+            digest: Hash([Belt(0); 5]),
+            pow: None,
+            parent: Hash([Belt(0); 5]),
+            tx_ids: vec![],
+            coinbase: CoinbaseSplit::V0(vec![]),
+            timestamp: 0,
+            epoch_counter: 0,
+            target: BigNum::from_u64(0),
+            accumulated_work: BigNum::from_u64(0),
+            height: 0,
+            msg: vec![],
+        };
+        let mut slab = NounSlab::new();
+        let tag = "nockchain-block".to_string().to_noun(&mut slab);
+        let page = page.to_noun(&mut slab);
+        let cause = nockvm::noun::T(
+            &mut slab,
+            &[nockvm::noun::D(0), tag, page, nockvm::noun::D(42)],
+        );
+        slab.set_root(cause);
+        slab
+    }
 
     async fn setup_bridge_nockapp() -> Result<(TempDir, NockApp), BridgeError> {
         let temp_dir = TempDir::new()
@@ -2477,6 +2503,17 @@ mod tests {
                 "malformed payload for valid tag %{tag} must be rejected at the cause mold"
             );
         }
+        let effects = app
+            .poke_sync(OnePunchWire::Poke.to_wire(), malformed_nockchain_txs_slab())
+            .map_err(|err| {
+                BridgeError::Runtime(format!(
+                    "bridge kernel poke failed for malformed nockchain tx map: {err}"
+                ))
+            })?;
+        assert!(
+            effects.is_empty(),
+            "malformed nockchain transaction map must be rejected before cause handling"
+        );
         Ok(())
     }
 

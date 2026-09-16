@@ -666,10 +666,19 @@
 ++  poke
   |=  [=wire eny=@ our=@ux now=@da dat=*]
   ^-  [(list effect) bridge-state]
-  =/  soft-cause  ((soft cause) dat)
-  ?~  soft-cause
-    ~&  "bridge: could not mold poke: {<dat>}"  !!
-  =/  =cause  u.soft-cause
+  |^
+  =/  =cause
+    ?:  (is-nockchain-block-cause dat)
+      ::  Rust decodes transaction values into typed +Tx values before encoding
+      ::  this cause. Validate the version, page, transaction IDs, and z-map
+      ::  structure here without re-molding each large transaction noun.
+      ?.  (valid-nockchain-block-cause dat)
+        ~&  'bridge: could not mold nockchain-block poke'  !!
+      !<(cause [-:!>(*cause) dat])
+    =/  soft-cause  ((soft cause) dat)
+    ?~  soft-cause
+      ~&  'bridge: could not mold poke'  !!
+    u.soft-cause
   =/  tag  +<.cause
   =/  =(pole)  wire
   ~&  >  "poke: saw cause {<;;(@t tag)>} on wire {<wire>}"
@@ -678,5 +687,40 @@
       [%poke src=?(%one-punch %signature) ver=@ *]
     (handle-cause:b cause [wire eny our now])
   ==
+  ::
+  ++  is-nockchain-block-cause
+    |=  raw=*
+    ^-  ?
+    ?@  raw  %.n
+    =/  tagged  +.raw
+    ?@  tagged  %.n
+    =(%nockchain-block -.tagged)
+  ::
+  ++  valid-nockchain-txs
+    |=  txs=*
+    ^-  ?
+    ?@  txs  =(0 txs)
+    =/  entry  -.txs
+    =/  branches  +.txs
+    ?@  entry  %.n
+    ?@  branches  %.n
+    ?~  ((soft tx-id:t) -.entry)  %.n
+    ?&  $(txs -.branches)
+        $(txs +.branches)
+    ==
+  ::
+  ++  valid-nockchain-block-cause
+    |=  raw=*
+    ^-  ?
+    ?@  raw  %.n
+    ?.  =(%0 -.raw)  %.n
+    =/  tagged  +.raw
+    ?@  tagged  %.n
+    ?.  =(%nockchain-block -.tagged)  %.n
+    =/  payload  +.tagged
+    ?@  payload  %.n
+    ?~  ((soft page:t) -.payload)  %.n
+    (valid-nockchain-txs +.payload)
+  --
 ::
 --

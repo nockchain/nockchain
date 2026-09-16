@@ -149,7 +149,7 @@
     ?:  (is-bridge-deposit-tx tx)
       ::  produce a deposit
       ::
-      ~&  bridge-deposit-detected+tx
+      ~&  bridge-deposit-detected+tx-id
       =/  maybe-intent=(unit deposit-intent)
         (extract-deposit-intent tx)
       ~&  maybe-intent+maybe-intent
@@ -217,7 +217,6 @@
       =/  out=output:v1:t  i.outputs-list
       ?.  ?=(@ -.note.out)
         $(outputs-list t.outputs-list)
-      ~&  output-note+note.out
       =/  =note-data:t  note-data.note.out
       ?:  (lth assets.note.out (mul minimum-event-nocks.constants.state nicks-per-nock:t))
         ~>  %slog.[0 'deposit-does-not-meet-minimum-requirement']
@@ -230,7 +229,6 @@
     ?~  bridge-output
       ~>  %slog.[0 'bridge data output note first name does not match bridge-lock-root first name']
       ~
-    ~&  bridge-output+bridge-output
     ?>  ?=(@ -.note.u.bridge-output)  :: assert v1 output
     =/  =note-data:t  note-data.note.u.bridge-output
     ::  we already checked that the %bridge entry exists in the note data
