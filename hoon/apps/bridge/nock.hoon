@@ -41,8 +41,13 @@
       %|
     =/  =process-fail  +.process-block
     ?-  -.process-fail
-      %stop  [[%0 %stop msg.process-fail stop-info]~ old-state]
-      %hold  [~ old-state(nock-hold.hash-state `hold.process-fail)]
+        %stop
+      [[%0 %stop msg.process-fail stop-info]~ old-state]
+    ::
+        %hold
+      ?:  !=(~ base-hold.hash-state.old-state)
+        [[%0 %stop 'incoming nockchain block would create both nock and base hold' stop-info]~ old-state]
+      [~ old-state(nock-hold.hash-state `hold.process-fail)]
     ==
   ::
       %&

@@ -7,6 +7,7 @@
 /=  base-lib  /apps/bridge/base
 /=  nock-lib  /apps/bridge/nock
 /=  hel  /tests/bridge/helpers
+/=  wt  /apps/wallet/lib/types
 /=  *  /apps/bridge/types
 |%
 ++  has-stop-effect
@@ -229,6 +230,69 @@
     !>(stopped-nock-hold)
   ::
     (expect !>(?=(~ pending-base-block-commit.hash-state.stopped)))
+  ==
+:::  Incoming Nock block missing as-of stops instead of creating simultaneous holds.
+++  test-incoming-nockchain-block-stops-before-both-holds
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  config.state  test-config:hel
+  =.  constants.state  (small-constants:hel 1 0 0)
+  =.  nockchain-constants.state  [~ *blockchain-constants:t]
+  =/  base-hold-value=[hash=nock-hash height=@]
+    [[0xa 0xa 0xa 0xa 0xa] 77]
+  =.  base-hold.hash-state.state  `base-hold-value
+  =/  selected=selected-withdrawal-note
+    (create-selected-withdrawal-note:hel config.state [0x11 0x12 0x13 0x14 0x15] 15.000.000)
+  =/  id=withdrawal-id
+    [[0x21 0x22 0x23 0x24 0x25] 8]
+  =/  request=create-withdrawal-tx
+    :*  id
+        [0x31 0x32 0x33 0x34 0x35]
+        3.000.000
+        10.000.000
+        25
+        0
+        [10 [0x41 0x42 0x43 0x44 0x45]]
+        7.000.000
+        ~[selected]
+    ==
+  =/  brg  (brg:hel)
+  =/  bridge  (lod:hel state brg)
+  =/  [build-effects=(list effect) bridge]
+    (pok:hel 0 [%0 %create-withdrawal-tx request] bridge)
+  ?~  build-effects
+    ~|('expected withdrawal-proposal-built effect' !!)
+  ?>  ?=([%0 %withdrawal-proposal-built *] i.build-effects)
+  =/  proposal=withdrawal-proposal  proposal.i.build-effects
+  =/  raw-tx=raw-tx:v1:t  (new:raw-tx:v1:t spends.transaction.proposal)
+  =/  tx=tx:t  (new:tx:t raw-tx 0)
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw-tx)
+  =/  page=page:v1:t  *page:v1:t
+  =.  height.page  nockchain-start-height.constants.state
+  =.  parent.page  *block-id:t
+  =.  digest.page  [0xb 0xb 0xb 0xb 0xb]
+  =.  tx-ids.page  (z-silt ~[tx-id])
+  =/  txs=(z-map tx-id:t tx:t)
+    (~(put z-by *(z-map tx-id:t tx:t)) tx-id tx)
+  =/  nock  ~(. nock-lib state)
+  =/  nock-cause=nockchain-block:cause  [block=page txs=txs]
+  =/  [effects=(list effect) stopped=bridge-state]
+    (incoming-nockchain-block:nock [nock-cause [~ 0 0x0 *@da]])
+  ?>  ?=(^ base-hold.hash-state.stopped)
+  =/  stopped-base-hold=[hash=nock-hash height=@]
+    u.base-hold.hash-state.stopped
+  ;:  weld
+    (expect !>((has-stop-effect effects)))
+  ::
+    (expect !>(?=(~ nock-hold.hash-state.stopped)))
+  ::
+    %+  expect-eq
+      !>(base-hold-value)
+    !>(stopped-base-hold)
+  ::
+    %+  expect-eq
+      !>(nockchain-start-height.constants.state)
+    !>(nock-hashchain-next-height.hash-state.stopped)
   ==
 ::  Any hold causes handle-cause to not emit a stop effect.
 ++  test-hold-no-stop-handle-cause
