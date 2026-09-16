@@ -849,6 +849,25 @@ impl NockchainWatcher {
                 continue;
             }
 
+            let nock_hold_active = match self.deps.runtime.peek_nock_hold().await {
+                Ok(active) => active,
+                Err(err) => {
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        error=%err,
+                        "failed to peek nock hold"
+                    );
+                    sleep(poll_interval).await;
+                    continue;
+                }
+            };
+            if nock_hold_active {
+                nock_block_in_flight = None;
+                prefetched_blocks.clear();
+                sleep(poll_interval).await;
+                continue;
+            }
+
             let next_needed_height = match self.deps.runtime.peek_nock_next_height().await {
                 Ok(height) => height,
                 Err(err) => {

@@ -46,6 +46,9 @@
     ::
         %hold
       ?:  !=(~ base-hold.hash-state.old-state)
+        ?^  repaired=(repair-stale-base-hold ~)
+          ~>  %slog.[0 'repaired stale nock hashchain lineage and cleared base hold']
+          [~ u.repaired(nock-hold.hash-state `hold.process-fail)]
         [[%0 %stop 'incoming nockchain block would create both nock and base hold' stop-info]~ old-state]
       [~ old-state(nock-hold.hash-state `hold.process-fail)]
     ==
@@ -78,6 +81,106 @@
     ~&  eth-sig-requests+eth-sig-requests
     [deposit-effects state]
   ==
+::  Mainnet nonce 14 settled a 100,000,000-nick deposit from block 46,849
+::  before the minimum became 100,000 NOCK. Preserve that canonical block
+::  content when replaying or repairing the recursive Nock hashchain.
+++  restore-mainnet-legacy-deposit
+  |=  block=nock-block
+  ^-  nock-block
+  =/  expected-block-id=block-id:t
+    [0xea58.5f21.dd2b.1c45 0xa800.c0cb.33d7.31e1 0x74d7.9cc6.c9ae.2c02 0x29c.34b8.66c4.de58 0xeac3.e1ca.0329.b3fb]
+  =/  name=nname:t
+    :*  [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
+        [0xf68c.c7dd.f2ba.7818 0x828a.9a6d.3dcf.f822 0x409f.62b1.3f56.88d9 0x46ea.2f97.f8f8.c4d7 0x561d.0332.2829.9954]
+        ~
+    ==
+  ?.  ?&  =(46.849 height.block)
+           =(expected-block-id block-id.block)
+           =(46.810 nockchain-start-height.constants.state)
+           =(-.name (first:nname:v1:t bridge-lock-root.config.state))
+       ==
+    block
+  ?:  (~(has z-by deposits.block) name)
+    block
+  =/  recipient=base-addr  0x4be0.28f3.ed83.7add.fcb5.233f.0af7.6b61.5947.e5b4
+  =/  legacy=deposit
+    :*  [0x62a3.2805.7e94.5a0a 0xdff6.74b9.94a9.563e 0xb432.72d6.4a88.e1e4 0x7df8.12ab.a7c3.9a6a 0x7879.dcf7.13da.5670]
+        name
+        `recipient
+        99.702.430
+        297.570
+    ==
+  block(deposits (~(put z-by deposits.block) name legacy))
+::
+++  repair-stale-base-hold
+  |=  ~
+  ^-  (unit bridge-state)
+  =/  maybe-hold  base-hold.hash-state.state
+  ?~  maybe-hold  ~
+  =/  hold=[hash=nock-hash height=@]  u.maybe-hold
+  =/  old-chain  nock-hashchain.hash-state.state
+  ?:  (~(has z-by old-chain) hash.hold)
+    `state(base-hold.hash-state ~)
+  ?.  (lth height.hold nock-hashchain-next-height.hash-state.state)
+    ~
+  =/  maybe-entries
+    ^-  (unit (list [nock-hash nock-block]))
+    =/  cursor=nock-hash  last-nock-block.hash-state.state
+    =/  chronological=(list [nock-hash nock-block])  ~
+    |-
+    ?:  =(cursor *nock-hash)
+      `chronological
+    =/  maybe-block  (~(get z-by old-chain) cursor)
+    ?~  maybe-block  ~
+    $(cursor prev.u.maybe-block, chronological [[cursor u.maybe-block] chronological])
+  ?~  maybe-entries  ~
+  =/  rebuilt
+    ^-  [new-chain=(z-map nock-hash nock-block) old-to-new=(z-map nock-hash nock-hash) new-last=nock-hash added-deposits=(z-mip nock-hash nname:t deposit)]
+    =/  entries=(list [nock-hash nock-block])  u.maybe-entries
+    =/  new-chain=(z-map nock-hash nock-block)
+      *(z-map nock-hash nock-block)
+    =/  old-to-new=(z-map nock-hash nock-hash)
+      *(z-map nock-hash nock-hash)
+    =/  new-last=nock-hash  *nock-hash
+    =/  added-deposits=(z-mip nock-hash nname:t deposit)
+      *(z-mip nock-hash nname:t deposit)
+    |-
+    ?~  entries  [new-chain old-to-new new-last added-deposits]
+    =/  old-hash=nock-hash  -.i.entries
+    =/  relinked=nock-block  +.i.entries(prev new-last)
+    =/  rebuilt-block=nock-block
+      (restore-mainnet-legacy-deposit relinked)
+    =/  new-hash=nock-hash  (hash:nock-block rebuilt-block)
+    =/  newly-added=(z-map nname:t deposit)
+      (~(dif z-by deposits.rebuilt-block) deposits.relinked)
+    =.  added-deposits
+      %+  roll  ~(tap z-by newly-added)
+      |=  [[name=nname:t =deposit] acc=_added-deposits]
+      (~(put z-bi acc) new-hash name deposit)
+    $(entries t.entries, new-chain (~(put z-by new-chain) new-hash rebuilt-block), old-to-new (~(put z-by old-to-new) old-hash new-hash), new-last new-hash, added-deposits added-deposits)
+  ?.  (~(has z-by new-chain.rebuilt) hash.hold)
+    ~
+  =/  maybe-unsettled
+    ^-  (unit (z-mip nock-hash nname:t deposit))
+    =/  entries=(list [nock-hash [nname:t deposit]])
+      ~(tap z-bi unsettled-deposits.hash-state.state)
+    =/  new-unsettled=(z-mip nock-hash nname:t deposit)
+      added-deposits.rebuilt
+    |-
+    ?~  entries  `new-unsettled
+    =/  old-hash=nock-hash  -.i.entries
+    =/  maybe-new-hash  (~(get z-by old-to-new.rebuilt) old-hash)
+    ?~  maybe-new-hash  ~
+    =/  name=nname:t  -.+.i.entries
+    =/  =deposit  +.+.i.entries
+    $(entries t.entries, new-unsettled (~(put z-bi new-unsettled) u.maybe-new-hash name deposit))
+  ?~  maybe-unsettled  ~
+  =.  nock-hashchain.hash-state.state  new-chain.rebuilt
+  =.  last-nock-block.hash-state.state  new-last.rebuilt
+  =.  unsettled-deposits.hash-state.state  u.maybe-unsettled
+  =.  base-hold.hash-state.state  ~
+  `state
+::
 ::
 ::  check if nockchain page belongs to hashchain
 ++  validate-nockchain-page-sequence
@@ -122,6 +225,7 @@
         ::  this is okay.
         prev=last-nock-block.hash-state.state
     ==
+  =.  nock-blk  (restore-mainnet-legacy-deposit nock-blk)
   =/  nock-blk-hash  (hash:nock-block nock-blk)
   =.  last-block.state  block
   =.  nock-hashchain.hash-state.state

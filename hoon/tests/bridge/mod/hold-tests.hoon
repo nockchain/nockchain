@@ -294,6 +294,103 @@
       !>(nockchain-start-height.constants.state)
     !>(nock-hashchain-next-height.hash-state.stopped)
   ==
+:::  A successful lineage repair preserves the new Nock hold in the same poke.
+++  test-incoming-nockchain-block-preserves-hold-after-repair
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  config.state  test-config:hel
+  =.  constants.state  (small-constants:hel 1 0 0)
+  =.  nockchain-constants.state  [~ *blockchain-constants:t]
+  =/  old-hash-1=nock-hash  [0x11 0x11 0x11 0x11 0x11]
+  =/  old-hash-2=nock-hash  [0x22 0x22 0x22 0x22 0x22]
+  =/  block-1=nock-block
+    :*  %nock
+        %0
+        0
+        [0x61 0x62 0x63 0x64 0x65]
+        *(z-map nname:t deposit)
+        *(z-map nname:t withdrawal-settlement)
+        *nock-hash
+    ==
+  =/  canonical-hash-1=nock-hash  (hash:nock-block block-1)
+  =/  block-2=nock-block
+    :*  %nock
+        %0
+        1
+        [0x71 0x72 0x73 0x74 0x75]
+        *(z-map nname:t deposit)
+        *(z-map nname:t withdrawal-settlement)
+        old-hash-1
+    ==
+  =/  canonical-block-2=nock-block  block-2(prev canonical-hash-1)
+  =/  canonical-hash-2=nock-hash  (hash:nock-block canonical-block-2)
+  =.  nock-hashchain.hash-state.state
+    %+  ~(put z-by (~(put z-by *(z-map nock-hash nock-block)) old-hash-1 block-1))
+      old-hash-2
+    block-2
+  =.  last-nock-block.hash-state.state  old-hash-2
+  =.  nock-hashchain-next-height.hash-state.state  2
+  =.  base-hold.hash-state.state  `[canonical-hash-2 1]
+  =/  selected=selected-withdrawal-note
+    (create-selected-withdrawal-note:hel config.state [0x81 0x82 0x83 0x84 0x85] 15.000.000)
+  =/  id=withdrawal-id
+    [[0x91 0x92 0x93 0x94 0x95] 8]
+  =/  request=create-withdrawal-tx
+    :*  id
+        [0xa1 0xa2 0xa3 0xa4 0xa5]
+        3.000.000
+        10.000.000
+        25
+        0
+        [10 [0xb1 0xb2 0xb3 0xb4 0xb5]]
+        7.000.000
+        ~[selected]
+    ==
+  =/  brg  (brg:hel)
+  =/  bridge  (lod:hel state brg)
+  =/  [build-effects=(list effect) bridge]
+    (pok:hel 0 [%0 %create-withdrawal-tx request] bridge)
+  ?~  build-effects
+    ~|('expected withdrawal-proposal-built effect' !!)
+  ?>  ?=([%0 %withdrawal-proposal-built *] i.build-effects)
+  =/  proposal=withdrawal-proposal  proposal.i.build-effects
+  =/  raw-tx=raw-tx:v1:t  (new:raw-tx:v1:t spends.transaction.proposal)
+  =/  tx=tx:t  (new:tx:t raw-tx 0)
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw-tx)
+  =/  page=page:v1:t  *page:v1:t
+  =.  height.page  2
+  =.  parent.page  block-id.block-2
+  =.  digest.page  [0xc1 0xc2 0xc3 0xc4 0xc5]
+  =.  tx-ids.page  (z-silt ~[tx-id])
+  =/  txs=(z-map tx-id:t tx:t)
+    (~(put z-by *(z-map tx-id:t tx:t)) tx-id tx)
+  =/  nock  ~(. nock-lib state)
+  =/  nock-cause=nockchain-block:cause  [block=page txs=txs]
+  =/  [effects=(list effect) repaired=bridge-state]
+    (incoming-nockchain-block:nock [nock-cause [~ 0 0x0 *@da]])
+  ?>  ?=(^ nock-hold.hash-state.repaired)
+  =/  hold=[hash=base-hash height=@]  u.nock-hold.hash-state.repaired
+  ;:  weld
+    (expect !>(?=(~ effects)))
+  ::
+    (expect !>(?=(~ base-hold.hash-state.repaired)))
+  ::
+    %+  expect-eq
+      !>(canonical-hash-2)
+    !>(last-nock-block.hash-state.repaired)
+  ::
+    %+  expect-eq
+      !>(2)
+    !>(nock-hashchain-next-height.hash-state.repaired)
+  ::
+    %+  expect-eq
+      !>(-.id)
+    !>(hash.hold)
+  ::
+    %+  expect-eq
+      !>(25)
+    !>(height.hold)
+  ==
 ::  Any hold causes handle-cause to not emit a stop effect.
 ++  test-hold-no-stop-handle-cause
   ^-  tang
@@ -449,4 +546,157 @@
   ::
     (expect !>((~(has z-by base-hashchain.hash-state.committed) blocks-hash.pending)))
   ==
+::  Stale hash keys and prev links are rebuilt before clearing a Base hold.
+++  test-stale-nock-hashchain-repair
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  old-hash-1=nock-hash  [0x11 0x11 0x11 0x11 0x11]
+  =/  old-hash-2=nock-hash  [0x22 0x22 0x22 0x22 0x22]
+  =/  dep-name=nname:t
+    [[0x31 0x32 0x33 0x34 0x35] [0x41 0x42 0x43 0x44 0x45] ~]
+  =/  dep=deposit
+    (create-deposit:hel [0x51 0x52 0x53 0x54 0x55] dep-name `0x1234 1.000.000 2)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) dep-name dep)
+  =/  block-1=nock-block
+    :*  %nock
+        %0
+        1
+        [0x61 0x62 0x63 0x64 0x65]
+        *(z-map nname:t deposit)
+        *(z-map nname:t withdrawal-settlement)
+        *nock-hash
+    ==
+  =/  canonical-hash-1=nock-hash  (hash:nock-block block-1)
+  =/  block-2=nock-block
+    :*  %nock
+        %0
+        2
+        [0x71 0x72 0x73 0x74 0x75]
+        deposits
+        *(z-map nname:t withdrawal-settlement)
+        old-hash-1
+    ==
+  =/  canonical-block-2=nock-block  block-2(prev canonical-hash-1)
+  =/  canonical-hash-2=nock-hash  (hash:nock-block canonical-block-2)
+  =.  nock-hashchain.hash-state.state
+    %+  ~(put z-by (~(put z-by *(z-map nock-hash nock-block)) old-hash-1 block-1))
+      old-hash-2
+    block-2
+  =.  last-nock-block.hash-state.state  old-hash-2
+  =.  nock-hashchain-next-height.hash-state.state  3
+  =.  base-hold.hash-state.state  `[canonical-hash-2 2]
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi *(z-mip nock-hash nname:t deposit)) old-hash-2 dep-name dep)
+  =/  nock  ~(. nock-lib state)
+  =/  repaired=(unit bridge-state)  (repair-stale-base-hold:nock ~)
+  ?~  repaired
+    ~|('expected stale nock hashchain repair to succeed' !!)
+  =/  new-state=bridge-state  u.repaired
+  =/  stored-block-2=nock-block
+    (~(got z-by nock-hashchain.hash-state.new-state) canonical-hash-2)
+  =/  old-chain-key-remains=?
+    (~(has z-by nock-hashchain.hash-state.new-state) old-hash-2)
+  =/  old-unsettled-key-remains=?
+    (~(has z-bi unsettled-deposits.hash-state.new-state) old-hash-2 dep-name)
+  ;:  weld
+    (expect !>(?=(~ base-hold.hash-state.new-state)))
+  ::
+    %+  expect-eq
+      !>(canonical-hash-2)
+    !>(last-nock-block.hash-state.new-state)
+  ::
+    %+  expect-eq
+      !>(canonical-hash-1)
+    !>(prev.stored-block-2)
+  ::
+    (expect !>((~(has z-by nock-hashchain.hash-state.new-state) canonical-hash-1)))
+  ::
+    (expect !>((~(has z-by nock-hashchain.hash-state.new-state) canonical-hash-2)))
+  ::
+    (expect !>(!old-chain-key-remains))
+  ::
+    (expect !>((~(has z-bi unsettled-deposits.hash-state.new-state) canonical-hash-2 dep-name)))
+  ::
+    (expect !>(!old-unsettled-key-remains))
+  ==
+::
+::  A hold is never cleared when rebuilding cannot produce its target hash.
+++  test-stale-nock-hashchain-repair-rejects-unknown-target
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  old-hash=nock-hash  [0x81 0x82 0x83 0x84 0x85]
+  =/  block=nock-block
+    :*  %nock
+        %0
+        1
+        [0x91 0x92 0x93 0x94 0x95]
+        *(z-map nname:t deposit)
+        *(z-map nname:t withdrawal-settlement)
+        *nock-hash
+    ==
+  =.  nock-hashchain.hash-state.state
+    (~(put z-by *(z-map nock-hash nock-block)) old-hash block)
+  =.  last-nock-block.hash-state.state  old-hash
+  =.  nock-hashchain-next-height.hash-state.state  2
+  =.  base-hold.hash-state.state  `[[0xa1 0xa2 0xa3 0xa4 0xa5] 1]
+  =/  nock  ~(. nock-lib state)
+  =/  repaired=(unit bridge-state)  (repair-stale-base-hold:nock ~)
+  (expect !>(?=(~ repaired)))
+::
+::  Fresh mainnet replay restores the one deposit accepted below today's minimum.
+++  test-mainnet-legacy-deposit-restored
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  name=nname:t
+    :*  [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
+        [0xf68c.c7dd.f2ba.7818 0x828a.9a6d.3dcf.f822 0x409f.62b1.3f56.88d9 0x46ea.2f97.f8f8.c4d7 0x561d.0332.2829.9954]
+        ~
+    ==
+  =.  bridge-lock-root.config.state  -.name
+  =/  block=nock-block
+    :*  %nock
+        %0
+        46.849
+        [0xea58.5f21.dd2b.1c45 0xa800.c0cb.33d7.31e1 0x74d7.9cc6.c9ae.2c02 0x29c.34b8.66c4.de58 0xeac3.e1ca.0329.b3fb]
+        *(z-map nname:t deposit)
+        *(z-map nname:t withdrawal-settlement)
+        *nock-hash
+    ==
+  =/  nock  ~(. nock-lib state)
+  =/  restored=nock-block  (restore-mainnet-legacy-deposit:nock block)
+  =/  legacy=deposit  (~(got z-by deposits.restored) name)
+  =/  old-hash=nock-hash  [0xd1 0xd2 0xd3 0xd4 0xd5]
+  =/  restored-hash=nock-hash  (hash:nock-block restored)
+  =.  nock-hashchain.hash-state.state
+    (~(put z-by *(z-map nock-hash nock-block)) old-hash block)
+  =.  last-nock-block.hash-state.state  old-hash
+  =.  nock-hashchain-next-height.hash-state.state  46.850
+  =.  base-hold.hash-state.state  `[restored-hash 46.849]
+  =/  repair-nock  ~(. nock-lib state)
+  =/  repaired=(unit bridge-state)  (repair-stale-base-hold:repair-nock ~)
+  ?~  repaired
+    ~|('expected legacy lineage repair to succeed' !!)
+  =/  legacy-tracked=?
+    (~(has z-bi unsettled-deposits.hash-state.u.repaired) restored-hash name)
+  ;:  weld
+    %+  expect-eq
+      !>(99.702.430)
+    !>(amount-to-mint.legacy)
+  ::
+    %+  expect-eq
+      !>(297.570)
+    !>(fee.legacy)
+  ::
+    %+  expect-eq
+      !>(`(unit base-addr)`[~ 0x4be0.28f3.ed83.7add.fcb5.233f.0af7.6b61.5947.e5b4])
+    !>(dest.legacy)
+  ::
+    %+  expect-eq
+      !>(restored)
+    !>((restore-mainnet-legacy-deposit:nock restored))
+  ::
+    (expect !>(legacy-tracked))
+  ==
+::
 --
