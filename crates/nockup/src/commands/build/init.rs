@@ -81,8 +81,7 @@ pub async fn run() -> Result<()> {
         .context("Failed to install dependencies")?;
 
     println!("\nAll done! Project is ready.");
-    println!("   cd {}", project_name.cyan());
-    println!("   nockup run");
+    println!("   nockup project run {}", project_name.cyan());
     Ok(())
 }
 
