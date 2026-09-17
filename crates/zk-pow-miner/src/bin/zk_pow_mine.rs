@@ -1,9 +1,9 @@
 //! `zk-pow-mine` — standalone ZK-PoW (puzzle-nock STARK) miner.
 //!
 //! Connects to a `nockchain` node's private NockAppService gRPC,
-//! subscribes to `%mine-zk` candidate effects, runs the STARK in a
-//! worker pool, and pokes solutions back as `%pow` commands on the
-//! `ZkPowMinerWire::Mined` wire.
+//! subscribes to `%mine-zk` candidate effects, searches them in a
+//! CPU or CUDA worker pool, proves winners, and pokes solutions back
+//! on the `ZkPowMinerWire::Mined` wire.
 //!
 //! Quick start (assuming a fakenet node on `127.0.0.1:5555`):
 //!
@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 use zk_pow_miner::run::{run, MinerConfig, MinerError};
+#[cfg(feature = "cuda")]
+use zk_pow_miner::run::{run_cuda, CudaConfig};
 
 /// `zk-pow-mine` — standalone ZK PoW block miner.
 #[derive(Parser, Debug)]
@@ -43,10 +45,39 @@ struct Args {
     #[arg(long, value_parser = clap::value_parser!(MiningPkhConfig), num_args = 1..)]
     mining_pkh_adv: Option<Vec<MiningPkhConfig>>,
 
-    /// Worker pool size (number of concurrent SerfThreads, each running miner.jam).
-    /// Defaults to `num_cpus - 1` (min 1).
+    /// CPU worker pool size. Defaults to `num_cpus - 1` (min 1).
     #[arg(long)]
     num_threads: Option<u64>,
+
+    /// Use the Serf CPU search path even when CUDA support is compiled in.
+    #[cfg(feature = "cuda")]
+    #[arg(long)]
+    cpu: bool,
+
+    /// Comma-delimited CUDA device ordinals. Empty means every visible device.
+    #[cfg(feature = "cuda")]
+    #[arg(long, value_delimiter = ',')]
+    cuda_devices: Vec<u32>,
+
+    /// Serf CPU provers shared round-robin across CUDA devices.
+    #[cfg(feature = "cuda")]
+    #[arg(long, default_value = "1")]
+    cuda_provers: u32,
+
+    /// Nonces evaluated per CUDA kernel launch and device.
+    #[cfg(feature = "cuda")]
+    #[arg(long, default_value = "262144")]
+    cuda_batch_size: u64,
+
+    /// CUDA blocks launched per streaming multiprocessor.
+    #[cfg(feature = "cuda")]
+    #[arg(long, default_value = "12")]
+    cuda_blocks_per_sm: u32,
+
+    /// CUDA threads per block. Must be a multiple of 32.
+    #[cfg(feature = "cuda")]
+    #[arg(long, default_value = "512")]
+    cuda_threads_per_block: u32,
 
     /// Initial reconnect backoff in milliseconds.
     #[arg(long, default_value = "1000")]
@@ -83,6 +114,16 @@ fn main() -> ExitCode {
         .num_threads
         .unwrap_or_else(|| num_cpus::get().saturating_sub(1).max(1) as u64);
 
+    #[cfg(feature = "cuda")]
+    let use_cuda = !args.cpu;
+    #[cfg(feature = "cuda")]
+    let cuda_cfg = CudaConfig {
+        devices: args.cuda_devices.clone(),
+        prover_count: args.cuda_provers,
+        batch_size: args.cuda_batch_size,
+        blocks_per_sm: args.cuda_blocks_per_sm,
+        threads_per_block: args.cuda_threads_per_block,
+    };
     let cfg = MinerConfig {
         node_addr: args.node_addr,
         mining_pkh_configs: pkh_configs,
@@ -106,7 +147,6 @@ fn main() -> ExitCode {
     };
 
     let r: Result<(), MinerError> = rt.block_on(async {
-        info!(node = %cfg.node_addr, threads = cfg.num_threads, "zk-pow-mine: starting");
         let shutdown = CancellationToken::new();
         // Spawn a Ctrl-C watcher.
         let shutdown_clone = shutdown.clone();
@@ -116,6 +156,12 @@ fn main() -> ExitCode {
                 shutdown_clone.cancel();
             }
         });
+        #[cfg(feature = "cuda")]
+        if use_cuda {
+            info!(node = %cfg.node_addr, devices = ?cuda_cfg.devices, "zk-pow-mine: starting CUDA backend");
+            return run_cuda(cfg, cuda_cfg, shutdown).await;
+        }
+        info!(node = %cfg.node_addr, threads = cfg.num_threads, "zk-pow-mine: starting CPU backend");
         run(cfg, shutdown).await
     });
 

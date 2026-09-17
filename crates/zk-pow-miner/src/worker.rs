@@ -38,6 +38,16 @@ pub enum WorkerError {
     SerfSpawn(String),
     #[error("serf poke failed: {0}")]
     Poke(String),
+    #[error("invalid mining candidate: {0}")]
+    Candidate(String),
+    #[error("CUDA mining failed: {0}")]
+    Cuda(String),
+    #[error("CUDA search result failed CPU validation")]
+    CudaDigestMismatch,
+    #[error("CUDA reported a winner that the miner kernel rejected")]
+    CudaFalsePositive,
+    #[error("mining attempt was cancelled")]
+    Cancelled,
     #[error("decoding mine-result effect: {0}")]
     Decode(&'static str),
     #[error("miner kernel returned no mine-result effect")]
@@ -60,20 +70,18 @@ pub enum MineResult {
         hash_slab: NounSlab,
         poke_slab: NounSlab,
     },
-    /// Proof digest did not clear the target. `next_nonce` is the digest
-    /// returned by the miner kernel — to be used as the nonce on the
-    /// next attempt for the same candidate. This is how the old driver
-    /// stepped through the nonce space; cribbed verbatim.
+    /// Proof digest did not clear the target. `next_nonce` is the next
+    /// nonce selected by the worker. Serf workers use the kernel-returned
+    /// digest; CUDA workers advance past the completed nonce batch.
     Retry { next_nonce: NounSlab },
 }
 
 #[async_trait]
 pub trait Worker: Send + Sync + 'static {
     fn id(&self) -> WorkerId;
-    /// Signal the worker to abort its current `mine_attempt`. The
-    /// attempt's future will resolve with `Err(WorkerError::Poke(...))`
-    /// shortly after (the underlying Nock interpreter polls the
-    /// cancel flag at branch / opcode boundaries).
+    /// Signal the worker to abort its current `mine_attempt`. Serf workers
+    /// poll the cancellation flag at branch and opcode boundaries; CUDA
+    /// workers stop after the current kernel batch or before queued proving.
     fn cancel(&self);
     /// Run one mining attempt. The caller pre-builds the `[version
     /// header nonce target pow-len]` poke slab via [`build_candidate_poke`]
@@ -465,7 +473,13 @@ mod tests {
             .await
             .expect("losing mine_attempt")
         {
-            MineResult::Retry { .. } => {}
+            MineResult::Retry { next_nonce } => {
+                assert_eq!(
+                    crate::v5::decode_digest_slab(&next_nonce).expect("retry digest"),
+                    crate::v5::v5_pow_digest([0; 5], [1, 0, 0, 0, 0], 2),
+                    "native V5 digest oracle must match the Hoon miner kernel",
+                );
+            }
             MineResult::Success { .. } => panic!("zero target accepted losing nonce"),
         }
         let losing_elapsed = losing_started.elapsed();

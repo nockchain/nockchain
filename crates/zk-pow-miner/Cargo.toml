@@ -2,8 +2,12 @@
 name = "zk-pow-miner"
 version.workspace = true
 edition.workspace = true
-description = "Standalone ZK PoW (puzzle-nock STARK) block miner. Connects to a nockchain node via the private NockAppService gRPC, subscribes to %mine-zk effects, runs the STARK prover in a SerfThread worker pool, and submits solutions back."
+description = "Standalone ZK PoW block miner with CUDA V5 search and Serf STARK proving."
 publish = false
+
+[features]
+default = []
+cuda = []
 
 [lib]
 name = "zk_pow_miner"
@@ -13,12 +17,18 @@ path = "src/lib.rs"
 name = "zk-pow-mine"
 path = "src/bin/zk_pow_mine.rs"
 
+[[bin]]
+name = "zk-pow-cuda-bench"
+path = "src/bin/zk_pow_cuda_bench.rs"
+required-features = ["cuda"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
+ibig = { workspace = true }
 kernels-open-miner = { workspace = true }
 nockapp = { workspace = true }
 nockapp-grpc = { workspace = true }
@@ -37,7 +47,6 @@ zkvm-jetpack = { workspace = true }
 
 [dev-dependencies]
 gnort = { workspace = true }
-ibig = { workspace = true }
 noun-serde = { workspace = true }
 once_cell = { workspace = true }
 tempfile = { workspace = true }

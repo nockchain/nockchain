@@ -29,6 +29,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+#[cfg(feature = "cuda")]
+use crate::cuda::{device_count, CudaWorker, SharedProver};
 use crate::pool::Pool;
 use crate::wire::ZkPowMinerWire;
 use crate::worker::{build_candidate_poke, random_nonce, MineResult, SerfWorker, Worker};
@@ -87,6 +89,64 @@ impl MinerConfig {
     }
 }
 
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone)]
+pub struct CudaConfig {
+    /// CUDA device ordinals. Empty selects every visible device.
+    pub devices: Vec<u32>,
+    /// Serf prover workers shared round-robin across CUDA devices.
+    pub prover_count: u32,
+    /// Nonces evaluated by each device before checking cancellation.
+    pub batch_size: u64,
+    /// CUDA blocks launched per streaming multiprocessor.
+    pub blocks_per_sm: u32,
+    /// CUDA threads per block. Must be a multiple of 32.
+    pub threads_per_block: u32,
+}
+
+#[cfg(feature = "cuda")]
+impl Default for CudaConfig {
+    fn default() -> Self {
+        Self {
+            devices: Vec::new(),
+            prover_count: 1,
+            batch_size: 262_144,
+            blocks_per_sm: 12,
+            threads_per_block: 512,
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl CudaConfig {
+    fn validate(&self) -> Result<(), MinerError> {
+        if self.prover_count == 0 {
+            return Err(MinerError::InvalidConfig(
+                "CUDA prover-count must be nonzero".to_owned(),
+            ));
+        }
+        if self.batch_size == 0 {
+            return Err(MinerError::InvalidConfig(
+                "CUDA batch-size must be nonzero".to_owned(),
+            ));
+        }
+        if self.blocks_per_sm == 0 {
+            return Err(MinerError::InvalidConfig(
+                "CUDA blocks-per-sm must be nonzero".to_owned(),
+            ));
+        }
+        if self.threads_per_block < 32
+            || self.threads_per_block > 1024
+            || !self.threads_per_block.is_multiple_of(32)
+        {
+            return Err(MinerError::InvalidConfig(
+                "CUDA threads-per-block must be a multiple of 32 between 32 and 1024".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MinerError {
     #[error("invalid miner configuration: {0}")]
@@ -114,6 +174,80 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
     let pool = build_pool(cfg.num_threads).await?;
     info!("zk-pow-miner: pool ready; entering main loop");
     run_with_pool(cfg, pool, shutdown).await
+}
+
+#[cfg(feature = "cuda")]
+pub async fn run_cuda(
+    cfg: MinerConfig,
+    cuda: CudaConfig,
+    shutdown: CancellationToken,
+) -> Result<(), MinerError> {
+    cfg.validate()?;
+    cuda.validate()?;
+    let devices = if cuda.devices.is_empty() {
+        let count = device_count().map_err(|error| MinerError::WorkerSpawn(error.to_string()))?;
+        (0..count).collect::<Vec<_>>()
+    } else {
+        cuda.devices.clone()
+    };
+    if devices.is_empty() {
+        return Err(MinerError::InvalidConfig(
+            "CUDA backend selected but no CUDA devices are visible".to_owned(),
+        ));
+    }
+    let mut unique_devices = devices.clone();
+    unique_devices.sort_unstable();
+    unique_devices.dedup();
+    if unique_devices.len() != devices.len() {
+        return Err(MinerError::InvalidConfig(
+            "CUDA device list contains duplicate ordinals".to_owned(),
+        ));
+    }
+    if cuda.prover_count as usize > devices.len() {
+        return Err(MinerError::InvalidConfig(
+            "CUDA prover-count cannot exceed the selected device count".to_owned(),
+        ));
+    }
+    info!(
+        node = %cfg.node_addr,
+        devices = ?devices,
+        provers = cuda.prover_count,
+        batch_size = cuda.batch_size,
+        blocks_per_sm = cuda.blocks_per_sm,
+        threads_per_block = cuda.threads_per_block,
+        "zk-pow-miner: spawning CUDA worker pool"
+    );
+    let pool = build_cuda_pool(&devices, &cuda).await?;
+    info!("zk-pow-miner: CUDA pool ready; entering main loop");
+    run_with_pool(cfg, pool, shutdown).await
+}
+
+#[cfg(feature = "cuda")]
+async fn build_cuda_pool(devices: &[u32], cuda: &CudaConfig) -> Result<Pool, MinerError> {
+    let hot_state = zkvm_jetpack::hot::produce_prover_hot_state();
+    let mut provers = Vec::with_capacity(cuda.prover_count as usize);
+    for id in 0..cuda.prover_count {
+        let prover = SharedProver::spawn(u64::from(id), hot_state.clone())
+            .await
+            .map_err(|error| {
+                MinerError::WorkerSpawn(format!("shared CUDA prover {id}: {error}"))
+            })?;
+        provers.push(Arc::new(prover));
+    }
+
+    let mut workers: Vec<Arc<dyn Worker>> = Vec::with_capacity(devices.len());
+    for (id, &device) in devices.iter().enumerate() {
+        let prover = Arc::clone(&provers[id % provers.len()]);
+        let worker = CudaWorker::spawn(
+            id as u64, device, cuda.batch_size, cuda.blocks_per_sm, cuda.threads_per_block, prover,
+        )
+        .await
+        .map_err(|error| {
+            MinerError::WorkerSpawn(format!("CUDA worker {id} on device {device}: {error}"))
+        })?;
+        workers.push(Arc::new(worker));
+    }
+    Ok(Pool::new(workers))
 }
 
 async fn build_pool(num_threads: u64) -> Result<Pool, MinerError> {
@@ -718,6 +852,42 @@ mod tests {
                 .contains("reconnect_backoff_initial must be nonzero"),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_config_preflight_rejects_invalid_launch_settings() {
+        let mut cfg = CudaConfig::default();
+        cfg.prover_count = 0;
+        assert!(matches!(
+            cfg.validate(),
+            Err(MinerError::InvalidConfig(message))
+                if message == "CUDA prover-count must be nonzero"
+        ));
+
+        cfg.prover_count = 1;
+        cfg.batch_size = 0;
+        assert!(matches!(
+            cfg.validate(),
+            Err(MinerError::InvalidConfig(message))
+                if message == "CUDA batch-size must be nonzero"
+        ));
+
+        cfg.batch_size = 1;
+        cfg.blocks_per_sm = 0;
+        assert!(matches!(
+            cfg.validate(),
+            Err(MinerError::InvalidConfig(message))
+                if message == "CUDA blocks-per-sm must be nonzero"
+        ));
+
+        cfg.blocks_per_sm = 1;
+        cfg.threads_per_block = 33;
+        assert!(matches!(
+            cfg.validate(),
+            Err(MinerError::InvalidConfig(message))
+                if message == "CUDA threads-per-block must be a multiple of 32 between 32 and 1024"
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
