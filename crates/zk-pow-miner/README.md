@@ -22,6 +22,8 @@ The node and miner are separate processes. `nockchain-mining-common` owns candid
 - Worker results are associated with the job that produced them; a late result cannot be submitted as a solution to a newer commitment.
 - The miner's `%pow` wire source remains distinct from `%ai-pow` and other kernel commands.
 - The private effect stream is best-effort and bounded. Missing an effect can reduce miner liveness but cannot change node consensus.
+- Connection setup, RPCs, submissions, and worker shutdown are deadline-bounded and cancellation-aware. Reconnect failures share one capped budget that resets only after a valid candidate arrives.
+- A successful `%pow` gRPC response acknowledges kernel processing, not consensus acceptance. An ambiguous timeout or transport failure reconnects without blindly resubmitting the same proof.
 - A submitted proof is never trusted because it came from the reference miner. The node checks proof version, exact target, block commitment, and STARK validity.
 
 ## Cryptographic and consensus dependencies
@@ -61,6 +63,12 @@ The benchmark validates a GPU digest against the native V5 oracle before timing 
 ZK_POW_CUDA_ARCH=89 cargo run --release -p zk-pow-miner \
   --features cuda --bin zk-pow-cuda-bench
 ```
+
+## Network deployment
+
+The private gRPC endpoint is a trusted, unauthenticated control plane. Keep it on loopback or a private network and reach remote miners through SSH forwarding or a VPN; never expose it directly to the public internet. Use `--rpc-timeout-ms` to bound node calls and `--worker-shutdown-timeout-ms` to bound cooperative worker drain.
+
+Multiple miners may connect to one node, but they must use the same `--mining-pkh`: mining configuration is node-global. Each miner enables mining when it subscribes and deliberately does not disable the shared flag when it disconnects, so one miner shutting down cannot stop its peers.
 
 ## Validation
 

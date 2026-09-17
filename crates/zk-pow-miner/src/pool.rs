@@ -114,9 +114,9 @@ impl Pool {
             .clone();
         self.busy.insert(id);
         self.attempts.spawn(async move {
-            // A panic inside an attempt (e.g. in the SerfThread Nock VM) is
+            // A panic inside an attempt (for example in the SerfThread Nock VM) is
             // caught here so it surfaces as an attributed error result for
-            // the run loop to respawn on, never as a process-fatal join
+            // the run loop to classify, never as an unattributed join
             // failure.
             let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                 worker.mine_attempt(poke),
@@ -135,6 +135,15 @@ impl Pool {
         for w in &self.workers {
             w.cancel();
         }
+    }
+
+    /// Force-abort every in-flight attempt and restore the pool to an idle
+    /// state. This is the bounded-shutdown fallback for a worker that ignores
+    /// cooperative cancellation.
+    pub async fn abort_all(&mut self) {
+        self.attempts.abort_all();
+        while self.attempts.join_next().await.is_some() {}
+        self.busy.clear();
     }
 
     /// Wait for the next attempt result. Returns `None` when no

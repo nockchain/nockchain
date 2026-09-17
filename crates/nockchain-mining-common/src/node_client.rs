@@ -154,6 +154,18 @@ impl NodeClient {
         Ok(Self { client })
     }
 
+    /// Connect with a bounded handshake plus TCP and HTTP/2 keepalives. Mining
+    /// streams use this to detect silent network partitions instead of waiting
+    /// for the operating system's long TCP timeout.
+    pub async fn connect_with_timeout<T: AsRef<str>>(
+        address: T,
+        connect_timeout: Duration,
+    ) -> Result<Self, NodeClientError> {
+        let client =
+            PrivateNockAppGrpcClient::connect_with_timeout(address, connect_timeout).await?;
+        Ok(Self { client })
+    }
+
     /// Push the mining-reward configuration to the node's kernel.
     /// Same noun shape as the old in-process
     /// `set_mining_key_advanced(...)`: `[%command %set-mining-key-advanced

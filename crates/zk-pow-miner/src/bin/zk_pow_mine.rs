@@ -79,6 +79,14 @@ struct Args {
     #[arg(long, default_value = "512")]
     cuda_threads_per_block: u32,
 
+    /// Deadline in milliseconds for connect, setup, and poke acknowledgements.
+    #[arg(long, default_value = "30000")]
+    rpc_timeout_ms: u64,
+
+    /// Worker cancellation grace period in milliseconds before forced abort.
+    #[arg(long, default_value = "10000")]
+    worker_shutdown_timeout_ms: u64,
+
     /// Initial reconnect backoff in milliseconds.
     #[arg(long, default_value = "1000")]
     reconnect_backoff_initial_ms: u64,
@@ -128,6 +136,8 @@ fn main() -> ExitCode {
         node_addr: args.node_addr,
         mining_pkh_configs: pkh_configs,
         num_threads,
+        rpc_timeout: Duration::from_millis(args.rpc_timeout_ms),
+        worker_shutdown_timeout: Duration::from_millis(args.worker_shutdown_timeout_ms),
         reconnect_backoff_initial: Duration::from_millis(args.reconnect_backoff_initial_ms),
         reconnect_backoff_max: Duration::from_millis(args.reconnect_backoff_max_ms),
         reconnect_max_attempts: args.reconnect_max_attempts,

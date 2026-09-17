@@ -11,20 +11,26 @@
 //!       `update-candidate-block` then emits the first `%mine-zk` effect
 //!       on the now-active stream.
 //! 3. Inner loop (select):
-//!    - shutdown → cancel pool + best-effort `enable-mining(false)` + exit
-//!    - new candidate → `cancel_all()` + remember as current
-//!      + `dispatch_to_idle` (cancelled workers re-dispatch on
-//!      their cancelled-result tick)
-//!    - worker result → submit if success / re-dispatch on current
-//!      with the returned nonce (Retry) or a fresh one (Success / Err)
-//! 4. Stream drop → outer loop reconnects + re-configures + re-subscribes.
+//!    - shutdown → cancel and bounded-drain the pool
+//!    - new candidate → supersede stale work and dispatch every idle worker
+//!    - worker result → submit a winner once, continue retry work, or fail
+//!      closed after repeated worker faults
+//! 4. Transport loss or an acknowledgement-unknown submission → cancel work,
+//!    back off with jitter, reconnect, reconfigure, and resubscribe.
+//! 5. A valid candidate marks the session healthy and resets the consecutive
+//!    reconnect-failure budget.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use nockapp::nockapp::wire::Wire;
-use nockchain_mining_common::{MiningCandidate, MiningPkhConfig, NodeClient, NodeClientError};
+use nockchain_mining_common::{
+    MiningCandidate, MiningPkhConfig, NodeClient, NodeClientError, PokeTransportOutcome,
+};
+use rand::Rng;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -33,7 +39,12 @@ use tracing::{debug, info, warn};
 use crate::cuda::{device_count, CudaWorker, SharedProver};
 use crate::pool::Pool;
 use crate::wire::ZkPowMinerWire;
-use crate::worker::{build_candidate_poke, random_nonce, MineResult, SerfWorker, Worker};
+use crate::worker::{
+    build_candidate_poke, random_nonce, MineResult, SerfWorker, Worker, WorkerError, WorkerId,
+};
+
+const MAX_CONSECUTIVE_CANDIDATE_DECODE_ERRORS: u32 = 3;
+const MAX_CONSECUTIVE_WORKER_ERRORS: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct MinerConfig {
@@ -43,6 +54,11 @@ pub struct MinerConfig {
     pub mining_pkh_configs: Vec<MiningPkhConfig>,
     /// Worker pool size.
     pub num_threads: u64,
+    /// Deadline for connecting, configuring, subscribing, and receiving a
+    /// poke acknowledgement.
+    pub rpc_timeout: Duration,
+    /// Grace period for cooperative worker cancellation before task abort.
+    pub worker_shutdown_timeout: Duration,
     pub reconnect_backoff_initial: Duration,
     pub reconnect_backoff_max: Duration,
     pub reconnect_max_attempts: u32,
@@ -50,13 +66,16 @@ pub struct MinerConfig {
 
 impl MinerConfig {
     /// Convenience builder with safe defaults: required v1 mining-pkh configs,
-    /// num_cpus-1 threads (min 1), 1s→30s backoff, 5 retries.
+    /// num_cpus-1 threads (min 1), 30s RPCs, 10s worker shutdown, and
+    /// jittered 1s→30s reconnect backoff with 5 consecutive failures.
     pub fn new(node_addr: String, mining_pkh_configs: Vec<MiningPkhConfig>) -> Self {
         let num_threads = num_cpus::get().saturating_sub(1).max(1) as u64;
         Self {
             node_addr,
             mining_pkh_configs,
             num_threads,
+            rpc_timeout: Duration::from_secs(30),
+            worker_shutdown_timeout: Duration::from_secs(10),
             reconnect_backoff_initial: Duration::from_secs(1),
             reconnect_backoff_max: Duration::from_secs(30),
             reconnect_max_attempts: 5,
@@ -83,6 +102,21 @@ impl MinerConfig {
         if self.reconnect_backoff_max.is_zero() {
             return Err(MinerError::InvalidConfig(
                 "reconnect_backoff_max must be nonzero".to_string(),
+            ));
+        }
+        if self.reconnect_backoff_initial > self.reconnect_backoff_max {
+            return Err(MinerError::InvalidConfig(
+                "reconnect_backoff_initial must not exceed reconnect_backoff_max".to_string(),
+            ));
+        }
+        if self.rpc_timeout.is_zero() {
+            return Err(MinerError::InvalidConfig(
+                "rpc_timeout must be nonzero".to_string(),
+            ));
+        }
+        if self.worker_shutdown_timeout.is_zero() {
+            return Err(MinerError::InvalidConfig(
+                "worker_shutdown_timeout must be nonzero".to_string(),
             ));
         }
         Ok(())
@@ -155,10 +189,16 @@ pub enum MinerError {
     WorkerSpawn(String),
     #[error("kernel configuration failed: {0}")]
     Configure(String),
-    #[error("gave up after {count} consecutive connect attempts")]
+    #[error("gave up after {count} consecutive connection/session failures")]
     TooManyReconnects { count: u32 },
-    #[error("candidate decode failed: {0}")]
-    CandidateDecode(String),
+    #[error("worker {worker} failed after {attempts} consecutive errors: {error}")]
+    WorkerFailed {
+        worker: WorkerId,
+        attempts: u32,
+        error: String,
+    },
+    #[error("worker pool did not stop within {timeout_ms}ms during reconnect")]
+    WorkerShutdownTimedOut { timeout_ms: u128 },
 }
 
 /// Production entry point. Builds the worker pool then runs the main
@@ -270,177 +310,499 @@ pub async fn run_with_pool(
     shutdown: CancellationToken,
 ) -> Result<(), MinerError> {
     cfg.validate()?;
-    let mut consecutive_failures: u32 = 0;
-    let mut backoff = cfg.reconnect_backoff_initial;
+    let mut reconnect = ReconnectState::new(&cfg);
 
-    loop {
+    'outer: loop {
         if shutdown.is_cancelled() {
-            break;
+            return Ok(());
         }
 
-        // ── (re)connect ──
-        let mut client = match NodeClient::connect(&cfg.node_addr).await {
-            Ok(c) => {
-                consecutive_failures = 0;
-                backoff = cfg.reconnect_backoff_initial;
-                c
-            }
-            Err(e) => {
-                consecutive_failures += 1;
-                warn!(
-                    attempt = consecutive_failures,
-                    backoff_ms = backoff.as_millis() as u64,
-                    error = %e,
-                    "connect failed; backing off"
-                );
-                if consecutive_failures >= cfg.reconnect_max_attempts {
-                    return Err(MinerError::TooManyReconnects {
-                        count: consecutive_failures,
-                    });
+        // The configured endpoint supplies a bounded handshake plus TCP and
+        // HTTP/2 keepalives. Cancellation keeps Ctrl-C responsive even while
+        // DNS or a connect attempt is pending.
+        let connect = NodeClient::connect_with_timeout(&cfg.node_addr, cfg.rpc_timeout);
+        tokio::pin!(connect);
+        let mut client = match tokio::select! {
+            _ = shutdown.cancelled() => return Ok(()),
+            result = &mut connect => result,
+        } {
+            Ok(client) => client,
+            Err(error) => {
+                if !reconnect
+                    .wait(&cfg, &shutdown, format!("connect failed: {error}"))
+                    .await?
+                {
+                    return Ok(());
                 }
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(backoff) => {}
-                }
-                backoff = (backoff * 2).min(cfg.reconnect_backoff_max);
                 continue;
             }
         };
 
-        // ── configure ──
-        // Order matters: subscribe to %mine-zk effects BEFORE enabling mining,
-        // so the initial candidate emitted by the post-poke
-        // update-candidate-block lands on a live stream.
-        if let Err(e) = client
-            .set_mining_key(
+        // Subscribe before enable-mining so the initial candidate emitted by
+        // the node's post-poke update lands on a live stream. Configuration
+        // pokes are idempotent: transport ambiguity is retried after reconnect,
+        // while an explicit kernel NACK is a permanent configuration failure.
+        match call_with_deadline(
+            cfg.rpc_timeout,
+            &shutdown,
+            client.set_mining_key(
                 ZkPowMinerWire::SetPubKey.to_wire(),
                 Vec::new(),
                 cfg.mining_pkh_configs.clone(),
-            )
-            .await
+            ),
+        )
+        .await
         {
-            return Err(MinerError::Configure(format!("set_mining_key: {e}")));
-        }
-        let mut candidates = match client.watch_candidates(vec![b"mine-zk".to_vec()]).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "watch_candidates failed; reconnect");
-                consecutive_failures += 1;
+            TimedCall::Completed(Ok(())) => {}
+            TimedCall::Completed(Err(error @ NodeClientError::PokeRejected { .. })) => {
+                return Err(MinerError::Configure(format!("set_mining_key: {error}")));
+            }
+            TimedCall::Completed(Err(error)) => {
+                if !reconnect
+                    .wait(
+                        &cfg,
+                        &shutdown,
+                        format!("set_mining_key transport failed: {error}"),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
                 continue;
             }
-        };
-        if let Err(e) = client
-            .enable_mining(ZkPowMinerWire::Enable.to_wire(), true)
-            .await
+            TimedCall::TimedOut => {
+                if !reconnect
+                    .wait(
+                        &cfg,
+                        &shutdown,
+                        format!(
+                            "set_mining_key exceeded {}ms deadline",
+                            cfg.rpc_timeout.as_millis()
+                        ),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            TimedCall::Shutdown => return Ok(()),
+        }
+
+        let mut candidates = match call_with_deadline(
+            cfg.rpc_timeout,
+            &shutdown,
+            client.watch_candidates(vec![b"mine-zk".to_vec()]),
+        )
+        .await
         {
-            return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
+            TimedCall::Completed(Ok(stream)) => stream,
+            TimedCall::Completed(Err(error)) => {
+                if !reconnect
+                    .wait(
+                        &cfg,
+                        &shutdown,
+                        format!("watch_candidates setup failed: {error}"),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            TimedCall::TimedOut => {
+                if !reconnect
+                    .wait(
+                        &cfg,
+                        &shutdown,
+                        format!(
+                            "watch_candidates setup exceeded {}ms deadline",
+                            cfg.rpc_timeout.as_millis()
+                        ),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            TimedCall::Shutdown => return Ok(()),
+        };
+
+        match call_with_deadline(
+            cfg.rpc_timeout,
+            &shutdown,
+            client.enable_mining(ZkPowMinerWire::Enable.to_wire(), true),
+        )
+        .await
+        {
+            TimedCall::Completed(Ok(())) => {}
+            TimedCall::Completed(Err(error @ NodeClientError::PokeRejected { .. })) => {
+                return Err(MinerError::Configure(format!(
+                    "enable_mining(true): {error}"
+                )));
+            }
+            TimedCall::Completed(Err(error)) => {
+                if !reconnect
+                    .wait(
+                        &cfg,
+                        &shutdown,
+                        format!("enable_mining(true) transport failed: {error}"),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            TimedCall::TimedOut => {
+                if !reconnect
+                    .wait(
+                        &cfg,
+                        &shutdown,
+                        format!(
+                            "enable_mining(true) exceeded {}ms deadline",
+                            cfg.rpc_timeout.as_millis()
+                        ),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            TimedCall::Shutdown => return Ok(()),
         }
         info!("zk-pow-miner: subscribed + mining enabled; awaiting candidates");
 
-        // ── inner loop ──
-        // current_candidate is local — never shared across threads — so we
-        // sidestep the MiningCandidate:!Sync problem entirely. Each select
-        // branch borrows it briefly and releases before any await on
-        // `client` or `pool.next_result`.
         let mut current_candidate: Option<MiningCandidate> = None;
         let mut current_generation = 0u64;
+        let mut candidate_decode_errors = 0u32;
+        let mut worker_errors: HashMap<WorkerId, u32> = HashMap::new();
         let inner_result: InnerOutcome = loop {
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break InnerOutcome::Shutdown,
                 maybe_c = candidates.next() => {
-                    let Some(c_res) = maybe_c else {
-                        warn!("watch_candidates stream ended; will reconnect");
-                        break InnerOutcome::StreamLost;
+                    let Some(candidate_result) = maybe_c else {
+                        break InnerOutcome::Reconnect(
+                            "watch_candidates stream ended".to_string(),
+                        );
                     };
-                    let candidate = match c_res {
-                        Ok(c) => c,
-                        Err(NodeClientError::Grpc(e)) => {
-                            warn!(error = %e, "watch_candidates stream failed; will reconnect");
-                            break InnerOutcome::StreamLost;
+                    let candidate = match candidate_result {
+                        Ok(candidate) => candidate,
+                        Err(NodeClientError::Grpc(error)) => {
+                            break InnerOutcome::Reconnect(format!(
+                                "watch_candidates stream failed: {error}"
+                            ));
                         }
-                        Err(e) => break InnerOutcome::Fatal(MinerError::CandidateDecode(format!("{e}"))),
+                        Err(error) => {
+                            candidate_decode_errors =
+                                candidate_decode_errors.saturating_add(1);
+                            current_generation = current_generation.wrapping_add(1);
+                            current_candidate = None;
+                            pool.cancel_all();
+                            warn!(
+                                consecutive_errors = candidate_decode_errors,
+                                error = %error,
+                                "invalid candidate superseded current work"
+                            );
+                            if candidate_decode_errors
+                                >= MAX_CONSECUTIVE_CANDIDATE_DECODE_ERRORS
+                            {
+                                break InnerOutcome::Reconnect(format!(
+                                    "{candidate_decode_errors} consecutive invalid candidates"
+                                ));
+                            }
+                            continue;
+                        }
                     };
+
+                    reconnect.mark_healthy(&cfg);
+                    candidate_decode_errors = 0;
+                    worker_errors.clear();
                     current_generation = current_generation.wrapping_add(1);
-                    info!(pow_len = candidate.pow_len, generation = current_generation, "new candidate; supersede + dispatch fresh");
+                    info!(
+                        pow_len = candidate.pow_len,
+                        generation = current_generation,
+                        "new candidate; superseding stale work"
+                    );
                     pool.cancel_all();
                     current_candidate = Some(candidate);
-                    let cur = current_candidate.as_ref().expect("just-stored");
-                    pool.dispatch_to_idle(current_generation, || build_candidate_poke(cur, random_nonce()));
+                    let current = current_candidate.as_ref().expect("candidate just stored");
+                    pool.dispatch_to_idle(current_generation, || {
+                        build_candidate_poke(current, random_nonce())
+                    });
                 }
-                Some((wid, generation, r)) = pool.next_result(), if pool.busy_count() > 0 => {
-                    let Some(cur) = &current_candidate else {
-                        debug!(worker = wid, generation, "result with no current candidate; idle");
+                Some((worker, generation, result)) = pool.next_result(), if pool.busy_count() > 0 => {
+                    let Some(current) = &current_candidate else {
+                        debug!(worker, generation, "result has no current candidate; leaving worker idle");
                         continue;
                     };
                     if generation != current_generation {
                         debug!(
-                            worker = wid,
+                            worker,
                             generation,
                             current_generation,
                             "dropping stale mining result after candidate supersede"
                         );
-                        let respawn_poke = build_candidate_poke(cur, random_nonce());
-                        pool.dispatch_one(wid, current_generation, respawn_poke);
+                        pool.dispatch_one(
+                            worker,
+                            current_generation,
+                            build_candidate_poke(current, random_nonce()),
+                        );
                         continue;
                     }
-                    match r {
+
+                    match result {
                         Ok(MineResult::Success { poke_slab, .. }) => {
-                            // Build the respawn poke FIRST so `cur` is no
-                            // longer borrowed before we await on the client.
-                            let respawn_poke = build_candidate_poke(cur, random_nonce());
-                            info!(worker = wid, generation, "found a block; submitting via gRPC");
-                            if let Err(e) = client
-                                .submit_mined_block(ZkPowMinerWire::Mined.to_wire(), poke_slab)
-                                .await
-                            {
-                                warn!(worker = wid, generation, error = %e, "submit_mined_block failed (likely stale candidate)");
+                            worker_errors.remove(&worker);
+                            let prepared = NodeClient::prepare_poke_wire(
+                                ZkPowMinerWire::Mined.to_wire(),
+                                poke_slab,
+                            );
+                            info!(worker, generation, "found a block; submitting via gRPC");
+                            let outcome = client
+                                .send_prepared_poke_with_timeout_or_cancel(
+                                    prepared,
+                                    cfg.rpc_timeout,
+                                    shutdown.cancelled(),
+                                )
+                                .await;
+                            let elapsed_ms = outcome.elapsed().as_millis();
+                            match outcome {
+                                PokeTransportOutcome::Ack { .. } => {
+                                    info!(
+                                        worker,
+                                        generation,
+                                        elapsed_ms,
+                                        "submission acknowledged by node; awaiting replacement candidate"
+                                    );
+                                    current_candidate = None;
+                                    pool.cancel_all();
+                                }
+                                PokeTransportOutcome::Nack { code, message, .. } => {
+                                    warn!(
+                                        worker,
+                                        generation,
+                                        elapsed_ms,
+                                        code,
+                                        message,
+                                        "node rejected submission; dropping candidate"
+                                    );
+                                    current_candidate = None;
+                                    pool.cancel_all();
+                                }
+                                PokeTransportOutcome::FailureBeforeSend { error, .. } => {
+                                    break InnerOutcome::Reconnect(format!(
+                                        "submission failed before send: {error}"
+                                    ));
+                                }
+                                PokeTransportOutcome::AckUnknown { error, .. } => {
+                                    if shutdown.is_cancelled() {
+                                        break InnerOutcome::Shutdown;
+                                    }
+                                    break InnerOutcome::Reconnect(format!(
+                                        "submission acknowledgement unknown after {elapsed_ms}ms: {error}"
+                                    ));
+                                }
                             }
-                            pool.dispatch_one(wid, current_generation, respawn_poke);
                         }
                         Ok(MineResult::Retry { next_nonce }) => {
-                            let respawn_poke = build_candidate_poke(cur, next_nonce);
-                            pool.dispatch_one(wid, current_generation, respawn_poke);
+                            worker_errors.remove(&worker);
+                            pool.dispatch_one(
+                                worker,
+                                current_generation,
+                                build_candidate_poke(current, next_nonce),
+                            );
                         }
-                        Err(e) => {
-                            debug!(worker = wid, generation, error = %e, "worker error; respawning on current");
-                            let respawn_poke = build_candidate_poke(cur, random_nonce());
-                            pool.dispatch_one(wid, current_generation, respawn_poke);
+                        Err(error @ WorkerError::Candidate(_)) => {
+                            warn!(
+                                worker,
+                                generation,
+                                error = %error,
+                                "worker rejected candidate; dropping it"
+                            );
+                            current_candidate = None;
+                            pool.cancel_all();
+                        }
+                        Err(error) if retryable_worker_error(&error) => {
+                            let attempts = worker_errors
+                                .entry(worker)
+                                .and_modify(|count| *count = count.saturating_add(1))
+                                .or_insert(1);
+                            if *attempts >= MAX_CONSECUTIVE_WORKER_ERRORS {
+                                break InnerOutcome::Fatal(MinerError::WorkerFailed {
+                                    worker,
+                                    attempts: *attempts,
+                                    error: error.to_string(),
+                                });
+                            }
+                            warn!(
+                                worker,
+                                generation,
+                                consecutive_errors = *attempts,
+                                error = %error,
+                                "worker attempt failed; retrying current candidate"
+                            );
+                            pool.dispatch_one(
+                                worker,
+                                current_generation,
+                                build_candidate_poke(current, random_nonce()),
+                            );
+                        }
+                        Err(error) => {
+                            break InnerOutcome::Fatal(MinerError::WorkerFailed {
+                                worker,
+                                attempts: 1,
+                                error: error.to_string(),
+                            });
                         }
                     }
                 }
             }
         };
 
-        // ── cleanup before reconnect or exit ──
-        pool.cancel_all();
-        while pool.busy_count() > 0 {
-            let _ = pool.next_result().await;
-        }
-        let _ = client
-            .enable_mining(ZkPowMinerWire::Enable.to_wire(), false)
-            .await;
+        let forced_abort = quiesce_pool(&mut pool, cfg.worker_shutdown_timeout).await;
 
+        // enable-mining is node-global, not a lease owned by this process.
+        // Disabling it here would stop every other miner sharing the node.
         match inner_result {
             InnerOutcome::Shutdown => return Ok(()),
-            InnerOutcome::StreamLost => {
-                consecutive_failures += 1;
-                if consecutive_failures >= cfg.reconnect_max_attempts {
-                    return Err(MinerError::TooManyReconnects {
-                        count: consecutive_failures,
+            InnerOutcome::Reconnect(reason) => {
+                if forced_abort {
+                    return Err(MinerError::WorkerShutdownTimedOut {
+                        timeout_ms: cfg.worker_shutdown_timeout.as_millis(),
                     });
                 }
-                tokio::select! {
-                    _ = shutdown.cancelled() => return Ok(()),
-                    _ = tokio::time::sleep(backoff) => {}
+                if !reconnect.wait(&cfg, &shutdown, reason).await? {
+                    return Ok(());
                 }
-                backoff = (backoff * 2).min(cfg.reconnect_backoff_max);
+                continue 'outer;
             }
-            InnerOutcome::Fatal(e) => return Err(e),
+            InnerOutcome::Fatal(error) => return Err(error),
+        }
+    }
+}
+
+enum TimedCall<T> {
+    Completed(T),
+    TimedOut,
+    Shutdown,
+}
+
+async fn call_with_deadline<T, F>(
+    timeout: Duration,
+    shutdown: &CancellationToken,
+    future: F,
+) -> TimedCall<T>
+where
+    F: Future<Output = T>,
+{
+    tokio::select! {
+        _ = shutdown.cancelled() => TimedCall::Shutdown,
+        result = tokio::time::timeout(timeout, future) => match result {
+            Ok(value) => TimedCall::Completed(value),
+            Err(_) => TimedCall::TimedOut,
+        },
+    }
+}
+
+struct ReconnectState {
+    consecutive_failures: u32,
+    backoff: Duration,
+}
+
+impl ReconnectState {
+    fn new(cfg: &MinerConfig) -> Self {
+        Self {
+            consecutive_failures: 0,
+            backoff: cfg.reconnect_backoff_initial,
         }
     }
 
-    Ok(())
+    fn mark_healthy(&mut self, cfg: &MinerConfig) {
+        if self.consecutive_failures > 0 {
+            info!(
+                previous_failures = self.consecutive_failures,
+                "received valid candidate; reconnect budget reset"
+            );
+        }
+        self.consecutive_failures = 0;
+        self.backoff = cfg.reconnect_backoff_initial;
+    }
+
+    async fn wait(
+        &mut self,
+        cfg: &MinerConfig,
+        shutdown: &CancellationToken,
+        reason: String,
+    ) -> Result<bool, MinerError> {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures >= cfg.reconnect_max_attempts {
+            warn!(
+                attempt = self.consecutive_failures,
+                reason, "connection/session failure budget exhausted"
+            );
+            return Err(MinerError::TooManyReconnects {
+                count: self.consecutive_failures,
+            });
+        }
+
+        let delay = jittered_backoff(self.backoff);
+        warn!(
+            attempt = self.consecutive_failures,
+            reconnect_in_ms = delay.as_millis(),
+            reason,
+            "connection/session failure; backing off"
+        );
+        let retry = tokio::select! {
+            _ = shutdown.cancelled() => false,
+            _ = tokio::time::sleep(delay) => true,
+        };
+        if retry {
+            self.backoff = self
+                .backoff
+                .saturating_mul(2)
+                .min(cfg.reconnect_backoff_max);
+        }
+        Ok(retry)
+    }
+}
+
+fn jittered_backoff(backoff: Duration) -> Duration {
+    let upper_nanos = backoff.as_nanos().min(u128::from(u64::MAX)) as u64;
+    let lower_nanos = (upper_nanos / 2).max(1).min(upper_nanos);
+    Duration::from_nanos(rand::rng().random_range(lower_nanos..=upper_nanos))
+}
+
+fn retryable_worker_error(error: &WorkerError) -> bool {
+    matches!(
+        error,
+        WorkerError::Poke(_) | WorkerError::Cuda(_) | WorkerError::Cancelled
+    )
+}
+
+async fn quiesce_pool(pool: &mut Pool, timeout: Duration) -> bool {
+    pool.cancel_all();
+    let drain = async {
+        while pool.busy_count() > 0 {
+            if pool.next_result().await.is_none() {
+                break;
+            }
+        }
+    };
+    if tokio::time::timeout(timeout, drain).await.is_ok() {
+        return false;
+    }
+
+    warn!(
+        timeout_ms = timeout.as_millis(),
+        busy_workers = pool.busy_count(),
+        "worker cancellation deadline expired; aborting tasks"
+    );
+    pool.abort_all().await;
+    true
 }
 
 fn validate_mining_pkh_configs(configs: &[MiningPkhConfig]) -> Result<(), MinerError> {
@@ -466,7 +828,7 @@ fn validate_mining_pkh_configs(configs: &[MiningPkhConfig]) -> Result<(), MinerE
 
 enum InnerOutcome {
     Shutdown,
-    StreamLost,
+    Reconnect(String),
     Fatal(MinerError),
 }
 
@@ -483,6 +845,7 @@ mod tests {
     //! synthetic `%mine-zk` effects, and assert the miner pokes
     //! `ZkPowMinerWire::Mined` back at the server within a tight timeout.
 
+    use std::collections::VecDeque;
     use std::net::{SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -509,45 +872,91 @@ mod tests {
         )
     });
 
-    /// Build a `NockAppHandle` from raw channels (no real kernel). The
-    /// caller drains `action_rx` to observe pokes. The returned
-    /// `effect_tx` is the bus the test publishes synthetic effects on.
+    #[derive(Debug)]
+    enum MockPokeResponse {
+        Ack,
+        Nack,
+        DelayedAck(Duration),
+    }
+
+    #[derive(Clone, Copy)]
+    enum MockPokeKind {
+        SetKey,
+        Enable,
+        Mined,
+        Other,
+    }
+
+    #[derive(Default)]
+    struct MockResponseQueues {
+        set_key: VecDeque<MockPokeResponse>,
+        enable: VecDeque<MockPokeResponse>,
+        mined: VecDeque<MockPokeResponse>,
+    }
+
+    impl MockResponseQueues {
+        fn push(&mut self, kind: MockPokeKind, response: MockPokeResponse) {
+            match kind {
+                MockPokeKind::SetKey => self.set_key.push_back(response),
+                MockPokeKind::Enable => self.enable.push_back(response),
+                MockPokeKind::Mined => self.mined.push_back(response),
+                MockPokeKind::Other => panic!("cannot script an unclassified poke"),
+            }
+        }
+
+        fn pop(&mut self, kind: MockPokeKind) -> MockPokeResponse {
+            let queue = match kind {
+                MockPokeKind::SetKey => Some(&mut self.set_key),
+                MockPokeKind::Enable => Some(&mut self.enable),
+                MockPokeKind::Mined => Some(&mut self.mined),
+                MockPokeKind::Other => None,
+            };
+            queue
+                .and_then(VecDeque::pop_front)
+                .unwrap_or(MockPokeResponse::Ack)
+        }
+    }
+
+    /// Restartable private gRPC server backed by channels instead of a kernel.
+    /// Tests can script ACK/NACK/delayed-ACK responses per wire.
     struct MockNode {
         addr: SocketAddr,
+        action_tx: mpsc::Sender<IOAction>,
         effect_tx: Arc<broadcast::Sender<NounSlab>>,
+        exit: NockAppExit,
+        responses: Arc<TMutex<MockResponseQueues>>,
         pokes_observed: Arc<AtomicU64>,
         mined_pokes: Arc<TMutex<Vec<NounSlab>>>,
         set_key_pokes: Arc<TMutex<Vec<NounSlab>>>,
-        server_task: tokio::task::JoinHandle<nockapp_grpc::error::Result<()>>,
+        enable_pokes: Arc<TMutex<Vec<NounSlab>>>,
+        server_task: Option<tokio::task::JoinHandle<nockapp_grpc::error::Result<()>>>,
         action_drainer: tokio::task::JoinHandle<()>,
     }
 
     impl MockNode {
         async fn spawn() -> Self {
-            // Bind ephemeral port; drop the listener; reuse the port for tonic.
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let addr = listener.local_addr().expect("local_addr");
             drop(listener);
-            // Channels.
+            Self::spawn_on(addr).await
+        }
+
+        async fn spawn_on(addr: SocketAddr) -> Self {
             let (action_tx, mut action_rx) = mpsc::channel::<IOAction>(64);
             let (effect_tx, _seed_rx) = broadcast::channel::<NounSlab>(64);
             let effect_tx = Arc::new(effect_tx);
-            let effect_rx_for_handle = effect_tx.subscribe();
             let (exit, _exit_rx) = NockAppExit::new();
-            let handle = NockAppHandle {
-                io_sender: action_tx,
-                effect_sender: effect_tx.clone(),
-                effect_receiver: TMutex::new(effect_rx_for_handle),
-                metrics: METRICS.clone(),
-                exit,
-            };
-            // Drain actions; collect ZkPowMinerWire::Mined slabs.
+            let responses = Arc::new(TMutex::new(MockResponseQueues::default()));
             let pokes_observed = Arc::new(AtomicU64::new(0));
             let mined_pokes: Arc<TMutex<Vec<NounSlab>>> = Arc::new(TMutex::new(Vec::new()));
             let set_key_pokes: Arc<TMutex<Vec<NounSlab>>> = Arc::new(TMutex::new(Vec::new()));
+            let enable_pokes: Arc<TMutex<Vec<NounSlab>>> = Arc::new(TMutex::new(Vec::new()));
+
+            let responses_clone = responses.clone();
             let pokes_clone = pokes_observed.clone();
             let mined_clone = mined_pokes.clone();
             let set_key_clone = set_key_pokes.clone();
+            let enable_clone = enable_pokes.clone();
             let action_drainer = tokio::spawn(async move {
                 while let Some(action) = action_rx.recv().await {
                     match action {
@@ -558,46 +967,98 @@ mod tests {
                             ..
                         } => {
                             pokes_clone.fetch_add(1, Ordering::SeqCst);
-                            if wire.source == ZkPowMinerWire::SOURCE {
-                                if wire.tags.iter().any(|t| match t {
-                                    nockapp::wire::WireTag::String(s) => s == "mined",
-                                    _ => false,
-                                }) {
-                                    mined_clone.lock().await.push(poke);
-                                } else if wire.tags.iter().any(|t| match t {
-                                    nockapp::wire::WireTag::String(s) => s == "setpubkey",
-                                    _ => false,
-                                }) {
-                                    set_key_clone.lock().await.push(poke);
+                            let kind = if wire.source != ZkPowMinerWire::SOURCE {
+                                MockPokeKind::Other
+                            } else if wire.tags.iter().any(|tag| {
+                                matches!(tag, nockapp::wire::WireTag::String(value) if value == "mined")
+                            }) {
+                                mined_clone.lock().await.push(poke);
+                                MockPokeKind::Mined
+                            } else if wire.tags.iter().any(|tag| {
+                                matches!(tag, nockapp::wire::WireTag::String(value) if value == "setpubkey")
+                            }) {
+                                set_key_clone.lock().await.push(poke);
+                                MockPokeKind::SetKey
+                            } else if wire.tags.iter().any(|tag| {
+                                matches!(tag, nockapp::wire::WireTag::String(value) if value == "enable")
+                            }) {
+                                enable_clone.lock().await.push(poke);
+                                MockPokeKind::Enable
+                            } else {
+                                MockPokeKind::Other
+                            };
+
+                            let response = responses_clone.lock().await.pop(kind);
+                            use nockapp::driver::PokeResult;
+                            match response {
+                                MockPokeResponse::Ack => {
+                                    let _ = ack_channel.send(PokeResult::Ack);
+                                }
+                                MockPokeResponse::Nack => {
+                                    let _ = ack_channel.send(PokeResult::Nack);
+                                }
+                                MockPokeResponse::DelayedAck(delay) => {
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(delay).await;
+                                        let _ = ack_channel.send(PokeResult::Ack);
+                                    });
                                 }
                             }
-                            use nockapp::driver::PokeResult;
-                            let _ = ack_channel.send(PokeResult::Ack);
                         }
-                        IOAction::Peek { .. } => {
-                            // unused in these tests
-                        }
+                        IOAction::Peek { .. } => {}
                     }
                 }
             });
-            // Spawn server.
-            let server = PrivateNockAppGrpcServer::new(handle);
-            let server_task = tokio::spawn(async move { server.serve(addr).await });
-            // Give server a moment to come up.
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            MockNode {
+
+            let mut node = Self {
                 addr,
+                action_tx,
                 effect_tx,
+                exit,
+                responses,
                 pokes_observed,
                 mined_pokes,
                 set_key_pokes,
-                server_task,
+                enable_pokes,
+                server_task: None,
                 action_drainer,
-            }
+            };
+            node.start_server().await;
+            node
         }
 
         fn url(&self) -> String {
             format!("http://{}", self.addr)
+        }
+
+        fn build_handle(&self) -> NockAppHandle {
+            NockAppHandle {
+                io_sender: self.action_tx.clone(),
+                effect_sender: self.effect_tx.clone(),
+                effect_receiver: TMutex::new(self.effect_tx.subscribe()),
+                metrics: METRICS.clone(),
+                exit: self.exit.clone(),
+            }
+        }
+
+        async fn start_server(&mut self) {
+            assert!(self.server_task.is_none(), "mock server already running");
+            let server = PrivateNockAppGrpcServer::new(self.build_handle());
+            let addr = self.addr;
+            self.server_task = Some(tokio::spawn(async move { server.serve(addr).await }));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        async fn stop_server(&mut self) {
+            if let Some(task) = self.server_task.take() {
+                task.abort();
+                let _ = task.await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        async fn queue_response(&self, kind: MockPokeKind, response: MockPokeResponse) {
+            self.responses.lock().await.push(kind, response);
         }
 
         fn publish_synth_mine_effect(&self, header_seed: u64, target_seed: u64, pow_len: u64) {
@@ -622,10 +1083,18 @@ mod tests {
             self.effect_tx.send(slab).expect("publish %mine-zk effect");
         }
 
-        async fn shutdown(self) {
-            self.server_task.abort();
+        fn publish_malformed_mine_effect(&self) {
+            let mut slab = NounSlab::new();
+            let effect = T(&mut slab, &[D(tas!(b"mine-zk")), D(0)]);
+            slab.set_root(effect);
+            self.effect_tx
+                .send(slab)
+                .expect("publish malformed %mine-zk effect");
+        }
+
+        async fn shutdown(mut self) {
+            self.stop_server().await;
             self.action_drainer.abort();
-            let _ = self.server_task.await;
             let _ = self.action_drainer.await;
         }
     }
@@ -635,6 +1104,9 @@ mod tests {
         SuccessImmediate,
         SuccessWithPowAfterDelay { pow: u64, delay: Duration },
         WaitForCancel,
+        PokeError,
+        Panic,
+        IgnoreCancel,
     }
 
     struct ScriptedStubWorker {
@@ -686,6 +1158,11 @@ mod tests {
                     }
                     Err(WorkerError::Poke("stub cancelled".into()))
                 }
+                StubAction::PokeError => Err(WorkerError::Poke("scripted failure".into())),
+                StubAction::Panic => Err(WorkerError::Panicked),
+                StubAction::IgnoreCancel => {
+                    std::future::pending::<Result<MineResult, WorkerError>>().await
+                }
             }
         }
     }
@@ -713,6 +1190,8 @@ mod tests {
                 share: 1,
                 pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
             }],
+            rpc_timeout: Duration::from_millis(250),
+            worker_shutdown_timeout: Duration::from_millis(100),
             num_threads: 1,
             reconnect_backoff_initial: Duration::from_millis(50),
             reconnect_backoff_max: Duration::from_millis(200),
@@ -793,6 +1272,53 @@ mod tests {
         }
     }
 
+    async fn wait_for_poke_count(
+        pokes: &TMutex<Vec<NounSlab>>,
+        expected: usize,
+        description: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if pokes.lock().await.len() >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
+    }
+
+    async fn wait_for_attempt_count(worker: &ScriptedStubWorker, expected: u64) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while worker.attempts.load(Ordering::SeqCst) < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for worker attempt");
+    }
+
+    fn enable_poke_value(poke: &NounSlab) -> bool {
+        let space = poke.noun_space();
+        let root = unsafe { *poke.root() };
+        let command = root.in_space(&space).as_cell().expect("command cell");
+        assert!(command.head().eq_bytes("command"));
+        let verb = command
+            .tail()
+            .noun()
+            .in_space(&space)
+            .as_cell()
+            .expect("enable-mining cell");
+        assert!(verb.head().eq_bytes("enable-mining"));
+        verb.tail()
+            .as_atom()
+            .expect("enable flag atom")
+            .as_u64()
+            .expect("enable flag fits u64")
+            == 0
+    }
+
     #[test]
     fn miner_config_preflight_rejects_missing_pkh_configs() {
         let mut cfg = test_config("http://127.0.0.1:1".to_string());
@@ -852,6 +1378,32 @@ mod tests {
                 .contains("reconnect_backoff_initial must be nonzero"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn miner_config_preflight_rejects_invalid_deadlines_and_backoff_order() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.rpc_timeout = Duration::ZERO;
+        assert!(matches!(
+            cfg.validate(),
+            Err(MinerError::InvalidConfig(message)) if message == "rpc_timeout must be nonzero"
+        ));
+
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.worker_shutdown_timeout = Duration::ZERO;
+        assert!(matches!(
+            cfg.validate(),
+            Err(MinerError::InvalidConfig(message))
+                if message == "worker_shutdown_timeout must be nonzero"
+        ));
+
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.reconnect_backoff_initial = Duration::from_millis(201);
+        assert!(matches!(
+            cfg.validate(),
+            Err(MinerError::InvalidConfig(message))
+                if message == "reconnect_backoff_initial must not exceed reconnect_backoff_max"
+        ));
     }
 
     #[cfg(feature = "cuda")]
@@ -1019,6 +1571,8 @@ mod tests {
                 share: 1,
                 pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
             }],
+            rpc_timeout: Duration::from_millis(250),
+            worker_shutdown_timeout: Duration::from_millis(100),
             num_threads: 1,
             reconnect_backoff_initial: Duration::from_millis(20),
             reconnect_backoff_max: Duration::from_millis(80),
@@ -1041,29 +1595,463 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn run_loop_exits_cleanly_on_shutdown() {
+    async fn run_loop_force_aborts_worker_that_ignores_shutdown() {
         let node = MockNode::spawn().await;
         let cfg = test_config(node.url());
-        // Worker that hangs forever on cancel.
-        let worker = ScriptedStubWorker::new(0, vec![StubAction::WaitForCancel]);
+        // This worker never observes cancel(); the run loop must abort its task
+        // after worker_shutdown_timeout instead of hanging forever.
+        let worker = ScriptedStubWorker::new(0, vec![StubAction::IgnoreCancel]);
         let workers: Vec<Arc<dyn Worker>> = vec![worker.clone()];
         let pool = Pool::new(workers);
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();
         let mining_task =
             tokio::spawn(async move { run_with_pool(cfg, pool, shutdown_clone).await });
-        // Let miner connect + configure + start its first attempt.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        // Push a candidate so the pool actually dispatches.
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "enable poke").await;
         node.publish_synth_mine_effect(50, 0xFFFF_FFFF, 2);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        // Now cancel — miner should drain + return Ok.
+        wait_for_attempt_count(&worker, 1).await;
         shutdown.cancel();
         let r = tokio::time::timeout(Duration::from_secs(3), mining_task)
             .await
             .expect("miner did not exit within 3s")
             .expect("miner panicked");
         assert!(r.is_ok(), "expected clean Ok on shutdown, got {r:?}");
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn explicit_configuration_nack_is_fatal_without_retry() {
+        let node = MockNode::spawn().await;
+        node.queue_response(MockPokeKind::SetKey, MockPokeResponse::Nack)
+            .await;
+        let cfg = test_config(node.url());
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_with_pool(cfg, Pool::new(Vec::new()), CancellationToken::new()),
+        )
+        .await
+        .expect("configuration NACK did not terminate miner");
+        assert!(matches!(
+            result,
+            Err(MinerError::Configure(message)) if message.contains("kernel rejected poke")
+        ));
+        assert_eq!(node.set_key_pokes.lock().await.len(), 1);
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn repeated_post_connect_timeouts_exhaust_session_failure_budget() {
+        let node = MockNode::spawn().await;
+        for _ in 0..3 {
+            node.queue_response(
+                MockPokeKind::Enable,
+                MockPokeResponse::DelayedAck(Duration::from_millis(500)),
+            )
+            .await;
+        }
+        let mut cfg = test_config(node.url());
+        cfg.rpc_timeout = Duration::from_millis(40);
+        cfg.reconnect_backoff_initial = Duration::from_millis(5);
+        cfg.reconnect_backoff_max = Duration::from_millis(10);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_with_pool(cfg, Pool::new(Vec::new()), CancellationToken::new()),
+        )
+        .await
+        .expect("setup timeouts did not terminate miner");
+        assert!(matches!(
+            result,
+            Err(MinerError::TooManyReconnects { count: 3 })
+        ));
+        assert_eq!(node.set_key_pokes.lock().await.len(), 3);
+        assert_eq!(node.enable_pokes.lock().await.len(), 3);
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn miner_recovers_when_node_appears_during_backoff() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+
+        let mut cfg = test_config(format!("http://{addr}"));
+        cfg.reconnect_max_attempts = 50;
+        cfg.reconnect_backoff_initial = Duration::from_millis(10);
+        cfg.reconnect_backoff_max = Duration::from_millis(30);
+        let worker = ScriptedStubWorker::new(0, vec![StubAction::SuccessImmediate]);
+        let pool = Pool::new(vec![worker as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let mining_task =
+            tokio::spawn(async move { run_with_pool(cfg, pool, shutdown_clone).await });
+
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        let node = MockNode::spawn_on(addr).await;
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "enable poke after delayed startup").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 1, "submission after delayed startup").await;
+
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), mining_task)
+            .await
+            .expect("miner did not stop")
+            .expect("miner panicked");
+        assert!(result.is_ok(), "unexpected miner result: {result:?}");
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn effect_stream_data_loss_forces_reconnect_and_resubscribe() {
+        let node = MockNode::spawn().await;
+        node.queue_response(
+            MockPokeKind::Mined,
+            MockPokeResponse::DelayedAck(Duration::from_millis(250)),
+        )
+        .await;
+        let mut cfg = test_config(node.url());
+        cfg.rpc_timeout = Duration::from_secs(1);
+        cfg.reconnect_max_attempts = 10;
+        cfg.reconnect_backoff_initial = Duration::from_millis(10);
+        cfg.reconnect_backoff_max = Duration::from_millis(30);
+        let worker = ScriptedStubWorker::new(0, vec![StubAction::SuccessImmediate]);
+        let pool = Pool::new(vec![worker as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let mining_task =
+            tokio::spawn(async move { run_with_pool(cfg, pool, shutdown_clone).await });
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "initial enable poke").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 1, "submission blocking stream polling").await;
+
+        // The run loop is waiting for the delayed submission ACK. Overrun the
+        // bounded effect stream while it cannot poll, forcing DATA_LOSS.
+        for seed in 1_000..1_512 {
+            node.publish_synth_mine_effect(seed, 0xFFFF_FFFF, 2);
+        }
+        wait_for_poke_count(&node.set_key_pokes, 2, "set-key poke after stream loss").await;
+        wait_for_poke_count(&node.enable_pokes, 2, "enable poke after stream loss").await;
+
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), mining_task)
+            .await
+            .expect("miner did not stop")
+            .expect("miner panicked");
+        assert!(result.is_ok(), "unexpected miner result: {result:?}");
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn malformed_candidate_supersedes_old_work_and_stream_recovers() {
+        let node = MockNode::spawn().await;
+        let cfg = test_config(node.url());
+        let worker = ScriptedStubWorker::new(
+            0,
+            vec![
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 100,
+                    delay: Duration::from_millis(150),
+                },
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 200,
+                    delay: Duration::ZERO,
+                },
+            ],
+        );
+        let pool = Pool::new(vec![worker.clone() as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let mining_task =
+            tokio::spawn(async move { run_with_pool(cfg, pool, shutdown_clone).await });
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "enable poke").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        wait_for_attempt_count(&worker, 1).await;
+        node.publish_malformed_mine_effect();
+        node.publish_synth_mine_effect(200, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 1, "post-malformed submission").await;
+
+        let pokes = node.mined_pokes.lock().await;
+        assert_eq!(pokes.len(), 1);
+        assert_eq!(submitted_pow_payload_atom(&pokes[0]), 200);
+        drop(pokes);
+        assert_eq!(node.set_key_pokes.lock().await.len(), 1);
+
+        shutdown.cancel();
+        let result = mining_task.await.expect("miner panicked");
+        assert!(result.is_ok(), "unexpected miner result: {result:?}");
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn submission_nack_drops_candidate_without_reconnecting() {
+        let node = MockNode::spawn().await;
+        node.queue_response(MockPokeKind::Mined, MockPokeResponse::Nack)
+            .await;
+        let cfg = test_config(node.url());
+        let worker = ScriptedStubWorker::new(
+            0,
+            vec![
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 100,
+                    delay: Duration::ZERO,
+                },
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 200,
+                    delay: Duration::ZERO,
+                },
+            ],
+        );
+        let pool = Pool::new(vec![worker.clone() as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let mining_task =
+            tokio::spawn(async move { run_with_pool(cfg, pool, shutdown_clone).await });
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "enable poke").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 1, "NACKed submission").await;
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert_eq!(
+            worker.attempts.load(Ordering::SeqCst),
+            1,
+            "NACKed candidate must not be mined again"
+        );
+
+        node.publish_synth_mine_effect(200, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 2, "next-candidate submission").await;
+        let pokes = node.mined_pokes.lock().await;
+        assert_eq!(submitted_pow_payload_atom(&pokes[0]), 100);
+        assert_eq!(submitted_pow_payload_atom(&pokes[1]), 200);
+        drop(pokes);
+        assert_eq!(node.set_key_pokes.lock().await.len(), 1);
+
+        shutdown.cancel();
+        let result = mining_task.await.expect("miner panicked");
+        assert!(result.is_ok(), "unexpected miner result: {result:?}");
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acknowledgement_timeout_reconnects_without_resubmitting_proof() {
+        let node = MockNode::spawn().await;
+        node.queue_response(
+            MockPokeKind::Mined,
+            MockPokeResponse::DelayedAck(Duration::from_millis(500)),
+        )
+        .await;
+        let mut cfg = test_config(node.url());
+        cfg.rpc_timeout = Duration::from_millis(60);
+        cfg.reconnect_max_attempts = 10;
+        cfg.reconnect_backoff_initial = Duration::from_millis(10);
+        cfg.reconnect_backoff_max = Duration::from_millis(30);
+        let worker = ScriptedStubWorker::new(
+            0,
+            vec![
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 100,
+                    delay: Duration::ZERO,
+                },
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 200,
+                    delay: Duration::ZERO,
+                },
+            ],
+        );
+        let pool = Pool::new(vec![worker as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let mining_task =
+            tokio::spawn(async move { run_with_pool(cfg, pool, shutdown_clone).await });
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "initial enable poke").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 1, "ack-unknown submission").await;
+        wait_for_poke_count(&node.set_key_pokes, 2, "set-key poke after ack timeout").await;
+        wait_for_poke_count(&node.enable_pokes, 2, "enable poke after ack timeout").await;
+
+        node.publish_synth_mine_effect(200, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 2, "submission after ack timeout").await;
+        let pokes = node.mined_pokes.lock().await;
+        assert_eq!(pokes.len(), 2, "ambiguous proof must not be resubmitted");
+        assert_eq!(submitted_pow_payload_atom(&pokes[0]), 100);
+        assert_eq!(submitted_pow_payload_atom(&pokes[1]), 200);
+        drop(pokes);
+
+        shutdown.cancel();
+        let result = mining_task.await.expect("miner panicked");
+        assert!(result.is_ok(), "unexpected miner result: {result:?}");
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_cancels_pending_submission_ack_wait() {
+        let node = MockNode::spawn().await;
+        node.queue_response(
+            MockPokeKind::Mined,
+            MockPokeResponse::DelayedAck(Duration::from_secs(5)),
+        )
+        .await;
+        let mut cfg = test_config(node.url());
+        cfg.rpc_timeout = Duration::from_secs(2);
+        let worker = ScriptedStubWorker::new(0, vec![StubAction::SuccessImmediate]);
+        let pool = Pool::new(vec![worker as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let mining_task =
+            tokio::spawn(async move { run_with_pool(cfg, pool, shutdown_clone).await });
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "enable poke").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 1, "pending submission").await;
+        shutdown.cancel();
+
+        let result = tokio::time::timeout(Duration::from_millis(500), mining_task)
+            .await
+            .expect("shutdown waited for the submission deadline")
+            .expect("miner panicked");
+        assert!(result.is_ok(), "unexpected miner result: {result:?}");
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn repeated_worker_errors_fail_instead_of_hot_looping() {
+        let node = MockNode::spawn().await;
+        let cfg = test_config(node.url());
+        let worker = ScriptedStubWorker::new(
+            7,
+            vec![StubAction::PokeError, StubAction::PokeError, StubAction::PokeError],
+        );
+        let pool = Pool::new(vec![worker.clone() as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let mining_task = tokio::spawn(async move { run_with_pool(cfg, pool, shutdown).await });
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "enable poke").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        let result = tokio::time::timeout(Duration::from_secs(2), mining_task)
+            .await
+            .expect("worker failure budget did not terminate miner")
+            .expect("miner panicked");
+        assert!(matches!(
+            result,
+            Err(MinerError::WorkerFailed {
+                worker: 7,
+                attempts: 3,
+                ..
+            })
+        ));
+        assert_eq!(worker.attempts.load(Ordering::SeqCst), 3);
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn worker_panic_is_attributed_and_fatal() {
+        let node = MockNode::spawn().await;
+        let cfg = test_config(node.url());
+        let worker = ScriptedStubWorker::new(9, vec![StubAction::Panic]);
+        let pool = Pool::new(vec![worker as Arc<dyn Worker>]);
+        let shutdown = CancellationToken::new();
+        let mining_task = tokio::spawn(async move { run_with_pool(cfg, pool, shutdown).await });
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        wait_for_poke_count(&node.enable_pokes, 1, "enable poke").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        let result = tokio::time::timeout(Duration::from_secs(2), mining_task)
+            .await
+            .expect("worker panic did not terminate miner")
+            .expect("run loop task panicked");
+        assert!(matches!(
+            result,
+            Err(MinerError::WorkerFailed {
+                worker: 9,
+                attempts: 1,
+                ..
+            })
+        ));
+        node.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stopping_one_miner_does_not_disable_shared_node_mining() {
+        let node = MockNode::spawn().await;
+        let first_worker = ScriptedStubWorker::new(
+            1,
+            vec![StubAction::SuccessWithPowAfterDelay {
+                pow: 101,
+                delay: Duration::ZERO,
+            }],
+        );
+        let second_worker = ScriptedStubWorker::new(
+            2,
+            vec![
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 201,
+                    delay: Duration::ZERO,
+                },
+                StubAction::SuccessWithPowAfterDelay {
+                    pow: 202,
+                    delay: Duration::ZERO,
+                },
+            ],
+        );
+        let first_pool = Pool::new(vec![first_worker as Arc<dyn Worker>]);
+        let second_pool = Pool::new(vec![second_worker as Arc<dyn Worker>]);
+        let first_shutdown = CancellationToken::new();
+        let second_shutdown = CancellationToken::new();
+        let first_task = {
+            let cfg = test_config(node.url());
+            let shutdown = first_shutdown.clone();
+            tokio::spawn(async move { run_with_pool(cfg, first_pool, shutdown).await })
+        };
+        let second_task = {
+            let cfg = test_config(node.url());
+            let shutdown = second_shutdown.clone();
+            tokio::spawn(async move { run_with_pool(cfg, second_pool, shutdown).await })
+        };
+
+        wait_for_poke_count(&node.set_key_pokes, 2, "two set-key pokes").await;
+        wait_for_poke_count(&node.enable_pokes, 2, "two enable pokes").await;
+        node.publish_synth_mine_effect(100, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 2, "two first-candidate submissions").await;
+
+        first_shutdown.cancel();
+        let first_result = first_task.await.expect("first miner panicked");
+        assert!(
+            first_result.is_ok(),
+            "unexpected first miner result: {first_result:?}"
+        );
+        {
+            let enables = node.enable_pokes.lock().await;
+            assert!(
+                enables.iter().all(enable_poke_value),
+                "a miner shutdown must not send global enable-mining(false)"
+            );
+        }
+
+        node.publish_synth_mine_effect(200, 0xFFFF_FFFF, 2);
+        wait_for_poke_count(&node.mined_pokes, 3, "surviving miner submission").await;
+        assert_eq!(
+            submitted_pow_payload_atom(node.mined_pokes.lock().await.last().unwrap()),
+            202
+        );
+
+        second_shutdown.cancel();
+        let second_result = second_task.await.expect("second miner panicked");
+        assert!(
+            second_result.is_ok(),
+            "unexpected second miner result: {second_result:?}"
+        );
+        assert!(node.enable_pokes.lock().await.iter().all(enable_poke_value));
         node.shutdown().await;
     }
 }

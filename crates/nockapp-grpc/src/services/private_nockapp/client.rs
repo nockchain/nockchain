@@ -1,7 +1,9 @@
+use std::time::Duration;
+
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use nockapp::noun::slab::NounSlab;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 
 use crate::error::{NockAppGrpcError, Result};
 use crate::pb::common::v1::{ErrorStatus, Wire};
@@ -19,10 +21,33 @@ pub enum PokeResponseResult {
     Error(ErrorStatus),
 }
 
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl PrivateNockAppGrpcClient {
     pub async fn connect<T: AsRef<str>>(address: T) -> Result<Self> {
         let client = PrivateNockAppClient::connect(address.as_ref().to_string()).await?;
         Ok(Self { client })
+    }
+
+    /// Connect with a bounded handshake and transport keepalives suitable for
+    /// long-lived effect streams. The original [`Self::connect`] remains for
+    /// callers that need tonic's default transport policy.
+    pub async fn connect_with_timeout<T: AsRef<str>>(
+        address: T,
+        connect_timeout: Duration,
+    ) -> Result<Self> {
+        let endpoint = Endpoint::from_shared(address.as_ref().to_string())?
+            .connect_timeout(connect_timeout)
+            .tcp_keepalive(Some(TCP_KEEPALIVE_INTERVAL))
+            .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+            .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+            .keep_alive_while_idle(true);
+        let channel = endpoint.connect().await?;
+        Ok(Self {
+            client: PrivateNockAppClient::new(channel),
+        })
     }
 
     // Monitoring ping is handled in MonitoringService, not here.

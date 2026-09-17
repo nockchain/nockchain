@@ -137,6 +137,8 @@ async fn miner_finds_and_submits_block_against_mock_node() {
             pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
         }],
         num_threads: 1,
+        rpc_timeout: Duration::from_secs(5),
+        worker_shutdown_timeout: Duration::from_secs(2),
         reconnect_backoff_initial: Duration::from_millis(50),
         reconnect_backoff_max: Duration::from_millis(200),
         reconnect_max_attempts: 5,
