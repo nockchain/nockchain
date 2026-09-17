@@ -424,12 +424,7 @@ pub(crate) async fn execute_request_item(
                 total_response_bytes,
             );
 
-            return Ok(RequestExecutionOutcome::Result {
-                response: NockchainResponse::Result {
-                    message: ByteBuf::new(),
-                },
-                envelope,
-            });
+            return Ok(RequestExecutionOutcome::Result { envelope });
         }
     };
 
@@ -446,7 +441,7 @@ pub(crate) async fn execute_request_item(
         .await
         .record_response_message_hint(&request_for_hint, envelope.message.len());
 
-    Ok(RequestExecutionOutcome::Result { response, envelope })
+    Ok(RequestExecutionOutcome::Result { envelope })
 }
 
 fn response_result_message(
@@ -717,12 +712,7 @@ async fn complete_bundle_response(
     let request_for_hint = NockchainDataRequest::BlockWithTxsByHeight(height);
     state_guard.record_response_message_hint(&request_for_hint, total_bytes);
 
-    Ok(RequestExecutionOutcome::Result {
-        response: NockchainResponse::Result {
-            message: block_message,
-        },
-        envelope,
-    })
+    Ok(RequestExecutionOutcome::Result { envelope })
 }
 
 async fn peek_single_block_range_fallback(

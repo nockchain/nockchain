@@ -24,37 +24,15 @@ if [ ! -f "$SPEC_FILE" ]; then
     exit 1
 fi
 
-require_pattern "run_testnet_full_validation entrypoint" 'scripts/run_testnet_full_validation\.sh'
-require_pattern "run_testnet_gen2_validation entrypoint" 'scripts/run_testnet_gen2_validation\.sh'
-require_pattern "run_nous_mixed_generation_e2e entrypoint" 'scripts/run_nous_mixed_generation_e2e\.sh'
-require_pattern "validator json output path" 'scripts/validate_req_res_gen2_rollout\.rs --json-out target/test-logs/req_res_gen2_rollout_readiness/latest\.json'
-require_pattern "canonical recurring readiness gate wording" 'canonical recurring readiness gate'
-require_pattern "one-time pre-testnet validation wording" 'one-time pre-testnet validation'
-require_pattern "full validation report output" 'target/test-logs/testnet_full_validation/<timestamp>/report\.json'
-require_pattern "embedded old/new fallback proof summary wording" 'embedded `old_new_fallback_proof` summary'
-require_pattern "first-checkpoint fallback proof gate wording" 'pass `--require-old-new-fallback`.*recurring report.*fails'
-require_pattern "focused staged-send drill wording" 'narrower staged-send drill'
-require_pattern "gen2 staged-send scenario reference" 'nous_testnet_gen2_send'
-
-# Output-path guards for remaining canonical validation entrypoints
-require_pattern "gen2 staged-send compose/consensus.log output" 'testnet_gen2_validation/<timestamp>/compose/consensus\.log'
-require_pattern "gen2 staged-send scenario-run/ output" 'testnet_gen2_validation/<timestamp>/scenario-run/'
-require_pattern "cargo-only reducer benchmark sidecar output" 'target/benchmarks/req_res_gen2/latest\.json'
-require_pattern "mixed-generation proof log output" 'nous_mixed_generation/<timestamp>\.log'
-
-# Guard: operator guide must use the canonical --json-out validator flag.
-OPERATOR_GUIDE="../docs/NOUS-OPERATOR-GUIDE.md"
-if [ -f "$OPERATOR_GUIDE" ]; then
-    if ! rg -q 'scripts/validate_req_res_gen2_rollout\.rs.*--json-out' "$OPERATOR_GUIDE"; then
-        printf '  - %s: missing canonical --json-out validator flag\n' "$OPERATOR_GUIDE"
-        failures=1
-    fi
-    # Detect bare one-line validator invocations without --json-out.
-    if rg -q 'validate_req_res_gen2_rollout\.rs\s*$' "$OPERATOR_GUIDE"; then
-        printf '  - %s: bare validator invocation without --json-out detected\n' "$OPERATOR_GUIDE"
-        failures=1
-    fi
-fi
+require_pattern "gen2 protocol ID" '/nockchain-2-req-res'
+require_pattern "gen2 full support" 'full inbound and outbound support'
+require_pattern "gen1 registration removed" 'Generation 1 is not registered'
+require_pattern "legacy gossip removed" 'unauthenticated legacy `Gossip` wire shape'
+require_pattern "authenticated gossip schema" 'AuthenticatedGossip'
+require_pattern "gen2 request schema" 'BatchRequest'
+require_pattern "accept flag removal" 'req_res_gen2_accept_enabled.*removed'
+require_pattern "send flag removal" 'req_res_gen2_send_enabled.*removed'
+require_pattern "no runtime rollback" 'no runtime rollback flag'
 
 if [ "$failures" -ne 0 ]; then
     printf 'nous validation entrypoint check: FAIL\n'

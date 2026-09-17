@@ -116,12 +116,8 @@ pub fn default_test_config() -> LibP2PConfig {
     LibP2PConfig::default()
 }
 
-pub fn expected_outbound_generation(config: &LibP2PConfig) -> &'static str {
-    if config.req_res_gen2_send_enabled {
-        "gen2"
-    } else {
-        "gen1"
-    }
+pub fn expected_outbound_generation(_config: &LibP2PConfig) -> &'static str {
+    "gen2"
 }
 
 pub fn expected_common_protocol(local: &LibP2PConfig, remote: &LibP2PConfig) -> Option<String> {
@@ -929,8 +925,6 @@ pub async fn run_request_until_disconnect_cleanup_failure(
 
 fn describe_request(request: &NockchainRequest) -> &'static str {
     match request {
-        NockchainRequest::Request { .. } => "request",
-        NockchainRequest::Gossip { .. } => "gossip",
         NockchainRequest::AuthenticatedGossip { .. } => "authenticated-gossip",
         NockchainRequest::BatchRequest { .. } => "batch-request",
     }

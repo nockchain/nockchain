@@ -25,9 +25,8 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use crate::behaviour::request_response_protocols;
 use crate::config::LibP2PConfig;
 use crate::driver::{
-    build_retry_request_contexts, build_unsupported_protocol_fallback_contexts,
-    collect_tip5_zset_strings, handle_outbound_request_failure, heard_block_height_from_fact_poke,
-    heard_block_tx_ids_from_fact_poke, SwarmAction,
+    build_retry_request_contexts, collect_tip5_zset_strings, handle_outbound_request_failure,
+    heard_block_height_from_fact_poke, heard_block_tx_ids_from_fact_poke, SwarmAction,
 };
 use crate::ip_block::PeerExclusions;
 use crate::key_fair_queue;
@@ -40,7 +39,6 @@ pub use crate::messages::{
     NockchainRequest, NockchainResponse, ResponseEnvelope,
 };
 use crate::metrics::NockchainP2PMetrics;
-pub use crate::p2p_state::ReqResGeneration;
 use crate::p2p_state::{
     InboundReplayAdmission, OutboundRequestContext, P2PState, DEFERRED_HEARD_BLOCK_PER_PEER_CAP,
 };
@@ -271,11 +269,8 @@ pub type ReqResTestSwarm = Swarm<ReqResTestBehaviour>;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReqResObservabilitySnapshot {
     pub request_failed: u64,
-    pub gen1_outbound_failures: u64,
-    pub gen1_outbound_timeouts: u64,
     pub gen2_outbound_failures: u64,
     pub gen2_outbound_timeouts: u64,
-    pub req_res_fallback_total: u64,
 }
 
 pub struct ReqResFailureObservabilityProbe {
@@ -320,7 +315,6 @@ impl ReqResFailureObservabilityProbe {
         peer_id: PeerId,
         remote_addr: &Multiaddr,
         local_addr: &Multiaddr,
-        generation: ReqResGeneration,
     ) {
         let connection_id =
             ConnectionId::new_unchecked(self.next_connection_id.fetch_add(1, Ordering::Relaxed));
@@ -334,23 +328,19 @@ impl ReqResFailureObservabilityProbe {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state.observe_peer_generation(peer_id, generation);
     }
 
     pub async fn observe_outbound_failure(
         &self,
         peer_id: PeerId,
-        generation: ReqResGeneration,
         request: NockchainRequest,
         error: request_response::OutboundFailure,
     ) {
         let request_id = fresh_outbound_request_id();
         {
             let mut state = self.state.lock().await;
-            state.record_outbound_request(
-                request_id,
-                OutboundRequestContext::new(peer_id, generation, request),
-            );
+            state
+                .record_outbound_request(request_id, OutboundRequestContext::new(peer_id, request));
         }
 
         let mut equix_builder = equix::EquiXBuilder::new();
@@ -373,11 +363,8 @@ impl ReqResFailureObservabilityProbe {
     pub fn snapshot(&self) -> ReqResObservabilitySnapshot {
         ReqResObservabilitySnapshot {
             request_failed: self.metrics.request_failed.fetch_add(0) as u64,
-            gen1_outbound_failures: self.metrics.gen1_outbound_failures.fetch_add(0) as u64,
-            gen1_outbound_timeouts: self.metrics.gen1_outbound_timeouts.fetch_add(0) as u64,
             gen2_outbound_failures: self.metrics.gen2_outbound_failures.fetch_add(0) as u64,
             gen2_outbound_timeouts: self.metrics.gen2_outbound_timeouts.fetch_add(0) as u64,
-            req_res_fallback_total: self.metrics.req_res_fallback_total.fetch_add(0) as u64,
         }
     }
 
@@ -395,15 +382,17 @@ fn fresh_outbound_request_id() -> request_response::OutboundRequestId {
     let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
         request_response::cbor::Behaviour::new(
             [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_gen1_protocol_version()),
+                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
                 request_response::ProtocolSupport::Full,
             )],
             request_response::Config::default(),
         );
     behaviour.send_request(
         &PeerId::random(),
-        NockchainRequest::Gossip {
-            message: ByteBuf::from(vec![0xAB]),
+        NockchainRequest::BatchRequest {
+            pow: [0; 16],
+            nonce: 0,
+            items: Vec::new(),
         },
     )
 }
@@ -540,7 +529,7 @@ pub fn solve_block_by_height_request(
     receiver_peer_id: &PeerId,
     height: u64,
 ) -> NockchainRequest {
-    let mut slab = NounSlab::new();
+    let mut slab: NounSlab = NounSlab::new();
     let by_height_tas = make_tas(&mut slab, "by-height");
     let by_height = T(&mut slab, &[by_height_tas.as_noun(), D(height)]);
     let block_cell = T(&mut slab, &[D(tas!(b"block")), by_height]);
@@ -548,7 +537,16 @@ pub fn solve_block_by_height_request(
     slab.set_root(request);
 
     let mut builder = equix::EquiXBuilder::new();
-    NockchainRequest::new_request(&mut builder, sender_peer_id, receiver_peer_id, &slab)
+    NockchainRequest::new_batch_request(
+        &mut builder,
+        sender_peer_id,
+        receiver_peer_id,
+        vec![BatchRequestItem {
+            item_id: 0,
+            message: ByteBuf::from(slab.jam().as_ref()),
+        }],
+    )
+    .expect("test BlockByHeight batch PoW construction must succeed")
 }
 
 pub fn solve_batch_request(
@@ -1044,9 +1042,8 @@ fn build_req_res_test_swarm_internal(
     Ok((swarm, raw_request_injection, raw_response_injection))
 }
 
-/// Jam-encode a `[%request [%block [%by-height height]]]` noun into the byte
-/// format used by `NockchainRequest::Request { message }`.  This is the same
-/// encoding the driver produces for outbound `BlockByHeight` requests.
+/// Jam-encode a `[%request [%block [%by-height height]]]` noun into the item
+/// payload used by `NockchainRequest::BatchRequest`.
 pub fn jam_block_by_height_request(height: u64) -> Vec<u8> {
     let mut slab: NounSlab = NounSlab::new();
     let by_height_tas = make_tas(&mut slab, "by-height");
@@ -1282,58 +1279,10 @@ pub fn validated_batch_response_retry_item_ids(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct UnsupportedProtocolFallbackRequest {
-    pub item_id: u32,
-    pub request: NockchainRequest,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct SelectiveBatchRetryRequest {
     pub item_ids: Vec<u32>,
     pub retry_count: u8,
     pub request: NockchainRequest,
-}
-
-/// Build the ordered gen1 singleton requests the driver would queue after a
-/// gen2 batch hits `UnsupportedProtocols`.
-pub fn build_unsupported_protocol_fallback_requests(
-    local_peer_id: &libp2p::PeerId,
-    remote_peer_id: &libp2p::PeerId,
-    batch_request: NockchainRequest,
-) -> Result<Vec<UnsupportedProtocolFallbackRequest>, nockapp::NockAppError> {
-    let item_ids = match &batch_request {
-        NockchainRequest::BatchRequest { items, .. } => {
-            items.iter().map(|item| item.item_id).collect::<Vec<_>>()
-        }
-        _ => {
-            return Err(nockapp::NockAppError::OtherError(String::from(
-                "fallback helper requires a BatchRequest",
-            )));
-        }
-    };
-
-    let request_context = OutboundRequestContext::with_attempt(
-        *remote_peer_id,
-        ReqResGeneration::Gen2,
-        batch_request,
-        0,
-        false,
-    );
-    let mut equix_builder = equix::EquiXBuilder::new();
-    let fallback_contexts = build_unsupported_protocol_fallback_contexts(
-        &request_context, local_peer_id, &mut equix_builder,
-    )?;
-
-    Ok(item_ids
-        .into_iter()
-        .zip(fallback_contexts)
-        .map(
-            |(item_id, fallback_context)| UnsupportedProtocolFallbackRequest {
-                item_id,
-                request: fallback_context.request,
-            },
-        )
-        .collect())
 }
 
 /// Build the selective gen2 retry batch requests the driver would queue after
@@ -1351,13 +1300,8 @@ pub fn build_selective_batch_retry_requests(
         )));
     }
 
-    let request_context = OutboundRequestContext::with_attempt(
-        *remote_peer_id,
-        ReqResGeneration::Gen2,
-        batch_request,
-        retry_count,
-        false,
-    );
+    let request_context =
+        OutboundRequestContext::with_attempt(*remote_peer_id, batch_request, retry_count);
     let retry_item_ids = retry_item_ids.iter().copied().collect::<BTreeSet<_>>();
     let mut equix_builder = equix::EquiXBuilder::new();
     let retry_contexts = build_retry_request_contexts(
@@ -1398,48 +1342,4 @@ pub fn is_block_by_height_message(message: &[u8]) -> bool {
         NockchainDataRequest::from_noun(noun, &space),
         Ok(NockchainDataRequest::BlockByHeight(_))
     )
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct UnsupportedProtocolFallbackReplay {
-    pub fallback_requests: Vec<NockchainRequest>,
-    pub fallback_metric_total: u64,
-}
-
-/// Build the same ordered gen1 singleton replay that the driver queues after a
-/// gen2 `UnsupportedProtocols` failure on a batch request.
-pub fn build_unsupported_protocol_fallback_replay(
-    local_peer_id: PeerId,
-    remote_peer_id: PeerId,
-    items: Vec<BatchRequestItem>,
-) -> Result<UnsupportedProtocolFallbackReplay, Box<dyn Error>> {
-    let request_context = OutboundRequestContext::with_attempt(
-        remote_peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::BatchRequest {
-            pow: [0; 16],
-            nonce: 0,
-            items,
-        },
-        0,
-        false,
-    );
-    let mut equix_builder = equix::EquiXBuilder::new();
-    let fallback_contexts = build_unsupported_protocol_fallback_contexts(
-        &request_context, &local_peer_id, &mut equix_builder,
-    )?;
-
-    let fallback_metric_total = fallback_contexts.len() as u64;
-    let mut fallback_requests = Vec::with_capacity(fallback_contexts.len());
-    for fallback_context in fallback_contexts {
-        fallback_context
-            .request
-            .verify_pow(&mut equix_builder, &remote_peer_id, &local_peer_id)?;
-        fallback_requests.push(fallback_context.request);
-    }
-
-    Ok(UnsupportedProtocolFallbackReplay {
-        fallback_requests,
-        fallback_metric_total,
-    })
 }

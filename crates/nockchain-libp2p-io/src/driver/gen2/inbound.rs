@@ -99,25 +99,8 @@ pub(super) async fn handle_inbound_request(
             return Ok(());
         }
     }
-    if matches!(&request, NockchainRequest::Gossip { .. }) {
-        metrics.legacy_gossip_received.increment();
-    }
-    if matches!(&request, NockchainRequest::Gossip { .. })
-        && !req_res_limits.legacy_gossip_accept_enabled
-    {
-        metrics.legacy_gossip_compatibility_rejected.increment();
-        metrics.gossip_dropped.increment();
-        warn!(
-            peer = %peer,
-            "Rejecting legacy gossip because unauthenticated gossip compatibility is disabled"
-        );
-        return Ok(());
-    }
 
-    if !matches!(
-        &request,
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. }
-    ) {
+    if matches!(&request, NockchainRequest::BatchRequest { .. }) {
         let admission = driver_state.lock().await.admit_request_from_connection(
             connection_id, req_res_limits.ip_bucket_request_admission_limit,
         );
@@ -262,27 +245,7 @@ pub(super) async fn handle_inbound_request(
     let driver_state_for_release = Arc::clone(&driver_state);
     let request_result: Result<(), NockAppError> = async move {
         match request {
-            NockchainRequest::Request {
-                pow: _,
-                nonce: _,
-                message,
-            } => {
-                trace!("handle_request_response: Request received");
-                let data_request = decode_request_item_message(&message)?;
-                let response = execute_request_item(
-                    peer, data_request, req_res_limits, &traffic, &metrics, &driver_state,
-                )
-                .await?
-                .into_single_response();
-                swarm_tx
-                    .send(SwarmAction::SendResponse { channel, response })
-                    .await
-                    .map_err(|_| {
-                        NockAppError::OtherError(String::from("Failed to send SwarmAction response"))
-                    })
-            }
-            NockchainRequest::Gossip { message }
-            | NockchainRequest::AuthenticatedGossip { message, .. } => {
+            NockchainRequest::AuthenticatedGossip { message, .. } => {
                 trace!("handle_request_response: Gossip received");
                 let admission = driver_state.lock().await.admit_gossip_from_connection(
                     connection_id,

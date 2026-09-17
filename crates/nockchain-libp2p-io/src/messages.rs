@@ -330,6 +330,7 @@ pub(crate) fn decode_request_item_message(
     NockchainDataRequest::from_noun(request_noun, &space)
 }
 
+#[cfg(test)]
 pub(crate) fn request_slab_from_message(message: &[u8]) -> Result<NounSlab, NockAppError> {
     let mut request_slab = NounSlab::new();
     let request_noun = request_slab.cue_into(Bytes::copy_from_slice(message))?;
@@ -781,24 +782,6 @@ fn canonical_batch_item_bytes(items: &[BatchRequestItem]) -> Result<Vec<u8>, Noc
     Ok(bytes)
 }
 
-fn gen1_pow_preimage(
-    nonce: u64,
-    sender_peer_id: &libp2p::PeerId,
-    receiver_peer_id: &libp2p::PeerId,
-    message: &[u8],
-) -> Vec<u8> {
-    let sender_peer_bytes = (*sender_peer_id).to_bytes();
-    let receiver_peer_bytes = (*receiver_peer_id).to_bytes();
-    let mut pow_buf = Vec::with_capacity(
-        size_of::<u64>() + sender_peer_bytes.len() + receiver_peer_bytes.len() + message.len(),
-    );
-    pow_buf.extend_from_slice(&nonce.to_le_bytes());
-    pow_buf.extend_from_slice(&sender_peer_bytes);
-    pow_buf.extend_from_slice(&receiver_peer_bytes);
-    pow_buf.extend_from_slice(message);
-    pow_buf
-}
-
 fn gen2_pow_preimage(
     nonce: u64,
     sender_peer_id: &libp2p::PeerId,
@@ -871,21 +854,13 @@ fn solve_pow(
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Network struct (in serde/CBOR) for requests
 pub enum NockchainRequest {
-    /// Request a block or TX from another node, carry PoW
-    Request {
-        pow: equix::SolutionByteArray,
-        nonce: u64,
-        message: ByteBuf,
-    },
-    /// Gossip a block or TX to another node
-    Gossip { message: ByteBuf },
-    /// Request a batch of transport items from another node, carry PoW
+    /// Request a batch of transport items from another node, carry PoW.
     BatchRequest {
         pow: equix::SolutionByteArray,
         nonce: u64,
         items: Vec<BatchRequestItem>,
     },
-    /// Gossip a block or TX to another node with sender-bound PoW
+    /// Gossip a block or TX to another node with sender-bound PoW.
     AuthenticatedGossip {
         pow: equix::SolutionByteArray,
         nonce: u64,
@@ -947,14 +922,6 @@ fn batch_items_replay_hash(items: &[BatchRequestItem]) -> Result<(u64, usize), N
 }
 
 impl NockchainRequest {
-    /// Make a new "request" which gossips a block or a TX
-    pub(crate) fn new_gossip(message: &NounSlab) -> NockchainRequest {
-        let message_bytes = ByteBuf::from(message.jam().as_ref());
-        NockchainRequest::Gossip {
-            message: message_bytes,
-        }
-    }
-
     pub fn authenticated_gossip_from_message(
         builder: &mut equix::EquiXBuilder,
         local_peer_id: &libp2p::PeerId,
@@ -972,47 +939,6 @@ impl NockchainRequest {
             nonce,
             message,
         })
-    }
-
-    pub(crate) fn authenticate_gossip(
-        self,
-        builder: &mut equix::EquiXBuilder,
-        local_peer_id: &libp2p::PeerId,
-        remote_peer_id: &libp2p::PeerId,
-    ) -> Result<NockchainRequest, NockAppError> {
-        match self {
-            Self::Gossip { message } => Self::authenticated_gossip_from_message(
-                builder, local_peer_id, remote_peer_id, message,
-            ),
-            other => Ok(other),
-        }
-    }
-
-    /// Make a new request for a block or a TX
-    pub(crate) fn new_request(
-        builder: &mut equix::EquiXBuilder,
-        local_peer_id: &libp2p::PeerId,
-        remote_peer_id: &libp2p::PeerId,
-        message: &NounSlab,
-    ) -> NockchainRequest {
-        let message_bytes = ByteBuf::from(message.jam().as_ref());
-
-        let mut nonce = 0u64;
-        let sol_bytes = loop {
-            let pow_buf = gen1_pow_preimage(nonce, local_peer_id, remote_peer_id, &message_bytes);
-            if let Ok(sols) = builder.solve(&pow_buf) {
-                if !sols.is_empty() {
-                    break sols[0].to_bytes();
-                }
-            }
-            nonce += 1;
-        };
-
-        NockchainRequest::Request {
-            pow: sol_bytes,
-            nonce,
-            message: message_bytes,
-        }
     }
 
     pub fn new_batch_request(
@@ -1036,14 +962,13 @@ impl NockchainRequest {
 
     pub fn validate(&self) -> Result<(), NockAppError> {
         match self {
-            Self::Request { .. } | Self::Gossip { .. } | Self::AuthenticatedGossip { .. } => Ok(()),
             Self::BatchRequest { items, .. } => validate_batch_item_ids(items),
+            Self::AuthenticatedGossip { .. } => Ok(()),
         }
     }
 
     pub(crate) fn replay_key(&self) -> Result<Option<RequestReplayKey>, NockAppError> {
         match self {
-            Self::Request { .. } => Ok(None),
             Self::BatchRequest { nonce, items, .. } => {
                 let (payload_hash, payload_bytes) = batch_items_replay_hash(items)?;
                 Ok(Some(RequestReplayKey {
@@ -1063,7 +988,6 @@ impl NockchainRequest {
                     payload_bytes: message.len(),
                 }))
             }
-            Self::Gossip { .. } => Ok(None),
         }
     }
 
@@ -1075,19 +999,6 @@ impl NockchainRequest {
         remote_peer_id: &libp2p::PeerId,
     ) -> Result<(), NockAppError> {
         match self {
-            NockchainRequest::Request {
-                pow,
-                nonce,
-                message,
-            } => {
-                // This looks backwards, but it's because local/remote swap between
-                // sender-side generation and receiver-side verification.
-                let pow_buf = gen1_pow_preimage(*nonce, remote_peer_id, local_peer_id, message);
-                builder.verify_bytes(&pow_buf, pow).map_err(|err| {
-                    NockAppError::OtherError(format!("pow verification failed: {err}"))
-                })
-            }
-            NockchainRequest::Gossip { message: _ } => Ok(()),
             NockchainRequest::BatchRequest { pow, nonce, items } => {
                 let pow_buf = gen2_pow_preimage(*nonce, remote_peer_id, local_peer_id, items)?;
                 builder.verify_bytes(&pow_buf, pow).map_err(|err| {
@@ -1111,9 +1022,10 @@ impl NockchainRequest {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Responses to Nockchain requests
 pub enum NockchainResponse {
-    /// The requested block or raw-tx
+    /// Internal single-item execution result. Never accepted on the wire.
+    #[serde(skip)]
     Result { message: ByteBuf },
-    /// If the request was a gossip, no actual response is needed
+    /// Acknowledgement for authenticated gossip.
     Ack { acked: bool },
     /// Per-item outcomes for a batched request
     BatchResult { results: Vec<BatchResultItem> },
@@ -1236,19 +1148,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_key_ignores_singleton_requests() {
-        let replay_key = NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 9,
-            message: ByteBuf::from(b"first".to_vec()),
-        }
-        .replay_key()
-        .expect("singleton request replay decision should build");
-
-        assert!(replay_key.is_none());
-    }
-
-    #[test]
     fn replay_key_matches_identical_batch_payloads() {
         let items = vec![
             BatchRequestItem {
@@ -1305,17 +1204,6 @@ mod tests {
         .expect("batch has a replay key");
 
         assert_ne!(first, second);
-    }
-
-    #[test]
-    fn replay_key_ignores_legacy_gossip() {
-        let key = NockchainRequest::Gossip {
-            message: ByteBuf::from(b"gossip".to_vec()),
-        }
-        .replay_key()
-        .expect("legacy gossip replay key should be absent");
-
-        assert!(key.is_none());
     }
 
     #[test]

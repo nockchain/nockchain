@@ -16,8 +16,6 @@ use serde_bytes::ByteBuf;
 
 fn gen2_config() -> LibP2PConfig {
     LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..default_test_config()
     }
 }

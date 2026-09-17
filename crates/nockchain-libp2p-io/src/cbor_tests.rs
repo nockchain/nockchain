@@ -33,59 +33,36 @@ impl Arbitrary for TestByteBuf {
 
 impl Arbitrary for NockchainRequest {
     fn arbitrary(g: &mut Gen) -> Self {
-        match u8::arbitrary(g) % 4 {
-            0 => NockchainRequest::Gossip {
-                message: TestByteBuf::arbitrary(g).into(),
-            },
-            1 => NockchainRequest::Request {
-                pow: {
-                    let mut arr = [0u8; 16];
-                    for elem in &mut arr {
-                        *elem = u8::arbitrary(g);
-                    }
-                    arr
-                },
-                nonce: u64::arbitrary(g),
-                message: TestByteBuf::arbitrary(g).into(),
-            },
-            2 => NockchainRequest::BatchRequest {
-                pow: {
-                    let mut arr = [0u8; 16];
-                    for elem in &mut arr {
-                        *elem = u8::arbitrary(g);
-                    }
-                    arr
-                },
+        let mut pow = [0u8; 16];
+        for elem in &mut pow {
+            *elem = u8::arbitrary(g);
+        }
+        if bool::arbitrary(g) {
+            NockchainRequest::BatchRequest {
+                pow,
                 nonce: u64::arbitrary(g),
                 items: arbitrary_batch_request_items(g),
-            },
-            _ => NockchainRequest::AuthenticatedGossip {
-                pow: {
-                    let mut arr = [0u8; 16];
-                    for elem in &mut arr {
-                        *elem = u8::arbitrary(g);
-                    }
-                    arr
-                },
+            }
+        } else {
+            NockchainRequest::AuthenticatedGossip {
+                pow,
                 nonce: u64::arbitrary(g),
                 message: TestByteBuf::arbitrary(g).into(),
-            },
+            }
         }
     }
 }
 
 impl Arbitrary for NockchainResponse {
     fn arbitrary(g: &mut Gen) -> Self {
-        match u8::arbitrary(g) % 3 {
-            0 => NockchainResponse::Result {
-                message: TestByteBuf::arbitrary(g).into(),
-            },
-            1 => NockchainResponse::Ack {
+        if bool::arbitrary(g) {
+            NockchainResponse::Ack {
                 acked: bool::arbitrary(g),
-            },
-            _ => NockchainResponse::BatchResult {
+            }
+        } else {
+            NockchainResponse::BatchResult {
                 results: arbitrary_batch_result_items(g),
-            },
+            }
         }
     }
 }
@@ -293,7 +270,9 @@ mod tests {
 
     #[test]
     fn test_truncated_cbor_enum_reproduction() {
-        let request = NockchainRequest::Gossip {
+        let request = NockchainRequest::AuthenticatedGossip {
+            pow: [0; 16],
+            nonce: 0,
             message: ByteBuf::from(vec![1, 2, 3, 4]),
         };
 
@@ -317,7 +296,9 @@ mod tests {
 
     #[test]
     fn test_corrupted_enum_discriminant() {
-        let request = NockchainRequest::Gossip {
+        let request = NockchainRequest::AuthenticatedGossip {
+            pow: [0; 16],
+            nonce: 0,
             message: ByteBuf::from(vec![1, 2, 3, 4]),
         };
 
@@ -408,8 +389,8 @@ mod tests {
     fn test_response_enum_truncation() {
         let responses = vec![
             NockchainResponse::Ack { acked: true },
-            NockchainResponse::Result {
-                message: ByteBuf::from(vec![5, 6, 7, 8]),
+            NockchainResponse::BatchResult {
+                results: Vec::new(),
             },
         ];
 
@@ -438,10 +419,13 @@ mod tests {
 
     #[test]
     fn test_network_corruption_scenarios() {
-        let request = NockchainRequest::Request {
+        let request = NockchainRequest::BatchRequest {
             pow: [42u8; 16],
             nonce: 12345,
-            message: ByteBuf::from(vec![1, 2, 3, 4, 5]),
+            items: vec![BatchRequestItem {
+                item_id: 0,
+                message: ByteBuf::from(vec![1, 2, 3, 4, 5]),
+            }],
         };
 
         let mut cbor_data = serde_cbor::to_vec(&request).expect("Serialization should succeed");
@@ -773,24 +757,28 @@ mod tests {
     #[test]
     fn test_comprehensive_eof_enum_search() {
         let test_messages = [
-            NockchainRequest::Gossip {
-                message: ByteBuf::from(vec![]),
-            },
-            NockchainRequest::Gossip {
-                message: ByteBuf::from(vec![0]),
-            },
-            NockchainRequest::Gossip {
-                message: ByteBuf::from(vec![1, 2, 3]),
-            },
-            NockchainRequest::Request {
-                pow: [0u8; 16],
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
                 nonce: 0,
-                message: ByteBuf::from(vec![]),
+                message: ByteBuf::new(),
             },
-            NockchainRequest::Request {
-                pow: [0xFFu8; 16],
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0xFF; 16],
                 nonce: u64::MAX,
                 message: ByteBuf::from(vec![0xFF; 1000]),
+            },
+            NockchainRequest::BatchRequest {
+                pow: [0; 16],
+                nonce: 0,
+                items: Vec::new(),
+            },
+            NockchainRequest::BatchRequest {
+                pow: [0xFF; 16],
+                nonce: u64::MAX,
+                items: vec![BatchRequestItem {
+                    item_id: 0,
+                    message: ByteBuf::from(vec![0xFF; 1000]),
+                }],
             },
         ];
 
@@ -924,20 +912,25 @@ mod tests {
     #[test]
     fn test_cbor_baseline_robustness() {
         let request_cases = [
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(b"test message".to_vec()),
             },
-            NockchainRequest::Request {
+            NockchainRequest::BatchRequest {
                 pow: [1u8; 16],
                 nonce: 42,
-                message: ByteBuf::from(b"request".to_vec()),
+                items: vec![BatchRequestItem {
+                    item_id: 0,
+                    message: ByteBuf::from(b"request".to_vec()),
+                }],
             },
         ];
 
         let response_cases = [
             NockchainResponse::Ack { acked: true },
-            NockchainResponse::Result {
-                message: ByteBuf::from(b"response data".to_vec()),
+            NockchainResponse::BatchResult {
+                results: Vec::new(),
             },
         ];
 
@@ -1026,8 +1019,8 @@ mod tests {
             }
         }
 
-        let result_response = NockchainResponse::Result {
-            message: ByteBuf::from(b"test".to_vec()),
+        let result_response = NockchainResponse::BatchResult {
+            results: Vec::new(),
         };
 
         let mut cbor4ii_buffer_result = Vec::new();
@@ -1095,9 +1088,9 @@ mod tests {
         let test_messages = vec![
             ("Ack", NockchainResponse::Ack { acked: true }),
             (
-                "Result",
-                NockchainResponse::Result {
-                    message: ByteBuf::from(b"test".to_vec()),
+                "BatchResult",
+                NockchainResponse::BatchResult {
+                    results: Vec::new(),
                 },
             ),
         ];
@@ -1331,8 +1324,6 @@ mod tests {
     #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
     enum RequestVariant {
-        Gossip,
-        Request,
         AuthenticatedGossip,
         BatchRequest,
     }
@@ -1349,7 +1340,6 @@ mod tests {
         variant: ResponseVariant,
         cbor_hex: String,
         acked: Option<bool>,
-        message_hex: Option<String>,
         results: Option<Vec<BatchResultItemVector>>,
     }
 
@@ -1357,7 +1347,6 @@ mod tests {
     #[serde(rename_all = "snake_case")]
     enum ResponseVariant {
         Ack,
-        Result,
         BatchResult,
     }
 
@@ -1419,11 +1408,6 @@ mod tests {
         Response,
     }
 
-    fn load_gen1_cbor_conformance_vectors() -> ReqResCborConformanceVectors {
-        serde_json::from_str(include_str!("../testdata/req_res_gen1_cbor_vectors.json"))
-            .expect("gen1 cbor vector fixture must be valid JSON")
-    }
-
     fn load_gen2_cbor_conformance_vectors() -> ReqResCborConformanceVectors {
         serde_json::from_str(include_str!("../testdata/req_res_gen2_cbor_vectors.json"))
             .expect("gen2 cbor vector fixture must be valid JSON")
@@ -1442,37 +1426,6 @@ mod tests {
 
     fn request_from_vector(vector: &RequestVector) -> NockchainRequest {
         match vector.variant {
-            RequestVariant::Gossip => NockchainRequest::Gossip {
-                message: ByteBuf::from(decode_hex(
-                    vector
-                        .message_hex
-                        .as_ref()
-                        .expect("gossip vectors require message_hex"),
-                )),
-            },
-            RequestVariant::Request => {
-                let pow_hex = vector
-                    .pow_hex
-                    .as_ref()
-                    .expect("request vectors require pow_hex for Request variant");
-                let pow_bytes = decode_hex(pow_hex);
-                let pow: [u8; 16] = pow_bytes
-                    .try_into()
-                    .expect("pow_hex must decode to 16 bytes");
-                let nonce = vector
-                    .nonce
-                    .expect("request vectors require nonce for Request variant");
-                NockchainRequest::Request {
-                    pow,
-                    nonce,
-                    message: ByteBuf::from(decode_hex(
-                        vector
-                            .message_hex
-                            .as_ref()
-                            .expect("request vectors require message_hex"),
-                    )),
-                }
-            }
             RequestVariant::AuthenticatedGossip => {
                 let pow_hex = vector
                     .pow_hex
@@ -1579,15 +1532,6 @@ mod tests {
                     .expect("response vectors require acked for Ack variant");
                 NockchainResponse::Ack { acked }
             }
-            ResponseVariant::Result => {
-                let message_hex = vector
-                    .message_hex
-                    .as_ref()
-                    .expect("response vectors require message_hex for Result variant");
-                NockchainResponse::Result {
-                    message: ByteBuf::from(decode_hex(message_hex)),
-                }
-            }
             ResponseVariant::BatchResult => {
                 let results = vector
                     .results
@@ -1684,27 +1628,10 @@ mod tests {
     }
 
     #[test]
-    fn test_gen1_cbor_vector_schema_version() {
-        let vectors = load_gen1_cbor_conformance_vectors();
-        assert_eq!(vectors.schema_version, "req_res_gen1_cbor_v1");
-    }
-
-    #[test]
-    fn test_gen1_request_cbor_vectors_roundtrip() {
-        let vectors = load_gen1_cbor_conformance_vectors();
-        assert_request_cbor_vectors_roundtrip(&vectors.request_vectors);
-    }
-
-    #[test]
-    fn test_gen1_response_cbor_vectors_roundtrip() {
-        let vectors = load_gen1_cbor_conformance_vectors();
-        assert_response_cbor_vectors_roundtrip(&vectors.response_vectors);
-    }
-
-    #[test]
-    fn test_gen1_invalid_cbor_vectors_fail_decode() {
-        let vectors = load_gen1_cbor_conformance_vectors();
-        assert_invalid_cbor_vectors_fail_decode(&vectors.invalid_vectors);
+    fn test_legacy_gossip_request_fails_decode() {
+        let legacy_gossip = decode_hex("a166476f73736970a1676d6573736167654401020304");
+        serde_cbor::from_slice::<NockchainRequest>(&legacy_gossip)
+            .expect_err("legacy Gossip must not decode after the gen2-only cutover");
     }
 
     #[test]

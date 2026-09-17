@@ -34,8 +34,7 @@
 # to exercise the code path we care about — that's a scenario bug, not a
 # pass.
 #
-# Port range is 4521-4527 to avoid colliding with the 4501-4506 range used
-# by responder-stress and the 4511-4516 range used by gen1_responder_stress.
+# Port range is 4521-4527 to avoid colliding with responder-stress.
 
 name: "nous_gen2_multi_source_deferred"
 seed: 43
@@ -54,8 +53,6 @@ nodes:
     fakenet_v1_phase: 3
     no_default_peers: true
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -76,8 +73,6 @@ nodes:
       - node: "miner-a"
         listen: "/ip4/127.0.0.1/udp/4521/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -105,8 +100,6 @@ nodes:
       - node: "responder-a"
         listen: "/ip4/127.0.0.1/udp/4522/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -129,8 +122,6 @@ nodes:
       - node: "responder-b"
         listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -153,8 +144,6 @@ nodes:
       - node: "responder-b"
         listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -177,8 +166,6 @@ nodes:
       - node: "responder-b"
         listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -207,8 +194,6 @@ nodes:
       - node: "responder-b"
         listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"

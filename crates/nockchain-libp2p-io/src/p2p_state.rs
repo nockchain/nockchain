@@ -219,18 +219,8 @@ fn height_in_prefetch(height: u64, prefetch: &InflightPrefetch) -> bool {
 /// surface.
 fn prefetch_range_from_request(request: &NockchainRequest) -> Option<(u64, u8)> {
     let items: &[crate::messages::BatchRequestItem] = match request {
-        NockchainRequest::Request { message, .. } => {
-            return match crate::messages::decode_request_item_message(message) {
-                Ok(NockchainDataRequest::BlockRangeWithTxs { start_height, len }) => {
-                    Some((start_height, len))
-                }
-                _ => None,
-            }
-        }
         NockchainRequest::BatchRequest { items, .. } => items.as_slice(),
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {
-            return None;
-        }
+        NockchainRequest::AuthenticatedGossip { .. } => return None,
     };
     if let [item] = items {
         if let Ok(NockchainDataRequest::BlockRangeWithTxs { start_height, len }) =
@@ -454,49 +444,32 @@ impl ResponseSizeHints {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReqResGeneration {
-    Gen1,
-    Gen2,
-}
-
 #[derive(Debug, Clone)]
 pub struct OutboundRequestContext {
     pub peer_id: PeerId,
-    pub generation: ReqResGeneration,
     pub request: NockchainRequest,
     pub retry_count: u8,
-    pub fallback_attempted: bool,
     pub started_at: Instant,
 }
 
 impl OutboundRequestContext {
-    pub fn new(peer_id: PeerId, generation: ReqResGeneration, request: NockchainRequest) -> Self {
-        Self::with_attempt(peer_id, generation, request, 0, false)
+    pub fn new(peer_id: PeerId, request: NockchainRequest) -> Self {
+        Self::with_attempt(peer_id, request, 0)
     }
 
-    pub fn with_attempt(
-        peer_id: PeerId,
-        generation: ReqResGeneration,
-        request: NockchainRequest,
-        retry_count: u8,
-        fallback_attempted: bool,
-    ) -> Self {
+    pub fn with_attempt(peer_id: PeerId, request: NockchainRequest, retry_count: u8) -> Self {
         Self {
             peer_id,
-            generation,
             request,
             retry_count,
-            fallback_attempted,
             started_at: Instant::now(),
         }
     }
 
     pub fn logical_request_count(&self) -> Option<u64> {
         match &self.request {
-            NockchainRequest::Request { .. } => Some(1),
             NockchainRequest::BatchRequest { items, .. } => Some(items.len() as u64),
-            NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => None,
+            NockchainRequest::AuthenticatedGossip { .. } => None,
         }
     }
 
@@ -507,19 +480,15 @@ impl OutboundRequestContext {
 
 fn request_item_messages(request: &NockchainRequest) -> Vec<&[u8]> {
     match request {
-        NockchainRequest::Request { message, .. } => vec![message.as_ref()],
         NockchainRequest::BatchRequest { items, .. } => {
             items.iter().map(|item| item.message.as_ref()).collect()
         }
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {
-            Vec::new()
-        }
+        NockchainRequest::AuthenticatedGossip { .. } => Vec::new(),
     }
 }
 
 #[derive(Debug, Clone, Default)]
 struct PeerStatsAccumulator {
-    generation: PeerReqResGeneration,
     connected_at: Option<Instant>,
     request_count: u64,
     request_exchange_count: u64,
@@ -752,13 +721,6 @@ impl P2PState {
         state
     }
 
-    fn req_res_generation(generation: ReqResGeneration) -> PeerReqResGeneration {
-        match generation {
-            ReqResGeneration::Gen1 => PeerReqResGeneration::Gen1,
-            ReqResGeneration::Gen2 => PeerReqResGeneration::Gen2,
-        }
-    }
-
     fn ensure_peer_stats(&mut self, peer_id: PeerId) -> &mut PeerStatsAccumulator {
         self.peer_stats.entry(peer_id).or_default()
     }
@@ -779,7 +741,7 @@ impl P2PState {
                 let stats = self.peer_stats.get(&peer_id).cloned().unwrap_or_default();
                 PeerStatsEntry {
                     peer_id: peer_id.to_base58(),
-                    protocol_generation: stats.generation,
+                    protocol_generation: PeerReqResGeneration::Gen2,
                     request_count: stats.request_count,
                     bytes_sent: stats.bytes_sent,
                     bytes_received: stats.bytes_received,
@@ -1720,13 +1682,6 @@ impl P2PState {
         self.non_range_capable_peers.contains(peer_id)
     }
 
-    pub fn peer_req_res_generation(&self, peer_id: &PeerId) -> PeerReqResGeneration {
-        self.peer_stats
-            .get(peer_id)
-            .map(|stats| stats.generation)
-            .unwrap_or_default()
-    }
-
     pub fn peer_range_capability(&self, peer_id: &PeerId) -> RangeCapability {
         if self.non_range_capable_peers.contains(peer_id) {
             return RangeCapability::Unsupported;
@@ -2553,14 +2508,6 @@ impl P2PState {
         peers_to_ban
     }
 
-    /// Records settled peer capability from Identify or unsupported-protocol
-    /// fallback. Per-request bookkeeping intentionally does not overwrite this
-    /// with provisional send-path guesses during startup or reconnect.
-    pub fn observe_peer_generation(&mut self, peer_id: PeerId, generation: ReqResGeneration) {
-        self.ensure_peer_stats(peer_id).generation = Self::req_res_generation(generation);
-        self.refresh_peer_stats_snapshot();
-    }
-
     pub fn record_outbound_response(
         &mut self,
         request_context: &OutboundRequestContext,
@@ -2927,14 +2874,16 @@ mod tests {
         let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
             request_response::cbor::Behaviour::new(
                 [(
-                    libp2p::StreamProtocol::new(LibP2PConfig::req_res_gen1_protocol_version()),
+                    libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
             );
         behaviour.send_request(
             &PeerId::random(),
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0xAB]),
             },
         )
@@ -3093,8 +3042,9 @@ mod tests {
         let request_id = fresh_outbound_request_id();
         let context = OutboundRequestContext::new(
             peer_id,
-            ReqResGeneration::Gen1,
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0x01, 0x02]),
             },
         );
@@ -3105,7 +3055,6 @@ mod tests {
             .outbound_request_context(request_id)
             .expect("expected stored outbound request context");
         assert_eq!(stored.peer_id, peer_id);
-        assert_eq!(stored.generation, ReqResGeneration::Gen1);
         assert_eq!(state.outbound_request_count_for_peer(peer_id), 1);
         assert_eq!(state.total_outbound_request_count(), 1);
 
@@ -3131,20 +3080,24 @@ mod tests {
             NockchainResponse,
         > = request_response::cbor::Behaviour::new(
             [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_gen1_protocol_version()),
+                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
                 request_response::ProtocolSupport::Full,
             )],
             request_response::Config::default(),
         );
         let single_request_id = request_id_source.send_request(
             &PeerId::random(),
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0xaa]),
             },
         );
         let batch_request_id = request_id_source.send_request(
             &PeerId::random(),
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0xbb]),
             },
         );
@@ -3156,11 +3109,13 @@ mod tests {
             single_request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen1,
-                NockchainRequest::Request {
+                NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
-                    message: ByteBuf::from(singleton_message.clone()),
+                    items: vec![crate::messages::BatchRequestItem {
+                        item_id: 0,
+                        message: ByteBuf::from(singleton_message.clone()),
+                    }],
                 },
             ),
         );
@@ -3168,7 +3123,6 @@ mod tests {
             batch_request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
@@ -3418,11 +3372,13 @@ mod tests {
         let request_id = fresh_outbound_request_id();
         let request_context = OutboundRequestContext::new(
             peer_id,
-            ReqResGeneration::Gen2,
-            NockchainRequest::Request {
+            NockchainRequest::BatchRequest {
                 pow: [0; 16],
                 nonce: 0,
-                message: ByteBuf::from(vec![0xAA; 32]),
+                items: vec![crate::messages::BatchRequestItem {
+                    item_id: 0,
+                    message: ByteBuf::from(vec![0xAA; 32]),
+                }],
             },
         );
 
@@ -3435,7 +3391,6 @@ mod tests {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state.observe_peer_generation(peer_id, ReqResGeneration::Gen2);
         state.record_outbound_request(request_id, request_context.clone());
         state.record_outbound_response(&request_context, 256, Duration::from_millis(40), 1);
         state.record_outbound_failure(&request_context, true, 1);
@@ -3528,11 +3483,13 @@ mod tests {
         let request_id = fresh_outbound_request_id();
         let request_context = OutboundRequestContext::new(
             peer_id,
-            ReqResGeneration::Gen1,
-            NockchainRequest::Request {
+            NockchainRequest::BatchRequest {
                 pow: [0; 16],
                 nonce: 0,
-                message: ByteBuf::from(vec![0xAB; 16]),
+                items: vec![crate::messages::BatchRequestItem {
+                    item_id: 0,
+                    message: ByteBuf::from(vec![0xAB; 16]),
+                }],
             },
         );
 
@@ -3555,7 +3512,7 @@ mod tests {
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry");
 
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Unknown);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
         assert_eq!(entry.request_count, 1);
         assert_eq!(entry.bytes_received, 128);
         assert!(entry.average_round_trip_ms >= 15.0);
@@ -3590,16 +3547,17 @@ mod tests {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state.observe_peer_generation(peer_id, ReqResGeneration::Gen2);
         state.record_outbound_request(
             request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen1,
-                NockchainRequest::Request {
+                NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
-                    message: ByteBuf::from(vec![0xBC; 8]),
+                    items: vec![crate::messages::BatchRequestItem {
+                        item_id: 0,
+                        message: ByteBuf::from(vec![0xBC; 8]),
+                    }],
                 },
             ),
         );
@@ -3643,7 +3601,6 @@ mod tests {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state.observe_peer_generation(peer_id, ReqResGeneration::Gen2);
         assert_eq!(
             peer_stats_registry.snapshot().peers[0].protocol_generation,
             PeerReqResGeneration::Gen2
@@ -3672,7 +3629,7 @@ mod tests {
             .iter()
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry after reconnect");
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Unknown);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
     }
 
     #[test]
@@ -3703,7 +3660,6 @@ mod tests {
             request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
@@ -3734,11 +3690,13 @@ mod tests {
             request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen2,
-                NockchainRequest::Request {
+                NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
-                    message: ByteBuf::from(vec![0x01]),
+                    items: vec![crate::messages::BatchRequestItem {
+                        item_id: 0,
+                        message: ByteBuf::from(vec![0x01]),
+                    }],
                 },
             ),
         );
