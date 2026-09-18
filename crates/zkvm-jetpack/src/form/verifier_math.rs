@@ -1,8 +1,7 @@
 use nockvm::jets::JetErr;
-use num_traits::Pow;
 
 use crate::form::belt::Belt;
-use crate::form::felt::{fadd_, finv_, fmul_, fpow_, fsub_, Felt};
+use crate::form::felt::{fadd_, finv_, fmul_, fpow_, fscal_, fsub_, Felt};
 use crate::form::math::prover::ProcessedDegrees;
 use crate::form::poly::{BPolySlice, FPolySlice};
 use crate::form::proof::{CountMap, MPUltraSlice};
@@ -31,7 +30,7 @@ fn mpeval_mega_felt(
         if coefficient.is_zero() {
             continue;
         }
-        let mut acc_inner = Felt::one();
+        let mut acc_inner = None;
         for encoded in (*megas).iter() {
             let mega = crate::form::proof::Mega::try_from(encoded)
                 .expect("valid verifier constraint term");
@@ -45,9 +44,21 @@ fn mpeval_mega_felt(
                     .get(mega.idx)
                     .expect("composition dependency exists"),
             };
-            acc_inner = acc_inner * value.pow(mega.exp as usize);
+            if mega.exp == 0 {
+                continue;
+            }
+            let factor = match mega.exp {
+                1 => value,
+                2 => fmul_(&value, &value),
+                exponent => fpow_(&value, exponent),
+            };
+            acc_inner = Some(match acc_inner {
+                Some(acc_inner) => fmul_(&acc_inner, &factor),
+                None => factor,
+            });
         }
-        acc = acc + (Felt::lift(*coefficient) * acc_inner);
+        let acc_inner = acc_inner.unwrap_or_else(Felt::one);
+        acc = fadd_(&acc, &fscal_(coefficient, &acc_inner));
     }
     acc
 }
