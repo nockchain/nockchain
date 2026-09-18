@@ -39,6 +39,10 @@ __pycache__/
 .coverage.*
 htmlcov/
 
+# Python protobuf bindings come from the canonical nockapp-grpc-proto schema.
+/crates/ai-pow-miner/vllm-plugin/src/vllm_miner/proto/inference_mining_pb2.py
+/crates/ai-pow-miner/vllm-plugin/src/vllm_miner/proto/inference_mining_pb2_grpc.py
+
 # Python virtual environments.
 .venv/
 venv/

@@ -1,0 +1,12 @@
+# PearlMiner Configuration
+
+# Path to the Gateway Unix Domain Socket
+gateway_socket_path: "/tmp/pearlgw.sock"
+
+# Matrix multiplication configuration
+matrix_multiplication:
+  # Use noisy GEMM when N and K dimensions are larger than these thresholds, if not use vanilla GEMM
+  use_simplified_gemm:
+    min_m: 1024
+    min_n: 256
+    min_k: 1024
