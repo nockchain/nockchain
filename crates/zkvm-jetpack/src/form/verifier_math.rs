@@ -18,7 +18,7 @@ pub fn bpeval_lift_(bpoly: &[Belt], x: &Felt) -> Felt {
 
 #[inline(always)]
 fn mpeval_mega_felt(
-    mp_mega: &ProofMap<&[Belt], Belt>,
+    mp_mega: &[(&[Belt], Belt)],
     args: &[Felt],
     chals: &[Belt],
     dyns: &[Belt],

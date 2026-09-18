@@ -329,7 +329,7 @@ pub struct Mega {
 }
 
 #[derive(Clone)]
-pub struct MPMegaSlice<'a>(pub ProofMap<&'a [Belt], Belt>);
+pub struct MPMegaSlice<'a>(pub Vec<(&'a [Belt], Belt)>);
 pub struct MPMega(pub ProofMap<BPolyVec, Belt>);
 
 impl MPMega {
@@ -339,12 +339,12 @@ impl MPMega {
 }
 
 impl MPMegaSlice<'_> {
-    pub fn new<'a>(proof_map: ProofMap<&'a [Belt], Belt>) -> MPMegaSlice<'a> {
-        MPMegaSlice(proof_map)
+    pub fn new<'a>(terms: Vec<(&'a [Belt], Belt)>) -> MPMegaSlice<'a> {
+        MPMegaSlice(terms)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&[Belt], Belt)> {
-        self.0.iter().map(|(k, v)| (*k, *v))
+        self.0.iter().copied()
     }
 }
 
@@ -759,7 +759,7 @@ impl<'a> MPMegaSlice<'a> {
     pub fn try_from(noun: Noun, space: &'a NounSpace) -> Result<Self, JetErr> {
         let noun_handle = noun.in_space(space);
         let hoon_map = HoonMapIter::new(&noun_handle);
-        let mut mega_map = ProofMap::<&[Belt], Belt>::new();
+        let mut terms = Vec::new();
         for term_noun in hoon_map.into_iter() {
             let (k, v): (&[Belt], Belt) = {
                 let term_cell = term_noun.as_cell().unwrap_or_else(|err| {
@@ -784,10 +784,10 @@ impl<'a> MPMegaSlice<'a> {
                     Belt(term_cell.tail().as_atom()?.as_u64()?),
                 )
             };
-            mega_map.insert(k, v);
+            terms.push((k, v));
         }
 
-        Ok(MPMegaSlice(mega_map))
+        Ok(MPMegaSlice(terms))
     }
 }
 
