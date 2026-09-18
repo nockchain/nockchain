@@ -2398,8 +2398,8 @@ Note Information
     #[test]
     fn req_res_generation_logged_matches_completed_exchange_line() {
         let logs = "\
-[INFO  nockchain_libp2p_io::driver] Nous req-res exchange completed peer=peer-a request_id=1 generation=Gen2 request_shape=\"batch-request\"\n\
-[INFO  nockchain_libp2p_io::driver] Nous req-res outbound request sent peer=peer-b request_id=2 generation=Gen2 request_shape=\"batch-request\"\n";
+[INFO  nockchain_network::driver] Nous req-res exchange completed peer=peer-a request_id=1 generation=Gen2 request_shape=\"batch-request\"\n\
+[INFO  nockchain_network::driver] Nous req-res outbound request sent peer=peer-b request_id=2 generation=Gen2 request_shape=\"batch-request\"\n";
 
         assert!(crate::runner::req_res_generation_logged(
             logs,

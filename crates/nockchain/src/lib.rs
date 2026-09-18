@@ -247,8 +247,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         .identity_path
         .clone()
         .unwrap_or_else(|| PathBuf::from(config::IDENTITY_PATH));
-    // Persist the existing libp2p identity across restarts by default so the node
-    // keeps a stable peer ID. A node that rerolls its peer ID every restart gets
+    // Persist the canonical network identity across restarts by default so the
+    // node keeps a stable peer ID. A node that rerolls its peer ID every restart gets
     // rejected by peers that still map its IP to the old ID (wrong-peer-id) and
     // can be IP-banned, isolating it from the network. Only generate a fresh
     // identity when explicitly requested via --new-peer-id. (`--no-new-peer-id`
@@ -283,8 +283,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         .map(|addr_str| addr_str.parse().expect("could not parse bind multiaddr"))
         .collect();
 
-    let libp2p_config = nockchain_libp2p_io::config::LibP2PConfig::from_env()?;
-    debug!("Using libp2p config: {:?}", libp2p_config);
+    let libp2p_config = nockchain_network::config::LibP2PConfig::from_env()?;
+    debug!("Using network config: {:?}", libp2p_config);
     let limits = connection_limits::ConnectionLimits::default()
         .with_max_established_incoming(Some(
             cli.max_established_incoming
@@ -325,8 +325,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         }
     };
 
-    // Full backbone pool. The libp2p driver dials a rotating round-robin window
-    // of these on each attempt rather than all of them at once, so we hand it
+    // Full backbone pool. The network driver dials a rotating round-robin window
+    // on each attempt rather than all of them at once, so we hand it
     // the whole set (empty when the user opts out or on fakenet).
     let default_backbone_peers: &[&str] = if cli.fakenet {
         config::TESTNET_BACKBONE_NODES
@@ -388,7 +388,7 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     let mut born_driver_signals = driver_init::DriverInitSignals::new();
 
     // Register drivers that need initialization signals
-    let libp2p_init_tx = born_driver_signals.register_driver("libp2p");
+    let network_init_tx = born_driver_signals.register_driver("network");
 
     // Create the born task that waits for all drivers to initialize
     let _born_task = born_driver_signals.create_task();
@@ -608,10 +608,10 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     // from the kernel; miners subscribe via the private NockAppService's
     // WatchEffects RPC.
 
-    let network_driver = nockchain_libp2p_io::driver::make_network_driver(
-        nockchain_libp2p_io::driver::NetworkDriverConfig {
-            backend: nockchain_libp2p_io::driver::TransportBackendConfig::Libp2p(
-                nockchain_libp2p_io::driver::Libp2pBackendConfig {
+    let backend = match cli.network_backend {
+        config::NetworkBackend::Libp2p => {
+            nockchain_network::driver::TransportBackendConfig::Libp2p(
+                nockchain_network::driver::Libp2pBackendConfig {
                     keypair,
                     bind: bind_multiaddrs,
                     allowed,
@@ -622,11 +622,59 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
                     backbone_dial_count: backbone::DEFAULT_BACKBONE_PEER_COUNT,
                     force_peers,
                 },
-            ),
+            )
+        }
+        config::NetworkBackend::Iroh => {
+            if bind_multiaddrs.len() != 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "the Iroh backend requires exactly one --bind address",
+                )
+                .into());
+            }
+            let invalid_address =
+                |error: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, error);
+            let bind = nockchain_network::driver::iroh_socket_from_multiaddr(&bind_multiaddrs[0])
+                .map_err(invalid_address)?;
+            let initial_peers = initial_peer_multiaddrs
+                .iter()
+                .map(nockchain_network::driver::iroh_peer_from_multiaddr)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(invalid_address)?;
+            let backbone_peers = backbone_peers
+                .iter()
+                .map(nockchain_network::driver::iroh_peer_from_multiaddr)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(invalid_address)?;
+            let force_peers = force_peers
+                .iter()
+                .map(nockchain_network::driver::iroh_peer_from_multiaddr)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(invalid_address)?;
+            nockchain_network::driver::TransportBackendConfig::Iroh(
+                nockchain_network::driver::IrohBackendConfig {
+                    keypair,
+                    bind,
+                    advertised_addresses: cli
+                        .iroh_advertise
+                        .into_iter()
+                        .map(nockchain_network::types::PeerAddress::new)
+                        .collect(),
+                    initial_peers,
+                    backbone_peers,
+                    backbone_dial_count: backbone::DEFAULT_BACKBONE_PEER_COUNT,
+                    force_peers,
+                },
+            )
+        }
+    };
+    let network_driver = nockchain_network::driver::make_network_driver(
+        nockchain_network::driver::NetworkDriverConfig {
+            backend,
             prune_inbound_size: prune_inbound,
             equix_builder,
             chain_interval: config::CHAIN_INTERVAL,
-            init_complete_tx: Some(libp2p_init_tx),
+            init_complete_tx: Some(network_init_tx),
         },
     );
     nockapp.add_io_driver(network_driver).await;

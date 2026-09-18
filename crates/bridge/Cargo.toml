@@ -41,7 +41,7 @@ nockapp.workspace = true
 nockapp-grpc = { path = "../nockapp-grpc", default-features = false, features = [
   "client",
 ] }
-nockchain-libp2p-io.workspace = true
+nockchain-network.workspace = true
 nockchain-math.workspace = true
 nockchain-types.workspace = true
 nockvm.workspace = true

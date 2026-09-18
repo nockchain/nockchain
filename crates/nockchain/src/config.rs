@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use nockapp::kernel::boot::{NockStackSize, PmaSize};
 
 // TODO: command-line/configure
@@ -25,6 +25,12 @@ pub const TESTNET_BACKBONE_NODES: &[&str] = &[];
 
 /** How often we should affirmatively ask other nodes for their heaviest chain */
 pub const CHAIN_INTERVAL: Duration = Duration::from_secs(20);
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum NetworkBackend {
+    #[default]
+    Libp2p,
+    Iroh,
+}
 
 /// The height of the bitcoin block that we want to sync our genesis block to
 /// Currently, this is the height of an existing block for testing. It will be
@@ -290,6 +296,19 @@ pub struct NockchainCli {
     pub nockapp_cli: nockapp::kernel::boot::Cli,
     #[arg(long, help = "Whether to run as fakenet", default_value_t = false)]
     pub fakenet: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = NetworkBackend::Libp2p,
+        help = "Network transport backend"
+    )]
+    pub network_backend: NetworkBackend,
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(std::net::SocketAddr),
+        help = "Direct address advertised by the Iroh backend"
+    )]
+    pub iroh_advertise: Option<std::net::SocketAddr>,
     #[arg(long, short, help = "Initial peer", action = ArgAction::Append)]
     pub peer: Vec<String>,
     #[arg(long, short, help = "Force peer", action = ArgAction::Append)]
@@ -308,14 +327,14 @@ pub struct NockchainCli {
     pub no_new_peer_id: bool,
     #[arg(
         long,
-        help = "Generate a fresh libp2p peer ID, discarding any existing identity. By default the existing peer ID is persisted across restarts so the node keeps a stable identity.",
+        help = "Generate a fresh canonical network peer ID, discarding any existing identity. By default the existing peer ID is persisted across restarts so the node keeps a stable identity.",
         default_value = "false",
         conflicts_with = "no_new_peer_id"
     )]
     pub new_peer_id: bool,
     #[arg(
         long,
-        help = "Override the path to the libp2p identity key (defaults to .nockchain_identity)"
+        help = "Override the path to the network identity key (defaults to .nockchain_identity)"
     )]
     pub identity_path: Option<PathBuf>,
     #[arg(long, help = "Maximum established incoming connections")]
@@ -500,6 +519,11 @@ impl NockchainCli {
     pub fn validate(&self) -> Result<(), String> {
         self.fakenet_asert.clone().into_config()?;
         self.effective_fakenet_ai_activation_height()?;
+        if self.network_backend == NetworkBackend::Iroh && self.allowed_peers_path.is_some() {
+            return Err(String::from(
+                "--allowed-peers-path is not supported by the Iroh backend",
+            ));
+        }
         Ok(())
     }
 }
@@ -515,6 +539,8 @@ mod tests {
         NockchainCli {
             nockapp_cli: default_boot_cli(false),
             fakenet: false,
+            network_backend: NetworkBackend::Libp2p,
+            iroh_advertise: None,
             peer: Vec::new(),
             force_peer: Vec::new(),
             allowed_peers_path: None,
@@ -549,6 +575,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validate_rejects_libp2p_allowlist_for_iroh() {
+        let mut cli = base_cli();
+        cli.network_backend = NetworkBackend::Iroh;
+        cli.allowed_peers_path = Some(String::from("allowed-peers"));
+
+        assert_eq!(
+            cli.validate()
+                .expect_err("Iroh cannot enforce the allowlist"),
+            "--allowed-peers-path is not supported by the Iroh backend"
+        );
+    }
     // clap requires unique arg ids across all flattened arg structs. Because the
     // ZK and AI ASERT arg structs share Rust field names, each needs an explicit
     // `id`; this catches a regression where two args collide (silent in release,

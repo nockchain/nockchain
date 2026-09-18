@@ -100,4 +100,4 @@ rust_library(
     ] + all_crate_deps(),
 )
 
-# Unit tests for nockchain-libp2p-io
+# Unit tests for nockchain-network

@@ -8,8 +8,8 @@ use nockapp::driver::{NockAppHandle, PokeResult};
 use nockapp::nockapp::NockAppExit;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::WireRepr;
-use nockchain_libp2p_io::metrics::NockchainP2PMetrics;
-use nockchain_libp2p_io::peer_stats::{
+use nockchain_network::metrics::NockchainP2PMetrics;
+use nockchain_network::peer_stats::{
     global_peer_stats_registry, PeerReqResGeneration as TransportPeerReqResGeneration,
     PeerStatsEntry as TransportPeerStatsEntry, PeerStatsRegistry as TransportPeerStatsRegistry,
 };
@@ -2014,12 +2014,12 @@ mod tests {
     use std::sync::Arc;
 
     use nockapp_grpc_proto::pb::common::v1::Base58Hash;
-    use nockchain_libp2p_io::peer_stats::{
+    use nockchain_math::crypto::cheetah::A_GEN;
+    use nockchain_network::peer_stats::{
         PeerReqResGeneration as TransportPeerReqResGeneration,
         PeerStatsEntry as TransportPeerStatsEntry, PeerStatsRegistry as TransportPeerStatsRegistry,
         PeerStatsSnapshot as TransportPeerStatsSnapshot,
     };
-    use nockchain_math::crypto::cheetah::A_GEN;
     use nockchain_types::v1::Hash;
 
     use super::*;
