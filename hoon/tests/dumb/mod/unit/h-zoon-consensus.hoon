@@ -427,11 +427,12 @@
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-load-resets-postactivation-v2-fakenet-side-fork
+++  test-zoe-load-prunes-postactivation-v2-fakenet-side-fork
   =/  base=proof:t  *proof:t
   =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
   =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
   =/  forked-state=kernel-state  (zoe-fakenet-tip-state `v3)
+  =/  tip-id=block-id:t  (need heaviest-block.c.forked-state)
   =/  stale-page=page:v1:t
     %*  .  *page:v1:t
       height  proof-version-3-start:dcon
@@ -444,9 +445,11 @@
     [stale-id (to-local-page:page:t stale-page)]
   =/  loaded=kernel-state  (load:inner:dumb forked-state)
   %+  expect-eq
-    !>([%.y 0 %.y])
-  !>  :*  ?=(~ heaviest-block.c.loaded)
+    !>([%.y %.y 1 %.n %.y])
+  !>  :*  =(heaviest-block.c.forked-state heaviest-block.c.loaded)
+          (~(has h-by blocks.c.loaded) tip-id)
           ~(wyt h-by blocks.c.loaded)
+          (~(has h-by blocks.c.loaded) stale-id)
           =(genesis-seal.c.forked-state genesis-seal.c.loaded)
       ==
 ::
