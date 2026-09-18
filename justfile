@@ -14,6 +14,45 @@ test:
 test-honk:
     cargo nextest run --release -p honk
 
+# Install the locked dependencies and build the installable VS Code extension.
+npm-build:
+    npm --prefix editors/code ci
+    npm --prefix editors/code run package
+
+# Build the honk-lsp language server (the extension looks in target/release first).
+build-honk-lsp:
+    cargo build --release -p honk-lsp
+
+# Build honk and honk-lsp and install them into ~/.local/bin (for workspaces outside this repo).
+install-honk: build-honk build-honk-lsp
+    #!/usr/bin/env sh
+    set -eu
+    dest="${HOME}/.local/bin"
+    mkdir -p "$dest"
+    for bin in honk honk-lsp; do
+        # Remove first so the copy is a new file. Overwriting a running binary
+        # in place leaves macOS with a stale code-signature cache, and every
+        # later launch of it dies with SIGKILL.
+        rm -f "$dest/$bin"
+        cp "target/release/$bin" "$dest/$bin"
+        echo "installed $dest/$bin"
+    done
+    case ":${PATH}:" in
+        *":$dest:"*) ;;
+        *) echo "install-honk: $dest is not on PATH; add it so editors can find honk-lsp" >&2 ;;
+    esac
+
+# Package the VS Code extension and install it with the `code` CLI; reload VS Code afterwards.
+vscode-install: npm-build
+    #!/usr/bin/env sh
+    set -eu
+    if ! command -v code >/dev/null 2>&1; then
+        echo "vscode-install: the 'code' CLI is not on PATH; in VS Code run 'Shell Command: Install code command in PATH'" >&2
+        exit 1
+    fi
+    version=$(node -p "require('./editors/code/package.json').version")
+    code --install-extension "editors/code/honk-hoon-${version}.vsix" --force
+
 build-honk-assets: honc-cold-138-asset hoonc-octs-type-138-asset
 
 honc-cold-138-asset:
@@ -132,6 +171,15 @@ honk-nockasm-serialization-bench: build-honk
     mkdir -p target/honk-nockasm-serialization
     target/release/honk --new --output target/honk-nockasm-serialization/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
     HONK_KERNEL_JAM=target/honk-nockasm-serialization/dumb.jam HONK_BENCH_REPORT=target/honk-nockasm-serialization/results.txt cargo bench -p honk-tools --bench kernel_serialization
+
+# Measure editor-facing compiler checks, semantic queries, LSP responsiveness
+# under a background compiler load, and RSS across 256 invalidating edits.
+honk-lsp-performance:
+    cargo bench -p honk-lsp --bench lsp_performance -- --samples 20 --warmups 3 --sustained-checks 256
+
+# Fast correctness pass for the harness itself. Results are smoke evidence only.
+honk-lsp-performance-smoke:
+    cargo bench -p honk-lsp --bench lsp_performance -- --quick --skip-contention
 
 # Compare every honk-built kernel against the hoonc-built reference.
 # PASS requires byte equality or a dir-hash-only difference (proven by

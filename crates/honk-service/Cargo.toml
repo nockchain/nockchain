@@ -1,0 +1,18 @@
+[package]
+name = "honk-service"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+honk = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
