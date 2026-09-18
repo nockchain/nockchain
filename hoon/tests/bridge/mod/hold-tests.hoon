@@ -136,6 +136,62 @@
     !>((~(has z-bi unsettled-deposits.hash-state.final) as-of name))
   ==
 ::
+::  The closed mainnet lineage range reconciles by its unique canonical note,
+::  while the same hash mismatch outside the immutable nonce range still stops.
+++  test-mainnet-pre-repair-deferred-lineage-range
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  nockchain-start-height.constants.state  46.810
+  =.  base-start-height.constants.state  39.694.000
+  =/  legacy-name=nname:t  mainnet-legacy-deposit-name
+  =/  name=nname:t
+    [-.legacy-name [0x211 0x212 0x213 0x214 0x215] ~]
+  =/  dep=deposit
+    (create-deposit:hel [0x221 0x222 0x223 0x224 0x225] name `0x1234 1.000.000 5)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name dep)
+  =/  block=nock-block
+    :*  %nock
+        %0
+        146.586
+        [0x231 0x232 0x233 0x234 0x235]
+        deposits
+        *(z-map nname:t withdrawal-settlement)
+        *nock-hash
+    ==
+  =/  canonical-as-of=nock-hash  (hash:nock-block block)
+  =/  historical-as-of=nock-hash
+    [0x6ed8.e075.476a.722a 0x251.7f0e.dcf4.5b09 0x53a5.d1f8.80b9.1bac 0xab72.0e9d.a61c.cc4c 0xae0c.cdd4.b817.46b9]
+  =/  event-id=beid  (from-atom:blist 529)
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id name historical-as-of 146.586 0x1234 1.000.000 529)
+  =.  nock-hashchain.hash-state.state
+    (~(put z-by nock-hashchain.hash-state.state) canonical-as-of block)
+  =.  last-nock-block.hash-state.state  canonical-as-of
+  =.  nock-hashchain-next-height.hash-state.state  146.587
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) canonical-as-of name dep)
+  =.  deferred-deposit-settlements.hash-state.state
+    (~(put z-bi deferred-deposit-settlements.hash-state.state) historical-as-of event-id settlement)
+  =/  nock  ~(. nock-lib state)
+  =/  result=process-result
+    (nockchain-process-deferred-deposit-settlements:nock block)
+  ?>  ?=(%& -.result)
+  =/  final=bridge-state  p.result
+  =/  future=bridge-state  state
+  =.  deferred-deposit-settlements.hash-state.future
+    (~(put z-bi *(z-mip nock-hash beid deposit-settlement)) historical-as-of event-id settlement(nonce 530))
+  =/  future-nock  ~(. nock-lib future)
+  =/  future-result=process-result
+    (nockchain-process-deferred-deposit-settlements:future-nock block)
+  ;:  weld
+    (expect !>(!(~(has z-bi unsettled-deposits.hash-state.final) canonical-as-of name)))
+  ::
+    (expect !>(!(~(has z-bi deferred-deposit-settlements.hash-state.final) historical-as-of event-id)))
+  ::
+    (expect !>(?=(%| -.future-result)))
+  ==
+::
 :::  A Nockchain settlement that arrives first suppresses the later withdrawal
 :::  proposal and is reconciled when its Base batch arrives.
 ++  test-deferred-withdrawal-filters-base-proposal
@@ -356,11 +412,7 @@
   ^-  tang
   =/  state=bridge-state  *bridge-state
   =.  nockchain-start-height.constants.state  46.810
-  =/  name=nname:t
-    :*  [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
-        [0xf68c.c7dd.f2ba.7818 0x828a.9a6d.3dcf.f822 0x409f.62b1.3f56.88d9 0x46ea.2f97.f8f8.c4d7 0x561d.0332.2829.9954]
-        ~
-    ==
+  =/  name=nname:t  mainnet-legacy-deposit-name
   =/  block=nock-block
     :*  %nock
         %0
@@ -373,7 +425,7 @@
   =/  nock  ~(. nock-lib state)
   =/  restored=nock-block  (restore-mainnet-legacy-deposit:nock block)
   =/  legacy=deposit  (~(got z-by deposits.restored) name)
-  =/  old-hash=nock-hash  [0xd1 0xd2 0xd3 0xd4 0xd5]
+  =/  old-hash=nock-hash  (hash:nock-block block)
   =/  restored-hash=nock-hash  (hash:nock-block restored)
   =.  nock-hashchain.hash-state.state
     (~(put z-by *(z-map nock-hash nock-block)) old-hash block)
@@ -403,9 +455,272 @@
       !>(restored)
     !>((restore-mainnet-legacy-deposit:nock restored))
   ::
+    (expect !>((~(has z-by nock-hashchain.hash-state.u.repaired) old-hash)))
+  ::
     (expect !>(legacy-tracked))
   ==
 ::
+:::
+::  The one finalized pre-repair settlement maps only by its complete immutable
+::  Base event and Nock deposit identities, then consumes the canonical entry.
+++  test-mainnet-pre-repair-settlement-migration
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  nockchain-start-height.constants.state  46.810
+  =.  base-start-height.constants.state  39.694.000
+  =/  [settlement=deposit-settlement counterpart=deposit]
+    mainnet-pre-repair-deposit-settlement
+  =/  name=nname:t  counterpart.settlement
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name counterpart)
+  =/  canonical=nock-block
+    :*  %nock
+        %0
+        48.325
+        [0x121 0x122 0x123 0x124 0x125]
+        deposits
+        *(z-map nname:t withdrawal-settlement)
+        [0x221 0x222 0x223 0x224 0x225]
+    ==
+  =/  canonical-hash=nock-hash  (hash:nock-block canonical)
+  =.  nock-hashchain.hash-state.state
+    (~(put z-by *(z-map nock-hash nock-block)) canonical-hash canonical)
+  =.  last-nock-block.hash-state.state  canonical-hash
+  =.  nock-hashchain-next-height.hash-state.state  48.326
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) canonical-hash name counterpart)
+  =/  settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) beid.settlement settlement)
+  =/  blocks=base-blocks
+    (make-base-blocks-at-height:hel state 40.085.800 *(z-map beid withdrawal) settlements)
+  =.  last-height.blocks  40.085.899
+  =/  base  ~(. base-lib state)
+  =/  result=process-result
+    (base-process-deposit-settlements:base blocks)
+  ?>  ?=(%& -.result)
+  =/  final=bridge-state  p.result
+  =/  bad-settlement=deposit-settlement
+    settlement(nonce +(nonce.settlement))
+  =/  bad-settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) beid.bad-settlement bad-settlement)
+  =/  bad-blocks=base-blocks
+    (make-base-blocks-at-height:hel state 40.085.800 *(z-map beid withdrawal) bad-settlements)
+  =.  last-height.bad-blocks  40.085.899
+  =/  bad-result=process-result
+    (base-process-deposit-settlements:base bad-blocks)
+  =/  wrong-batch=base-blocks
+    (make-base-blocks-at-height:hel state 40.085.900 *(z-map beid withdrawal) settlements)
+  =.  last-height.wrong-batch  40.085.999
+  =/  wrong-batch-result=process-result
+    (base-process-deposit-settlements:base wrong-batch)
+  ;:  weld
+    (expect !>(!(~(has z-bi unsettled-deposits.hash-state.final) canonical-hash name)))
+  ::
+    (expect !>(?=(%| -.bad-result)))
+  ::
+    (expect !>(?=(%| -.wrong-batch-result)))
+  ==
+::
+::  Historical mainnet settlements may translate only the closed nonce/height
+::  range and still require one exact canonical counterpart and value match.
+++  test-mainnet-pre-repair-lineage-range
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  nockchain-start-height.constants.state  46.810
+  =.  base-start-height.constants.state  39.694.000
+  =/  legacy-name=nname:t  mainnet-legacy-deposit-name
+  =/  name=nname:t
+    [-.legacy-name [0x201 0x202 0x203 0x204 0x205] ~]
+  =/  counterpart=deposit
+    (create-deposit:hel [0x206 0x207 0x208 0x209 0x20a] name `0x1234 1.000.000 5)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name counterpart)
+  =/  canonical=nock-block
+    :*  %nock
+        %0
+        48.390
+        [0x20b 0x20c 0x20d 0x20e 0x20f]
+        deposits
+        *(z-map nname:t withdrawal-settlement)
+        *nock-hash
+    ==
+  =/  canonical-as-of=nock-hash  (hash:nock-block canonical)
+  =/  historical-as-of=nock-hash
+    [0x29da.7958.6518.bd7c 0xdf61.a8d6.2a33.eee2 0xd283.7fe4.9afb.bf19 0x2aca.87e7.216f.950a 0xce79.4b62.5f43.abe8]
+  =/  event-id=beid  (from-atom:blist 121)
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id name historical-as-of 48.390 0x1234 1.000.000 121)
+  =.  nock-hashchain.hash-state.state
+    (~(put z-by nock-hashchain.hash-state.state) canonical-as-of canonical)
+  =.  last-nock-block.hash-state.state  canonical-as-of
+  =.  nock-hashchain-next-height.hash-state.state  48.391
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) canonical-as-of name counterpart)
+  =/  settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) event-id settlement)
+  =/  blocks=base-blocks
+    (make-base-blocks-at-height:hel state 40.102.300 *(z-map beid withdrawal) settlements)
+  =.  last-height.blocks  40.102.399
+  =/  base  ~(. base-lib state)
+  =/  result=process-result
+    (base-process-deposit-settlements:base blocks)
+  ?>  ?=(%& -.result)
+  =/  final=bridge-state  p.result
+  =/  future-settlement=deposit-settlement  settlement(nonce 530)
+  =/  future-settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) event-id future-settlement)
+  =/  future-blocks=base-blocks
+    (make-base-blocks-at-height:hel state 40.102.300 *(z-map beid withdrawal) future-settlements)
+  =.  last-height.future-blocks  40.102.399
+  =/  future-result=process-result
+    (base-process-deposit-settlements:base future-blocks)
+  =/  wrong-height=deposit-settlement  settlement(nock-height 48.391)
+  =/  wrong-height-settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) event-id wrong-height)
+  =/  wrong-height-blocks=base-blocks
+    (make-base-blocks-at-height:hel state 40.102.300 *(z-map beid withdrawal) wrong-height-settlements)
+  =.  last-height.wrong-height-blocks  40.102.399
+  =/  wrong-height-result=process-result
+    (base-process-deposit-settlements:base wrong-height-blocks)
+  ;:  weld
+    (expect !>(!(~(has z-bi unsettled-deposits.hash-state.final) canonical-as-of name)))
+  ::
+    (expect !>(?=(%| -.future-result)))
+  ::
+    (expect !>(?=(%| -.wrong-height-result)))
+  ==
+::
+::  Signers whose Base cursor already passed the one pre-repair event converge
+::  on startup, but only from the complete immutable deposit identity.
+++  test-mainnet-pre-repair-startup-reconciliation
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  nockchain-start-height.constants.state  46.810
+  =.  base-start-height.constants.state  39.694.000
+  =.  base-hashchain-next-height.hash-state.state  40.085.900
+  =/  [settlement=deposit-settlement counterpart=deposit]
+    mainnet-pre-repair-deposit-settlement
+  =/  name=nname:t  counterpart.settlement
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name counterpart)
+  =/  canonical=nock-block
+    :*  %nock
+        %0
+        48.325
+        [0x121 0x122 0x123 0x124 0x125]
+        deposits
+        *(z-map nname:t withdrawal-settlement)
+        [0x221 0x222 0x223 0x224 0x225]
+    ==
+  =/  canonical-hash=nock-hash  (hash:nock-block canonical)
+  =.  nock-hashchain.hash-state.state
+    (~(put z-by *(z-map nock-hash nock-block)) canonical-hash canonical)
+  =.  last-nock-block.hash-state.state  canonical-hash
+  =.  nock-hashchain-next-height.hash-state.state  48.326
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) canonical-hash name counterpart)
+  =/  no-event=bridge-state  state
+  =/  settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) beid.settlement settlement)
+  =/  event-batch=base-blocks
+    (make-base-blocks-at-height:hel state 40.085.800 *(z-map beid withdrawal) settlements)
+  =.  last-height.event-batch  40.085.899
+  =/  event-batch-hash=base-hash  (hash:base-blocks event-batch)
+  =.  base-hashchain.hash-state.state
+    (~(put z-by *(z-map base-hash base-blocks)) event-batch-hash event-batch)
+  =.  last-base-blocks.hash-state.state  event-batch-hash
+  =/  before=bridge-state  state
+  =.  base-hashchain-next-height.hash-state.before  40.085.800
+  =/  before-base  ~(. base-lib before)
+  =/  before-result=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:before-base ~)
+  ?~  before-result
+    ~|('expected pre-event state to remain valid' !!)
+  =/  no-event-base  ~(. base-lib no-event)
+  =/  no-event-result=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:no-event-base ~)
+  =/  consumed-no-event=bridge-state  no-event
+  =.  unsettled-deposits.hash-state.consumed-no-event
+    (~(del z-bi unsettled-deposits.hash-state.consumed-no-event) [canonical-hash name])
+  =/  consumed-no-event-base  ~(. base-lib consumed-no-event)
+  =/  consumed-no-event-result=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:consumed-no-event-base ~)
+  =/  brg  (brg:hel)
+  =/  no-event-bridge  (lod:hel no-event brg)
+  =/  stopped-bridge  no-event-bridge
+  =^  start-effects=(list effect)  stopped-bridge
+    (pok:hel 0 [%0 %start ~] no-event-bridge)
+  =/  stop-peek=(unit (unit *))
+    (peek:stopped-bridge [%stop-state ~])
+  ?>  ?=(^ stop-peek)
+  ?>  ?=(^ u.stop-peek)
+  =/  stopped=?  ;;(? u.u.stop-peek)
+  =/  base  ~(. base-lib state)
+  =/  reconciled=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:base ~)
+  ?~  reconciled
+    ~|('expected exact finalized settlement to reconcile on startup' !!)
+  =/  reconciled-state=bridge-state  u.reconciled
+  =/  again-base  ~(. base-lib reconciled-state)
+  =/  again=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:again-base ~)
+  ?~  again
+    ~|('expected completed startup reconciliation to be idempotent' !!)
+  =/  consumed-with-deferred=bridge-state  state
+  =.  unsettled-deposits.hash-state.consumed-with-deferred
+    (~(del z-bi unsettled-deposits.hash-state.consumed-with-deferred) [canonical-hash name])
+  =.  deferred-deposit-settlements.hash-state.consumed-with-deferred
+    %-  ~(put z-bi deferred-deposit-settlements.hash-state.consumed-with-deferred)
+    [as-of.settlement beid.settlement settlement]
+  =/  consumed-base  ~(. base-lib consumed-with-deferred)
+  =/  consumed-result=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:consumed-base ~)
+  ?~  consumed-result
+    ~|('expected exact consumed settlement residue to reconcile on startup' !!)
+  =/  consumed-state=bridge-state  u.consumed-result
+  =/  bad=bridge-state  state
+  =/  bad-counterpart=deposit
+    counterpart(fee +(fee.counterpart))
+  =.  unsettled-deposits.hash-state.bad
+    (~(put z-bi unsettled-deposits.hash-state.bad) canonical-hash name bad-counterpart)
+  =/  bad-base  ~(. base-lib bad)
+  =/  bad-result=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:bad-base ~)
+  =/  deferred=bridge-state  state
+  =.  deferred-deposit-settlements.hash-state.deferred
+    (~(put z-bi deferred-deposit-settlements.hash-state.deferred) as-of.settlement beid.settlement settlement)
+  =/  deferred-base  ~(. base-lib deferred)
+  =/  deferred-result=(unit bridge-state)
+    (reconcile-mainnet-pre-repair-deposit:deferred-base ~)
+  ;:  weld
+    %+  expect-eq
+      !>(before)
+    !>(u.before-result)
+  ::
+    (expect !>(?=(~ no-event-result)))
+  ::
+    (expect !>(?=(~ consumed-no-event-result)))
+  ::
+    (expect !>((has-stop-effect start-effects)))
+  ::
+    (expect !>(stopped))
+  ::
+    (expect !>(!(~(has z-bi unsettled-deposits.hash-state.reconciled-state) canonical-hash name)))
+  ::
+    %+  expect-eq
+      !>(reconciled-state)
+    !>(u.again)
+  ::
+    %+  expect-eq
+      !>(reconciled-state)
+    !>(consumed-state)
+  ::
+    (expect !>(?=(~ bad-result)))
+  ::
+    (expect !>(?=(~ deferred-result)))
+  ==
+:::
+:::
 :::  Unknown settlement dependencies must point to an unprocessed Nock height.
 ++  test-stale-deposit-settlement-is-not-deferred
   ^-  tang

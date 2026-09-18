@@ -217,6 +217,181 @@
   =.  state  (reconcile-deferred-withdrawal-settlements base-blocks-hash)
   state
 ::
+++  unsettled-deposits-by-counterpart
+  |=  name=nname:t
+  ^-  (list [nock-hash deposit])
+  %+  murn
+    ~(tap z-bi unsettled-deposits.hash-state.state)
+  |=  [tracked-as-of=nock-hash [tracked-name=nname:t tracked=deposit]]
+  ?.  =(name tracked-name)
+    ~
+  `[tracked-as-of tracked]
+::
+::  Resolve one finalized mainnet settlement whose as-of key was invalidated by
+::  the block-46,849 lineage repair. The full Base event and Nock deposit must
+::  match the immutable migration fact, and the current map key must still be
+::  the hash of the exact block containing the unique tracked counterpart.
+++  mainnet-pre-repair-deposit-block
+  |=  settlement=deposit-settlement
+  ^-  (unit nock-block)
+  ?.  ?&  =(46.810 nockchain-start-height.constants.state)
+           =(39.694.000 base-start-height.constants.state)
+       ==
+    ~
+  =/  [expected-settlement=deposit-settlement expected-counterpart=deposit]
+    mainnet-pre-repair-deposit-settlement
+  ?.  =(settlement expected-settlement)
+    ~
+  =/  tracked=(list [nock-hash deposit])
+    (unsettled-deposits-by-counterpart counterpart.settlement)
+  ?~  tracked  ~
+  ?^  t.tracked  ~
+  ?.  =(+.i.tracked expected-counterpart)
+    ~
+  =/  maybe-block=(unit nock-block)
+    (~(get z-by nock-hashchain.hash-state.state) -.i.tracked)
+  ?~  maybe-block  ~
+  =/  block=nock-block  u.maybe-block
+  ?.  =(-.i.tracked (hash:nock-block block))
+    ~
+  ?.  =(nock-height.settlement height.block)
+    ~
+  =/  maybe-counterpart=(unit deposit)
+    (~(get z-by deposits.block) counterpart.settlement)
+  ?~  maybe-counterpart  ~
+  ?.  =(expected-counterpart u.maybe-counterpart)
+    ~
+  `block
+::
+::  Resolve the closed mainnet range finalized against the old Nock lineage.
+::  The historical as-of is only a stale locator: the unique canonical note,
+::  containing block, height, recipient, and amount must still match exactly.
+++  mainnet-pre-repair-lineage-source-block
+  |=  settlement=deposit-settlement
+  ^-  (unit nock-block)
+  ?.  (mainnet-pre-repair-lineage-settlement constants.state settlement)
+    ~
+  =/  name=nname:t  counterpart.settlement
+  =/  tracked=(list [nock-hash deposit])
+    (unsettled-deposits-by-counterpart name)
+  ?~  tracked  ~
+  ?^  t.tracked  ~
+  =/  maybe-block=(unit nock-block)
+    (~(get z-by nock-hashchain.hash-state.state) -.i.tracked)
+  ?~  maybe-block  ~
+  =/  block=nock-block  u.maybe-block
+  ?.  =(-.i.tracked (hash:nock-block block))
+    ~
+  ?.  =(nock-height.settlement height.block)
+    ~
+  =/  maybe-counterpart=(unit deposit)
+    (~(get z-by deposits.block) name)
+  ?~  maybe-counterpart  ~
+  ?.  =(+.i.tracked u.maybe-counterpart)
+    ~
+  ?.  (check-deposit-settlement +.i.tracked settlement)
+    ~
+  `block
+::
+::
+::  Prove the exact migration event exists in the retained canonical Base
+::  lineage. A cursor beyond the batch is necessary but not sufficient.
+++  mainnet-pre-repair-deposit-event-committed
+  |=  settlement=deposit-settlement
+  ^-  ?
+  =/  cursor=base-hash  last-base-blocks.hash-state.state
+  |-
+  ?:  =(*base-hash cursor)
+    %.n
+  =/  maybe-blocks=(unit base-blocks)
+    (~(get z-by base-hashchain.hash-state.state) cursor)
+  ?~  maybe-blocks
+    %.n
+  =/  blocks=base-blocks  u.maybe-blocks
+  ?.  =(cursor (hash:base-blocks blocks))
+    %.n
+  ?:  (gth first-height.blocks 40.085.800)
+    $(cursor prev.blocks)
+  ?.  ?&  =(40.085.800 first-height.blocks)
+           =(40.085.899 last-height.blocks)
+       ==
+    %.n
+  =/  maybe-settlement=(unit deposit-settlement)
+    (~(get z-by deposit-settlements.blocks) beid.settlement)
+  ?~  maybe-settlement
+    %.n
+  =(settlement u.maybe-settlement)
+:::
+::  Some signers committed the finalized migration event before historical
+::  lineage preservation existed. Once their Base cursor is past that event's
+::  batch, consume the same exact immutable counterpart during startup. Any
+::  present-but-inexact state refuses startup instead of silently diverging.
+++  reconcile-mainnet-pre-repair-deposit
+  |=  ~
+  ^-  (unit bridge-state)
+  ?.  ?&  =(46.810 nockchain-start-height.constants.state)
+           =(39.694.000 base-start-height.constants.state)
+           (gte base-hashchain-next-height.hash-state.state 40.085.900)
+       ==
+    `state
+  =/  [settlement=deposit-settlement expected-counterpart=deposit]
+    mainnet-pre-repair-deposit-settlement
+  =/  name=nname:t  counterpart.settlement
+  =/  deferred=(list [nock-hash [beid deposit-settlement]])
+    %+  murn
+      ~(tap z-bi deferred-deposit-settlements.hash-state.state)
+    |=  [deferred-as-of=nock-hash [event-id=beid deferred-settlement=deposit-settlement]]
+    ?:  =(name counterpart.deferred-settlement)
+      `[deferred-as-of event-id deferred-settlement]
+    ~
+  =/  tracked=(list [nock-hash deposit])
+    (unsettled-deposits-by-counterpart name)
+  ?~  tracked
+    ?~  deferred
+      ?:  (mainnet-pre-repair-deposit-event-committed settlement)
+        `state
+      ~
+    ?^  t.deferred
+      ~
+    =/  [deferred-as-of=nock-hash event-id=beid deferred-settlement=deposit-settlement]
+      i.deferred
+    ?.  ?&  =(as-of.settlement deferred-as-of)
+             =(beid.settlement event-id)
+             =(settlement deferred-settlement)
+             (mainnet-pre-repair-deposit-event-committed settlement)
+         ==
+      ~
+    =.  deferred-deposit-settlements.hash-state.state
+      (~(del z-bi deferred-deposit-settlements.hash-state.state) [deferred-as-of event-id])
+    `state
+  ?^  deferred
+    ~
+  ?.  (mainnet-pre-repair-deposit-event-committed settlement)
+    ~
+  =/  valid=(unit nock-block)
+    (mainnet-pre-repair-deposit-block settlement)
+  ?~  valid
+    ~
+  =.  unsettled-deposits.hash-state.state
+    (~(del z-bi unsettled-deposits.hash-state.state) [-.i.tracked name])
+  `state
+:::
+::
+++  deposit-settlement-source-block
+  |=  [settlement=deposit-settlement latest-blocks=base-blocks]
+  ^-  (unit nock-block)
+  =/  direct=(unit nock-block)
+    (~(get z-by nock-hashchain.hash-state.state) as-of.settlement)
+  ?^  direct  direct
+  =/  exact=(unit nock-block)
+    ?:  ?&  =(40.085.800 first-height.latest-blocks)
+             =(40.085.899 last-height.latest-blocks)
+         ==
+      (mainnet-pre-repair-deposit-block settlement)
+    ~
+  ?^  exact  exact
+  (mainnet-pre-repair-lineage-source-block settlement)
+::
 :::  +validate-base-deposit-settlements:
 :::    Validate every Base deposit settlement before any derived withdrawal
 :::    request is persisted. Unknown Nock hashes may only point forward.
@@ -238,10 +413,10 @@
     [~ 'failed to process deposit settlement: counterpart note already has a deferred settlement']
   =/  next-seen=(z-set nname:t)  (~(put z-in seen) name)
   =/  maybe-block=(unit nock-block)
-    (~(get z-by nock-hashchain.hash-state.state) as-of.settlement)
+    (deposit-settlement-source-block settlement latest-blocks)
   ?~  maybe-block
-    ?:  (has-unsettled-deposit-counterpart-under-other-hash as-of.settlement name)
-      [~ 'failed to process deposit settlement: counterpart note is tracked under a different as-of hash']
+    ?^  (unsettled-deposits-by-counterpart name)
+      [~ 'failed to process deposit settlement: counterpart note is tracked under an unknown as-of hash']
     ?:  (lth nock-height.settlement nock-hashchain-next-height.hash-state.state)
       [~ 'failed to process deposit settlement: unknown as-of hash is behind the Nockchain cursor']
     $(settlements t.settlements, seen next-seen)
@@ -252,9 +427,15 @@
     (~(get z-by deposits.block) name)
   ?~  maybe-counterpart
     [~ 'failed to process deposit settlement: counterpart note not found in as-of nock block']
-  ?.  (has-unsettled-deposit as-of.settlement name)
+  =/  tracked=(list [nock-hash deposit])
+    (unsettled-deposits-by-counterpart name)
+  ?~  tracked
     [~ 'failed to process deposit settlement: cannot find unsettled deposit in state']
-  ?.  (check-deposit-settlement u.maybe-counterpart settlement)
+  ?^  t.tracked
+    [~ 'failed to process deposit settlement: counterpart note is tracked more than once']
+  ?.  =(+.i.tracked u.maybe-counterpart)
+    [~ 'failed to process deposit settlement: tracked counterpart does not match as-of block']
+  ?.  (check-deposit-settlement +.i.tracked settlement)
     [~ 'failed to process deposit settlement: counterpart does not match settlement']
   $(settlements t.settlements, seen next-seen)
 :::
@@ -265,15 +446,6 @@
     ~(tap z-bi deferred-deposit-settlements.hash-state.state)
   |=  [deferred-as-of=nock-hash [event-id=beid settlement=deposit-settlement]]
   =(name counterpart.settlement)
-++  has-unsettled-deposit-counterpart-under-other-hash
-  |=  [as-of=nock-hash name=nname:t]
-  ^-  ?
-  %+  lien
-    ~(tap z-bi unsettled-deposits.hash-state.state)
-  |=  [tracked-as-of=nock-hash [tracked-name=nname:t tracked=deposit]]
-  ?&  =(name tracked-name)
-      !=(as-of tracked-as-of)
-  ==
 :::
 :::
 :::  +validate-deferred-withdrawal-settlements:
@@ -359,9 +531,15 @@
   =/  [event-id=beid settlement=deposit-settlement]
     i.settlements
   =/  [name=nname:t as-of=nock-hash]  [counterpart as-of]:settlement
-  ?:  (~(has z-by nock-hashchain.hash-state.state) as-of)
+  =/  source=(unit nock-block)
+    (deposit-settlement-source-block settlement latest-blocks)
+  ?^  source
+    =/  tracked=(list [nock-hash deposit])
+      (unsettled-deposits-by-counterpart name)
+    ?~  tracked
+      [%| [%stop 'failed to process deposit settlement: validated counterpart disappeared from state']]
     =.  unsettled-deposits.hash-state.state
-      (~(del z-bi unsettled-deposits.hash-state.state) [as-of name])
+      (~(del z-bi unsettled-deposits.hash-state.state) [-.i.tracked name])
     $(settlements t.settlements)
   =.  deferred-deposit-settlements.hash-state.state
     %-  ~(put z-bi deferred-deposit-settlements.hash-state.state)

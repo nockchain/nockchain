@@ -143,8 +143,12 @@ explicitly assigned to the Rust runtime or an on-chain contract.
    Base height, contain the configured number of blocks, and preserve parent
    linkage.
 2. A source-chain hash is the hash of the complete cooked `nock-block` or
-   `base-blocks` value. Settlement lookup never substitutes an RPC block ID,
-   transaction ID, or height for that hash.
+   `base-blocks` value. Settlement lookup never generally substitutes an RPC
+   block ID, transaction ID, or height for that hash. When the block-46,849
+   mainnet repair rewrites the recursive Nock hashchain, it preserves exact
+   original stored blocks needed by unresolved deposits or deferred settlements
+   as read-only aliases. Their map keys are verified hashes of their complete
+   cooked values.
 3. A parent mismatch, skipped/replayed cursor, malformed batch, or contradictory
    finalized history is a STOP condition. The kernel never selects an alternate
    branch.
@@ -155,10 +159,29 @@ explicitly assigned to the Rust runtime or an on-chain contract.
 ### Counterpart and settlement identity invariants
 
 1. A deposit settlement binds its Base event ID and map key to one Nockchain
-   source tuple: `(as_of, nock_height, note_name, recipient, amount)`.
+   source tuple: `(as_of, nock_height, note_name, recipient, amount, nonce)`.
    `as_of` must identify a stored Nock block at `nock_height`; that block must
-   contain `note_name`; the corresponding unsettled deposit must exist; and
-   recipient and amount must match.
+   contain `note_name`; exactly one corresponding unsettled deposit must exist;
+   and the stored deposit, source-block deposit, recipient, and amount must all
+   match. Mainnet has two closed compatibility cases for settlements finalized
+   against the pre-repair Nock lineage:
+   - nonce `120` is translated only in Base batch `40,085,800..40,085,899`
+     and only when its complete Base event and Nock deposit identities equal the
+     immutable migration fact in `types.hoon`;
+   - nonces `121..529`, Nock heights `48,390..146,586`, and the canonical
+     mainnet bridge-root prefix may use the unique canonical counterpart block
+     when the historical `as_of` is absent.
+   The second rule changes only the stale locator. The canonical map key must
+   equal the hash of the block at the claimed height, the block and unsettled
+   maps must contain exactly one equal deposit, and recipient and amount must
+   match before consumption. Base enforces strictly increasing deposit nonces
+   and nonce `529` is the last immutable pre-repair event, so no future event
+   can enter this range. Every other unknown or cross-hash `as_of` stops.
+   A signer that already committed nonce `120` before this repair performs the
+   same exact reconciliation on startup, and only after its Base cursor is past
+   that batch and the retained canonical Base lineage contains the exact
+   settlement event. Consumption removes the unique counterpart, so event
+   replay and startup reconciliation are both one-shot.
 2. A withdrawal settlement binds its Nock note-name map key to one Base source
    tuple: `(as_of, base_batch_end, base_event_id, lock_root)`.
    `as_of` must identify a stored Base batch ending at `base_batch_end`; that
@@ -184,19 +207,44 @@ explicitly assigned to the Rust runtime or an on-chain contract.
 2. Deferred settlements are globally unique by value-release counterpart,
    independent of their outer hash bucket: one deferred deposit settlement per
    Nock note name and one deferred withdrawal settlement per Base event ID.
-   A new or persisted deferred entry also must not name an already-unsettled
-   counterpart tracked under a different hash.
+   Outside the bounded mainnet case, an unknown `as_of` must not name an
+   already-unsettled counterpart. A retained historical alias is known and must
+   still contain the exact counterpart and pass every source-position and
+   content check before reconciliation removes the unique canonical unsettled
+   entry. Nonce `120` is resolved immediately by its exact migration fact. A
+   settlement in the closed mainnet nonce/height range above may remain
+   deferred until its canonical counterpart arrives; it then receives the same
+   uniqueness, block-hash, height, deposit, recipient, and amount checks with
+   only its stale historical locator translated.
 3. When a source block arrives, any deferred entry that names one of its
-   counterpart events under a different `as_of` stops processing before a new
-   proposal or persistence effect is emitted. If the claimed height or batch
-   end is reached without the claimed hash, processing also stops.
+   counterpart events under a different `as_of` stops before a new proposal or
+   persistence effect, except for the closed immutable mainnet range above. If
+   the claimed height or batch end is reached without either the claimed hash
+   or that bounded migration proof, processing also stops.
 4. A matching deferred entry is validated against the full identity above,
    removes the unsettled counterpart, and is then deleted. A valid
    settlement-first and counterpart-first history therefore converges to the
    same kernel settlement state.
 5. Deferred maps survive restart and `%start`. Legacy `base-hold` and
    `nock-hold` fields exist only for state migration and are cleared on start;
-   new cross-chain dependencies do not create global holds.
+   new cross-chain dependencies do not create global holds. The one exact
+   pre-repair mainnet deposit is also reconciled at start when the Base cursor
+   is past its finalized event batch and that exact event remains in the
+   canonical Base lineage. If that note is still tracked but its deposit,
+   containing block, map-key hash, uniqueness check, or event evidence differs
+   from the immutable fact, startup is refused. A deferred entry beside a still
+   tracked counterpart also refuses startup. After the unique counterpart was
+   already consumed, retained exact Base event evidence is still required:
+   absence of the counterpart alone cannot distinguish valid consumption from
+   lost state. Startup deletes one sole deferred residue only when its bucket,
+   event ID, complete settlement, and retained canonical Base event all equal
+   the immutable migration fact; any other deferred residue refuses startup.
+6. Historical alias blocks are excluded from canonical hashchain projections:
+   projection walks backward from the canonical tip through `prev` links rather
+   than enumerating the backing map. Aliases therefore cannot duplicate deposit
+   proposals or deposit-log records. Compatibility migration does not add an
+   alias or alter the canonical chain; it only resolves a finalized historical
+   settlement to its unique verified canonical counterpart.
 
 ### Atomicity, effects, and failure invariants
 
@@ -212,9 +260,10 @@ explicitly assigned to the Rust runtime or an on-chain contract.
 3. Nock block processing is atomic in the kernel. Any settlement failure
    returns the pre-block state and emits only STOP; deposit proposal effects are
    constructed after the entire block succeeds.
-4. STOP is fail-closed and persistent. Operators must investigate the
-   contradictory chain data, corrupted state, or signer-authorized malformed
-   settlement rather than skipping it.
+4. STOP is fail-closed and persistent. A startup repair that cannot prove its
+   exact lineage writes persistent STOP state and emits STOP before later causes
+   can run. Operators must investigate contradictory chain data, corrupted
+   state, or signer-authorized malformed settlement rather than skipping it.
 5. The two source chains otherwise progress independently. If a counterpart is
    observed before its already-existing remote settlement, a proposal may have
    reached durable Rust storage before that settlement is observed locally.

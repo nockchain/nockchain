@@ -45,10 +45,20 @@
           `state(base-hold.hash-state ~)
         (repair-stale-base-hold:nock ~)
       ?~  resumed
-        ~>  %slog.[0 'bridge start refused: stale base hold lineage could not be repaired']
-        [~ state]
-      =.  state  (resume-bridge-state u.resumed)
-      =/  msg=@t  'bridge stop and legacy hold state removed. resuming cause processing.'
+        =/  msg=@t  'bridge start refused: stale base hold lineage could not be repaired'
+        =/  info=stop-info  (get-stop-info state)
+        ~>  %slog.[0 msg]
+        [[%0 %stop msg info]~ state(stop `info)]
+      =/  resume-base  ~(. base-lib u.resumed)
+      =/  reconciled=(unit bridge-state)
+        (reconcile-mainnet-pre-repair-deposit:resume-base ~)
+      ?~  reconciled
+        =/  msg=@t  'bridge start refused: finalized mainnet deposit could not be reconciled exactly'
+        =/  info=stop-info  (get-stop-info state)
+        ~>  %slog.[0 msg]
+        [[%0 %stop msg info]~ state(stop `info)]
+      =.  state  (resume-bridge-state u.reconciled)
+      =/  msg=@t  'bridge stop and recoverable legacy state reconciled. resuming cause processing.'
       ~>  %slog.[0 msg]
       [~ state]
     ?^  stop.state
@@ -506,13 +516,16 @@
       ``last
     ::
         [%nock-hashchain-deposits ~]
-      =/  blocks=(list [as-of=nock-hash block=nock-block])
-        ~(tap z-by nock-hashchain.hash-state.state)
-      =/  reqs=(list nock-deposit-request:effect)
-        %+  roll  blocks
-        |=  [[as-of=nock-hash block=nock-block] reqs=(list nock-deposit-request:effect)]
-        =/  dep-entries=(list [name=nname:t =deposit])
-          ~(tap z-by deposits.block)
+      =|  reqs=(list nock-deposit-request:effect)
+      =/  cur-hash=nock-hash  last-nock-block.hash-state.state
+      ?:  =(*hash:t cur-hash)
+        [~ ~]
+      |-
+      =/  block=nock-block
+        (~(got z-by nock-hashchain.hash-state.state) cur-hash)
+      =/  dep-entries=(list [name=nname:t =deposit])
+        ~(tap z-by deposits.block)
+      =.  reqs
         %+  roll  dep-entries
         |=  [[name=nname:t =deposit] reqs=_reqs]
         ?~  dest.deposit  reqs
@@ -522,10 +535,12 @@
             u.dest.deposit
             amount-to-mint.deposit
             height.block
-            as-of
+            cur-hash
         ==
-      ::  flop not required, but nice because it gives deposits in order of earliest to latest blocks
-      ``(flop reqs)
+      ?:  =(*hash:t prev.block)
+        ``(flop reqs)
+      =.  cur-hash  prev.block
+      $(reqs reqs)
     ::
         [%nock-hashchain-deposits-since-height start-height=@ta ~]
       =/  maybe-start  (rush start-height.pole dim:ag)

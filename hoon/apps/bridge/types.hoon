@@ -712,8 +712,9 @@
         ::
         ::  Settlements observed before their referenced future counterpart.
         ::  Each value-release counterpart is globally unique across hash
-        ::  buckets. Reconciliation requires the exact hash and source position;
-        ::  stale or cross-hash dependencies stop before emitting new work.
+        ::  buckets. Reconciliation requires the exact source hash and position,
+        ::  except for the one complete immutable mainnet migration fact defined
+        ::  below; unknown stale or cross-hash dependencies stop before effects.
         deferred-deposit-settlements=(z-mip nock-hash beid deposit-settlement)
         deferred-withdrawal-settlements=(z-mip base-hash nname:t withdrawal-settlement)
         ::
@@ -1059,6 +1060,71 @@
     %-  hash-hashable:tip5
     (hashable form)
   --
+::
+::  Exact mainnet identity of the note restored at block 46,849.
+++  mainnet-legacy-deposit-name
+  ^-  nname:t
+  :*  [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
+      [0xf68c.c7dd.f2ba.7818 0x828a.9a6d.3dcf.f822 0x409f.62b1.3f56.88d9 0x46ea.2f97.f8f8.c4d7 0x561d.0332.2829.9954]
+      ~
+  ==
+::
+::  This one settlement was finalized before the repaired lineage and before
+::  the bounded historical range below. Its complete Base event and Nock
+::  deposit identities form a one-shot migration fact.
+++  mainnet-pre-repair-deposit-settlement
+  ^-  [settlement=deposit-settlement counterpart=deposit]
+  =/  name=nname:t
+    :*  [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
+        [0xb7be.bb2f.38cc.3b5d 0x313f.a17d.ecd8.7360 0x5f43.e97c.c3c3.29df 0xe7f0.bbec.e834.6559 0x7ac4.8e78.ae60.b21e]
+        ~
+    ==
+  =/  event-id=beid
+    ~[0xc570.d8e0.2619.70ed 0x1ca7.7790.11b0.8188 0x4ea6.2025.9c8f.d321 0x940c.a776.f9d0.b9d7]
+  =/  historical-as-of=nock-hash
+    :*  0x5215.1cbb.b7b7.6221
+        0xb849.bf6c.5152.fdef
+        0x12fc.4026.9f99.941f
+        0x62aa.8941.0da3.12e8
+        0xc0d6.c5c3.a5b1.19f0
+    ==
+  =/  recipient=base-addr  0x9ff8.e289.ef6b.a33c.6a82.491a.445f.b57a.740d.2150
+  =/  settlement=deposit-settlement
+    :*  event-id
+        name
+        historical-as-of
+        48.325
+        recipient
+        9.801.150.000
+        120
+    ==
+  =/  counterpart=deposit
+    :*  [0x883c.b79e.ad8b.7eb0 0x7a63.af71.e499.2184 0x2f6d.876b.caec.e4bb 0xb578.65a0.564d.cefa 0x693d.c6c9.1074.25b2]
+        name
+        `recipient
+        9.801.150.000
+        29.250.000
+    ==
+  [settlement counterpart]
+::
+::  Base deposit nonces 121 through 529 were finalized against the old Nock
+::  hash lineage before the repaired chain became authoritative. Base enforces
+::  strictly increasing nonces, so this closed range cannot admit a future
+::  event. The height and bridge-root bounds are the observed endpoints of the
+::  immutable mainnet event range.
+++  mainnet-pre-repair-lineage-settlement
+  |=  [constants=bridge-constants settlement=deposit-settlement]
+  ^-  ?
+  =/  bridge-root=hash:t
+    [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
+  ?&  =(46.810 nockchain-start-height.constants)
+      =(39.694.000 base-start-height.constants)
+      =(bridge-root -.counterpart.settlement)
+      (gte nonce.settlement 121)
+      (lte nonce.settlement 529)
+      (gte nock-height.settlement 48.390)
+      (lte nock-height.settlement 146.586)
+  ==
 :::
 ++  withdrawal-settlement
   =<  form
