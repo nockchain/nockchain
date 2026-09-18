@@ -15,7 +15,7 @@ use tracing::{debug, trace, warn};
 
 use crate::driver::gen2::*;
 use crate::driver::{
-    record_local_peer_abuse, Libp2pWire, LocalPeerAbuseKind, LocalPeerAbuseSeverity, SwarmAction,
+    record_local_peer_abuse, LocalPeerAbuseKind, LocalPeerAbuseSeverity, P2pWire, SwarmAction,
 };
 use crate::messages::{
     BatchErrorClass, BatchResultStatus, NockchainFact, NockchainRequest, NockchainResponse,
@@ -344,7 +344,7 @@ pub(crate) async fn handle_inbound_request(
                             should_process
                         });
 
-                    let wire = Libp2pWire::Gossip(peer);
+                    let wire = P2pWire::Gossip(peer);
 
                     {
                         let poke_slab = gossip.fact_poke();

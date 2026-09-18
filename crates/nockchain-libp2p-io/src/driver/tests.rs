@@ -1387,7 +1387,7 @@ async fn poke_fact_direct(
 ) -> Vec<NounSlab> {
     poke_direct(
         app,
-        Libp2pWire::Response(peer).to_wire(),
+        P2pWire::Response(peer).to_wire(),
         fact.fact_poke().clone(),
         label,
     )
@@ -6601,7 +6601,7 @@ async fn profile_checkpoint_requester_first_item(
 
     let peer = PeerId::random();
     let mut checkpoint_app = start_checkpoint_app(chkjam_path).await;
-    let wire = Libp2pWire::Response(peer).to_wire();
+    let wire = P2pWire::Response(peer).to_wire();
     let poke_started = Instant::now();
     // Call NockApp::poke_timeout directly, bypassing traffic cop.
     // The traffic cop sends IOAction::Poke to the NockApp event loop,

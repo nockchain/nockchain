@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, trace, warn};
 
 use crate::driver::gen2::*;
-use crate::driver::{Libp2pWire, SwarmAction, SwarmActionDispatcher};
+use crate::driver::{P2pWire, SwarmAction, SwarmActionDispatcher};
 use crate::messages::NockchainFact;
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{BlockSource, P2PState};
@@ -268,7 +268,7 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
         should_process
     });
 
-    let wire = Libp2pWire::Response(peer);
+    let wire = P2pWire::Response(peer);
     let poke_slab = response.fact_poke();
 
     let (timing, timing_rx) = tokio::sync::oneshot::channel();

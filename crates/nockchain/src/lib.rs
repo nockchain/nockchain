@@ -608,22 +608,28 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     // from the kernel; miners subscribe via the private NockAppService's
     // WatchEffects RPC.
 
-    let libp2p_driver = nockchain_libp2p_io::driver::make_libp2p_driver(
-        keypair,
-        bind_multiaddrs,
-        allowed,
-        limits,
-        memory_limits,
-        &initial_peer_multiaddrs,
-        &backbone_peers,
-        backbone::DEFAULT_BACKBONE_PEER_COUNT,
-        &force_peers,
-        prune_inbound,
-        equix_builder,
-        config::CHAIN_INTERVAL,
-        Some(libp2p_init_tx),
+    let network_driver = nockchain_libp2p_io::driver::make_network_driver(
+        nockchain_libp2p_io::driver::NetworkDriverConfig {
+            backend: nockchain_libp2p_io::driver::TransportBackendConfig::Libp2p(
+                nockchain_libp2p_io::driver::Libp2pBackendConfig {
+                    keypair,
+                    bind: bind_multiaddrs,
+                    allowed,
+                    limits,
+                    memory_limits,
+                    initial_peers: initial_peer_multiaddrs,
+                    backbone_peers,
+                    backbone_dial_count: backbone::DEFAULT_BACKBONE_PEER_COUNT,
+                    force_peers,
+                },
+            ),
+            prune_inbound_size: prune_inbound,
+            equix_builder,
+            chain_interval: config::CHAIN_INTERVAL,
+            init_complete_tx: Some(libp2p_init_tx),
+        },
     );
-    nockapp.add_io_driver(libp2p_driver).await;
+    nockapp.add_io_driver(network_driver).await;
 
     // Create the born driver that waits for the born signal
     // Make the born poke

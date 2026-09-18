@@ -78,34 +78,34 @@ impl Wire for NockchainWire {
 }
 
 #[derive(Debug)]
-pub enum Libp2pWire {
+pub enum P2pWire {
     Gossip(PeerId),
     Response(PeerId),
 }
 
-impl Libp2pWire {
+impl P2pWire {
     fn verb(&self) -> &'static str {
         match self {
-            Libp2pWire::Gossip(_) => "gossip",
-            Libp2pWire::Response(_) => "response",
+            P2pWire::Gossip(_) => "gossip",
+            P2pWire::Response(_) => "response",
         }
     }
 
     fn peer_id(&self) -> &PeerId {
         match self {
-            Libp2pWire::Gossip(peer_id) => peer_id,
-            Libp2pWire::Response(peer_id) => peer_id,
+            P2pWire::Gossip(peer_id) => peer_id,
+            P2pWire::Response(peer_id) => peer_id,
         }
     }
 }
 
-impl Wire for Libp2pWire {
+impl Wire for P2pWire {
     const VERSION: u64 = 1;
     const SOURCE: &'static str = "libp2p";
 
     fn to_wire(&self) -> WireRepr {
         let tags = vec![self.verb().into(), "peer-id".into(), self.peer_id().to_base58().into()];
-        WireRepr::new(Libp2pWire::SOURCE, Libp2pWire::VERSION, tags)
+        WireRepr::new(P2pWire::SOURCE, P2pWire::VERSION, tags)
     }
 }
 
@@ -411,25 +411,50 @@ fn select_request_peers_with_preferences(
     }
 }
 
-#[instrument(skip(keypair, bind, allowed, limits, memory_limits, equix_builder))]
-pub fn make_libp2p_driver(
-    keypair: Keypair,
-    bind: Vec<Multiaddr>,
-    allowed: Option<allow_block_list::Behaviour<allow_block_list::AllowedPeers>>,
-    limits: connection_limits::ConnectionLimits,
-    memory_limits: Option<memory_connection_limits::Behaviour>,
-    initial_peers: &[Multiaddr],
-    backbone_peers: &[Multiaddr],
-    backbone_dial_count: usize,
-    force_peers: &[Multiaddr],
-    prune_inbound_size: Option<usize>,
-    mut equix_builder: equix::EquiXBuilder,
-    chain_interval: Duration,
-    init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
-) -> IODriverFn {
-    let initial_peers = Vec::from(initial_peers);
-    let backbone_peers = Vec::from(backbone_peers);
-    let force_peers = Vec::from(force_peers);
+pub struct NetworkDriverConfig {
+    pub backend: TransportBackendConfig,
+    pub prune_inbound_size: Option<usize>,
+    pub equix_builder: equix::EquiXBuilder,
+    pub chain_interval: Duration,
+    pub init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+pub enum TransportBackendConfig {
+    Libp2p(Libp2pBackendConfig),
+}
+
+pub struct Libp2pBackendConfig {
+    pub keypair: Keypair,
+    pub bind: Vec<Multiaddr>,
+    pub allowed: Option<allow_block_list::Behaviour<allow_block_list::AllowedPeers>>,
+    pub limits: connection_limits::ConnectionLimits,
+    pub memory_limits: Option<memory_connection_limits::Behaviour>,
+    pub initial_peers: Vec<Multiaddr>,
+    pub backbone_peers: Vec<Multiaddr>,
+    pub backbone_dial_count: usize,
+    pub force_peers: Vec<Multiaddr>,
+}
+
+#[instrument(skip(config))]
+pub fn make_network_driver(config: NetworkDriverConfig) -> IODriverFn {
+    let NetworkDriverConfig {
+        backend,
+        prune_inbound_size,
+        mut equix_builder,
+        chain_interval,
+        init_complete_tx,
+    } = config;
+    let TransportBackendConfig::Libp2p(Libp2pBackendConfig {
+        keypair,
+        bind,
+        allowed,
+        limits,
+        memory_limits,
+        initial_peers,
+        backbone_peers,
+        backbone_dial_count,
+        force_peers,
+    }) = backend;
     Box::new(move |handle| {
         let metrics = Arc::new(
             NockchainP2PMetrics::register(gnort::global_metrics_registry())
