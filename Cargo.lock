@@ -6729,6 +6729,7 @@ dependencies = [
  "ibig",
  "kernels-open-dumb",
  "libp2p",
+ "libp2p-identity",
  "nockapp",
  "nockapp-grpc-proto",
  "nockchain",

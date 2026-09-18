@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use either::{Left, Right};
-use libp2p::PeerId;
 use nockapp::noun::slab::NounSlab;
 use nockapp::utils::scry::ScryResult;
 use nockapp::NockAppError;
@@ -23,6 +22,7 @@ use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{CacheResponse, P2PState};
 use crate::tip5_util::tip5_hash_to_base58;
 use crate::traffic_cop;
+use crate::types::NodeId as PeerId;
 
 struct HeavyTxsPeek<'a> {
     height: u64,
@@ -102,7 +102,7 @@ pub(crate) async fn execute_request_item(
         (cache_result, true)
     } else {
         let scry_slab = request_to_scry_slab(data_request.clone())?;
-        let Some(scry_res_slab) = (match traffic.peek(Some(peer), scry_slab).await {
+        let Some(scry_res_slab) = (match traffic.peek(Some(NodeId::from(peer)), scry_slab).await {
             Ok(Some(res_slab)) => {
                 metrics.requests_peeked_some.increment();
                 Some(res_slab)
@@ -725,7 +725,7 @@ async fn peek_single_block_range_fallback(
         start_height: height,
         len: 1,
     })?;
-    match traffic.peek(Some(peer), scry_slab).await {
+    match traffic.peek(Some(NodeId::from(peer)), scry_slab).await {
         Ok(Some(res_slab)) => {
             metrics.requests_peeked_some.increment();
             Ok(Some(res_slab))

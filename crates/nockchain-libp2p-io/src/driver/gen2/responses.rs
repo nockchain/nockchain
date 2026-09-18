@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use libp2p::PeerId;
 use nockapp::NockAppError;
 use tokio::sync::{mpsc, Mutex};
 use tracing::trace;
@@ -14,6 +13,7 @@ use crate::messages::{
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{BlockSource, OutboundRequestContext, P2PState};
 use crate::traffic_cop;
+use crate::types::NodeId as PeerId;
 
 /// Decompose a bundle envelope (`kind == HeardBlockWithTxs`) into its
 /// constituent block + tx facts, route each through `route_response_fact` in

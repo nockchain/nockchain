@@ -2,6 +2,8 @@ use rand::Rng;
 
 use super::*;
 use crate::messages::{block_by_height_message, BatchErrorClass};
+use crate::transport::TransportCommand;
+use crate::types::{NodeId as PeerId, RequestFailure, RequestId};
 
 mod batch;
 mod frontier;
@@ -19,8 +21,8 @@ pub(crate) use frontier::{
     future_heard_block_details, heard_block_height_from_fact_poke,
     heard_block_tx_ids_from_fact_poke, track_future_heard_block_tx_hints,
 };
-use inbound::handle_inbound_request;
-use outbound::handle_outbound_response;
+pub(super) use inbound::handle_inbound_request;
+pub(super) use outbound::handle_outbound_response;
 pub(super) use request_exec::execute_request_item;
 pub(crate) use responses::{
     batch_request_item_ids, missing_batch_result_item_ids, response_envelope_from_result_message,
@@ -68,16 +70,21 @@ pub(super) fn take_pending_batch_request(
 
     let items = pending_batch.take_items();
     pending_gen2_batches.remove(&peer_id);
-    let request =
-        NockchainRequest::new_batch_request(equix_builder, local_peer_id, &peer_id, items)?;
+    let request = NockchainRequest::new_batch_request(
+        equix_builder,
+        &NodeId::from(*local_peer_id),
+        &NodeId::from(peer_id),
+        items,
+    )?;
     Ok(Some(OutboundRequestContext::new(peer_id, request)))
 }
 pub(super) async fn send_outbound_request_now(
-    swarm: &mut Swarm<NockchainBehaviour>,
+    transport_tx: &mpsc::Sender<TransportCommand>,
+    next_request_id: &mut u64,
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &NockchainP2PMetrics,
     request_context: OutboundRequestContext,
-) {
+) -> Result<(), NockAppError> {
     let peer_id = request_context.peer_id;
     let request = request_context.request.clone();
     if let Some(item_count) = batch_request_item_count(&request_context.request) {
@@ -94,10 +101,16 @@ pub(super) async fn send_outbound_request_now(
         NockchainRequest::BatchRequest { items, .. } => batch_request_payload_bytes(items).ok(),
         _ => None,
     };
-    let request_id = swarm
-        .behaviour_mut()
-        .request_response
-        .send_request(&peer_id, request);
+    let request_id = RequestId::new(*next_request_id);
+    *next_request_id = next_request_id.saturating_add(1);
+    transport_tx
+        .send(TransportCommand::SendRequest {
+            id: request_id,
+            peer: peer_id,
+            request,
+        })
+        .await
+        .map_err(|_| NockAppError::OtherError(String::from("transport command channel closed")))?;
     debug!(
         peer = %peer_id,
         request_id = %request_id,
@@ -113,6 +126,7 @@ pub(super) async fn send_outbound_request_now(
         .lock()
         .await
         .record_outbound_request(request_id, request_context);
+    Ok(())
 }
 
 pub(super) async fn queue_retry_requests_with_dispatcher(
@@ -151,8 +165,8 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
     equix_builder: &mut equix::EquiXBuilder,
     peer_exclusions: PeerExclusions,
     peer: PeerId,
-    request_id: request_response::OutboundRequestId,
-    error: request_response::OutboundFailure,
+    request_id: RequestId,
+    error: RequestFailure,
 ) {
     let request_context = driver_state
         .lock()
@@ -162,8 +176,8 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
     if peer_exclusions.record_peer_request_failure(peer) {
         metrics.request_peer_cooldowns_created.increment();
     }
-    let timed_out = matches!(&error, request_response::OutboundFailure::Timeout);
-    let transient_failure = transient_outbound_failure(&error);
+    let timed_out = error == RequestFailure::Timeout;
+    let transient_failure = error.is_transient();
     let mut skip_transient_retry = false;
     let mut retry_item_filter = None;
 
@@ -280,8 +294,8 @@ pub(crate) async fn handle_outbound_request_failure(
     equix_builder: &mut equix::EquiXBuilder,
     peer_exclusions: PeerExclusions,
     peer: PeerId,
-    request_id: request_response::OutboundRequestId,
-    error: request_response::OutboundFailure,
+    request_id: RequestId,
+    error: RequestFailure,
 ) {
     let mut swarm_actions = SwarmActionDispatcher::Channel(swarm_tx);
     handle_outbound_request_failure_with_dispatcher(
@@ -497,14 +511,6 @@ pub(super) async fn queue_block_height_retry_to_alternate_peer(
     )
     .await
 }
-pub(super) fn transient_outbound_failure(error: &request_response::OutboundFailure) -> bool {
-    matches!(
-        error,
-        request_response::OutboundFailure::Timeout
-            | request_response::OutboundFailure::ConnectionClosed
-            | request_response::OutboundFailure::Io(_)
-    )
-}
 pub(super) fn retryable_batch_error_class(error: Option<BatchErrorClass>) -> bool {
     matches!(
         error,
@@ -565,8 +571,8 @@ pub(crate) fn build_retry_request_contexts(
                 .map(|chunk| {
                     let request = NockchainRequest::new_batch_request(
                         equix_builder,
-                        local_peer_id,
-                        &request_context.peer_id,
+                        &NodeId::from(*local_peer_id),
+                        &NodeId::from(request_context.peer_id),
                         chunk.to_vec(),
                     )?;
                     Ok(OutboundRequestContext::with_attempt(
@@ -617,7 +623,9 @@ pub(super) async fn schedule_request_context_retry(
 pub(super) async fn process_queue_kernel_request_action(
     peer_id: PeerId,
     request_message: ByteBuf,
-    swarm: &mut Swarm<NockchainBehaviour>,
+    local_peer_id: PeerId,
+    transport_tx: &mpsc::Sender<TransportCommand>,
+    next_request_id: &mut u64,
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &Arc<NockchainP2PMetrics>,
     equix_builder: &mut equix::EquiXBuilder,
@@ -646,7 +654,6 @@ pub(super) async fn process_queue_kernel_request_action(
         return Ok(());
     }
 
-    let local_peer_id = *swarm.local_peer_id();
     let contains_response_budget_item = request_message_uses_response_budget(&request_message);
     let estimated_response_bytes = outbound_request_message_estimated_response_bytes(
         &request_message, req_res_limits, driver_state,
@@ -673,7 +680,10 @@ pub(super) async fn process_queue_kernel_request_action(
         if let Some(flushed_batch) = take_pending_batch_request(
             pending_gen2_batches, peer_id, &local_peer_id, equix_builder,
         )? {
-            send_outbound_request_now(swarm, driver_state, metrics, flushed_batch).await;
+            send_outbound_request_now(
+                transport_tx, next_request_id, driver_state, metrics, flushed_batch,
+            )
+            .await?;
         }
         update_pending_batch_metrics(metrics, pending_gen2_batches);
     }
@@ -704,7 +714,10 @@ pub(super) async fn process_queue_kernel_request_action(
                 if let Some(flushed_batch) = take_pending_batch_request(
                     pending_gen2_batches, peer_id, &local_peer_id, equix_builder,
                 )? {
-                    send_outbound_request_now(swarm, driver_state, metrics, flushed_batch).await;
+                    send_outbound_request_now(
+                        transport_tx, next_request_id, driver_state, metrics, flushed_batch,
+                    )
+                    .await?;
                 }
                 update_pending_batch_metrics(metrics, pending_gen2_batches);
             }
@@ -717,38 +730,40 @@ pub(super) async fn process_send_request_action(
     peer_id: PeerId,
     request: NockchainRequest,
     request_context: Option<OutboundRequestContext>,
-    swarm: &mut Swarm<NockchainBehaviour>,
+    transport_tx: &mpsc::Sender<TransportCommand>,
+    next_request_id: &mut u64,
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &Arc<NockchainP2PMetrics>,
 ) -> Result<(), NockAppError> {
     let request_context =
         request_context.unwrap_or_else(|| OutboundRequestContext::new(peer_id, request));
-    send_outbound_request_now(swarm, driver_state, metrics, request_context).await;
-    Ok(())
+    send_outbound_request_now(
+        transport_tx, next_request_id, driver_state, metrics, request_context,
+    )
+    .await
 }
 
 pub(super) async fn process_send_gossip_action(
     peer_id: PeerId,
     message: ByteBuf,
-    swarm: &mut Swarm<NockchainBehaviour>,
+    local_peer_id: PeerId,
+    transport_tx: &mpsc::Sender<TransportCommand>,
+    next_request_id: &mut u64,
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &Arc<NockchainP2PMetrics>,
     equix_builder: &mut equix::EquiXBuilder,
 ) -> Result<(), NockAppError> {
     let request = NockchainRequest::authenticated_gossip_from_message(
-        equix_builder,
-        swarm.local_peer_id(),
-        &peer_id,
-        message,
+        equix_builder, &local_peer_id, &peer_id, message,
     )?;
     send_outbound_request_now(
-        swarm,
+        transport_tx,
+        next_request_id,
         driver_state,
         metrics,
         OutboundRequestContext::new(peer_id, request),
     )
-    .await;
-    Ok(())
+    .await
 }
 
 pub(super) fn spawn_retry_requests(
@@ -789,54 +804,5 @@ pub(super) async fn process_flush_deferred_heard_blocks_action(
     )
     .await?;
     trace!(flushed, "Processed deferred heard-block flush action");
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_request_response(
-    peer: PeerId,
-    connection_id: ConnectionId,
-    message: request_response::Message<NockchainRequest, NockchainResponse>,
-    swarm_tx: mpsc::Sender<SwarmAction>,
-    equix_builder: &mut equix::EquiXBuilder,
-    local_peer_id: PeerId,
-    traffic: traffic_cop::TrafficCop,
-    metrics: Arc<NockchainP2PMetrics>,
-    driver_state: Arc<Mutex<P2PState>>,
-    req_res_limits: ReqResRuntimeLimits,
-    peer_exclusions: PeerExclusions,
-) -> Result<(), NockAppError> {
-    trace!("handle_request_response peer: {peer}");
-    match message {
-        Request {
-            request, channel, ..
-        } => {
-            handle_inbound_request(
-                peer,
-                connection_id,
-                request,
-                channel,
-                swarm_tx,
-                equix_builder,
-                local_peer_id,
-                traffic,
-                metrics,
-                driver_state,
-                req_res_limits,
-                peer_exclusions.clone(),
-            )
-            .await?;
-        }
-        Response {
-            request_id,
-            response,
-        } => {
-            handle_outbound_response(
-                peer, request_id, response, swarm_tx, equix_builder, local_peer_id, traffic,
-                metrics, driver_state, peer_exclusions,
-            )
-            .await?;
-        }
-    }
     Ok(())
 }

@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use libp2p::PeerId;
 use nockapp::driver::PokeResult;
 use nockapp::wire::Wire;
 use nockapp::NockAppError;
@@ -17,6 +16,7 @@ use crate::messages::NockchainFact;
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{BlockSource, P2PState};
 use crate::traffic_cop;
+use crate::types::NodeId as PeerId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseProcessingGate {
@@ -275,7 +275,7 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
     let route_started = Instant::now();
     let poke_result = traffic
         .poke_high_priority(
-            Some(peer),
+            Some(NodeId::from(peer)),
             wire.to_wire(),
             poke_slab.clone(),
             enable,

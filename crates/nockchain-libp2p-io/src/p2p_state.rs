@@ -5,10 +5,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use libp2p::core::ConnectedPoint;
-use libp2p::request_response::OutboundRequestId;
-use libp2p::swarm::ConnectionId;
-use libp2p::{Multiaddr, PeerId, Swarm};
 use nockapp::noun::slab::NounSlab;
 use nockapp::NockAppError;
 #[cfg(test)]
@@ -17,15 +13,18 @@ use nockvm::noun::{Noun, NounSpace};
 use rand::prelude::SliceRandom;
 use tracing::{debug, info, trace, warn};
 
-use crate::ip_block::PeerExclusions;
 use crate::messages::{NockchainDataRequest, NockchainFact, NockchainRequest, RequestReplayKey};
 use crate::metrics::NockchainP2PMetrics;
-use crate::p2p_util::{multiaddr_without_p2p, MultiaddrExt};
+use crate::peer_policy::PeerExclusions;
 use crate::peer_stats::{
     global_peer_stats_registry, unix_timestamp_millis, PeerReqResGeneration, PeerStatsEntry,
     PeerStatsRegistry, PeerStatsSnapshot,
 };
 use crate::tip5_util::tip5_hash_to_base58;
+use crate::types::{
+    ConnectionDirection, ConnectionId, NodeId as PeerId, PeerAddress,
+    RequestId as OutboundRequestId,
+};
 
 const TX_SOURCE_HINT_CAP: usize = 65_536;
 const BLOCK_HEIGHT_ATTEMPT_CAP: usize = 65_536;
@@ -559,7 +558,7 @@ pub struct P2PState {
     connections: BTreeMap<ConnectionId, PeerId>,
     // subset of connections: all inbound connections
     inbound_connections: BTreeMap<ConnectionId, PeerId>,
-    pub(crate) peer_connections: BTreeMap<PeerId, BTreeMap<ConnectionId, Multiaddr>>,
+    pub(crate) peer_connections: BTreeMap<PeerId, BTreeMap<ConnectionId, PeerAddress>>,
     ip_info: BTreeMap<IpAddr, IpInfo>,
     ip_bucket_info: BTreeMap<IpBucket, IpBucketInfo>,
     inbound_replay_by_peer: BTreeMap<PeerId, PeerReplayCache>,
@@ -796,18 +795,18 @@ impl P2PState {
         &mut self,
         connection_id: ConnectionId,
         peer_id: PeerId,
-        addr: &Multiaddr,
-        endpoint: ConnectedPoint,
+        addr: PeerAddress,
+        direction: ConnectionDirection,
     ) {
         self.connections.insert(connection_id, peer_id);
-        if let ConnectedPoint::Listener { .. } = endpoint {
+        if direction == ConnectionDirection::Inbound {
             self.inbound_connections.insert(connection_id, peer_id);
         }
         if let Some(c) = self.peer_connections.get_mut(&peer_id) {
-            c.insert(connection_id, addr.clone());
+            c.insert(connection_id, addr);
         } else {
             let mut new_map = BTreeMap::new();
-            new_map.insert(connection_id, addr.clone());
+            new_map.insert(connection_id, addr);
             self.peer_connections.insert(peer_id, new_map);
         }
         if let Some(ip) = addr.ip_addr() {
@@ -873,38 +872,18 @@ impl P2PState {
         peer_count
     }
 
-    pub(crate) fn peer_has_connection_at_address(
+    pub(crate) fn choose_inbound_connections_to_prune(
         &self,
-        peer_id: &PeerId,
-        address: &Multiaddr,
-    ) -> bool {
-        let address_without_peer_id = multiaddr_without_p2p(address);
-        self.peer_connections
-            .get(peer_id)
-            .is_some_and(|connections| {
-                connections
-                    .values()
-                    .any(|addr| multiaddr_without_p2p(addr) == address_without_peer_id)
-            })
-    }
-
-    pub(crate) fn prune_inbound_connections(
-        &mut self,
         metrics: Arc<NockchainP2PMetrics>,
-        swarm: &mut Swarm<crate::behaviour::NockchainBehaviour>,
         prune_n: usize,
-    ) {
-        let mut inbound_connections_vec = self
-            .inbound_connections
-            .keys()
-            .cloned()
-            .collect::<Vec<ConnectionId>>();
-        inbound_connections_vec.shuffle(&mut rand::rng());
-        let prune_actual = std::cmp::min(prune_n, inbound_connections_vec.len());
-        for connection_id in &inbound_connections_vec[0..prune_actual] {
-            metrics.incoming_connections_pruned.increment();
-            swarm.close_connection(*connection_id);
-        }
+    ) -> Vec<ConnectionId> {
+        let mut inbound_connections = self.inbound_connections.keys().copied().collect::<Vec<_>>();
+        inbound_connections.shuffle(&mut rand::rng());
+        inbound_connections.truncate(prune_n.min(inbound_connections.len()));
+        metrics
+            .incoming_connections_pruned
+            .fetch_add(inbound_connections.len());
+        inbound_connections
     }
 
     pub(crate) fn requested(&mut self, ip: IpAddr, threshhold: u64) -> Option<u64> {
@@ -1300,20 +1279,20 @@ impl P2PState {
         }
     }
 
-    pub(crate) fn connection_address(&self, connection_id: ConnectionId) -> Option<Multiaddr> {
+    pub(crate) fn connection_address(&self, connection_id: ConnectionId) -> Option<PeerAddress> {
         self.connections.get(&connection_id).and_then(|peer_id| {
             self.peer_connections
                 .get(peer_id)
                 .and_then(|map| map.get(&connection_id))
-                .cloned()
+                .copied()
         })
     }
 
-    pub(crate) fn peer_first_address(&self, peer_id: &PeerId) -> Option<Multiaddr> {
+    pub(crate) fn peer_first_address(&self, peer_id: &PeerId) -> Option<PeerAddress> {
         self.peer_connections
             .get(peer_id)
             .and_then(|connections| connections.values().next())
-            .cloned()
+            .copied()
     }
 
     pub(crate) fn track_block_id_str_and_peer(&mut self, block_id_str: String, peer_id: PeerId) {
@@ -2859,9 +2838,9 @@ mod tests {
 
     use super::*;
     use crate::config::{LibP2PConfig, PeerExclusionConfig};
-    use crate::ip_block::PeerExclusions;
     use crate::messages::{BatchRequestItem, NockchainDataRequest, NockchainResponse};
     use crate::p2p_util::PeerIdExt;
+    use crate::peer_policy::PeerExclusions;
 
     pub static LIBP2P_CONFIG: LazyLock<LibP2PConfig> = LazyLock::new(LibP2PConfig::default);
 

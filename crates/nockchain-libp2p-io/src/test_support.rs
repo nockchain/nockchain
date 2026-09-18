@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::error::Error;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,9 +10,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::AsyncWriteExt;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use libp2p::core::ConnectedPoint;
 use libp2p::request_response::cbor;
-use libp2p::swarm::{ConnectionId, NetworkBehaviour};
+use libp2p::swarm::NetworkBehaviour;
 use libp2p::{request_response, Multiaddr, PeerId, Swarm};
 use nockapp::noun::slab::NounSlab;
 use nockapp::utils::make_tas;
@@ -28,7 +27,6 @@ use crate::driver::{
     build_retry_request_contexts, collect_tip5_zset_strings, handle_outbound_request_failure,
     heard_block_height_from_fact_poke, heard_block_tx_ids_from_fact_poke, SwarmAction,
 };
-use crate::ip_block::PeerExclusions;
 use crate::key_fair_queue;
 use crate::messages::{
     block_range_with_txs_request_message, decode_request_item_message, NockchainDataRequest,
@@ -42,8 +40,10 @@ use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{
     InboundReplayAdmission, OutboundRequestContext, P2PState, DEFERRED_HEARD_BLOCK_PER_PEER_CAP,
 };
+use crate::peer_policy::{PeerExclusions, PolicyAddress};
 use crate::peer_stats::{PeerStatsRegistry, PeerStatsSnapshot};
 use crate::tip5_util::tip5_hash_to_base58;
+use crate::types::{ConnectionDirection, ConnectionId, NodeId, RequestFailure, RequestId};
 
 #[derive(Clone, Debug, Default)]
 pub struct ProtocolTrace {
@@ -314,19 +314,23 @@ impl ReqResFailureObservabilityProbe {
         &self,
         peer_id: PeerId,
         remote_addr: &Multiaddr,
-        local_addr: &Multiaddr,
+        _local_addr: &Multiaddr,
     ) {
-        let connection_id =
-            ConnectionId::new_unchecked(self.next_connection_id.fetch_add(1, Ordering::Relaxed));
+        let connection_id = ConnectionId::new(
+            self.next_connection_id
+                .fetch_add(1, Ordering::Relaxed)
+                .try_into()
+                .expect("connection id fits u64"),
+        );
+        let remote_addr = remote_addr
+            .peer_address()
+            .expect("remote address must contain an IP and port");
         let mut state = self.state.lock().await;
         state.track_connection(
             connection_id,
             peer_id,
             remote_addr,
-            ConnectedPoint::Listener {
-                local_addr: local_addr.clone(),
-                send_back_addr: remote_addr.clone(),
-            },
+            ConnectionDirection::Inbound,
         );
     }
 
@@ -353,7 +357,7 @@ impl ReqResFailureObservabilityProbe {
             self.peer_exclusions.clone(),
             peer_id,
             request_id,
-            error,
+            normalize_outbound_failure(error),
         )
         .await;
 
@@ -378,23 +382,21 @@ impl ReqResFailureObservabilityProbe {
     }
 }
 
-fn fresh_outbound_request_id() -> request_response::OutboundRequestId {
-    let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
-        request_response::cbor::Behaviour::new(
-            [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
-                request_response::ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        );
-    behaviour.send_request(
-        &PeerId::random(),
-        NockchainRequest::BatchRequest {
-            pow: [0; 16],
-            nonce: 0,
-            items: Vec::new(),
-        },
-    )
+fn fresh_outbound_request_id() -> RequestId {
+    static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+    RequestId::new(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+fn normalize_outbound_failure(error: request_response::OutboundFailure) -> RequestFailure {
+    match error {
+        request_response::OutboundFailure::Timeout => RequestFailure::Timeout,
+        request_response::OutboundFailure::ConnectionClosed => RequestFailure::ConnectionClosed,
+        request_response::OutboundFailure::UnsupportedProtocols => {
+            RequestFailure::UnsupportedProtocol
+        }
+        request_response::OutboundFailure::DialFailure => RequestFailure::NotConnected,
+        request_response::OutboundFailure::Io(error) => RequestFailure::Io(error.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,16 +444,20 @@ impl ReqResStateBoundsProbe {
     }
 
     pub fn connect_peer(&mut self, remote_addr: Multiaddr) -> ConnectionId {
-        let connection_id = ConnectionId::new_unchecked(self.next_connection_id);
+        let connection_id = ConnectionId::new(
+            self.next_connection_id
+                .try_into()
+                .expect("connection id fits u64"),
+        );
         self.next_connection_id = self.next_connection_id.saturating_add(1);
+        let remote_addr = remote_addr
+            .peer_address()
+            .expect("remote address must contain an IP and port");
         self.state.track_connection(
             connection_id,
             self.peer_id,
-            &remote_addr,
-            ConnectedPoint::Listener {
-                local_addr: "/ip4/0.0.0.0/tcp/0".parse().expect("valid local addr"),
-                send_back_addr: remote_addr.clone(),
-            },
+            remote_addr,
+            ConnectionDirection::Inbound,
         );
         connection_id
     }
@@ -539,8 +545,8 @@ pub fn solve_block_by_height_request(
     let mut builder = equix::EquiXBuilder::new();
     NockchainRequest::new_batch_request(
         &mut builder,
-        sender_peer_id,
-        receiver_peer_id,
+        &NodeId::from(*sender_peer_id),
+        &NodeId::from(*receiver_peer_id),
         vec![BatchRequestItem {
             item_id: 0,
             message: ByteBuf::from(slab.jam().as_ref()),
@@ -555,7 +561,12 @@ pub fn solve_batch_request(
     items: Vec<BatchRequestItem>,
 ) -> Result<NockchainRequest, nockapp::NockAppError> {
     let mut builder = equix::EquiXBuilder::new();
-    NockchainRequest::new_batch_request(&mut builder, sender_peer_id, receiver_peer_id, items)
+    NockchainRequest::new_batch_request(
+        &mut builder,
+        &NodeId::from(*sender_peer_id),
+        &NodeId::from(*receiver_peer_id),
+        items,
+    )
 }
 
 pub fn solve_authenticated_gossip(
@@ -566,8 +577,8 @@ pub fn solve_authenticated_gossip(
     let mut builder = equix::EquiXBuilder::new();
     NockchainRequest::authenticated_gossip_from_message(
         &mut builder,
-        sender_peer_id,
-        receiver_peer_id,
+        &NodeId::from(*sender_peer_id),
+        &NodeId::from(*receiver_peer_id),
         ByteBuf::from(message.as_ref().to_vec()),
     )
     .expect("authenticated gossip PoW should be solved")
@@ -580,7 +591,11 @@ pub fn request_pow_verifies_at(
 ) -> bool {
     let mut builder = equix::EquiXBuilder::new();
     request
-        .verify_pow(&mut builder, receiver_peer_id, sender_peer_id)
+        .verify_pow(
+            &mut builder,
+            &NodeId::from(*receiver_peer_id),
+            &NodeId::from(*sender_peer_id),
+        )
         .is_ok()
 }
 
@@ -843,16 +858,20 @@ impl ReqResIpPeerBanningProbe {
         peer_id: PeerId,
         remote_addr: Multiaddr,
     ) -> ConnectionId {
-        let connection_id = ConnectionId::new_unchecked(self.next_connection_id);
+        let connection_id = ConnectionId::new(
+            self.next_connection_id
+                .try_into()
+                .expect("connection id fits u64"),
+        );
         self.next_connection_id = self.next_connection_id.saturating_add(1);
+        let remote_addr = remote_addr
+            .peer_address()
+            .expect("remote address must contain an IP and port");
         self.state.track_connection(
             connection_id,
             peer_id,
-            &remote_addr,
-            ConnectedPoint::Listener {
-                local_addr: "/ip4/0.0.0.0/tcp/0".parse().expect("valid local addr"),
-                send_back_addr: remote_addr.clone(),
-            },
+            remote_addr,
+            ConnectionDirection::Inbound,
         );
         connection_id
     }
@@ -901,7 +920,7 @@ impl ReqResIpPeerBanningProbe {
 
     fn observe_outcome(
         &self,
-        outcome: crate::ip_block::ExclusionOutcome,
+        outcome: crate::peer_policy::ExclusionOutcome,
     ) -> PeerExclusionProbeOutcome {
         PeerExclusionProbeOutcome {
             address_cooldown_created: outcome.address_cooldown.is_some(),

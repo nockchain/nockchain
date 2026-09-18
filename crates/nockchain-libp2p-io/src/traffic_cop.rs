@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use libp2p::PeerId;
 use nockapp::driver::{NockAppHandle, PokeResult};
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::WireRepr;
@@ -15,6 +14,7 @@ use tracing::{error, trace, warn};
 
 use crate::key_fair_queue;
 use crate::tracked_join_set::TrackedJoinSet;
+use crate::types::NodeId;
 
 const PEER_HIGH_BURST_BEFORE_LOW: usize = 8;
 const HIGH_PRIORITY_QUEUE_MAX_TOTAL: usize = 16_384;
@@ -59,8 +59,8 @@ struct TrafficCopPoke {
 #[derive(Clone)]
 pub(crate) struct TrafficCop {
     system_high_priority_pokes: key_fair_queue::Sender<(), TrafficCopPoke>,
-    peer_high_priority_pokes: key_fair_queue::Sender<PeerId, TrafficCopPoke>,
-    low_priority: key_fair_queue::Sender<Option<PeerId>, TrafficCopAction>,
+    peer_high_priority_pokes: key_fair_queue::Sender<NodeId, TrafficCopPoke>,
+    low_priority: key_fair_queue::Sender<Option<NodeId>, TrafficCopAction>,
     /// Unix timestamp of the last successful TrafficCop kernel operation.
     /// See `unix_now` docstring above. Exposed via `last_poke_completed_at()`
     /// for libp2p-watchdog stall detection independent of the driver
@@ -128,7 +128,7 @@ impl TrafficCop {
     /// enable: Future which is polled just prior to poking, intended to allow checking block/tx caches
     pub(crate) async fn poke_high_priority(
         &self,
-        peer_id: Option<PeerId>,
+        peer_id: Option<NodeId>,
         wire: WireRepr,
         cause: NounSlab,
         enable: Pin<Box<dyn Future<Output = bool> + Send>>,
@@ -158,7 +158,7 @@ impl TrafficCop {
     #[allow(dead_code)]
     pub(crate) async fn poke_low_priority(
         &self,
-        peer_id: Option<PeerId>,
+        peer_id: Option<NodeId>,
         wire: WireRepr,
         cause: NounSlab,
         enable: Pin<Box<dyn Future<Output = bool> + Send>>,
@@ -180,7 +180,7 @@ impl TrafficCop {
 
     pub(crate) async fn peek(
         &self,
-        peer_id: Option<PeerId>,
+        peer_id: Option<NodeId>,
         path: NounSlab,
     ) -> Result<Option<NounSlab>, NockAppError> {
         let (result_tx, result_rx) = oneshot::channel();
@@ -207,8 +207,8 @@ fn key_fair_queue_error_to_nockapp<K>(error: key_fair_queue::Error<K>) -> NockAp
 async fn traffic_cop_task(
     handle: NockAppHandle,
     mut system_high: key_fair_queue::Receiver<(), TrafficCopPoke>,
-    mut peer_high: key_fair_queue::Receiver<PeerId, TrafficCopPoke>,
-    mut low: key_fair_queue::Receiver<Option<PeerId>, TrafficCopAction>,
+    mut peer_high: key_fair_queue::Receiver<NodeId, TrafficCopPoke>,
+    mut low: key_fair_queue::Receiver<Option<NodeId>, TrafficCopAction>,
     peek_timeout: Duration,
     last_poke_completed_at: Arc<AtomicU64>,
 ) -> Result<(), NockAppError> {

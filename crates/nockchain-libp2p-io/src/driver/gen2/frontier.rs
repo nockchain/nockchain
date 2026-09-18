@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use libp2p::PeerId;
 use nockapp::noun::slab::NounSlab;
 use nockapp::NockAppError;
 use nockvm::noun::{NounAllocator, NounHandle};
@@ -17,6 +16,7 @@ use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::P2PState;
 use crate::tip5_util::tip5_hash_to_base58;
 use crate::traffic_cop;
+use crate::types::NodeId as PeerId;
 
 const TIP5_ZSET_MAX_ITEMS: usize = 65_536;
 const TIP5_ZSET_MAX_STACK: usize = 65_536;

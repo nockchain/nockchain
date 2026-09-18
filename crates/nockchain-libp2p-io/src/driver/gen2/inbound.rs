@@ -4,10 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
-use libp2p::request_response::ResponseChannel;
-use libp2p::swarm::ConnectionId;
-use libp2p::PeerId;
+
 use nockapp::driver::PokeResult;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::Wire;
@@ -20,7 +17,6 @@ use crate::driver::gen2::*;
 use crate::driver::{
     record_local_peer_abuse, Libp2pWire, LocalPeerAbuseKind, LocalPeerAbuseSeverity, SwarmAction,
 };
-use crate::ip_block::PeerExclusions;
 use crate::messages::{
     BatchErrorClass, BatchResultStatus, NockchainFact, NockchainRequest, NockchainResponse,
 };
@@ -28,15 +24,16 @@ use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{
     GossipBucketAdmission, InboundReplayAdmission, IpBucketAdmission, P2PState,
 };
-use crate::p2p_util::MultiaddrExt;
+use crate::peer_policy::PeerExclusions;
 use crate::traffic_cop;
+use crate::types::{ConnectionId, InboundRequestId, NodeId as PeerId};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_inbound_request(
+pub(crate) async fn handle_inbound_request(
     peer: PeerId,
     connection_id: ConnectionId,
     request: NockchainRequest,
-    channel: ResponseChannel<NockchainResponse>,
+    request_id: InboundRequestId,
     swarm_tx: mpsc::Sender<SwarmAction>,
     equix_builder: &mut equix::EquiXBuilder,
     local_peer_id: PeerId,
@@ -155,7 +152,11 @@ pub(super) async fn handle_inbound_request(
         }
     }
 
-    let Ok(()) = request.verify_pow(equix_builder, &local_peer_id, &peer) else {
+    let Ok(()) = request.verify_pow(
+        equix_builder,
+        &NodeId::from(local_peer_id),
+        &NodeId::from(peer),
+    ) else {
         warn!("bad libp2p powork from {peer}, blocking!");
         record_local_peer_abuse(
             &swarm_tx,
@@ -287,7 +288,10 @@ pub(super) async fn handle_inbound_request(
                     tokio::spawn(async move {
                         let response = NockchainResponse::Ack { acked: true };
                         swarm_tx
-                            .send(SwarmAction::SendResponse { channel, response })
+                            .send(SwarmAction::SendResponse {
+                                id: request_id,
+                                response,
+                            })
                             .await
                             .map_err(|_| {
                                 NockAppError::OtherError(String::from(
@@ -385,7 +389,7 @@ pub(super) async fn handle_inbound_request(
                     let (timing, timing_rx) = tokio::sync::oneshot::channel();
                     let poke_result = traffic
                         .poke_high_priority(
-                            Some(peer),
+                            Some(NodeId::from(peer)),
                             wire.to_wire(),
                             poke.clone(),
                             enable_fut,
@@ -603,7 +607,10 @@ pub(super) async fn handle_inbound_request(
                 let response = NockchainResponse::BatchResult { results };
                 response.validate()?;
                 swarm_tx
-                    .send(SwarmAction::SendResponse { channel, response })
+                    .send(SwarmAction::SendResponse {
+                        id: request_id,
+                        response,
+                    })
                     .await
                     .map_err(|_| {
                         NockAppError::OtherError(String::from("Failed to send SwarmAction response"))

@@ -115,6 +115,7 @@ intmap = "3.1.0"
 lazy_static = "1.4.0"
 libc = "0.2.171"
 libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d" }
+libp2p-identity = { version = "0.2.13", features = ["ed25519", "peerid", "rand"] }
 libsqlite3-sys = { version = "0.35.0", features = ["bundled"] }
 memmap2 = "^0.9.5"
 nu-ansi-term = "0.50"

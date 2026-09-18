@@ -7,19 +7,10 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use futures::StreamExt;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use libp2p::identify::Event::Received;
 use libp2p::identity::Keypair;
-use libp2p::kad::NoKnownPeers;
 use libp2p::multiaddr::Protocol;
-use libp2p::request_response::Event::*;
-use libp2p::request_response::Message::*;
-use libp2p::request_response::{self};
-use libp2p::swarm::{ConnectionId, DialError, ListenError, SwarmEvent};
-use libp2p::{
-    allow_block_list, connection_limits, memory_connection_limits, ping, Multiaddr, PeerId, Swarm,
-};
+use libp2p::{allow_block_list, connection_limits, memory_connection_limits, Multiaddr, Swarm};
 use nockapp::driver::IODriverFn;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::{Wire, WireRepr};
@@ -29,27 +20,31 @@ use nockvm_macros::tas;
 use rand::seq::SliceRandom;
 use rand::{rng, Rng};
 use serde_bytes::ByteBuf;
-use tokio::sync::{mpsc, Mutex, MutexGuard};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::behaviour::{NockchainBehaviour, NockchainEvent};
+use crate::backend::libp2p::spawn_libp2p_transport;
+use crate::behaviour::NockchainBehaviour;
 use crate::config::LibP2PConfig;
-use crate::ip_block::{
-    AddressCooldownOutcome, ExclusionOutcome, IpExclusionOutcome, PeerExclusions,
-};
 use crate::messages::{
     block_with_txs_by_height_request_message, decode_request_item_message, NockchainDataRequest,
-    NockchainRequest, NockchainResponse, FACT_POKE_VERSION,
+    NockchainRequest, FACT_POKE_VERSION,
 };
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{OutboundRequestContext, P2PState, RangeCapability};
-use crate::p2p_util::{
-    log_fail2ban_ipv4, log_fail2ban_ipv6, multiaddr_without_p2p, MultiaddrExt, PeerIdExt,
+use crate::p2p_util::{log_fail2ban_ipv4, log_fail2ban_ipv6, NodeIdExt};
+use crate::peer_policy::{
+    AddressCooldownOutcome, ExclusionOutcome, IpExclusionOutcome, PeerExclusions,
 };
 use crate::tip5_util::tip5_hash_to_base58_stack;
 use crate::tracked_join_set::TrackedJoinSet;
 use crate::traffic_cop;
+use crate::transport::{ConnectionCloseCause, DiscoveryEvent, TransportCommand, TransportEvent};
+use crate::types::{
+    ConnectionId, DialFailure, InboundFailure, NodeId, NodeId as PeerId, PeerAddress,
+    RequestFailure, RequestId,
+};
 
 mod actions;
 mod gen2;
@@ -193,14 +188,6 @@ fn request_effect_trace_summary(noun_slab: &NounSlab) -> String {
     format!("request block {block_head}")
 }
 
-fn should_redial_initial_peers(
-    connected_peer_count: usize,
-    initial_peers: &[Multiaddr],
-    backbone_peers: &[Multiaddr],
-) -> bool {
-    connected_peer_count == 0 && !(initial_peers.is_empty() && backbone_peers.is_empty())
-}
-
 /// Returns the next round-robin window of up to `count` peers from `pool`,
 /// starting at `*cursor` and wrapping around, then advances `*cursor` past the
 /// window so the following call dials a different subset. An empty pool yields
@@ -216,37 +203,6 @@ fn next_backbone_window(pool: &[Multiaddr], cursor: &mut usize, count: usize) ->
         .collect();
     *cursor = (start + take) % pool.len();
     window
-}
-
-fn redial_initial_peers(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    initial_peers: &[Multiaddr],
-    backbone_peers: &[Multiaddr],
-    backbone_cursor: &mut usize,
-    backbone_dial_count: usize,
-    reason: &'static str,
-) -> Result<bool, NockAppError> {
-    let connected_peer_count = swarm.connected_peers().count();
-    if !should_redial_initial_peers(connected_peer_count, initial_peers, backbone_peers) {
-        return Ok(false);
-    }
-
-    let backbone_window =
-        next_backbone_window(backbone_peers, backbone_cursor, backbone_dial_count);
-    info!(
-        reason,
-        connected_peer_count,
-        initial_peer_count = initial_peers.len(),
-        backbone_dialed = backbone_window.len(),
-        "Redialing initial peers while disconnected"
-    );
-    if !initial_peers.is_empty() {
-        dial_peers(swarm, initial_peers)?;
-    }
-    if !backbone_window.is_empty() {
-        dial_peers(swarm, &backbone_window)?;
-    }
-    Ok(true)
 }
 
 const INITIAL_PEER_REDIAL_INTERVAL: Duration = Duration::from_secs(5);
@@ -525,7 +481,7 @@ pub fn make_libp2p_driver(
             let prefetch_bandwidth_cap_per_peer_bytes_per_min =
                 libp2p_config.prefetch_bandwidth_cap_per_peer_bytes_per_min;
             let swarm_action_queue_capacity = libp2p_config.gen2_swarm_action_queue_capacity();
-            let mut swarm = match start_swarm(
+            let swarm = match start_swarm(
                 libp2p_config,
                 keypair,
                 bind,
@@ -548,6 +504,19 @@ pub fn make_libp2p_driver(
                     )));
                 }
             };
+            let mut bootstrap_peers = initial_peers.clone();
+            bootstrap_peers.extend(backbone_peers.iter().cloned());
+            bootstrap_peers.extend(force_peers.iter().cloned());
+            let mut transport = spawn_libp2p_transport(
+                swarm,
+                peer_exclusions.clone(),
+                metrics.clone(),
+                bootstrap_peers,
+                swarm_action_queue_capacity,
+            );
+            let local_peer_id = transport.local_node_id;
+            let transport_tx = transport.commands.clone();
+            let mut next_request_id = 1u64;
             let (swarm_tx, mut swarm_rx) =
                 mpsc::channel::<SwarmAction>(swarm_action_queue_capacity);
             let mut join_set = TrackedJoinSet::<Result<(), NockAppError>>::new();
@@ -595,13 +564,29 @@ pub fn make_libp2p_driver(
             } else {
                 rand::rng().random_range(0..backbone_peers.len())
             };
-            if !initial_peers.is_empty() {
-                dial_peers(&mut swarm, &initial_peers)?;
+            let initial_peer_ids = multiaddr_peer_ids(&initial_peers);
+            if !initial_peer_ids.is_empty() {
+                transport_tx
+                    .send(TransportCommand::DialKnown {
+                        peers: initial_peer_ids,
+                    })
+                    .await
+                    .map_err(|_| {
+                        NockAppError::OtherError(String::from("transport command channel closed"))
+                    })?;
             }
             let initial_backbone_window =
                 next_backbone_window(&backbone_peers, &mut backbone_cursor, backbone_dial_count);
-            if !initial_backbone_window.is_empty() {
-                dial_peers(&mut swarm, &initial_backbone_window)?;
+            let initial_backbone_ids = multiaddr_peer_ids(&initial_backbone_window);
+            if !initial_backbone_ids.is_empty() {
+                transport_tx
+                    .send(TransportCommand::DialKnown {
+                        peers: initial_backbone_ids,
+                    })
+                    .await
+                    .map_err(|_| {
+                        NockAppError::OtherError(String::from("transport command channel closed"))
+                    })?;
             }
             if let Some(tx) = init_complete_tx {
                 let _ = tx.send(());
@@ -645,12 +630,13 @@ pub fn make_libp2p_driver(
 
             let mut connectivity_interval = tokio::time::interval(peer_status_interval);
             let mut buffered_swarm_actions = VecDeque::new();
+            let mut discovered_peers = BTreeMap::<PeerId, BTreeSet<PeerAddress>>::new();
             loop {
                 if let Some(swarm_action) = buffered_swarm_actions.pop_front() {
                     process_swarm_action(
-                        swarm_action, &mut swarm, &mut buffered_swarm_actions, &swarm_tx,
-                        &mut join_set, &driver_state, &metrics, &peer_exclusions,
-                        &mut equix_builder, &mut pending_gen2_batches, req_res_limits,
+                        swarm_action, local_peer_id, &transport_tx, &mut next_request_id,
+                        &mut buffered_swarm_actions, &swarm_tx, &mut join_set, &driver_state,
+                        &metrics, &mut equix_builder, &mut pending_gen2_batches, req_res_limits,
                         &traffic_cop,
                     )
                     .await?;
@@ -665,23 +651,44 @@ pub fn make_libp2p_driver(
                         join_set.spawn("timer".to_string(), send_timer_poke(guard, traffic_cop.clone(), metrics.clone()))
                     }
                     _ = connectivity_interval.tick() => {
-                        let peer_count = log_peer_status(
-                            &mut swarm,
-                            &metrics,
-                            &peer_exclusions,
-                            &driver_state
-                        ).await;
+                        let peer_count = driver_state.lock().await.peer_connections.len();
+                        let expired = peer_exclusions.expire();
+                        for _ in 0..expired.ips {
+                            metrics.ip_exclusions_expired.increment();
+                        }
+                        let _ = metrics
+                            .ip_exclusions_active
+                            .swap(peer_exclusions.active_ip_exclusion_count() as f64);
+                        let _ = metrics
+                            .address_cooldowns_active
+                            .swap(peer_exclusions.active_address_cooldown_count() as f64);
+                        info!(
+                            peer_count,
+                            active_ip_exclusions = peer_exclusions.active_ip_exclusion_count(),
+                            active_address_cooldowns = peer_exclusions.active_address_cooldown_count(),
+                            "P2P transport status"
+                        );
                         if peer_count < min_peers {
-                            let state_guard = driver_state.lock().await;
-                            dial_more_peers(&mut swarm, state_guard, &peer_exclusions);
+                            transport_tx
+                                .send(TransportCommand::RefreshDiscovery)
+                                .await
+                                .map_err(|_| {
+                                    NockAppError::OtherError(String::from("transport command channel closed"))
+                                })?;
                         }
                     },
                     Ok(noun_slab) = effect_handle.next_effect() => {
-                        let connected_peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
+                        let connected_peers = driver_state
+                            .lock()
+                            .await
+                            .peer_connections
+                            .keys()
+                            .copied()
+                            .collect::<Vec<_>>();
                         // Preserve kernel effect ordering within a poke burst so
                         // adjacent block requests can queue before trailing gossip
                         // effects interleave. Buffering those actions locally keeps
-                        // the select loop from awaiting its own bounded swarm queue.
+                        // the select loop from awaiting its own bounded action queue.
                         let mut swarm_actions =
                             SwarmActionDispatcher::Buffered(&mut buffered_swarm_actions);
                         handle_effect_with_dispatcher(
@@ -697,45 +704,26 @@ pub fn make_libp2p_driver(
                         )
                         .await?;
                     },
-                    Some(event) = swarm.next() => {
+                    Some(event) = transport.next_event() => {
                         match event {
-                            SwarmEvent::NewListenAddr { address, .. } => {
-                                info!("SEvent: Listening on {address:?}");
-                            },
-                            SwarmEvent::ListenerError { error, .. } => {
-                                error!("SEvent: Listener error: {error:?}");
-                            },
-                            SwarmEvent::ListenerClosed { addresses, reason, .. } => {
-                                if let Err(e) = reason {
-                                    error!("SEvent: Listener closed on {addresses:?} because of {e:?}");
-                                } else {
-                                    info!("SEvent: Listener closed on {addresses:?}");
-                                }
-                            },
-                            SwarmEvent::Behaviour(NockchainEvent::Identify(Received { connection_id: _, peer_id, info })) => {
-                                trace!("SEvent: identify_received");
-                                identify_received(&mut swarm, peer_id, info, &peer_exclusions, &metrics)?;
-                            },
-                            SwarmEvent::Behaviour(NockchainEvent::Kad(event)) => {
-                                trace!("SEvent: kad event {event:?}");
-                                observe_kad_cardinality_and_exclude(
-                                    &mut swarm,
-                                    &driver_state,
-                                    &peer_exclusions,
-                                    &metrics,
-                                ).await;
-                                prune_excluded_swarm_state(
-                                    &mut swarm,
-                                    &driver_state,
-                                    &peer_exclusions,
-                                    &metrics,
-                                ).await;
-                            },
-                            SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                            TransportEvent::Listening { address } => {
+                                info!("Transport listening on {address}");
+                            }
+                            TransportEvent::ConnectionEstablished {
+                                connection,
+                                peer,
+                                address,
+                                direction,
+                            } => {
                                 let bucket_count = {
                                     let mut state_guard = driver_state.lock().await;
-                                    state_guard.track_connection(connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone());
-                                    state_guard.ip_bucket_connection_count(connection_id)
+                                    state_guard.track_connection(
+                                        connection,
+                                        peer,
+                                        address,
+                                        direction,
+                                    );
+                                    state_guard.ip_bucket_connection_count(connection)
                                 };
                                 if let Some((bucket, count)) = bucket_count {
                                     if req_res_limits.ip_bucket_connection_limit != 0
@@ -743,160 +731,297 @@ pub fn make_libp2p_driver(
                                     {
                                         metrics.ip_bucket_connection_rejected.increment();
                                         warn!(
-                                            peer = %peer_id,
-                                            connection_id = ?connection_id,
+                                            peer = %peer,
+                                            connection = %connection,
                                             bucket = %bucket,
                                             count,
                                             limit = req_res_limits.ip_bucket_connection_limit,
                                             "Closing connection because IP bucket connection cap is exceeded"
                                         );
-                                        swarm.close_connection(connection_id);
+                                        transport_tx
+                                            .send(TransportCommand::CloseConnection { connection })
+                                            .await
+                                            .map_err(|_| {
+                                                NockAppError::OtherError(String::from(
+                                                    "transport command channel closed",
+                                                ))
+                                            })?;
                                     }
                                 }
-                                debug!("SEvent: {peer_id} is new friend via: {endpoint:?}");
-                            },
-                            SwarmEvent::ConnectionClosed { connection_id, peer_id, endpoint, cause, .. } => {
-                                let eperm = cause
-                                    .as_ref()
-                                    .is_some_and(|c| chain_has_permission_denied(c));
-                                {
+                                debug!("Transport connected to {peer} via {address}");
+                            }
+                            TransportEvent::ConnectionClosed {
+                                connection,
+                                peer,
+                                cause,
+                            } => {
+                                let address = {
                                     let mut state_guard = driver_state.lock().await;
-                                    let _ = state_guard.lost_connection(connection_id);
-                                }
-                                if let Some(cause) = &cause {
-                                    debug!("SEvent: friendship ended with {peer_id} via: {endpoint:?}. cause: {cause:?}");
-                                } else {
-                                    debug!("SEvent: friendship ended by us with {peer_id} via: {endpoint:?}.");
-                                }
-                                if eperm {
-                                    if let Some(ip) = endpoint.get_remote_address().ip_addr() {
+                                    let address = state_guard.connection_address(connection);
+                                    let _ = state_guard.lost_connection(connection);
+                                    address
+                                };
+                                debug!(%peer, %connection, ?cause, "Transport connection closed");
+                                if cause == Some(ConnectionCloseCause::PermissionDenied) {
+                                    if let Some(address) = address {
+                                        let ip = address.socket.ip();
+                                        let outcome =
+                                            peer_exclusions.record_permission_denied(&address);
                                         record_exclusion_outcome(
-                                            &mut swarm,
+                                            &transport_tx,
                                             &driver_state,
-                                            &peer_exclusions,
                                             &metrics,
-                                            peer_exclusions.record_permission_denied(
-                                                endpoint.get_remote_address()
-                                            ),
-                                            &[peer_id],
+                                            outcome,
+                                            &[peer],
                                         )
-                                        .await;
+                                        .await?;
                                         if !peer_exclusions.is_ip_excluded(&ip) {
-                                            trace!("PermissionDenied on {ip} stayed below IP exclusion threshold");
+                                            trace!(
+                                                "PermissionDenied on {ip} stayed below IP exclusion threshold"
+                                            );
                                         }
                                     }
                                 }
-                            },
-                            SwarmEvent::IncomingConnectionError { local_addr, send_back_addr, error, .. } => {
-                               trace!("SEvent: Failed incoming connection from {} to {}: {}",
-                               send_back_addr, local_addr, error);
-
-                               // When connection limits are reached, randomly prune inbound connections
-                               if let ListenError::Denied { cause } = error {
-                                   metrics.incoming_connections_blocked_by_limits.increment();
-                                   if let Some(prune_factor) = prune_inbound_size {
-                                       if let Ok(_exceeded) = cause.downcast::<libp2p::connection_limits::Exceeded>() {
-                                           driver_state.lock().await.prune_inbound_connections(metrics.clone(), &mut swarm, prune_factor);
-                                       }
-                                   }
-                               }
-                            },
-                            SwarmEvent::Behaviour(NockchainEvent::RequestResponse(Message { connection_id , peer, message })) => {
-                                trace!("SEvent: received RequestResponse");
-                                let _span = tracing::debug_span!("SwarmEvent::Behavior(NockchainEvent::RequestResponse(...))").entered();
+                            }
+                            TransportEvent::InboundConnectionLimitReached => {
+                                metrics.incoming_connections_blocked_by_limits.increment();
+                                if let Some(prune_factor) = prune_inbound_size {
+                                    let connections = driver_state
+                                        .lock()
+                                        .await
+                                        .choose_inbound_connections_to_prune(
+                                            metrics.clone(),
+                                            prune_factor,
+                                        );
+                                    for connection in connections {
+                                        transport_tx
+                                            .send(TransportCommand::CloseConnection { connection })
+                                            .await
+                                            .map_err(|_| {
+                                                NockAppError::OtherError(String::from(
+                                                    "transport command channel closed",
+                                                ))
+                                            })?;
+                                    }
+                                }
+                            }
+                            TransportEvent::IncomingRequest {
+                                id,
+                                connection,
+                                peer,
+                                request,
+                            } => {
                                 let swarm_tx_clone = swarm_tx.clone();
                                 let mut equix_builder_clone = equix_builder.clone();
-                                let local_peer_id = *swarm.local_peer_id();
-                                // We have to dup and move a handle back into `handle` to propitiate the borrow checker
                                 let traffic_clone = traffic_cop.clone();
                                 let metrics = metrics.clone();
-                                let state_arc = Arc::clone(&driver_state); // Clone the Arc, not the MessageTracker
+                                let state_arc = Arc::clone(&driver_state);
                                 let peer_exclusions_clone = peer_exclusions.clone();
-                                join_set.spawn("handle_request_response".to_string(), async move {
-                                    gen2::handle_request_response(peer, connection_id, message, swarm_tx_clone, &mut equix_builder_clone, local_peer_id, traffic_clone, metrics.clone(), state_arc, req_res_limits, peer_exclusions_clone).await
+                                join_set.spawn("handle_inbound_request".to_string(), async move {
+                                    gen2::handle_inbound_request(
+                                        peer,
+                                        connection,
+                                        request,
+                                        id,
+                                        swarm_tx_clone,
+                                        &mut equix_builder_clone,
+                                        local_peer_id,
+                                        traffic_clone,
+                                        metrics,
+                                        state_arc,
+                                        req_res_limits,
+                                        peer_exclusions_clone,
+                                    )
+                                    .await
                                 });
-                            },
-                            SwarmEvent::Behaviour(NockchainEvent::RequestResponse(
-                                OutboundFailure { peer, request_id, error, .. }
-                            )) => {
+                            }
+                            TransportEvent::Response { id, peer, response } => {
+                                let swarm_tx_clone = swarm_tx.clone();
+                                let mut equix_builder_clone = equix_builder.clone();
+                                let traffic_clone = traffic_cop.clone();
+                                let metrics = metrics.clone();
+                                let state_arc = Arc::clone(&driver_state);
+                                let peer_exclusions_clone = peer_exclusions.clone();
+                                join_set.spawn("handle_outbound_response".to_string(), async move {
+                                    gen2::handle_outbound_response(
+                                        peer,
+                                        id,
+                                        response,
+                                        swarm_tx_clone,
+                                        &mut equix_builder_clone,
+                                        local_peer_id,
+                                        traffic_clone,
+                                        metrics,
+                                        state_arc,
+                                        peer_exclusions_clone,
+                                    )
+                                    .await
+                                });
+                            }
+                            TransportEvent::RequestFailed { id, peer, failure } => {
                                 let mut swarm_actions =
                                     SwarmActionDispatcher::Buffered(&mut buffered_swarm_actions);
                                 gen2::handle_outbound_request_failure_with_dispatcher(
                                     &mut swarm_actions,
                                     Arc::clone(&driver_state),
                                     metrics.clone(),
-                                    *swarm.local_peer_id(),
+                                    local_peer_id,
                                     &mut equix_builder,
                                     peer_exclusions.clone(),
                                     peer,
-                                    request_id,
-                                    error,
+                                    id,
+                                    failure,
                                 )
                                 .await;
                             }
-                            SwarmEvent::Behaviour(NockchainEvent::RequestResponse(InboundFailure { peer, error, .. })) => {
-                                log_inbound_failure(peer, error, metrics.clone());
+                            TransportEvent::InboundFailed { peer, failure, .. } => {
+                                log_inbound_failure(peer, failure, metrics.clone());
                             }
-                            SwarmEvent::Behaviour(NockchainEvent::Ping(ping::Event{peer, connection, result})) => {
+                            TransportEvent::Liveness {
+                                connection,
+                                peer,
+                                result,
+                            } => {
                                 let mut state_guard = driver_state.lock().await;
-                                let connection_address = state_guard.connection_address(connection);
+                                let connection_address =
+                                    state_guard.connection_address(connection);
                                 match result {
                                     Ok(duration) => {
                                         state_guard.ping_succeeded(connection);
-                                        if let Some(ip) = connection_address.as_ref().and_then(|addr| addr.ip_addr()) {
+                                        if let Some(ip) =
+                                            connection_address.map(|address| address.socket.ip())
+                                        {
                                             peer_exclusions.record_positive_ip(ip);
                                         }
                                         log_ping_success(peer, connection_address, duration);
                                     }
                                     Err(error) => {
                                         let failures = state_guard.ping_failed(connection);
-                                        log_ping_failure(peer, connection_address.clone(), error);
+                                        log_ping_failure(
+                                            peer,
+                                            connection_address,
+                                            &error,
+                                        );
                                         drop(state_guard);
-                                        if let Some(addr) = connection_address.as_ref() {
-                                            let outcome = peer_exclusions.record_ping_failure(addr);
+                                        if let Some(address) = connection_address {
+                                            let outcome =
+                                                peer_exclusions.record_ping_failure(&address);
                                             record_exclusion_outcome(
-                                                &mut swarm,
+                                                &transport_tx,
                                                 &driver_state,
-                                                &peer_exclusions,
                                                 &metrics,
                                                 outcome,
                                                 &[peer],
-                                            ).await;
+                                            )
+                                            .await?;
                                         }
                                         if failures >= failed_pings_before_close {
-                                            if let Some(ip) = connection_address.and_then(|c| c.ip_addr()) {
-                                                info!("Closing connection to {peer} on {ip} after {failures} failed pings.");
+                                            if let Some(address) = connection_address {
+                                                info!(
+                                                    "Closing connection to {peer} on {} after {failures} failed pings.",
+                                                    address.socket.ip()
+                                                );
                                             } else {
-                                                info!("Closing connection to {peer} after {failures} failed pings.");
+                                                info!(
+                                                    "Closing connection to {peer} after {failures} failed pings."
+                                                );
                                             }
-                                            swarm.close_connection(connection);
+                                            transport_tx
+                                                .send(TransportCommand::CloseConnection {
+                                                    connection,
+                                                })
+                                                .await
+                                                .map_err(|_| {
+                                                    NockAppError::OtherError(String::from(
+                                                        "transport command channel closed",
+                                                    ))
+                                                })?;
                                         }
                                     }
                                 }
                             }
-                            SwarmEvent::OutgoingConnectionError { error, .. } => {
-                                handle_outgoing_connection_error(
-                                    &mut swarm,
+                            TransportEvent::DialFailed {
+                                peer,
+                                address,
+                                failure,
+                            } => {
+                                handle_transport_dial_failure(
+                                    &transport_tx,
                                     &driver_state,
                                     &peer_exclusions,
                                     &metrics,
-                                    error
-                                ).await;
-                            },
-                            SwarmEvent::IncomingConnection {
-                                local_addr,
-                                send_back_addr,
-                                connection_id,
-                                ..
-                            } => {
-                                debug!("SEvent: Incoming connection from {local_addr:?} to {send_back_addr:?} with {connection_id:?}");
-                            },
-                            SwarmEvent::Dialing { peer_id, connection_id } => {
-                                debug!("SEvent: Dialing {peer_id:?} {connection_id}");
-                            },
-                            _ => {
-                                // Handle other swarm events
-                                trace!("SEvent: other swarm event {:?}", event);
+                                    peer,
+                                    address,
+                                    failure,
+                                )
+                                .await?;
+                            }
+                            TransportEvent::Discovery(event) => {
+                                match event {
+                                    DiscoveryEvent::PeerUpserted {
+                                        peer,
+                                        addresses,
+                                        source,
+                                    } => {
+                                        let entry = discovered_peers.entry(peer).or_default();
+                                        for address in addresses {
+                                            if peer_exclusions
+                                                .is_address_excluded(&address, Some(peer))
+                                            {
+                                                metrics
+                                                    .kad_addresses_pruned_for_exclusion
+                                                    .increment();
+                                                transport_tx
+                                                    .send(
+                                                        TransportCommand::RemoveDiscoveredAddress {
+                                                            peer: Some(peer),
+                                                            address,
+                                                        },
+                                                    )
+                                                    .await
+                                                    .map_err(|_| {
+                                                        NockAppError::OtherError(String::from(
+                                                            "transport command channel closed",
+                                                        ))
+                                                    })?;
+                                            } else {
+                                                entry.insert(address);
+                                            }
+                                        }
+                                        trace!(%peer, ?source, "Transport discovery updated peer");
+                                        enforce_discovery_cardinality(
+                                            &discovered_peers,
+                                            &transport_tx,
+                                            &driver_state,
+                                            &peer_exclusions,
+                                            &metrics,
+                                        )
+                                        .await?;
+                                    }
+                                    DiscoveryEvent::PeerRemoved { peer } => {
+                                        discovered_peers.remove(&peer);
+                                    }
+                                    DiscoveryEvent::BootstrapFailed { failure } => {
+                                        debug!(?failure, "Discovery bootstrap failed; redialing bootstrap peers");
+                                        transport_tx
+                                            .send(TransportCommand::DialBootstrap)
+                                            .await
+                                            .map_err(|_| {
+                                                NockAppError::OtherError(String::from(
+                                                    "transport command channel closed",
+                                                ))
+                                            })?;
+                                    }
+                                    DiscoveryEvent::RoutingTableStats { entries } => {
+                                        trace!(entries, "Transport routing table status");
+                                    }
+                                    DiscoveryEvent::BootstrapFinished { discovered } => {
+                                        trace!(discovered, "Transport discovery bootstrap finished");
+                                    }
+                                }
+                            }
+                            TransportEvent::Fatal { error } => {
+                                return Err(NockAppError::OtherError(error));
                             }
                         }
                     },
@@ -904,53 +1029,64 @@ pub fn make_libp2p_driver(
                         buffered_swarm_actions.push_back(swarm_action);
                     },
                     _ = kad_bootstrap.tick() => {
-                        // If we don't have any peers, we should retry dialing our initial peers
-                        if let Err(NoKnownPeers())= swarm.behaviour_mut().kad.bootstrap() {
-                            if redial_initial_peers(
-                                &mut swarm,
-                                &initial_peers,
+                        transport_tx
+                            .send(TransportCommand::BootstrapDiscovery)
+                            .await
+                            .map_err(|_| {
+                                NockAppError::OtherError(String::from(
+                                    "transport command channel closed",
+                                ))
+                            })?;
+                    },
+                    _ = initial_peer_redial.tick() => {
+                        let disconnected =
+                            driver_state.lock().await.peer_connections.is_empty();
+                        if disconnected {
+                            let backbone_window = next_backbone_window(
                                 &backbone_peers,
                                 &mut backbone_cursor,
                                 backbone_dial_count,
-                                "kademlia_bootstrap_no_known_peers",
-                            )? {
-                                info!("Failed to bootstrap: {}", NoKnownPeers());
+                            );
+                            let mut peers = multiaddr_peer_ids(&initial_peers);
+                            peers.extend(multiaddr_peer_ids(&backbone_window));
+                            if !peers.is_empty() {
+                                transport_tx
+                                    .send(TransportCommand::DialKnown { peers })
+                                    .await
+                                    .map_err(|_| {
+                                        NockAppError::OtherError(String::from(
+                                            "transport command channel closed",
+                                        ))
+                                    })?;
                             }
-                        }
-                    },
-                    _ = initial_peer_redial.tick() => {
-                        if redial_initial_peers(
-                            &mut swarm,
-                            &initial_peers,
-                            &backbone_peers,
-                            &mut backbone_cursor,
-                            backbone_dial_count,
-                            "startup_zero_peer_window",
-                        )? {
-                            // Still disconnected: grow the backoff up to the cap and keep
-                            // retrying forever. reset_after must be called every tick to
-                            // hold the backoff cadence (the interval's own period would
-                            // otherwise resume at INITIAL_PEER_REDIAL_INTERVAL).
                             initial_peer_redial_backoff =
-                                (initial_peer_redial_backoff * 2).min(INITIAL_PEER_REDIAL_MAX_INTERVAL);
+                                (initial_peer_redial_backoff * 2)
+                                    .min(INITIAL_PEER_REDIAL_MAX_INTERVAL);
                             initial_peer_redial.reset_after(initial_peer_redial_backoff);
                             debug!(
                                 backoff_secs = initial_peer_redial_backoff.as_secs(),
                                 "Initial peer redial tick fired while disconnected"
                             );
                         } else if initial_peer_redial_backoff != INITIAL_PEER_REDIAL_INTERVAL {
-                            // Connected (or nothing to dial): reset the backoff so a future
-                            // disconnect starts retrying promptly again.
                             initial_peer_redial_backoff = INITIAL_PEER_REDIAL_INTERVAL;
                             initial_peer_redial.reset_after(INITIAL_PEER_REDIAL_INTERVAL);
                         }
                     },
                     _ = force_peer_dial.tick() => {
                         debug!("Force dialing peers");
-                        dial_peers(&mut swarm, &force_peers)?;
+                        let peers = multiaddr_peer_ids(&force_peers);
+                        if !peers.is_empty() {
+                            transport_tx
+                                .send(TransportCommand::DialKnown { peers })
+                                .await
+                                .map_err(|_| {
+                                    NockAppError::OtherError(String::from(
+                                        "transport command channel closed",
+                                    ))
+                                })?;
+                        }
                     },
                     _ = gen2_batch_flush.tick() => {
-                        let local_peer_id = *swarm.local_peer_id();
                         let peers_to_flush: Vec<_> = pending_gen2_batches.keys().copied().collect();
                         for peer_id in peers_to_flush {
                             let should_flush = pending_gen2_batches
@@ -974,12 +1110,13 @@ pub fn make_libp2p_driver(
                                 &mut equix_builder,
                             )? {
                                 gen2::send_outbound_request_now(
-                                    &mut swarm,
+                                    &transport_tx,
+                                    &mut next_request_id,
                                     &driver_state,
                                     &metrics,
                                     flushed_batch,
                                 )
-                                .await;
+                                .await?;
                             }
                             gen2::update_pending_batch_metrics(&metrics, &pending_gen2_batches);
                         }
@@ -1116,7 +1253,7 @@ pub(super) async fn record_local_peer_abuse(
     peer_exclusions: &PeerExclusions,
     peer_id: PeerId,
     connection_id: Option<ConnectionId>,
-    address: Option<Multiaddr>,
+    address: Option<PeerAddress>,
     kind: LocalPeerAbuseKind,
     severity: LocalPeerAbuseSeverity,
     block_peer: bool,
@@ -1137,7 +1274,7 @@ async fn record_local_peer_abuse_with_dispatcher(
     peer_exclusions: &PeerExclusions,
     peer_id: PeerId,
     connection_id: Option<ConnectionId>,
-    address: Option<Multiaddr>,
+    address: Option<PeerAddress>,
     kind: LocalPeerAbuseKind,
     severity: LocalPeerAbuseSeverity,
     block_peer: bool,
@@ -1278,7 +1415,7 @@ async fn handle_effect_with_dispatcher(
                         let elders_block_id_noun = elders_cell.head().noun();
                         let peer_id_noun = elders_cell.tail();
                         peer_id_noun.as_atom()?;
-                        match PeerId::from_noun(peer_id_noun.noun(), &space) {
+                        match NodeId::from_noun(peer_id_noun.noun(), &space) {
                             Ok(peer_id) => {
                                 if let Ok(block_id) = tip5_hash_to_base58_stack(
                                     &mut noun_slab, elders_block_id_noun, &space,
@@ -1759,7 +1896,7 @@ async fn handle_effect_with_dispatcher(
                     let peer_id_atom = data_cell.tail().as_atom()?;
 
                     // Convert peer_id from base58 string to PeerId
-                    let Ok(peer_id) = PeerId::from_noun(peer_id_atom.as_noun().noun(), &space)
+                    let Ok(peer_id) = NodeId::from_noun(peer_id_atom.as_noun().noun(), &space)
                     else {
                         return Err(NockAppError::OtherError(String::from(
                             "Invalid peer ID format",
@@ -1920,102 +2057,6 @@ async fn handle_effect_with_dispatcher(
     Ok(())
 }
 
-async fn log_peer_status(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    metrics: &NockchainP2PMetrics,
-    peer_exclusions: &PeerExclusions,
-    driver_state: &Arc<Mutex<P2PState>>,
-) -> usize {
-    let expired = peer_exclusions.expire();
-    for _ in 0..expired.ips {
-        metrics.ip_exclusions_expired.increment();
-    }
-    let _ = metrics
-        .ip_exclusions_active
-        .swap(peer_exclusions.active_ip_exclusion_count() as f64);
-    let _ = metrics
-        .address_cooldowns_active
-        .swap(peer_exclusions.active_address_cooldown_count() as f64);
-
-    let connected_peer_count = {
-        let connected_peers: Vec<_> = swarm.connected_peers().cloned().collect();
-        let peer_count = connected_peers.len();
-
-        if peer_count == 0 {
-            warn!(
-                connected_peers = peer_count,
-                peers = ?connected_peers.iter().map(|p| p.to_base58()).collect::<Vec<_>>(),
-                "No current peers connected!"
-            );
-        } else {
-            info!(
-                connected_peers = peer_count,
-                peers = ?connected_peers.iter().map(|p| p.to_base58()).collect::<Vec<_>>(),
-                "Current peer status"
-            );
-        }
-
-        let _ = metrics.active_peer_connections.swap(peer_count as f64);
-        peer_count
-    };
-
-    // Count peers in the routing table by iterating through k-buckets
-    let mut routing_table_size = 0;
-    for bucket in swarm.behaviour_mut().kad.kbuckets() {
-        routing_table_size += bucket.num_entries();
-    }
-
-    if routing_table_size == 0 {
-        warn!(
-            routing_table_size = routing_table_size,
-            "Routing table is empty!"
-        );
-    } else {
-        info!(
-            routing_table_size = routing_table_size,
-            "Routing table has {} entries", routing_table_size
-        );
-    };
-    observe_kad_cardinality_and_exclude(swarm, driver_state, peer_exclusions, metrics).await;
-    prune_excluded_swarm_state(swarm, driver_state, peer_exclusions, metrics).await;
-    connected_peer_count
-}
-
-fn dial_peers(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    peers: &[Multiaddr],
-) -> Result<(), NockAppError> {
-    let mut rng = rand::rng();
-
-    let cloned_peers: &mut [libp2p::Multiaddr] = &mut peers.to_vec();
-    cloned_peers.shuffle(&mut rng);
-
-    for peer in cloned_peers {
-        let peer = peer.clone();
-        debug!("Dialing peer: {}", peer);
-        let _ = swarm.dial(peer.clone()).map_err(log_dial_error);
-    }
-    Ok(())
-}
-
-/// Walks an error's `source()` chain looking for an [`std::io::Error`] of
-/// kind [`PermissionDenied`](std::io::ErrorKind::PermissionDenied). This is
-/// how a firewall-blocked egress surfaces: the quinn UDP socket's `sendmsg`
-/// returns `EPERM`, which the QUIC transport reports as a `PermissionDenied`
-/// io error inside `DialError::Transport`.
-fn chain_has_permission_denied(err: &(dyn std::error::Error + 'static)) -> bool {
-    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(e) = cur {
-        if let Some(io) = e.downcast_ref::<std::io::Error>() {
-            if io.kind() == std::io::ErrorKind::PermissionDenied {
-                return true;
-            }
-        }
-        cur = e.source();
-    }
-    false
-}
-
 /// The peer id encoded as the trailing `/p2p/<peer-id>` of a multiaddr, if
 /// any (Kademlia keys its routing table by it).
 fn p2p_peer_id(addr: &Multiaddr) -> Option<PeerId> {
@@ -2025,103 +2066,122 @@ fn p2p_peer_id(addr: &Multiaddr) -> Option<PeerId> {
     })
 }
 
-fn remove_stale_peer_address(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    peer_id: PeerId,
-    address: &Multiaddr,
-) {
-    let address_without_peer_id = multiaddr_without_p2p(address);
-    let behaviour = swarm.behaviour_mut();
-    behaviour
-        .kad
-        .remove_address(&peer_id, &address_without_peer_id);
-    behaviour
-        .peer_store
-        .store_mut()
-        .remove_address(&peer_id, &address_without_peer_id);
-    behaviour
-        .peer_store
-        .store_mut()
-        .remove_address(&peer_id, address);
+fn multiaddr_peer_ids(addresses: &[Multiaddr]) -> Vec<PeerId> {
+    addresses.iter().filter_map(p2p_peer_id).collect()
 }
 
-async fn handle_outgoing_connection_error(
-    swarm: &mut Swarm<NockchainBehaviour>,
+async fn handle_transport_dial_failure(
+    transport_tx: &mpsc::Sender<TransportCommand>,
     driver_state: &Arc<Mutex<P2PState>>,
     peer_exclusions: &PeerExclusions,
     metrics: &NockchainP2PMetrics,
-    error: DialError,
-) {
-    match &error {
-        // The host answered with a different identity than Kademlia
-        // advertised. Poisoned peers exploit this with many ports / fresh
-        // ids on one IP, so we never connect but keep retrying forever.
-        DialError::WrongPeerId { obtained, address } => {
-            let obtained = *obtained;
-            let expected = p2p_peer_id(address);
-            if address.ip_addr().is_none() {
-                warn!("WrongPeerId for {address} had no IP component; cannot exclude by IP");
-                return;
-            }
-            metrics.wrong_peer_id_observed.increment();
-            if driver_state
-                .lock()
-                .await
-                .peer_has_connection_at_address(&obtained, address)
-            {
-                if let Some(expected) = expected {
-                    warn!(
-                        "Wrong peer id from stale address {address}: obtained connected peer {obtained}, expected {expected}; removing stale address without IP ban"
-                    );
-                    remove_stale_peer_address(swarm, expected, address);
-                } else {
-                    warn!(
-                        "Wrong peer id from {address}: obtained already-connected peer {obtained}; skipping IP ban"
-                    );
-                }
-                return;
-            }
-            let mut ids: Vec<PeerId> = expected.into_iter().collect();
-            ids.push(obtained);
-            let outcome = peer_exclusions.record_wrong_peer_id(address, expected, obtained);
-            record_exclusion_outcome(swarm, driver_state, peer_exclusions, metrics, outcome, &ids)
-                .await;
+    peer: Option<PeerId>,
+    address: Option<PeerAddress>,
+    failure: DialFailure,
+) -> Result<(), NockAppError> {
+    let mut related_peers = peer.into_iter().collect::<Vec<_>>();
+    let outcome = match failure {
+        DialFailure::WrongNodeId { expected, obtained } => {
+            warn!(%expected, %obtained, ?address, "Transport dial returned the wrong node ID");
+            related_peers.push(expected);
+            related_peers.push(obtained);
+            address.map(|address| {
+                peer_exclusions.record_wrong_peer_id(&address, Some(expected), obtained)
+            })
         }
-        // A firewall is dropping our egress to this address: quinn's
-        // `sendmsg` returned EPERM (PermissionDenied). Treat this as local
-        // reachability evidence first, with IP-wide action only after repeats.
-        DialError::Transport(addr_errs) => {
-            for (addr, transport_err) in addr_errs {
-                let dyn_err: &(dyn std::error::Error + 'static) = transport_err;
-                let ids: Vec<PeerId> = p2p_peer_id(addr).into_iter().collect();
-                if chain_has_permission_denied(dyn_err) {
-                    let outcome = peer_exclusions.record_permission_denied(addr);
-                    record_exclusion_outcome(
-                        swarm, driver_state, peer_exclusions, metrics, outcome, &ids,
-                    )
-                    .await;
-                } else {
-                    let outcome = peer_exclusions.record_dial_failure(addr, p2p_peer_id(addr));
-                    record_exclusion_outcome(
-                        swarm, driver_state, peer_exclusions, metrics, outcome, &ids,
-                    )
-                    .await;
-                    trace!("Failed to dial address {}: {}", addr, transport_err);
-                }
-            }
+        DialFailure::PermissionDenied => {
+            debug!(?address, "Transport dial was denied by local permissions");
+            address.map(|address| peer_exclusions.record_permission_denied(&address))
         }
-        _ => log_dial_error(error),
+        DialFailure::NoAddress => {
+            debug!(?peer, ?address, "Transport had no address to dial");
+            None
+        }
+        DialFailure::Timeout => {
+            debug!(?peer, ?address, "Transport dial timed out");
+            address.map(|address| peer_exclusions.record_dial_failure(&address, peer))
+        }
+        DialFailure::Io(error) | DialFailure::Transport(error) => {
+            trace!(?peer, ?address, %error, "Transport dial failed");
+            address.map(|address| peer_exclusions.record_dial_failure(&address, peer))
+        }
+    };
+    if let Some(outcome) = outcome {
+        record_exclusion_outcome(transport_tx, driver_state, metrics, outcome, &related_peers)
+            .await?;
     }
+    Ok(())
+}
+
+async fn enforce_discovery_cardinality(
+    discovered_peers: &BTreeMap<PeerId, BTreeSet<PeerAddress>>,
+    transport_tx: &mpsc::Sender<TransportCommand>,
+    driver_state: &Arc<Mutex<P2PState>>,
+    peer_exclusions: &PeerExclusions,
+    metrics: &NockchainP2PMetrics,
+) -> Result<(), NockAppError> {
+    let mut by_ip = BTreeMap::<IpAddr, (BTreeSet<PeerId>, BTreeSet<u16>)>::new();
+    for (peer, addresses) in discovered_peers {
+        for address in addresses {
+            let Some(key) = peer_exclusions.address_key(address, Some(*peer)) else {
+                continue;
+            };
+            let (peers, ports) = by_ip.entry(key.ip).or_default();
+            peers.insert(*peer);
+            if let Some(port) = key.port {
+                ports.insert(port);
+            }
+        }
+    }
+
+    let mut max_cardinality = 0usize;
+    for (ip, (peers, ports)) in by_ip {
+        max_cardinality = max_cardinality.max(peers.len()).max(ports.len());
+        let Some(outcome) = peer_exclusions.record_kad_cardinality(ip, peers.len(), ports.len())
+        else {
+            continue;
+        };
+        let related_peers = peers.into_iter().collect::<Vec<_>>();
+        record_exclusion_outcome(
+            transport_tx,
+            driver_state,
+            metrics,
+            ExclusionOutcome {
+                address_cooldown: None,
+                ip_exclusion: Some(outcome),
+            },
+            &related_peers,
+        )
+        .await?;
+        for (peer, addresses) in discovered_peers {
+            for address in addresses {
+                if address.socket.ip() != ip {
+                    continue;
+                }
+                metrics.kad_addresses_pruned_for_exclusion.increment();
+                transport_tx
+                    .send(TransportCommand::RemoveDiscoveredAddress {
+                        peer: Some(*peer),
+                        address: *address,
+                    })
+                    .await
+                    .map_err(|_| {
+                        NockAppError::OtherError(String::from("transport command channel closed"))
+                    })?;
+            }
+        }
+    }
+    let _ = metrics.same_ip_kad_cardinality.swap(max_cardinality as f64);
+    Ok(())
 }
 
 async fn record_exclusion_outcome(
-    swarm: &mut Swarm<NockchainBehaviour>,
+    transport_tx: &mpsc::Sender<TransportCommand>,
     driver_state: &Arc<Mutex<P2PState>>,
-    peer_exclusions: &PeerExclusions,
     metrics: &NockchainP2PMetrics,
     outcome: ExclusionOutcome,
     related_peers: &[PeerId],
-) {
+) -> Result<(), NockAppError> {
     if let Some(address) = outcome.address_cooldown {
         log_address_cooldown(&address);
         // Both counters are incremented here at cooldown-creation time. The
@@ -2134,10 +2194,26 @@ async fn record_exclusion_outcome(
             peers_to_prune.insert(peer_id);
         }
         if peers_to_prune.is_empty() {
-            prune_one_address(swarm, metrics, None, &address.address).await;
+            transport_tx
+                .send(TransportCommand::RemoveDiscoveredAddress {
+                    peer: None,
+                    address: address.address,
+                })
+                .await
+                .map_err(|_| {
+                    NockAppError::OtherError(String::from("transport command channel closed"))
+                })?;
         } else {
             for peer_id in peers_to_prune {
-                prune_one_address(swarm, metrics, Some(peer_id), &address.address).await;
+                transport_tx
+                    .send(TransportCommand::RemoveDiscoveredAddress {
+                        peer: Some(peer_id),
+                        address: address.address,
+                    })
+                    .await
+                    .map_err(|_| {
+                        NockAppError::OtherError(String::from("transport command channel closed"))
+                    })?;
             }
         }
     }
@@ -2155,8 +2231,27 @@ async fn record_exclusion_outcome(
                 IpAddr::V6(v6) => log_fail2ban_ipv6(&log_peer, &v6),
             }
         }
-        prune_excluded_swarm_state(swarm, driver_state, peer_exclusions, metrics).await;
+        let connections_to_close = {
+            let state_guard = driver_state.lock().await;
+            state_guard
+                .peer_connections
+                .values()
+                .flat_map(|connections| connections.iter())
+                .filter_map(|(connection, address)| {
+                    (address.socket.ip() == ip.ip).then_some(*connection)
+                })
+                .collect::<Vec<_>>()
+        };
+        for connection in connections_to_close {
+            transport_tx
+                .send(TransportCommand::CloseConnection { connection })
+                .await
+                .map_err(|_| {
+                    NockAppError::OtherError(String::from("transport command channel closed"))
+                })?;
+        }
     }
+    Ok(())
 }
 
 fn log_address_cooldown(outcome: &AddressCooldownOutcome) {
@@ -2179,186 +2274,10 @@ fn log_ip_exclusion(outcome: &IpExclusionOutcome, related_peers: &[PeerId]) {
     );
 }
 
-async fn prune_one_address(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    metrics: &NockchainP2PMetrics,
-    peer_id: Option<PeerId>,
-    address: &Multiaddr,
-) {
-    let Some(peer_id) = peer_id.or_else(|| p2p_peer_id(address)) else {
-        return;
-    };
-
-    let stripped = multiaddr_without_p2p(address);
-    let mut address_candidates = vec![address.clone()];
-    if stripped != *address {
-        address_candidates.push(stripped);
-    }
-
-    let mut removed_address = false;
-    let mut removed_peer = false;
-    for candidate in address_candidates {
-        let had_kad_address = swarm.behaviour_mut().kad.kbuckets().any(|bucket| {
-            bucket.iter().any(|peer| {
-                peer.node.key.into_preimage() == peer_id
-                    && peer.node.value.iter().any(|addr| addr == &candidate)
-            })
-        });
-        if swarm
-            .behaviour_mut()
-            .kad
-            .remove_address(&peer_id, &candidate)
-            .is_some()
-        {
-            removed_peer = true;
-        }
-        let removed_from_peer_store = swarm
-            .behaviour_mut()
-            .peer_store
-            .store_mut()
-            .remove_address(&peer_id, &candidate);
-        removed_address = removed_address || had_kad_address || removed_from_peer_store;
-    }
-    if removed_address {
-        metrics.kad_addresses_pruned_for_exclusion.increment();
-    }
-    if removed_peer {
-        metrics.kad_peers_pruned_for_exclusion.increment();
-    }
-}
-
-async fn observe_kad_cardinality_and_exclude(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    driver_state: &Arc<Mutex<P2PState>>,
-    peer_exclusions: &PeerExclusions,
-    metrics: &NockchainP2PMetrics,
-) {
-    let mut by_ip: BTreeMap<IpAddr, (BTreeSet<PeerId>, BTreeSet<u16>)> = BTreeMap::new();
-    for bucket in swarm.behaviour_mut().kad.kbuckets() {
-        for peer in bucket.iter() {
-            let peer_id = peer.node.key.into_preimage();
-            for address in peer.node.value.iter() {
-                let Some(key) = peer_exclusions.address_key(address, Some(peer_id)) else {
-                    continue;
-                };
-                let (peers, ports) = by_ip.entry(key.ip).or_default();
-                peers.insert(peer_id);
-                if let Some(port) = key.port {
-                    ports.insert(port);
-                }
-            }
-        }
-    }
-
-    let mut max_cardinality = 0usize;
-    for (ip, (peers, ports)) in by_ip {
-        max_cardinality = max_cardinality.max(peers.len()).max(ports.len());
-        if let Some(outcome) = peer_exclusions.record_kad_cardinality(ip, peers.len(), ports.len())
-        {
-            let related_peers = peers.iter().copied().collect::<Vec<_>>();
-            record_exclusion_outcome(
-                swarm,
-                driver_state,
-                peer_exclusions,
-                metrics,
-                ExclusionOutcome {
-                    address_cooldown: None,
-                    ip_exclusion: Some(outcome),
-                },
-                &related_peers,
-            )
-            .await;
-        }
-    }
-    let _ = metrics.same_ip_kad_cardinality.swap(max_cardinality as f64);
-}
-
-async fn prune_excluded_swarm_state(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    driver_state: &Arc<Mutex<P2PState>>,
-    peer_exclusions: &PeerExclusions,
-    metrics: &NockchainP2PMetrics,
-) {
-    let mut addresses_to_remove = Vec::new();
-    for bucket in swarm.behaviour_mut().kad.kbuckets() {
-        for peer in bucket.iter() {
-            let peer_id = peer.node.key.into_preimage();
-            for address in peer.node.value.iter() {
-                if peer_exclusions.is_address_excluded(address, Some(peer_id)) {
-                    addresses_to_remove.push((peer_id, address.clone()));
-                }
-            }
-        }
-    }
-
-    for (peer_id, address) in addresses_to_remove {
-        metrics.kad_addresses_pruned_for_exclusion.increment();
-        if swarm
-            .behaviour_mut()
-            .kad
-            .remove_address(&peer_id, &address)
-            .is_some()
-        {
-            metrics.kad_peers_pruned_for_exclusion.increment();
-        }
-        let _ = swarm
-            .behaviour_mut()
-            .peer_store
-            .store_mut()
-            .remove_address(&peer_id, &address);
-    }
-
-    let connections_to_close = {
-        let state_guard = driver_state.lock().await;
-        state_guard
-            .peer_connections
-            .iter()
-            .flat_map(|(peer_id, connections)| {
-                connections.iter().filter_map(|(connection_id, address)| {
-                    let ip = address.ip_addr()?;
-                    peer_exclusions
-                        .is_ip_excluded(&ip)
-                        .then_some((*peer_id, *connection_id))
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-
-    for (peer_id, connection_id) in connections_to_close {
-        debug!("Closing connection {connection_id} to excluded peer {peer_id}");
-        swarm.close_connection(connection_id);
-    }
-}
-
-fn log_dial_error(error: DialError) {
-    match error {
-        DialError::NoAddresses => debug!("No addresses to dial"),
-        DialError::LocalPeerId { address } => {
-            debug!("Tried to dial ourselves at {}", address.to_string())
-        }
-
-        DialError::Aborted => trace!("Dial aborted"),
-        DialError::WrongPeerId { obtained, address } => {
-            warn!(
-                "Wrong peer id {} from address {}",
-                obtained,
-                address.to_string()
-            )
-        }
-        DialError::Denied { cause } => debug!("Outgoing connection denied: {}", cause),
-        DialError::DialPeerConditionFalse(_) => debug!("Dial peer condition false"),
-        DialError::Transport(addr_errs) => {
-            for (addr, error) in addr_errs {
-                trace!("Failed to dial address {}: {}", addr.to_string(), error);
-            }
-        }
-    }
-}
-
 fn log_outbound_failure(
     peer: PeerId,
-    request_id: request_response::OutboundRequestId,
-    error: request_response::OutboundFailure,
+    request_id: RequestId,
+    error: RequestFailure,
     request_context: Option<&OutboundRequestContext>,
     metrics: Arc<NockchainP2PMetrics>,
 ) {
@@ -2381,88 +2300,44 @@ fn log_outbound_failure(
         );
     }
     match error {
-        request_response::OutboundFailure::DialFailure => {
-            debug!("Failed to dial peer {} for request", peer)
+        RequestFailure::NotConnected => {
+            debug!("Failed to connect to peer {peer} for request")
         }
-        request_response::OutboundFailure::Timeout => debug!("Request to peer {} timed out", peer),
-        request_response::OutboundFailure::ConnectionClosed => {
-            debug!("Connection to peer {} closed with request pending", peer)
+        RequestFailure::Timeout => debug!("Request to peer {peer} timed out"),
+        RequestFailure::ConnectionClosed => {
+            debug!("Connection to peer {peer} closed with request pending")
         }
-        request_response::OutboundFailure::Io(err) => {
-            debug!("Error making request to peer {}: {}", peer, err)
+        RequestFailure::Codec(error) | RequestFailure::Io(error) => {
+            debug!("Error making request to peer {peer}: {error}")
         }
-        request_response::OutboundFailure::UnsupportedProtocols => {
-            debug!("Unsupported protocol when making request to peer {}", peer)
+        RequestFailure::UnsupportedProtocol => {
+            debug!("Unsupported protocol when making request to peer {peer}")
         }
+        RequestFailure::Shutdown => debug!("Transport shut down with request to {peer} pending"),
     }
 }
 
-fn log_inbound_failure(
-    peer: PeerId,
-    error: request_response::InboundFailure,
-    metrics: Arc<NockchainP2PMetrics>,
-) {
-    if let request_response::InboundFailure::ResponseOmission = error {
+fn log_inbound_failure(peer: PeerId, error: InboundFailure, metrics: Arc<NockchainP2PMetrics>) {
+    if error == InboundFailure::ResponseOmission {
         metrics.response_dropped.increment();
     } else {
         metrics.response_failed_not_dropped.increment();
     }
     match error {
-        request_response::InboundFailure::ResponseOmission => trace!(
-            "Response to peer {} refused, likely load shedding or simply no data for request", peer
+        InboundFailure::ResponseOmission => trace!(
+            "Response to peer {peer} refused, likely load shedding or simply no data for request"
         ),
-        request_response::InboundFailure::Timeout => warn!("Response to peer {} timed out", peer),
-        request_response::InboundFailure::Io(err) => {
-            warn!("Error responding to peer {}: {}", peer, err)
+        InboundFailure::Timeout => warn!("Response to peer {peer} timed out"),
+        InboundFailure::Codec(error) | InboundFailure::Io(error) => {
+            warn!("Error responding to peer {peer}: {error}")
         }
-        request_response::InboundFailure::ConnectionClosed => {
-            debug!("Connection to peer {} closed with response pending", peer)
+        InboundFailure::ConnectionClosed => {
+            debug!("Connection to peer {peer} closed with response pending")
         }
-        request_response::InboundFailure::UnsupportedProtocols => {
-            debug!("Unsupported protocol when responding to peer {}", peer)
+        InboundFailure::UnsupportedProtocol => {
+            debug!("Unsupported protocol when responding to peer {peer}")
         }
     };
-}
-
-fn dial_more_peers(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    state_guard: MutexGuard<P2PState>,
-    peer_exclusions: &PeerExclusions,
-) {
-    let mut addresses_to_dial = Vec::new();
-    for bucket in swarm.behaviour_mut().kad.kbuckets() {
-        for peer in bucket.iter() {
-            if state_guard
-                .peer_connections
-                .contains_key(&peer.node.key.into_preimage())
-            {
-                continue;
-            }
-            for address in peer.node.value.iter() {
-                let mut address = address.clone();
-
-                if peer_exclusions
-                    .is_address_excluded(&address, Some(peer.node.key.into_preimage()))
-                {
-                    continue;
-                }
-
-                if let Ok(address_with_peer_id) =
-                    address.clone().with_p2p(peer.node.key.into_preimage())
-                {
-                    address = address_with_peer_id;
-                }
-                addresses_to_dial.push(address);
-            }
-        }
-    }
-    addresses_to_dial.shuffle(&mut rand::rng());
-    for address in addresses_to_dial {
-        info!("Redialing {}", address);
-        if let Err(err) = swarm.dial(address) {
-            log_dial_error(err);
-        };
-    }
 }
 
 /// # Create a swarm and set it to listen
@@ -2523,40 +2398,7 @@ pub(crate) fn start_swarm(
     Ok(swarm)
 }
 
-/// Handler for identify messages.
-pub(crate) fn identify_received(
-    swarm: &mut Swarm<NockchainBehaviour>,
-    peer_id: PeerId,
-    info: libp2p::identify::Info,
-    peer_exclusions: &PeerExclusions,
-    metrics: &NockchainP2PMetrics,
-) -> Result<(), NockAppError> {
-    swarm.add_external_address(info.observed_addr.clone());
-    if let Some(ip) = info.observed_addr.ip_addr() {
-        peer_exclusions.record_positive_ip(ip);
-    }
-    let us = *swarm.local_peer_id();
-
-    let kad = &mut swarm.behaviour_mut().kad;
-    trace!("identify received for peer {}", peer_id);
-    trace!("Adding address {} for us: {}", info.observed_addr, us);
-    kad.add_address(&us, info.observed_addr);
-    for addr in info.listen_addrs {
-        if let Some(Protocol::Dnsaddr(_)) = addr.iter().next() {
-            continue;
-        }
-        if peer_exclusions.is_address_excluded(&addr, Some(peer_id)) {
-            trace!("Skipping excluded address {addr} for peer {peer_id}");
-            metrics.identify_addresses_skipped_for_exclusion.increment();
-            continue;
-        }
-        trace!("Adding address {} for peer {}", addr, peer_id);
-        kad.add_address(&peer_id, addr);
-    }
-    Ok(())
-}
-
-fn log_ping_success(peer: PeerId, connection_address: Option<Multiaddr>, duration: Duration) {
+fn log_ping_success(peer: PeerId, connection_address: Option<PeerAddress>, duration: Duration) {
     let Some(connection_address) = connection_address else {
         trace!("Untracked connection to {peer}, please report this to the developers");
         return;
@@ -2565,7 +2407,7 @@ fn log_ping_success(peer: PeerId, connection_address: Option<Multiaddr>, duratio
     debug!("Ping to {peer} via {connection_address} succeeded in {ms}ms");
 }
 
-fn log_ping_failure(peer: PeerId, connection_address: Option<Multiaddr>, error: ping::Failure) {
+fn log_ping_failure(peer: PeerId, connection_address: Option<PeerAddress>, error: &str) {
     let Some(connection_address) = connection_address else {
         trace!("Untracked connection to {peer}, please report this to the developers");
         return;

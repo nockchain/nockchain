@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 
-use libp2p::{request_response, PeerId};
 use nockapp::utils::error::CrownError;
 use nockapp::NockAppError;
 use serde_bytes::ByteBuf;
@@ -19,6 +18,7 @@ use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::P2PState;
 use crate::tip5_util::TIP5_BASE58_MAX_CHARS;
 use crate::traffic_cop;
+use crate::types::{NodeId as PeerId, RequestFailure};
 
 #[derive(Debug)]
 pub(crate) enum RequestExecutionOutcome {
@@ -440,10 +440,10 @@ pub(crate) fn batch_request_item_count(request: &NockchainRequest) -> Option<usi
 
 pub(crate) fn increment_outbound_failure_metrics(
     metrics: &NockchainP2PMetrics,
-    error: &request_response::OutboundFailure,
+    error: &RequestFailure,
 ) {
     metrics.gen2_outbound_failures.increment();
-    if matches!(error, request_response::OutboundFailure::Timeout) {
+    if *error == RequestFailure::Timeout {
         metrics.gen2_outbound_timeouts.increment();
     }
 }

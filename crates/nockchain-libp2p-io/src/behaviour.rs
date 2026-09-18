@@ -9,8 +9,9 @@ use libp2p::{
 };
 
 use crate::config::LibP2PConfig;
-use crate::ip_block::{self, PeerExclusions};
+use crate::ip_block;
 use crate::messages::{NockchainRequest, NockchainResponse};
+use crate::peer_policy::PeerExclusions;
 
 pub(crate) fn request_response_protocols(
     _libp2p_config: &LibP2PConfig,

@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use libp2p::{request_response, PeerId};
 use nockapp::NockAppError;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, trace, warn};
@@ -12,19 +11,20 @@ use crate::driver::{
     record_local_peer_abuse, LocalPeerAbuseKind, LocalPeerAbuseSeverity, SwarmAction,
     SwarmActionDispatcher,
 };
-use crate::ip_block::PeerExclusions;
 use crate::messages::{
     block_by_height_message, BatchResultItem, BatchResultStatus, EnvelopeKind,
     NockchainDataRequest, NockchainFact, NockchainRequest, NockchainResponse, ResponseEnvelope,
 };
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::P2PState;
+use crate::peer_policy::PeerExclusions;
 use crate::traffic_cop;
+use crate::types::{NodeId as PeerId, RequestId};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_outbound_response(
+pub(crate) async fn handle_outbound_response(
     peer: PeerId,
-    request_id: request_response::OutboundRequestId,
+    request_id: RequestId,
     response: NockchainResponse,
     swarm_tx: mpsc::Sender<SwarmAction>,
     equix_builder: &mut equix::EquiXBuilder,
@@ -643,7 +643,7 @@ pub(super) async fn handle_outbound_response(
 async fn queue_classic_block_by_height_fallback(
     swarm_tx: &mpsc::Sender<SwarmAction>,
     peer: PeerId,
-    request_id: request_response::OutboundRequestId,
+    request_id: RequestId,
     item_id: u32,
     height: u64,
     reason: &'static str,

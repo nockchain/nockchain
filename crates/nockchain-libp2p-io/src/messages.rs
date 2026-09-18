@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::mem::size_of;
 
 use bytes::Bytes;
-use libp2p::PeerId;
 use nockapp::noun::slab::NounSlab;
 use nockapp::utils::make_tas;
 use nockapp::NockAppError;
@@ -11,8 +10,9 @@ use nockvm_macros::tas;
 use rand::{rng, Rng};
 use serde_bytes::ByteBuf;
 
-use crate::p2p_util::PeerIdExt;
+use crate::p2p_util::NodeIdExt;
 use crate::tip5_util::{tip5_hash_to_base58, tip5_hash_to_base58_stack};
+use crate::types::NodeId;
 
 pub(crate) const FACT_POKE_VERSION: u64 = 0;
 const GEN2_BATCH_POW_DOMAIN_SEPARATOR: &[u8] = b"nockchain:req-res:gen2:pow:v1";
@@ -145,7 +145,7 @@ fn tx_id_from_raw_tx<'a>(raw_tx: NounHandle<'a>) -> Result<NounHandle<'a>, NockA
 pub enum NockchainDataRequest {
     BlockByHeight(u64), // Height requested
     #[allow(dead_code)]
-    EldersById(String, PeerId, NounSlab), // Block ID as string, peer id, block id as noun,
+    EldersById(String, NodeId, NounSlab), // Block ID as string, peer id, block id as noun,
     #[allow(dead_code)]
     RawTransactionById(String, NounSlab), // transaction id as string, transaction id as noun,
     /// Request a block at a given height bundled with its raw transactions
@@ -197,7 +197,7 @@ impl NockchainDataRequest {
                 } else if block_cell.head().eq_bytes(b"elders") {
                     let elders_cell = block_cell.tail().as_cell()?;
                     let block_id = tip5_hash_to_base58(elders_cell.head().noun(), space)?;
-                    let peer_id = PeerId::from_noun(elders_cell.tail().noun(), space)?;
+                    let peer_id = NodeId::from_noun(elders_cell.tail().noun(), space)?;
                     let slab = {
                         let mut slab = NounSlab::new();
                         slab.copy_into(elders_cell.head().noun(), space);
@@ -784,12 +784,12 @@ fn canonical_batch_item_bytes(items: &[BatchRequestItem]) -> Result<Vec<u8>, Noc
 
 fn gen2_pow_preimage(
     nonce: u64,
-    sender_peer_id: &libp2p::PeerId,
-    receiver_peer_id: &libp2p::PeerId,
+    sender_peer_id: &NodeId,
+    receiver_peer_id: &NodeId,
     items: &[BatchRequestItem],
 ) -> Result<Vec<u8>, NockAppError> {
-    let sender_peer_bytes = (*sender_peer_id).to_bytes();
-    let receiver_peer_bytes = (*receiver_peer_id).to_bytes();
+    let sender_peer_bytes = sender_peer_id.to_bytes();
+    let receiver_peer_bytes = receiver_peer_id.to_bytes();
     let canonical_items = canonical_batch_item_bytes(items)?;
     let mut pow_buf = Vec::with_capacity(
         GEN2_BATCH_POW_DOMAIN_SEPARATOR.len()
@@ -808,12 +808,12 @@ fn gen2_pow_preimage(
 
 fn gossip_pow_preimage(
     nonce: u64,
-    sender_peer_id: &libp2p::PeerId,
-    receiver_peer_id: &libp2p::PeerId,
+    sender_peer_id: &NodeId,
+    receiver_peer_id: &NodeId,
     message: &[u8],
 ) -> Vec<u8> {
-    let sender_peer_bytes = (*sender_peer_id).to_bytes();
-    let receiver_peer_bytes = (*receiver_peer_id).to_bytes();
+    let sender_peer_bytes = sender_peer_id.to_bytes();
+    let receiver_peer_bytes = receiver_peer_id.to_bytes();
     let mut pow_buf = Vec::with_capacity(
         GOSSIP_POW_DOMAIN_SEPARATOR.len()
             + size_of::<u64>()
@@ -924,8 +924,8 @@ fn batch_items_replay_hash(items: &[BatchRequestItem]) -> Result<(u64, usize), N
 impl NockchainRequest {
     pub fn authenticated_gossip_from_message(
         builder: &mut equix::EquiXBuilder,
-        local_peer_id: &libp2p::PeerId,
-        remote_peer_id: &libp2p::PeerId,
+        local_peer_id: &NodeId,
+        remote_peer_id: &NodeId,
         message: ByteBuf,
     ) -> Result<NockchainRequest, NockAppError> {
         let (pow, nonce) = solve_pow(builder, |nonce| {
@@ -943,8 +943,8 @@ impl NockchainRequest {
 
     pub fn new_batch_request(
         builder: &mut equix::EquiXBuilder,
-        local_peer_id: &libp2p::PeerId,
-        remote_peer_id: &libp2p::PeerId,
+        local_peer_id: &NodeId,
+        remote_peer_id: &NodeId,
         items: Vec<BatchRequestItem>,
     ) -> Result<NockchainRequest, NockAppError> {
         validate_batch_item_ids(&items)?;
@@ -995,8 +995,8 @@ impl NockchainRequest {
     pub(crate) fn verify_pow(
         &self,
         builder: &mut equix::EquiXBuilder,
-        local_peer_id: &libp2p::PeerId,
-        remote_peer_id: &libp2p::PeerId,
+        local_peer_id: &NodeId,
+        remote_peer_id: &NodeId,
     ) -> Result<(), NockAppError> {
         match self {
             NockchainRequest::BatchRequest { pow, nonce, items } => {
@@ -1209,8 +1209,8 @@ mod tests {
     #[test]
     fn test_new_batch_request_rejects_duplicate_item_ids() {
         let mut builder = equix::EquiXBuilder::new();
-        let local_peer_id = libp2p::PeerId::random();
-        let remote_peer_id = libp2p::PeerId::random();
+        let local_peer_id = NodeId::random();
+        let remote_peer_id = NodeId::random();
         let items = vec![
             BatchRequestItem {
                 item_id: 7,
@@ -1250,8 +1250,8 @@ mod tests {
 
     #[test]
     fn test_gen2_pow_preimage_matches_spec_layout() {
-        let sender_peer_id = libp2p::PeerId::random();
-        let receiver_peer_id = libp2p::PeerId::random();
+        let sender_peer_id = NodeId::random();
+        let receiver_peer_id = NodeId::random();
         let nonce = 0x0807_0605_0403_0201u64;
         let items = vec![
             BatchRequestItem {
