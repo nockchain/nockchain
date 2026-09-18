@@ -259,7 +259,7 @@
       config=node-config                                    ::  node configuration
       constants=bridge-constants                            ::  static bridge parameters
       nockchain-constants=(unit blockchain-constants-v1-pre-ai:dumb) ::  pre-Logos node-reported constants
-      hash-state=hash-state                                 ::  hashlogged cross-chain state
+      hash-state=hash-state-2                               ::  hashlogged cross-chain state
       last-nock-deposit-height=@                            ::  last nockchain height containing a deposit (0 = none)
       last-block=page:t                                     ::  for determining proposer
       stop=(unit stop-info)                                 ::  flag to stop the bridge. populated with last known good block hashes if stop is true.
@@ -270,7 +270,18 @@
       config=node-config                                    ::  node configuration
       constants=bridge-constants                            ::  static bridge parameters
       nockchain-constants=(unit blockchain-constants:t)     ::  node-reported tx-engine constants from boot-time handshake
-      hash-state=hash-state                                 ::  hashlogged cross-chain state
+      hash-state=hash-state-2                               ::  hashlogged cross-chain state
+      last-nock-deposit-height=@                            ::  last nockchain height containing a deposit (0 = none)
+      last-block=page:t                                     ::  for determining proposer
+      stop=(unit stop-info)                                 ::  flag to stop the bridge. populated with last known good block hashes if stop is true.
+  ==
+::
++$  bridge-state-5
+  $:  %5
+      config=node-config                                    ::  node configuration
+      constants=bridge-constants                            ::  static bridge parameters
+      nockchain-constants=(unit blockchain-constants:t)     ::  node-reported tx-engine constants from boot-time handshake
+      hash-state=hash-state-3                               ::  hashlogged cross-chain state
       last-nock-deposit-height=@                            ::  last nockchain height containing a deposit (0 = none)
       last-block=page:t                                     ::  for determining proposer
       stop=(unit stop-info)                                 ::  flag to stop the bridge. populated with last known good block hashes if stop is true.
@@ -283,9 +294,10 @@
       bridge-state-2
       bridge-state-3
       bridge-state-4
+      bridge-state-5
   ==
 ::
-+$  bridge-state  bridge-state-4
++$  bridge-state  bridge-state-5
 ++  upgrade-pre-ai-constants
   |=  old=blockchain-constants-v1-pre-ai:dumb
   ^-  blockchain-constants:t
@@ -323,7 +335,7 @@
 ::
 ++  upgrade-pre-logos-state
   |=  old=bridge-state-3
-  ^-  bridge-state
+  ^-  bridge-state-4
   =/  upgraded-constants=(unit blockchain-constants:t)
     ?~  nockchain-constants.old
       ~
@@ -337,6 +349,43 @@
       last-block.old
       stop.old
   ==
+::
+++  upgrade-deferred-settlement-state
+  |=  old=bridge-state-4
+  ^-  bridge-state
+  =/  new-hash-state=hash-state
+    %*  .  *hash-state
+        last-nock-block            last-nock-block.hash-state.old
+        last-base-blocks           last-base-blocks.hash-state.old
+        nock-hashchain             nock-hashchain.hash-state.old
+        base-hashchain             base-hashchain.hash-state.old
+        nock-hold                  nock-hold.hash-state.old
+        base-hold                  base-hold.hash-state.old
+        nock-hashchain-next-height  nock-hashchain-next-height.hash-state.old
+        base-hashchain-next-height  base-hashchain-next-height.hash-state.old
+        unsettled-deposits         unsettled-deposits.hash-state.old
+        unsettled-withdrawals      unsettled-withdrawals.hash-state.old
+        deferred-deposit-settlements     *(z-mip nock-hash beid deposit-settlement)
+        deferred-withdrawal-settlements  *(z-mip base-hash nname:t withdrawal-settlement)
+        pending-base-block-commit  pending-base-block-commit.hash-state.old
+    ==
+  :*  %5
+      config.old
+      constants.old
+      nockchain-constants.old
+      new-hash-state
+      last-nock-deposit-height.old
+      last-block.old
+      stop.old
+  ==
+::
+++  resume-bridge-state
+  |=  old=bridge-state
+  ^-  bridge-state
+  =.  stop.old  ~
+  =.  nock-hold.hash-state.old  ~
+  =.  base-hold.hash-state.old  ~
+  old
 ::
 ::
 ++  get-stop-info
@@ -357,7 +406,7 @@
   ==
 ::
 :::
-+$  hash-state  hash-state-2
++$  hash-state  hash-state-3
 ++  hash-state-0
   =<  form
   |%
@@ -625,6 +674,47 @@
         ::  withdrawals are removed from this set when we the transaction settling
         ::  them is posted on nockchain
         unsettled-withdrawals=(z-mip base-hash beid withdrawal)
+        ::
+        ::  Base batches waiting for Rust to durably persist derived withdrawal
+        ::  requests before the hashchain is advanced.
+        pending-base-block-commit=(unit pending-base-block-commit-data)
+    ==
+  --
+::
+++  hash-state-3
+  =<  form
+  |%
+  +$  form
+    $+  hash-state-3
+    $:  version=%3
+        ::
+        ::  hashchains
+        last-nock-block=nock-hash
+        last-base-blocks=base-hash
+        nock-hashchain=(z-map nock-hash nock-block)
+        base-hashchain=(z-map base-hash base-blocks)
+        ::
+        ::  Legacy single-dependency holds. Version %3 no longer creates new
+        ::  holds; unresolved cross-chain settlements are persisted below and
+        ::  reconciled when their counterpart blocks arrive.
+        nock-hold=(unit [hash=base-hash height=@])
+        base-hold=(unit [hash=nock-hash height=@])
+        ::
+        ::  Next Nockchain block height required for the hashchain.
+        nock-hashchain-next-height=nockchain-start-height
+        ::
+        ::  Next highest-in-the-batch height required for the Base hashchain.
+        base-hashchain-next-height=base-start-height
+        ::
+        ::  Confirmed cross-chain events not yet observed as settled.
+        unsettled-deposits=(z-mip nock-hash nname:t deposit)
+        unsettled-withdrawals=(z-mip base-hash beid withdrawal)
+        ::
+        ::  Settlements observed before their referenced counterpart block.
+        ::  These maps let both hashchains advance during historical replay
+        ::  without losing validation or emitting duplicate proposals.
+        deferred-deposit-settlements=(z-mip nock-hash beid deposit-settlement)
+        deferred-withdrawal-settlements=(z-mip base-hash nname:t withdrawal-settlement)
         ::
         ::  Base batches waiting for Rust to durably persist derived withdrawal
         ::  requests before the hashchain is advanced.
@@ -1016,6 +1106,39 @@
     %-  hash-hashable:tip5
     (hashable form)
   --
+::
+++  check-deposit-settlement
+  |=  $:  counterpart=deposit
+          settlement=deposit-settlement
+      ==
+  =/  dest-matches=?
+    ?~  dest.counterpart  %.n
+    =(dest.settlement u.dest.counterpart)
+  =/  amount-matches=?
+    =(amount-to-mint.counterpart settled-amount.settlement)
+  ?.  dest-matches
+    ~>  %slog.[0 'settlement destination does not match deposit destination']  %.n
+  ?.  amount-matches
+    ~>  %slog.[0 'settlement amount does not match deposit amount']  %.n
+  %.y
+::
+++  check-withdrawal-settlement
+  |=  $:  counterpart=withdrawal
+          settlement=withdrawal-settlement
+      ==
+  =/  dest-matches=?  =(dest.settlement dest.counterpart)
+  ::  counterpart tracks the gross/pre-fee burn amount, while settlement
+  ::  carries the net/post-fee disbursed amount. exact fee correctness is
+  ::  validated in Rust proposal acceptance, so kernel only enforces bounds.
+  =/  amount-in-bounds=?
+    ?&  (gth settled-amount.settlement 0)
+        (lth settled-amount.settlement amount-burned.counterpart)
+    ==
+  ?.  dest-matches
+    ~>  %slog.[0 'settlement destination does not match withdrawal destination']  %.n
+  ?.  amount-in-bounds
+    ~>  %slog.[0 'settlement amount is out of bounds for withdrawal']  %.n
+  %.y
 ::    +active-proposer: determine which node should propose
 ::
 ::  computes which bridge node should propose the bundle at a given

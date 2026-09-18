@@ -67,6 +67,7 @@
   ^-  bridge-constants
   =/  constants  *bridge-constants
   =.  base-blocks-chunk.constants  base-chunk
+  =.  minimum-event-nocks.constants  1
   =.  base-start-height.constants  base-start
   =.  nockchain-start-height.constants  nock-start
   constants

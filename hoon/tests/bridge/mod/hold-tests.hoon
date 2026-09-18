@@ -26,469 +26,174 @@
     %.y
   $(effects t.effects)
 ::
-::  Settlement referencing unknown nock hash triggers hold.
-++  test-hold-unknown-as-of-triggers-hold
+:::  A Base settlement whose Nockchain block has not arrived is persisted.
+++  test-base-unknown-settlement-is-deferred
   ^-  tang
   =/  state=bridge-state  *bridge-state
   =/  base  ~(. base-lib state)
   =/  unknown-as-of=nock-hash  [0x1 0x2 0x3 0x4 0x5]
-  =/  height=@  100
-  =/  dest=base-addr  0x1111
   =/  event-id=beid  (from-atom:blist 1)
   =/  settlement=deposit-settlement
-    (create-deposit-settlement:hel event-id *nname:t unknown-as-of height dest 1.000.000 5)
+    (create-deposit-settlement:hel event-id *nname:t unknown-as-of 100 0x1111 1.000.000 5)
   =/  deposit-settlements=(z-map beid deposit-settlement)
     (~(put z-by *(z-map beid deposit-settlement)) event-id settlement)
   =/  blocks=base-blocks
     (make-base-blocks:hel state *(z-map beid withdrawal) deposit-settlements)
   =/  result=process-result
     (base-process-deposit-settlements:base blocks)
-  ?>  ?=(%| -.result)
-  =/  process-fail=process-fail  +.result
-  ?>  ?=(%hold -.process-fail)
-  =/  hold=[hash=hash:t height=@]  hold.process-fail
+  ?>  ?=(%& -.result)
+  =/  new-state=bridge-state  p.result
   ;:  weld
-    (expect !>(?=(%hold -.process-fail)))
+    (expect !>((~(has z-bi deferred-deposit-settlements.hash-state.new-state) unknown-as-of event-id)))
   ::
-    %+  expect-eq
-      !>(unknown-as-of)
-    !>(hash.hold)
+    (expect !>(?=(~ base-hold.hash-state.new-state)))
   ::
-    %+  expect-eq
-      !>(height)
-    !>(height.hold)
+    (expect !>(?=(~ nock-hold.hash-state.new-state)))
   ==
-::  When multiple holds are possible, base picks the greatest height.
-++  test-hold-picks-greatest-height
+::
+:::  Unknown settlement dependencies no longer prevent a Base batch commit.
+++  test-incoming-base-settlement-commits-without-hold
   ^-  tang
   =/  state=bridge-state  *bridge-state
-  =/  base  ~(. base-lib state)
-  =/  dest=base-addr  0x1111
-  =/  as-of-1=nock-hash  [0x1 0x1 0x1 0x1 0x1]
-  =/  as-of-2=nock-hash  [0x2 0x2 0x2 0x2 0x2]
-  =/  event-1=beid  (from-atom:blist 1)
-  =/  event-2=beid  (from-atom:blist 2)
-  =/  settlement-1=deposit-settlement
-    (create-deposit-settlement:hel event-1 *nname:t as-of-1 100 dest 1.000.000 5)
-  =/  settlement-2=deposit-settlement
-    (create-deposit-settlement:hel event-2 *nname:t as-of-2 200 dest 1.000.000 6)
-  =/  deposit-settlements=(z-map beid deposit-settlement)
-    (~(put z-by (~(put z-by *(z-map beid deposit-settlement)) event-1 settlement-1)) event-2 settlement-2)
-  =/  blocks=base-blocks
-    (make-base-blocks:hel state *(z-map beid withdrawal) deposit-settlements)
-  =/  result=process-result
-    (base-process-deposit-settlements:base blocks)
-  ?>  ?=(%| -.result)
-  =/  process-fail=process-fail  +.result
-  ?>  ?=(%hold -.process-fail)
-  =/  hold=[hash=hash:t height=@]  hold.process-fail
-  ;:  weld
-    %+  expect-eq
-      !>(200)
-    !>(height.hold)
-  ::
-    %+  expect-eq
-      !>(as-of-2)
-    !>(hash.hold)
-  ==
-::  Incoming Base batches preflight unknown settlement dependencies before staging.
-++  test-incoming-base-blocks-preflight-holds-unknown-settlement
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =/  constants=bridge-constants  (small-constants:hel 1 10 0)
-  =.  constants.state  constants
-  =.  base-hashchain-next-height.hash-state.state  base-start-height.constants
-  =/  dep-name=nname:t  *nname:t
-  =/  dep-tx=tx-id:t  *tx-id:t
-  =/  dest=base-addr  0x4444
+  =.  constants.state  (small-constants:hel 1 10 0)
+  =.  base-hashchain-next-height.hash-state.state  10
   =/  event-id=beid  (from-atom:blist 30)
   =/  unknown-as-of=nock-hash  [0x4 0x4 0x4 0x4 0x4]
   =/  settlement-event=base-event
     :*  (to-atom:blist event-id)
-        [%deposit-processed dep-tx dep-name dest 1.000.000 100 unknown-as-of 9]
+        [%deposit-processed *tx-id:t *nname:t 0x4444 1.000.000 100 unknown-as-of 9]
     ==
   =/  raw=raw-base-blocks:cause
     :~  [10 0x30 0x0 ~[settlement-event]]
     ==
   =/  base  ~(. base-lib state)
-  =/  blocks=base-blocks  (cook-base-blocks:base raw)
-  =/  blocks-hash=base-hash  (hash:base-blocks blocks)
-  =/  [effects=(list effect) held=bridge-state]
-    (incoming-base-blocks:base [raw [~ 0 0x0 *@da]])
-  ?>  ?=(^ base-hold.hash-state.held)
-  =/  hold=[hash=hash:t height=@]  u.base-hold.hash-state.held
-  ;:  weld
-    %+  expect-eq
-      !>(~)
-    !>(effects)
-  ::
-    %+  expect-eq
-      !>(unknown-as-of)
-    !>(hash.hold)
-  ::
-    %+  expect-eq
-      !>(100)
-    !>(height.hold)
-  ::
-    (expect !>(?=(~ pending-base-block-commit.hash-state.held)))
-  ::
-    %+  expect-eq
-      !>(10)
-    !>(base-hashchain-next-height.hash-state.held)
-  ::
-    %+  expect-eq
-      !>(%.n)
-    !>((~(has z-by base-hashchain.hash-state.held) blocks-hash))
-  ==
-::  Incoming Base batch preflight uses greatest missing Nock height.
-++  test-incoming-base-blocks-preflight-picks-greatest-height
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =/  constants=bridge-constants  (small-constants:hel 1 10 0)
-  =.  constants.state  constants
-  =.  base-hashchain-next-height.hash-state.state  base-start-height.constants
-  =/  dep-name=nname:t  *nname:t
-  =/  dep-tx=tx-id:t  *tx-id:t
-  =/  dest=base-addr  0x5555
-  =/  event-1=beid  (from-atom:blist 31)
-  =/  event-2=beid  (from-atom:blist 32)
-  =/  as-of-1=nock-hash  [0x5 0x5 0x5 0x5 0x5]
-  =/  as-of-2=nock-hash  [0x6 0x6 0x6 0x6 0x6]
-  =/  settlement-1=base-event
-    :*  (to-atom:blist event-1)
-        [%deposit-processed dep-tx dep-name dest 1.000.000 100 as-of-1 10]
-    ==
-  =/  settlement-2=base-event
-    :*  (to-atom:blist event-2)
-        [%deposit-processed dep-tx dep-name dest 1.000.000 250 as-of-2 11]
-    ==
-  =/  raw=raw-base-blocks:cause
-    :~  [10 0x31 0x0 ~[settlement-1 settlement-2]]
-    ==
-  =/  base  ~(. base-lib state)
-  =/  [effects=(list effect) held=bridge-state]
-    (incoming-base-blocks:base [raw [~ 0 0x0 *@da]])
-  ?>  ?=(^ base-hold.hash-state.held)
-  =/  hold=[hash=hash:t height=@]  u.base-hold.hash-state.held
-  ;:  weld
-    %+  expect-eq
-      !>(~)
-    !>(effects)
-  ::
-    %+  expect-eq
-      !>(as-of-2)
-    !>(hash.hold)
-  ::
-    %+  expect-eq
-      !>(250)
-    !>(height.hold)
-  ::
-    (expect !>(?=(~ pending-base-block-commit.hash-state.held)))
-  ::
-    %+  expect-eq
-      !>(10)
-    !>(base-hashchain-next-height.hash-state.held)
-  ==
-::  Incoming Base missing as-of stops instead of creating simultaneous holds.
-++  test-incoming-base-blocks-stops-before-both-holds
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =/  constants=bridge-constants  (small-constants:hel 1 10 0)
-  =.  constants.state  constants
-  =.  base-hashchain-next-height.hash-state.state  base-start-height.constants
-  =/  nock-hold-value=[hash=base-hash height=@]  [[0xa 0xa 0xa 0xa 0xa] 77]
-  =.  nock-hold.hash-state.state  `nock-hold-value
-  =/  dep-name=nname:t  *nname:t
-  =/  dep-tx=tx-id:t  *tx-id:t
-  =/  dest=base-addr  0x7777
-  =/  event-id=beid  (from-atom:blist 33)
-  =/  unknown-as-of=nock-hash  [0x7 0x7 0x7 0x7 0x7]
-  =/  settlement-event=base-event
-    :*  (to-atom:blist event-id)
-        [%deposit-processed dep-tx dep-name dest 1.000.000 300 unknown-as-of 13]
-    ==
-  =/  raw=raw-base-blocks:cause
-    :~  [10 0x33 0x0 ~[settlement-event]]
-    ==
-  =/  base  ~(. base-lib state)
-  =/  [effects=(list effect) stopped=bridge-state]
-    (incoming-base-blocks:base [raw [~ 0 0x0 *@da]])
-  ?>  ?=(^ nock-hold.hash-state.stopped)
-  =/  stopped-nock-hold=[hash=base-hash height=@]
-    u.nock-hold.hash-state.stopped
-  ;:  weld
-    (expect !>((has-stop-effect effects)))
-  ::
-    %+  expect-eq
-      !>(%.n)
-    !>((has-base-withdrawals-pending-effect effects))
-  ::
-    (expect !>(?=(~ base-hold.hash-state.stopped)))
-  ::
-    %+  expect-eq
-      !>(nock-hold-value)
-    !>(stopped-nock-hold)
-  ::
-    (expect !>(?=(~ pending-base-block-commit.hash-state.stopped)))
-  ==
-:::  Incoming Nock block missing as-of stops instead of creating simultaneous holds.
-++  test-incoming-nockchain-block-stops-before-both-holds
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =.  config.state  test-config:hel
-  =.  constants.state  (small-constants:hel 1 0 0)
-  =.  nockchain-constants.state  [~ *blockchain-constants:t]
-  =/  base-hold-value=[hash=nock-hash height=@]
-    [[0xa 0xa 0xa 0xa 0xa] 77]
-  =.  base-hold.hash-state.state  `base-hold-value
-  =/  selected=selected-withdrawal-note
-    (create-selected-withdrawal-note:hel config.state [0x11 0x12 0x13 0x14 0x15] 15.000.000)
-  =/  id=withdrawal-id
-    [[0x21 0x22 0x23 0x24 0x25] 8]
-  =/  request=create-withdrawal-tx
-    :*  id
-        [0x31 0x32 0x33 0x34 0x35]
-        3.000.000
-        10.000.000
-        25
-        0
-        [10 [0x41 0x42 0x43 0x44 0x45]]
-        7.000.000
-        ~[selected]
-    ==
-  =/  brg  (brg:hel)
-  =/  bridge  (lod:hel state brg)
-  =/  [build-effects=(list effect) bridge]
-    (pok:hel 0 [%0 %create-withdrawal-tx request] bridge)
-  ?~  build-effects
-    ~|('expected withdrawal-proposal-built effect' !!)
-  ?>  ?=([%0 %withdrawal-proposal-built *] i.build-effects)
-  =/  proposal=withdrawal-proposal  proposal.i.build-effects
-  =/  raw-tx=raw-tx:v1:t  (new:raw-tx:v1:t spends.transaction.proposal)
-  =/  tx=tx:t  (new:tx:t raw-tx 0)
-  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw-tx)
-  =/  page=page:v1:t  *page:v1:t
-  =.  height.page  nockchain-start-height.constants.state
-  =.  parent.page  *block-id:t
-  =.  digest.page  [0xb 0xb 0xb 0xb 0xb]
-  =.  tx-ids.page  (z-silt ~[tx-id])
-  =/  txs=(z-map tx-id:t tx:t)
-    (~(put z-by *(z-map tx-id:t tx:t)) tx-id tx)
-  =/  nock  ~(. nock-lib state)
-  =/  nock-cause=nockchain-block:cause  [block=page txs=txs]
-  =/  [effects=(list effect) stopped=bridge-state]
-    (incoming-nockchain-block:nock [nock-cause [~ 0 0x0 *@da]])
-  ?>  ?=(^ base-hold.hash-state.stopped)
-  =/  stopped-base-hold=[hash=nock-hash height=@]
-    u.base-hold.hash-state.stopped
-  ;:  weld
-    (expect !>((has-stop-effect effects)))
-  ::
-    (expect !>(?=(~ nock-hold.hash-state.stopped)))
-  ::
-    %+  expect-eq
-      !>(base-hold-value)
-    !>(stopped-base-hold)
-  ::
-    %+  expect-eq
-      !>(nockchain-start-height.constants.state)
-    !>(nock-hashchain-next-height.hash-state.stopped)
-  ==
-:::  A successful lineage repair preserves the new Nock hold in the same poke.
-++  test-incoming-nockchain-block-preserves-hold-after-repair
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =.  config.state  test-config:hel
-  =.  constants.state  (small-constants:hel 1 0 0)
-  =.  nockchain-constants.state  [~ *blockchain-constants:t]
-  =/  old-hash-1=nock-hash  [0x11 0x11 0x11 0x11 0x11]
-  =/  old-hash-2=nock-hash  [0x22 0x22 0x22 0x22 0x22]
-  =/  block-1=nock-block
-    :*  %nock
-        %0
-        0
-        [0x61 0x62 0x63 0x64 0x65]
-        *(z-map nname:t deposit)
-        *(z-map nname:t withdrawal-settlement)
-        *nock-hash
-    ==
-  =/  canonical-hash-1=nock-hash  (hash:nock-block block-1)
-  =/  block-2=nock-block
-    :*  %nock
-        %0
-        1
-        [0x71 0x72 0x73 0x74 0x75]
-        *(z-map nname:t deposit)
-        *(z-map nname:t withdrawal-settlement)
-        old-hash-1
-    ==
-  =/  canonical-block-2=nock-block  block-2(prev canonical-hash-1)
-  =/  canonical-hash-2=nock-hash  (hash:nock-block canonical-block-2)
-  =.  nock-hashchain.hash-state.state
-    %+  ~(put z-by (~(put z-by *(z-map nock-hash nock-block)) old-hash-1 block-1))
-      old-hash-2
-    block-2
-  =.  last-nock-block.hash-state.state  old-hash-2
-  =.  nock-hashchain-next-height.hash-state.state  2
-  =.  base-hold.hash-state.state  `[canonical-hash-2 1]
-  =/  selected=selected-withdrawal-note
-    (create-selected-withdrawal-note:hel config.state [0x81 0x82 0x83 0x84 0x85] 15.000.000)
-  =/  id=withdrawal-id
-    [[0x91 0x92 0x93 0x94 0x95] 8]
-  =/  request=create-withdrawal-tx
-    :*  id
-        [0xa1 0xa2 0xa3 0xa4 0xa5]
-        3.000.000
-        10.000.000
-        25
-        0
-        [10 [0xb1 0xb2 0xb3 0xb4 0xb5]]
-        7.000.000
-        ~[selected]
-    ==
-  =/  brg  (brg:hel)
-  =/  bridge  (lod:hel state brg)
-  =/  [build-effects=(list effect) bridge]
-    (pok:hel 0 [%0 %create-withdrawal-tx request] bridge)
-  ?~  build-effects
-    ~|('expected withdrawal-proposal-built effect' !!)
-  ?>  ?=([%0 %withdrawal-proposal-built *] i.build-effects)
-  =/  proposal=withdrawal-proposal  proposal.i.build-effects
-  =/  raw-tx=raw-tx:v1:t  (new:raw-tx:v1:t spends.transaction.proposal)
-  =/  tx=tx:t  (new:tx:t raw-tx 0)
-  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw-tx)
-  =/  page=page:v1:t  *page:v1:t
-  =.  height.page  2
-  =.  parent.page  block-id.block-2
-  =.  digest.page  [0xc1 0xc2 0xc3 0xc4 0xc5]
-  =.  tx-ids.page  (z-silt ~[tx-id])
-  =/  txs=(z-map tx-id:t tx:t)
-    (~(put z-by *(z-map tx-id:t tx:t)) tx-id tx)
-  =/  nock  ~(. nock-lib state)
-  =/  nock-cause=nockchain-block:cause  [block=page txs=txs]
-  =/  [effects=(list effect) repaired=bridge-state]
-    (incoming-nockchain-block:nock [nock-cause [~ 0 0x0 *@da]])
-  ?>  ?=(^ nock-hold.hash-state.repaired)
-  =/  hold=[hash=base-hash height=@]  u.nock-hold.hash-state.repaired
-  ;:  weld
-    (expect !>(?=(~ effects)))
-  ::
-    (expect !>(?=(~ base-hold.hash-state.repaired)))
-  ::
-    %+  expect-eq
-      !>(canonical-hash-2)
-    !>(last-nock-block.hash-state.repaired)
-  ::
-    %+  expect-eq
-      !>(2)
-    !>(nock-hashchain-next-height.hash-state.repaired)
-  ::
-    %+  expect-eq
-      !>(-.id)
-    !>(hash.hold)
-  ::
-    %+  expect-eq
-      !>(25)
-    !>(height.hold)
-  ==
-::  Any hold causes handle-cause to not emit a stop effect.
-++  test-hold-no-stop-handle-cause
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =/  base  ~(. base-lib state)
-  =/  unknown-as-of=nock-hash  [0x3 0x3 0x3 0x3 0x3]
-  =/  dest=base-addr  0x2222
-  =/  event-id=beid  (from-atom:blist 3)
-  =/  settlement=deposit-settlement
-    (create-deposit-settlement:hel event-id *nname:t unknown-as-of 101 dest 1.000.000 7)
-  =/  deposit-settlements=(z-map beid deposit-settlement)
-    (~(put z-by *(z-map beid deposit-settlement)) event-id settlement)
-  =/  blocks=base-blocks
-    (make-base-blocks:hel state *(z-map beid withdrawal) deposit-settlements)
-  =/  result=process-result
-    (base-process-deposit-settlements:base blocks)
-  ?>  ?=(%| -.result)
-  =/  process-fail=process-fail  +.result
-  ?>  ?=(%hold -.process-fail)
-  =/  hold=[hash=hash:t height=@]  hold.process-fail
-  =/  state-held=bridge-state  state
-  =.  base-hold.hash-state.state-held  `hold
-  =/  brg  (brg:hel)
-  =/  bridge  (lod:hel state-held brg)
-  =/  [effects=(list effect) bridge]
-    (pok:hel 0 [%0 %cfg-load ~] bridge)
-  =/  new-state=bridge-state  (inner-state:hel bridge)
-  =/  is-stop=?
-    ?~  effects  %.n
-    ?=([%0 %stop * *] i.effects)
-  =/  hold-still-set=?  ?=(^ base-hold.hash-state.new-state)
-  ;:  weld
-    (expect !>(!is-stop))
-  ::
-    (expect !>(hold-still-set))
-  ==
-::  Base hold clears when the referenced nock block arrives.
-++  test-hold-base-clears-on-block-arrival
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =/  height=@  nockchain-start-height.constants.state
-  =/  block-id=block-id:t  [0x9 0x9 0x9 0x9 0x9]
-  =/  page=page:v1:t  *page:v1:t
-  =.  height.page  height
-  =.  parent.page  *block-id:t
-  =.  digest.page  block-id
-  =.  tx-ids.page  *(z-set tx-id:t)
-  =/  txs=(z-map tx-id:t tx:t)  *(z-map tx-id:t tx:t)
-  =/  expected-block=nock-block
-    :*  %nock
-        version=%0
-        height
-        block-id
-        deposits=*(z-map nname:t deposit)
-        withdrawal-settlements=*(z-map nname:t withdrawal-settlement)
-        prev=last-nock-block.hash-state.state
-    ==
-  =/  hold-hash=nock-hash  (hash:nock-block expected-block)
-  =/  state-held=bridge-state  state
-  =.  base-hold.hash-state.state-held  `[hold-hash height]
-  =/  nock  ~(. nock-lib state-held)
-  =/  nock-cause=nockchain-block:cause  [block=page txs=txs]
-  =/  [effects=(list effect) new-state=bridge-state]
-    (incoming-nockchain-block:nock [nock-cause [~ 0 0x0 *@da]])
-  =/  hold-cleared=?  ?=(~ base-hold.hash-state.new-state)
-  (expect !>(hold-cleared))
-::  Nock hold clears when the referenced base block arrives.
-++  test-hold-nock-clears-on-block-arrival
-  ^-  tang
-  =/  state=bridge-state  *bridge-state
-  =/  constants=bridge-constants  (small-constants:hel 1 10 0)
-  =.  constants.state  constants
-  =/  height=@  base-start-height.constants.state
-  =.  base-hashchain-next-height.hash-state.state  height
-  =/  block-id=base-block-id  0x1
-  =/  parent-id=base-block-id  0x0
-  =/  raw=raw-base-blocks:cause
-    :~  [height block-id parent-id ~]
-    ==
-  =/  base  ~(. base-lib state)
-  =/  blocks=base-blocks  (cook-base-blocks:base raw)
-  =/  hold-hash=base-hash  (hash:base-blocks blocks)
-  =/  state-held=bridge-state  state
-  =.  nock-hold.hash-state.state-held  `[hold-hash height]
-  =/  base-held  ~(. base-lib state-held)
   =/  [effects=(list effect) staged=bridge-state]
-    (incoming-base-blocks:base-held [raw [~ 0 0x0 *@da]])
-  ?>  ?=(^ pending-base-block-commit.hash-state.staged)
-  =/  pending=pending-base-block-commit-data
-    u.pending-base-block-commit.hash-state.staged
-  =/  metadata=pending-base-block-withdrawals  metadata.pending
+    (incoming-base-blocks:base [raw [~ 0 0x0 *@da]])
+  ?~  effects
+    ~|('expected base-block-withdrawals-pending effect' !!)
+  ?>  ?=([%0 %base-block-withdrawals-pending *] i.effects)
+  =/  pending=pending-base-block-withdrawals  pending.i.effects
   =/  ack=base-block-commit-ack
-    [blocks-hash.metadata first-height.metadata last-height.metadata]
+    [blocks-hash.pending first-height.pending last-height.pending]
   =/  base-staged  ~(. base-lib staged)
-  =/  [ack-effects=(list effect) new-state=bridge-state]
+  =/  [ack-effects=(list effect) committed=bridge-state]
     (commit-base-block-withdrawals:base-staged ack)
-  =/  hold-cleared=?  ?=(~ nock-hold.hash-state.new-state)
-  (expect !>(hold-cleared))
+  ;:  weld
+    (expect !>(?=(~ ack-effects)))
+  ::
+    (expect !>((~(has z-bi deferred-deposit-settlements.hash-state.committed) unknown-as-of event-id)))
+  ::
+    (expect !>((~(has z-by base-hashchain.hash-state.committed) blocks-hash.pending)))
+  ::
+    %+  expect-eq
+      !>(11)
+    !>(base-hashchain-next-height.hash-state.committed)
+  ::
+    (expect !>(?=(~ pending-base-block-commit.hash-state.committed)))
+  ::
+    (expect !>(?=(~ base-hold.hash-state.committed)))
+  ::
+    (expect !>(?=(~ nock-hold.hash-state.committed)))
+  ==
+::
+:::  A deferred Base settlement is reconciled when its Nockchain block arrives,
+:::  and the already-settled deposit is not proposed again.
+++  test-deferred-deposit-reconciles-on-nock-arrival
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  name=nname:t  *nname:t
+  =/  dep=deposit
+    (create-deposit:hel [0x1 0x1 0x1 0x1 0x1] name `0x1234 1.000.000 5)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name dep)
+  =/  block=nock-block
+    (produce-nock-block:hel state deposits *(z-map nname:t withdrawal-settlement))
+  =/  as-of=nock-hash  (hash:nock-block block)
+  =/  event-id=beid  (from-atom:blist 2)
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id name as-of height.block 0x1234 1.000.000 6)
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) as-of name dep)
+  =.  deferred-deposit-settlements.hash-state.state
+    (~(put z-bi deferred-deposit-settlements.hash-state.state) as-of event-id settlement)
+  =/  nock  ~(. nock-lib state)
+  =/  result=process-result
+    (nockchain-process-deferred-deposit-settlements:nock block)
+  ?>  ?=(%& -.result)
+  =/  reconciled=bridge-state  p.result
+  =/  nock-reconciled  ~(. nock-lib reconciled)
+  =/  [requests=(list nock-deposit-request:effect) final=bridge-state]
+    (nockchain-propose-deposits:nock-reconciled block)
+  ;:  weld
+    (expect !>(?=(~ requests)))
+  ::
+    (expect !>(?=(~ (~(get z-by deferred-deposit-settlements.hash-state.final) as-of))))
+  ::
+    %+  expect-eq
+      !>(%.n)
+    !>((~(has z-bi unsettled-deposits.hash-state.final) as-of name))
+  ==
+::
+:::  A Nockchain settlement that arrives first suppresses the later withdrawal
+:::  proposal and is reconciled when its Base batch arrives.
+++  test-deferred-withdrawal-filters-base-proposal
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  event-id=beid  (from-atom:blist 3)
+  =/  dest=nock-lock-root  *nock-lock-root
+  =/  wd=withdrawal
+    (create-withdrawal:hel event-id dest 10.000.000)
+  =/  withdrawals=(z-map beid withdrawal)
+    (~(put z-by *(z-map beid withdrawal)) event-id wd)
+  =/  blocks=base-blocks
+    (make-base-blocks:hel state withdrawals *(z-map beid deposit-settlement))
+  =/  as-of=base-hash  (hash:base-blocks blocks)
+  =/  name=nname:t  *nname:t
+  =/  settlement=withdrawal-settlement
+    :*  [0x2 0x2 0x2 0x2 0x2]
+        name
+        event-id
+        last-height.blocks
+        as-of
+        dest
+        7.000.000
+    ==
+  =.  deferred-withdrawal-settlements.hash-state.state
+    (~(put z-bi deferred-withdrawal-settlements.hash-state.state) as-of name settlement)
+  =/  base  ~(. base-lib state)
+  =/  invalid=(unit @t)
+    (validate-deferred-withdrawal-settlements:base blocks)
+  =/  requests=(list nock-withdrawal-request:effect)
+    (base-propose-withdrawals:base blocks)
+  =/  committed=bridge-state
+    (commit-base-blocks:base blocks)
+  ;:  weld
+    (expect !>(?=(~ invalid)))
+  ::
+    (expect !>(?=(~ requests)))
+  ::
+    (expect !>(?=(~ (~(get z-by deferred-withdrawal-settlements.hash-state.committed) as-of))))
+  ::
+    %+  expect-eq
+      !>(%.n)
+    !>((~(has z-bi unsettled-withdrawals.hash-state.committed) as-of event-id))
+  ==
+::
+:::  Start clears future dependency holds left by the old state machine.
+++  test-start-clears-legacy-holds
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  nock-hold.hash-state.state  `[[0xa 0xa 0xa 0xa 0xa] 1]
+  =.  base-hold.hash-state.state  `[[0xb 0xb 0xb 0xb 0xb] 50.000]
+  =.  stop.state  `(get-stop-info state)
+  =/  resumed=bridge-state  (resume-bridge-state state)
+  ;:  weld
+    (expect-eq !>(~) !>(stop.resumed))
+  ::
+    (expect-eq !>(~) !>(base-hold.hash-state.resumed))
+  ::
+    (expect-eq !>(~) !>(nock-hold.hash-state.resumed))
+  ==
 ::
 ++  test-base-deposit-settlement-commits-only-after-ack
   ^-  tang
@@ -648,12 +353,12 @@
 ++  test-mainnet-legacy-deposit-restored
   ^-  tang
   =/  state=bridge-state  *bridge-state
+  =.  nockchain-start-height.constants.state  46.810
   =/  name=nname:t
     :*  [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
         [0xf68c.c7dd.f2ba.7818 0x828a.9a6d.3dcf.f822 0x409f.62b1.3f56.88d9 0x46ea.2f97.f8f8.c4d7 0x561d.0332.2829.9954]
         ~
     ==
-  =.  bridge-lock-root.config.state  -.name
   =/  block=nock-block
     :*  %nock
         %0

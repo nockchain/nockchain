@@ -17,10 +17,8 @@
   ::  save old-state in case we need to revert after an error
   =/  old-state  state
   ::
-  ::  avoiding ?^ because it gives too much information to compiler about the shape of base-hold
-  ::  if there is a hold, do not process
-  ?:  !=(~ nock-hold.hash-state.state)
-    ~>  %slog.[0 'nock hold active, not processing incoming nockchain-block']
+  ?:  !=(~ pending-base-block-commit.hash-state.state)
+    ~>  %slog.[0 'base block commit pending, not processing incoming nockchain-block']
     [~ old-state]
   =/  stop-info  (get-stop-info old-state)
   ?.  ?=(%1 -.block.nockchain-block)
@@ -45,21 +43,12 @@
       [[%0 %stop msg.process-fail stop-info]~ old-state]
     ::
         %hold
-      ?:  !=(~ base-hold.hash-state.old-state)
-        ?^  repaired=(repair-stale-base-hold ~)
-          ~>  %slog.[0 'repaired stale nock hashchain lineage and cleared base hold']
-          [~ u.repaired(nock-hold.hash-state `hold.process-fail)]
-        [[%0 %stop 'incoming nockchain block would create both nock and base hold' stop-info]~ old-state]
-      [~ old-state(nock-hold.hash-state `hold.process-fail)]
+      [[%0 %stop 'unexpected nock hold while processing nockchain block' stop-info]~ old-state]
     ==
   ::
       %&
     ::  if process block was successful, update state and carry on
     =.  state  p.process-block
-    =?  base-hold.hash-state.state  ?=(^ base-hold.hash-state.state)
-      =+  nock-hash=(hash:nock-block latest-block)
-      ?:  =(nock-hash hash.u.base-hold.hash-state.state)  ~
-      base-hold.hash-state.state
     =/  current-height=@ud  ~(height get:page:t last-block.state)
     ::
     ::  If there are no signature requests, we will not submit a proposal.
@@ -245,7 +234,14 @@
     hash-state
   =?  last-nock-deposit-height.state  !=(~ deposits.nock-blk)
     height.nock-blk
-  [nock-blk (nockchain-process-withdrawal-settlements nock-blk)]
+  =/  deferred-result=process-result
+    (nockchain-process-deferred-deposit-settlements nock-blk)
+  ?-  -.deferred-result
+      %|  [nock-blk deferred-result]
+      %&
+    =.  state  p.deferred-result
+    [nock-blk (nockchain-process-withdrawal-settlements nock-blk)]
+  ==
   ::
   ++  process-nock-txs
     ^-  [deposits=(z-map nname deposit) withdrawal-settlements=(z-map nname withdrawal-settlement)]
@@ -366,48 +362,65 @@
     ~
   --
 ::
-::  +nockchain-process-withdrawal-settlements:
-::    processes unsettled withdrawals in new nockchain block
-::    unsettled withdrawals track the gross/pre-fee amount burned on Base,
-::    while settlements carry the net/post-fee amount disbursed on Nockchain.
-::    kernel reconciliation only enforces identity and basic amount bounds.
-::    TODO: once withdrawals are implemented, we need to emit holds for withdrawal settlements that we have not
-::    processed the corresponding withdrawal for.
+:::  +nockchain-process-deferred-deposit-settlements:
+:::    Reconcile Base settlements that arrived before their Nockchain block.
+++  nockchain-process-deferred-deposit-settlements
+  |=  latest=nock-block
+  ^-  process-result
+  =/  as-of=nock-hash  (hash:nock-block latest)
+  =/  maybe-settlements=(unit (z-map beid deposit-settlement))
+    (~(get z-by deferred-deposit-settlements.hash-state.state) as-of)
+  ?~  maybe-settlements  [%& state]
+  =/  settlements=(list [beid deposit-settlement])
+    ~(tap z-by u.maybe-settlements)
+  |-
+  ?~  settlements
+    =.  deferred-deposit-settlements.hash-state.state
+      (~(del z-by deferred-deposit-settlements.hash-state.state) as-of)
+    [%& state]
+  =/  [event-id=beid settlement=deposit-settlement]  i.settlements
+  ?.  =(event-id beid.settlement)
+    [%| [%stop 'failed to reconcile deposit settlement: event id does not match map key']]
+  ?.  =(as-of as-of.settlement)
+    [%| [%stop 'failed to reconcile deposit settlement: as-of hash does not match map key']]
+  =/  name=nname:t  counterpart.settlement
+  =/  maybe-counterpart=(unit deposit)
+    (~(get z-by deposits.latest) name)
+  ?~  maybe-counterpart
+    [%| [%stop 'failed to reconcile deposit settlement: counterpart note not found in as-of nock block']]
+  ?.  (~(has z-bi unsettled-deposits.hash-state.state) as-of name)
+    [%| [%stop 'failed to reconcile deposit settlement: cannot find unsettled deposit in state']]
+  ?.  (check-deposit-settlement u.maybe-counterpart settlement)
+    [%| [%stop 'failed to reconcile deposit settlement: counterpart does not match settlement']]
+  =.  unsettled-deposits.hash-state.state
+    (~(del z-bi unsettled-deposits.hash-state.state) [as-of name])
+  $(settlements t.settlements)
+::
+:::  +nockchain-process-withdrawal-settlements:
+:::    Reconcile settlements immediately when their Base batch is known;
+:::    otherwise persist them until that batch arrives.
 ++  nockchain-process-withdrawal-settlements
   |=  latest=nock-block
   ^-  process-result
   =/  settlements  ~(tap z-by withdrawal-settlements.latest)
-  =/  hold  nock-hold.hash-state.state
   |-
-  ?~  settlements
-    ?~  hold  [%& state]
-    [%| [%hold u.hold]]
+  ?~  settlements  [%& state]
   =/  [name=nname:t settlement=withdrawal-settlement]
     i.settlements
-  =/  [=beid as-of=base-hash height=@]  [counterpart as-of base-batch-end]:settlement
+  ?.  =(name nname.settlement)
+    [%| [%stop 'failed to process withdrawal settlement: note name does not match map key']]
+  =/  [=beid as-of=base-hash]  [counterpart as-of]:settlement
   ?.  (~(has z-by base-hashchain.hash-state.state) as-of)
-    ::  this means that we still have not processed the nockchain deposit tx
-    ::  corresponding to the settlement. put a hold on it. if there is already a
-    ::  hold, pick the hold with the greatest height.
-    %=    $
-        settlements
-      t.settlements
-    ::
-        hold
-      ?~  hold  `[as-of height]
-      ?:  (lte height height.u.hold)  hold
-      `[as-of height]
-    ==
-  ::
-  ::  If there is a hold, do not process the settlement
-  ?.  =(~ hold)
+    =.  deferred-withdrawal-settlements.hash-state.state
+      %-  ~(put z-bi deferred-withdrawal-settlements.hash-state.state)
+      [as-of name settlement]
     $(settlements t.settlements)
   ::
   ::  find the corresponding unsettled withdrawal in the hash-state.
   ::  we do not require the bridge node to have seen the proposal prior to observing
   ::  the withdrawal settlement.
   ::    - if bridge node has seen proposal, the withdrawal will be in the unsettled withdrawal set.
-  ::    - if the unsettled deposit is not the unsettled deposit set, this is a STOP condition.
+  ::    - if the unsettled withdrawal is not in the unsettled withdrawal set, this is a STOP condition.
   ?.  (has-unsettled-withdrawal as-of beid)
     [%| [%stop 'failed to process withdrawal settlement: cannot find unsettled withdrawal in state']]
   =+  block-with-withdrawal=(~(got z-by base-hashchain.hash-state.state) as-of)
@@ -429,25 +442,6 @@
   |=  [as-of=base-hash =beid]
   (~(has z-bi unsettled-withdrawals.hash-state.state) as-of beid)
 ::
-++  check-withdrawal-settlement
-  |=  $:  counterpart=withdrawal
-          settlement=withdrawal-settlement
-      ==
-  =/  dest-matches=?
-    =(dest.settlement dest.counterpart)
-  ::  counterpart tracks the gross/pre-fee burn amount, while settlement
-  ::  carries the net/post-fee disbursed amount. exact fee correctness is
-  ::  validated in Rust proposal acceptance, so kernel only enforces bounds.
-  =/  amount-in-bounds=?
-    ?&  (gth settled-amount.settlement 0)
-        (lth settled-amount.settlement amount-burned.counterpart)
-    ==
-  ?.  dest-matches
-    ~>  %slog.[0 'settlement destination does not match withdrawal destination']  %.n
-  ?.  amount-in-bounds
-    ~>  %slog.[0 'settlement amount is out of bounds for withdrawal']  %.n
-  %.y
-::
 ::  +nockchain-propose-deposits:
 ::    This arm only gets called if its our turn to propose and there are deposits in the newst nock block.
 ++  nockchain-propose-deposits
@@ -457,7 +451,9 @@
   =/  requests=(list nock-deposit-request:effect)
     %+  murn
       ~(tap z-by deposits.nock-block)
-    |=  [name=nname =deposit]
+    |=  [name=nname:t =deposit]
+    ?.  (~(has z-bi unsettled-deposits.hash-state.state) block-hash name)
+      ~
     ::  if the recipient is malformed, we keep the funds in the bridge nock address
     ?~  dest.deposit  ~
     ::  NOTE: as-of must be block-hash (hash of nock-block structure), NOT block-id (page digest).

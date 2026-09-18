@@ -16,10 +16,6 @@
   ::  hold onto old state in case the deposit process fails
   =/  old-state  state
   ::
-  ::  avoiding ?^ because it gives too much information to compiler about the shape of base-hold
-  ?:  !=(~ base-hold.hash-state.state)
-    ~>  %slog.[0 'base hold active, not processing incoming base-blocks']
-    [~ old-state]
   =/  stop-info  (get-stop-info old-state)
   ?:  !=(~ pending-base-block-commit.hash-state.state)
     [[%0 %stop 'pending base block commit active, not processing incoming base-blocks' stop-info]~ old-state]
@@ -37,10 +33,8 @@
     [~ state]
   ?^  stop=(validate-base-blocks-sequence blocks)
     [[%0 %stop u.stop stop-info]~ old-state]
-  ?^  hold=(base-find-deposit-settlement-hold blocks)
-    ?:  !=(~ nock-hold.hash-state.old-state)
-      [[%0 %stop 'incoming base blocks would create both base and nock hold' stop-info]~ old-state]
-    [~ old-state(base-hold.hash-state `u.hold)]
+  ?^  invalid=(validate-deferred-withdrawal-settlements blocks)
+    [[%0 %stop u.invalid stop-info]~ old-state]
   =/  withdrawals=(list nock-withdrawal-request:effect)
     (base-propose-withdrawals blocks)
   =/  pending=pending-base-block-withdrawals
@@ -57,13 +51,10 @@
     ?-    -.process-fail
         %stop
       ::  early stop and roll back to old state if we do not process the base blocks
-      ::  this happens when we encounter a %hold or %stop condition.
       [[%0 %stop msg.process-fail stop-info]~ old-state]
     ::
         %hold
-      ?:  !=(~ nock-hold.hash-state.old-state)
-        [[%0 %stop 'incoming base blocks would create both base and nock hold' stop-info]~ old-state]
-      [~ old-state(base-hold.hash-state `hold.process-fail)]
+      [[%0 %stop 'unexpected base hold while staging base blocks' stop-info]~ old-state]
     ==
    ::
        %&
@@ -105,9 +96,6 @@
     =.  state  p.commit-result
     =.  pending-base-block-commit.hash-state.state  ~
     =.  state  (commit-base-blocks blocks.pending)
-    =?  nock-hold.hash-state.state  ?=(^ nock-hold.hash-state.state)
-      ?:  =(blocks-hash.metadata hash.u.nock-hold.hash-state.state)  ~
-      nock-hold.hash-state.state
     [~ state]
   ==
 ::
@@ -224,43 +212,72 @@
   =?  unsettled-withdrawals.hash-state.state  !=(~ withdrawals.blocks)
     %-  ~(put z-by unsettled-withdrawals.hash-state.state)
     [base-blocks-hash withdrawals.blocks]
+  =.  state  (reconcile-deferred-withdrawal-settlements base-blocks-hash)
   state
 ::
-::  +base-process-deposit-settlements: confirm the deposits in the latest base block batch
-++  base-find-deposit-settlement-hold
+:::  +validate-deferred-withdrawal-settlements:
+:::    Validate Nockchain settlements that arrived before this Base batch.
+:::    Validation runs before Rust persists proposals, so already-settled
+:::    withdrawals are never emitted as new requests.
+++  validate-deferred-withdrawal-settlements
   |=  latest-blocks=base-blocks
-  ^-  (unit [=hash:t height=@])
-  =+  settlements=~(tap z-by deposit-settlements.latest-blocks)
-  =/  hold=(unit [=hash:t height=@])  ~
+  ^-  (unit @t)
+  =/  as-of=base-hash  (hash:base-blocks latest-blocks)
+  ?.  (~(has z-by deferred-withdrawal-settlements.hash-state.state) as-of)
+    ~
+  =/  settlements=(list [nname:t withdrawal-settlement])
+    ~(tap z-by (~(got z-by deferred-withdrawal-settlements.hash-state.state) as-of))
+  =/  seen=(z-set beid)  *(z-set beid)
   |-
-  ?~  settlements  hold
-  =/  [event-id=beid settlement=deposit-settlement]
-    i.settlements
-  =/  [as-of=nock-hash height=@]  [as-of nock-height]:settlement
-  ?:  (~(has z-by nock-hashchain.hash-state.state) as-of)
-    $(settlements t.settlements)
-  %=    $
-      settlements
-    t.settlements
-  ::
-      hold
-    ?~  hold  `[as-of height]
-    ?:  (lte height height.u.hold)  hold
-    `[as-of height]
-  ==
+  ?~  settlements  ~
+  =/  [name=nname:t settlement=withdrawal-settlement]  i.settlements
+  ?.  =(name nname.settlement)
+    [~ 'failed to reconcile withdrawal settlement: note name does not match map key']
+  =/  event-id=beid  counterpart.settlement
+  ?:  (~(has z-in seen) event-id)
+    [~ 'failed to reconcile withdrawal settlement: duplicate counterpart event']
+  =/  maybe-counterpart=(unit withdrawal)
+    (~(get z-by withdrawals.latest-blocks) event-id)
+  ?~  maybe-counterpart
+    [~ 'failed to reconcile withdrawal settlement: counterpart event not found in as-of base block']
+  ?.  (check-withdrawal-settlement u.maybe-counterpart settlement)
+    [~ 'failed to reconcile withdrawal settlement: counterpart does not match settlement']
+  $(settlements t.settlements, seen (~(put z-in seen) event-id))
+::
+++  reconcile-deferred-withdrawal-settlements
+  |=  as-of=base-hash
+  ^-  bridge-state
+  ?.  (~(has z-by deferred-withdrawal-settlements.hash-state.state) as-of)
+    state
+  =/  settlements=(list [nname:t withdrawal-settlement])
+    ~(tap z-by (~(got z-by deferred-withdrawal-settlements.hash-state.state) as-of))
+  |-
+  ?~  settlements
+    =.  deferred-withdrawal-settlements.hash-state.state
+      (~(del z-by deferred-withdrawal-settlements.hash-state.state) as-of)
+    state
+  =/  settlement=withdrawal-settlement  +.i.settlements
+  =.  unsettled-withdrawals.hash-state.state
+    (~(del z-bi unsettled-withdrawals.hash-state.state) [as-of counterpart.settlement])
+  $(settlements t.settlements)
+::
+:::  +base-process-deposit-settlements: confirm the deposits in the latest base block batch
 ::
 ++  base-process-deposit-settlements
   |=  latest-blocks=base-blocks
   ^-  process-result
-  ?^  hold=(base-find-deposit-settlement-hold latest-blocks)
-    [%| [%hold u.hold]]
   =+  settlements=~(tap z-by deposit-settlements.latest-blocks)
   |-
   ?~  settlements
     [%& state]
   =/  [event-id=beid settlement=deposit-settlement]
     i.settlements
-  =/  [name=nname:t as-of=nock-hash height=@]  [counterpart as-of nock-height]:settlement
+  =/  [name=nname:t as-of=nock-hash]  [counterpart as-of]:settlement
+  ?.  (~(has z-by nock-hashchain.hash-state.state) as-of)
+    =.  deferred-deposit-settlements.hash-state.state
+      %-  ~(put z-bi deferred-deposit-settlements.hash-state.state)
+      [as-of event-id settlement]
+    $(settlements t.settlements)
   =/  counterpart=deposit
     =+  block-with-deposit=(~(got z-by nock-hashchain.hash-state.state) as-of)
     (~(got z-by deposits.block-with-deposit) name)
@@ -284,32 +301,31 @@
   |=  [as-of=nock-hash name=nname:t]
   (~(has z-bi unsettled-deposits.hash-state.state) as-of name)
 ::
-++  check-deposit-settlement
-  |=  $:  counterpart=deposit
-          settlement=deposit-settlement
-      ==
-  =/  dest-matches=?
-    ?~  dest.counterpart  %.n
-    =(dest.settlement u.dest.counterpart)
-  =/  amount-matches=?
-    =(amount-to-mint.counterpart settled-amount.settlement)
-  ?.  dest-matches
-    ~>  %slog.[0 'settlement destination does not match deposit destination']  %.n
-  ?.  amount-matches
-    ~>  %slog.[0 'settlement amount does not match deposit amount']  %.n
-  %.y
 ::
-::  JOIE: when proposing withdrawals, attach height at the end of the batch window to the note-data
+:::  JOIE: when proposing withdrawals, attach height at the end of the batch window to the note-data
 ++  base-propose-withdrawals
   |=  latest-blocks=base-blocks
   ^-  (list nock-withdrawal-request:effect)
   =/  base-hash  (hash:base-blocks latest-blocks)
-  %+  turn  ~(tap z-by withdrawals.latest-blocks)
+  %+  murn  ~(tap z-by withdrawals.latest-blocks)
   |=  [=beid =withdrawal]
+  ?:  (has-deferred-withdrawal-settlement base-hash beid)
+    ~
+  %-  some
   :*  (to-atom:blist beid)
       dest.withdrawal
       amount-burned.withdrawal
       last-height.latest-blocks
       base-hash
   ==
+::
+++  has-deferred-withdrawal-settlement
+  |=  [as-of=base-hash =beid]
+  ^-  ?
+  ?.  (~(has z-by deferred-withdrawal-settlements.hash-state.state) as-of)
+    %.n
+  %+  lien
+    ~(tap z-by (~(got z-by deferred-withdrawal-settlements.hash-state.state) as-of))
+  |=  [name=nname:t settlement=withdrawal-settlement]
+  =(beid counterpart.settlement)
 --
