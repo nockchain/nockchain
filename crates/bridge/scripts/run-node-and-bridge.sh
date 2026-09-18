@@ -86,6 +86,7 @@ NOCKCHAIN_START_HEIGHT="${NOCKCHAIN_START_HEIGHT:-1}"
 # Driver-side finality configuration (confirmation depths)
 BASE_CONFIRMATION_DEPTH="${BASE_CONFIRMATION_DEPTH:-300}"
 NOCKCHAIN_CONFIRMATION_DEPTH="${NOCKCHAIN_CONFIRMATION_DEPTH:-400}"
+BASE_CHAIN_ID="${BASE_CHAIN_ID:-84532}"
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -198,6 +199,7 @@ cat > "$BRIDGE_CONFIG" << EOF
 node_id = 1
 # Environment: ${BRIDGE_ENV}
 base_ws_url = "${BASE_WS_URL}"
+base_chain_id = ${BASE_CHAIN_ID}
 inbox_contract_address = "${INBOX_CONTRACT_ADDRESS}"
 nock_contract_address = "${NOCK_CONTRACT_ADDRESS}"
 my_eth_key = "${BRIDGE_ETH_KEY}"

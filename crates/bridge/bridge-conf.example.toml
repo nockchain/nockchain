@@ -11,6 +11,7 @@ node_id = 0
 
 # Ethereum Base L2 WebSocket URL
 base_ws_url = "wss://virtual.base-sepolia.us-east.rpc.tenderly.co/YOUR-TENDERLY-PROJECT-ID"
+base_chain_id = 84532
 
 # Active bridge multisig lock root for this environment.
 # On mainnet this must remain the canonical production bridge root.
@@ -69,6 +70,16 @@ ingress_listen_address = "127.0.0.1:8001"
 # Withdrawal sequencer gRPC endpoint exposed by the nockchain API node.
 # If omitted, the bridge derives it from grpc_address by adding 100 to the port.
 nockchain_sequencer_api_address = "http://127.0.0.1:5655"
+
+# Governance-approved compensation tombstones. Render the identical immutable
+# entries into every bridge node and the standalone sequencer before restart.
+[[compensated_withdrawals]]
+base_event_id = "0x45cfbf831f2abf377164f857a2bc47338fcaa8f4f12a5986a3ba9bef35afeabd"
+transaction_hash = "0xfa0b8e4134a387440a99544114578397d52542cea306d6b9adea801407e3123f"
+log_index = 243
+reason = "legacy operator refund completed before WithdrawalWireV1 activation"
+evidence_reference = "base-mainnet:fa0b8e4134a387440a99544114578397d52542cea306d6b9adea801407e3123f:243"
+recorded_at_unix_secs = 0
 
 # All 5 bridge nodes configuration
 # Each node needs IP address, Base address (eth_pubkey), and Nockchain public key hash (nock_pkh).
