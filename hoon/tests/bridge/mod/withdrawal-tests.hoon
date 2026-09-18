@@ -344,6 +344,7 @@
 ++  test-withdrawal-settlement-unknown-as-of-is-deferred
   ^-  tang
   =/  state=bridge-state  *bridge-state
+  =.  base-hashchain-next-height.hash-state.state  123
   =/  recipient=nock-lock-root  *hash:t
   =/  as-of=base-hash  [0x7 0x7 0x7 0x7 0x7]
   =/  settlement=withdrawal-settlement

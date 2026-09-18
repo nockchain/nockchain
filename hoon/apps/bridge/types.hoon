@@ -710,9 +710,10 @@
         unsettled-deposits=(z-mip nock-hash nname:t deposit)
         unsettled-withdrawals=(z-mip base-hash beid withdrawal)
         ::
-        ::  Settlements observed before their referenced counterpart block.
-        ::  These maps let both hashchains advance during historical replay
-        ::  without losing validation or emitting duplicate proposals.
+        ::  Settlements observed before their referenced future counterpart.
+        ::  Each value-release counterpart is globally unique across hash
+        ::  buckets. Reconciliation requires the exact hash and source position;
+        ::  stale or cross-hash dependencies stop before emitting new work.
         deferred-deposit-settlements=(z-mip nock-hash beid deposit-settlement)
         deferred-withdrawal-settlements=(z-mip base-hash nname:t withdrawal-settlement)
         ::

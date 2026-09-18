@@ -1,4 +1,4 @@
-::  Tests for hold state logic (Finding 2: Missing Nockchain Blocks)
+::  Tests for deferred settlement replay and cross-chain state invariants.
 ::
 ::  These tests exercise the real bridge arms so they track runtime behavior.
 ::
@@ -30,6 +30,7 @@
 ++  test-base-unknown-settlement-is-deferred
   ^-  tang
   =/  state=bridge-state  *bridge-state
+  =.  nock-hashchain-next-height.hash-state.state  100
   =/  base  ~(. base-lib state)
   =/  unknown-as-of=nock-hash  [0x1 0x2 0x3 0x4 0x5]
   =/  event-id=beid  (from-atom:blist 1)
@@ -56,6 +57,7 @@
   ^-  tang
   =/  state=bridge-state  *bridge-state
   =.  constants.state  (small-constants:hel 1 10 0)
+  =.  nock-hashchain-next-height.hash-state.state  100
   =.  base-hashchain-next-height.hash-state.state  10
   =/  event-id=beid  (from-atom:blist 30)
   =/  unknown-as-of=nock-hash  [0x4 0x4 0x4 0x4 0x4]
@@ -404,4 +406,445 @@
     (expect !>(legacy-tracked))
   ==
 ::
+:::  Unknown settlement dependencies must point to an unprocessed Nock height.
+++  test-stale-deposit-settlement-is-not-deferred
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  nock-hashchain-next-height.hash-state.state  101
+  =/  event-id=beid  (from-atom:blist 101)
+  =/  as-of=nock-hash  [0x101 0x101 0x101 0x101 0x101]
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id *nname:t as-of 100 0x1111 1.000.000 1)
+  =/  settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) event-id settlement)
+  =/  blocks=base-blocks
+    (make-base-blocks:hel state *(z-map beid withdrawal) settlements)
+  =/  base  ~(. base-lib state)
+  =/  result=process-result  (base-process-deposit-settlements:base blocks)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  ;:  weld
+    (expect !>(?=(%stop -.fail)))
+  ::
+    (expect !>(?=(~ (~(get z-by deferred-deposit-settlements.hash-state.state) as-of))))
+  ==
+:::
+:::  Full settlement identity is checked before Rust may persist withdrawals.
+++  test-invalid-base-settlement-stops-before-persistence
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  constants.state  (small-constants:hel 1 10 0)
+  =.  base-hashchain-next-height.hash-state.state  10
+  =/  name=nname:t  *nname:t
+  =/  dep=deposit
+    (create-deposit:hel *tx-id:t name `0x2222 1.000.000 5)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name dep)
+  =/  [block=nock-block nock-state=bridge-state]
+    (add-nockchain-blocks:hel state deposits *(z-map nname:t withdrawal-settlement))
+  =/  as-of=nock-hash  (hash:nock-block block)
+  =.  unsettled-deposits.hash-state.nock-state
+    (~(put z-bi unsettled-deposits.hash-state.nock-state) as-of name dep)
+  =/  event-id=beid  (from-atom:blist 102)
+  =/  settlement-event=base-event
+    :*  (to-atom:blist event-id)
+        [%deposit-processed *tx-id:t name 0x2222 1.000.000 +(height.block) as-of 1]
+    ==
+  =/  raw=raw-base-blocks:cause
+    ~[[10 0x102 0x0 ~[settlement-event]]]
+  =/  base  ~(. base-lib nock-state)
+  =/  [effects=(list effect) returned=bridge-state]
+    (incoming-base-blocks:base [raw [~ 0 0x0 *@da]])
+  ;:  weld
+    (expect !>((has-stop-effect effects)))
+  ::
+    (expect !>(!(has-base-withdrawals-pending-effect effects)))
+  ::
+    (expect-eq !>(nock-state) !>(returned))
+  ::
+    (expect !>(?=(~ pending-base-block-commit.hash-state.returned)))
+  ==
+:::
+:::  A known source hash with no matching note is a stop, not a runtime crash.
+++  test-known-deposit-settlement-missing-counterpart-stops
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  [block=nock-block known-state=bridge-state]
+    (add-nockchain-blocks:hel state *(z-map nname:t deposit) *(z-map nname:t withdrawal-settlement))
+  =/  as-of=nock-hash  (hash:nock-block block)
+  =/  event-id=beid  (from-atom:blist 103)
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id *nname:t as-of height.block 0x3333 1.000.000 1)
+  =/  settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) event-id settlement)
+  =/  blocks=base-blocks
+    (make-base-blocks:hel known-state *(z-map beid withdrawal) settlements)
+  =/  base  ~(. base-lib known-state)
+  =/  result=process-result  (base-process-deposit-settlements:base blocks)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  (expect !>(?=(%stop -.fail)))
+:::
+:::  A note cannot settle under one hash and later appear under another hash.
+++  test-deferred-deposit-wrong-hash-stops-on-counterpart
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  name=nname:t  *nname:t
+  =/  dep=deposit
+    (create-deposit:hel *tx-id:t name `0x4444 1.000.000 5)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name dep)
+  =/  block=nock-block
+    (produce-nock-block:hel state deposits *(z-map nname:t withdrawal-settlement))
+  =/  actual-as-of=nock-hash  (hash:nock-block block)
+  =/  wrong-as-of=nock-hash  [0x104 0x104 0x104 0x104 0x104]
+  =/  event-id=beid  (from-atom:blist 104)
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id name wrong-as-of height.block 0x4444 1.000.000 1)
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) actual-as-of name dep)
+  =.  deferred-deposit-settlements.hash-state.state
+    (~(put z-bi deferred-deposit-settlements.hash-state.state) wrong-as-of event-id settlement)
+  =/  nock  ~(. nock-lib state)
+  =/  result=process-result
+    (nockchain-process-deferred-deposit-settlements:nock block)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  (expect !>(?=(%stop -.fail)))
+:::
+:::  A withdrawal counterpart under a different hash stops before persistence.
+++  test-deferred-withdrawal-wrong-hash-stops-before-persistence
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  constants.state  (small-constants:hel 1 10 0)
+  =.  base-hashchain-next-height.hash-state.state  10
+  =/  event-id=beid  (from-atom:blist 105)
+  =/  dest=nock-lock-root  *nock-lock-root
+  =/  burn-event=base-event
+    :*  (to-atom:blist event-id)
+        [%burn-for-withdrawal 0x5555 10.000.000 dest]
+    ==
+  =/  raw=raw-base-blocks:cause
+    ~[[10 0x105 0x0 ~[burn-event]]]
+  =/  wrong-as-of=base-hash  [0x105 0x105 0x105 0x105 0x105]
+  =/  name=nname:t  *nname:t
+  =/  settlement=withdrawal-settlement
+    :*  *tx-id:t
+        name
+        event-id
+        10
+        wrong-as-of
+        dest
+        7.000.000
+    ==
+  =.  deferred-withdrawal-settlements.hash-state.state
+    (~(put z-bi deferred-withdrawal-settlements.hash-state.state) wrong-as-of name settlement)
+  =/  base  ~(. base-lib state)
+  =/  [effects=(list effect) returned=bridge-state]
+    (incoming-base-blocks:base [raw [~ 0 0x0 *@da]])
+  ;:  weld
+    (expect !>((has-stop-effect effects)))
+  ::
+    (expect !>(!(has-base-withdrawals-pending-effect effects)))
+  ::
+    (expect-eq !>(state) !>(returned))
+  ::
+    (expect !>(?=(~ pending-base-block-commit.hash-state.returned)))
+  ==
+:::
+:::  Unknown withdrawal dependencies must point to an unprocessed Base batch.
+++  test-stale-withdrawal-settlement-is-not-deferred
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  base-hashchain-next-height.hash-state.state  124
+  =/  as-of=base-hash  [0x106 0x106 0x106 0x106 0x106]
+  =/  settlement=withdrawal-settlement
+    :*  *tx-id:t
+        *nname:t
+        (from-atom:blist 106)
+        123
+        as-of
+        *nock-lock-root
+        7.000.000
+    ==
+  =/  settlements=(z-map nname:t withdrawal-settlement)
+    (~(put z-by *(z-map nname:t withdrawal-settlement)) nname.settlement settlement)
+  =/  block=nock-block
+    (produce-nock-block:hel state *(z-map nname:t deposit) settlements)
+  =/  nock  ~(. nock-lib state)
+  =/  result=process-result
+    (nockchain-process-withdrawal-settlements:nock block)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  ;:  weld
+    (expect !>(?=(%stop -.fail)))
+  ::
+    (expect !>(?=(~ (~(get z-by deferred-withdrawal-settlements.hash-state.state) as-of))))
+  ==
+:::
+:::  A known Base hash also binds the settlement's batch-end height.
+++  test-known-withdrawal-settlement-batch-end-mismatch-stops
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  constants.state  (small-constants:hel 1 10 0)
+  =/  event-id=beid  (from-atom:blist 107)
+  =/  dest=nock-lock-root  *nock-lock-root
+  =/  wd=withdrawal  (create-withdrawal:hel event-id dest 10.000.000)
+  =/  withdrawals=(z-map beid withdrawal)
+    (~(put z-by *(z-map beid withdrawal)) event-id wd)
+  =/  blocks=base-blocks
+    (make-base-blocks:hel state withdrawals *(z-map beid deposit-settlement))
+  =/  as-of=base-hash  (hash:base-blocks blocks)
+  =.  base-hashchain.hash-state.state
+    (~(put z-by base-hashchain.hash-state.state) as-of blocks)
+  =.  unsettled-withdrawals.hash-state.state
+    (~(put z-bi unsettled-withdrawals.hash-state.state) as-of event-id wd)
+  =/  settlement=withdrawal-settlement
+    :*  *tx-id:t
+        *nname:t
+        event-id
+        +(last-height.blocks)
+        as-of
+        dest
+        7.000.000
+    ==
+  =/  settlements=(z-map nname:t withdrawal-settlement)
+    (~(put z-by *(z-map nname:t withdrawal-settlement)) nname.settlement settlement)
+  =/  block=nock-block
+    (produce-nock-block:hel state *(z-map nname:t deposit) settlements)
+  =/  nock  ~(. nock-lib state)
+  =/  result=process-result
+    (nockchain-process-withdrawal-settlements:nock block)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  (expect !>(?=(%stop -.fail)))
+:::
+:::  Counterpart-first deposit replay rejects a later cross-hash settlement.
+++  test-existing-deposit-counterpart-rejects-wrong-hash-settlement
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =/  name=nname:t  *nname:t
+  =/  dep=deposit
+    (create-deposit:hel *tx-id:t name `0x108 1.000.000 5)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name dep)
+  =/  block=nock-block
+    (produce-nock-block:hel state deposits *(z-map nname:t withdrawal-settlement))
+  =/  actual-as-of=nock-hash  (hash:nock-block block)
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) actual-as-of name dep)
+  =/  event-id=beid  (from-atom:blist 108)
+  =/  wrong-as-of=nock-hash  [0x108 0x108 0x108 0x108 0x108]
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id name wrong-as-of +(height.block) 0x108 1.000.000 1)
+  =/  settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) event-id settlement)
+  =/  blocks=base-blocks
+    (make-base-blocks:hel state *(z-map beid withdrawal) settlements)
+  =/  base  ~(. base-lib state)
+  =/  result=process-result  (base-process-deposit-settlements:base blocks)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  (expect !>(?=(%stop -.fail)))
+:::
+:::  Counterpart-first withdrawal replay rejects a later cross-hash settlement.
+++  test-existing-withdrawal-counterpart-rejects-wrong-hash-settlement
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  constants.state  (small-constants:hel 1 10 0)
+  =.  base-hashchain-next-height.hash-state.state  11
+  =/  event-id=beid  (from-atom:blist 109)
+  =/  dest=nock-lock-root  *nock-lock-root
+  =/  wd=withdrawal  (create-withdrawal:hel event-id dest 10.000.000)
+  =/  withdrawals=(z-map beid withdrawal)
+    (~(put z-by *(z-map beid withdrawal)) event-id wd)
+  =/  blocks=base-blocks
+    (make-base-blocks:hel state withdrawals *(z-map beid deposit-settlement))
+  =/  actual-as-of=base-hash  (hash:base-blocks blocks)
+  =.  base-hashchain.hash-state.state
+    (~(put z-by base-hashchain.hash-state.state) actual-as-of blocks)
+  =.  unsettled-withdrawals.hash-state.state
+    (~(put z-bi unsettled-withdrawals.hash-state.state) actual-as-of event-id wd)
+  =/  wrong-as-of=base-hash  [0x109 0x109 0x109 0x109 0x109]
+  =/  settlement=withdrawal-settlement
+    :*  *tx-id:t
+        *nname:t
+        event-id
+        11
+        wrong-as-of
+        dest
+        7.000.000
+    ==
+  =/  settlements=(z-map nname:t withdrawal-settlement)
+    (~(put z-by *(z-map nname:t withdrawal-settlement)) nname.settlement settlement)
+  =/  block=nock-block
+    (produce-nock-block:hel state *(z-map nname:t deposit) settlements)
+  =/  nock  ~(. nock-lib state)
+  =/  result=process-result
+    (nockchain-process-withdrawal-settlements:nock block)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  (expect !>(?=(%stop -.fail)))
+:::
+:::  Valid deposit settlement order changes effects, not final kernel state.
+++  test-deposit-arrival-orders-converge
+  ^-  tang
+  =/  initial=bridge-state  *bridge-state
+  =/  name=nname:t  *nname:t
+  =/  dep=deposit
+    (create-deposit:hel *tx-id:t name `0x110 1.000.000 5)
+  =/  deposits=(z-map nname:t deposit)
+    (~(put z-by *(z-map nname:t deposit)) name dep)
+  =/  block=nock-block
+    (produce-nock-block:hel initial deposits *(z-map nname:t withdrawal-settlement))
+  =/  as-of=nock-hash  (hash:nock-block block)
+  =/  event-id=beid  (from-atom:blist 110)
+  =/  settlement=deposit-settlement
+    (create-deposit-settlement:hel event-id name as-of height.block 0x110 1.000.000 1)
+  =/  settlements=(z-map beid deposit-settlement)
+    (~(put z-by *(z-map beid deposit-settlement)) event-id settlement)
+  =/  settlement-blocks=base-blocks
+    (make-base-blocks:hel initial *(z-map beid withdrawal) settlements)
+  ::
+  ::  Counterpart first, then settlement.
+  =/  [counterpart-block=nock-block counterpart-state=bridge-state]
+    (add-nockchain-blocks:hel initial deposits *(z-map nname:t withdrawal-settlement))
+  =.  unsettled-deposits.hash-state.counterpart-state
+    (~(put z-bi unsettled-deposits.hash-state.counterpart-state) as-of name dep)
+  =/  counterpart-base  ~(. base-lib counterpart-state)
+  =/  counterpart-result=process-result
+    (base-process-deposit-settlements:counterpart-base settlement-blocks)
+  ?>  ?=(%& -.counterpart-result)
+  =/  counterpart-final=bridge-state  p.counterpart-result
+  ::
+  ::  Settlement first, then counterpart.
+  =/  initial-base  ~(. base-lib initial)
+  =/  settlement-result=process-result
+    (base-process-deposit-settlements:initial-base settlement-blocks)
+  ?>  ?=(%& -.settlement-result)
+  =/  deferred-state=bridge-state  p.settlement-result
+  =/  [deferred-block=nock-block deferred-counterpart-state=bridge-state]
+    (add-nockchain-blocks:hel deferred-state deposits *(z-map nname:t withdrawal-settlement))
+  ?>  =(counterpart-block deferred-block)
+  =.  unsettled-deposits.hash-state.deferred-counterpart-state
+    (~(put z-bi unsettled-deposits.hash-state.deferred-counterpart-state) as-of name dep)
+  =/  deferred-nock  ~(. nock-lib deferred-counterpart-state)
+  =/  deferred-result=process-result
+    (nockchain-process-deferred-deposit-settlements:deferred-nock deferred-block)
+  ?>  ?=(%& -.deferred-result)
+  =/  deferred-final=bridge-state  p.deferred-result
+  (expect-eq !>(hash-state.counterpart-final) !>(hash-state.deferred-final))
+:::
+:::  Valid withdrawal settlement order changes effects, not final kernel state.
+++  test-withdrawal-arrival-orders-converge
+  ^-  tang
+  =/  initial=bridge-state  *bridge-state
+  =.  constants.initial  (small-constants:hel 1 10 0)
+  =.  base-hashchain-next-height.hash-state.initial  10
+  =/  event-id=beid  (from-atom:blist 111)
+  =/  dest=nock-lock-root  *nock-lock-root
+  =/  wd=withdrawal  (create-withdrawal:hel event-id dest 10.000.000)
+  =/  withdrawals=(z-map beid withdrawal)
+    (~(put z-by *(z-map beid withdrawal)) event-id wd)
+  =/  withdrawal-blocks=base-blocks
+    (make-base-blocks:hel initial withdrawals *(z-map beid deposit-settlement))
+  =/  as-of=base-hash  (hash:base-blocks withdrawal-blocks)
+  =/  settlement=withdrawal-settlement
+    :*  *tx-id:t
+        *nname:t
+        event-id
+        last-height.withdrawal-blocks
+        as-of
+        dest
+        7.000.000
+    ==
+  =/  settlements=(z-map nname:t withdrawal-settlement)
+    (~(put z-by *(z-map nname:t withdrawal-settlement)) nname.settlement settlement)
+  =/  settlement-block=nock-block
+    (produce-nock-block:hel initial *(z-map nname:t deposit) settlements)
+  ::
+  ::  Counterpart first, then settlement.
+  =/  initial-base  ~(. base-lib initial)
+  =/  counterpart-state=bridge-state
+    (commit-base-blocks:initial-base withdrawal-blocks)
+  =/  counterpart-nock  ~(. nock-lib counterpart-state)
+  =/  counterpart-result=process-result
+    (nockchain-process-withdrawal-settlements:counterpart-nock settlement-block)
+  ?>  ?=(%& -.counterpart-result)
+  =/  counterpart-final=bridge-state  p.counterpart-result
+  ::
+  ::  Settlement first, then counterpart.
+  =/  initial-nock  ~(. nock-lib initial)
+  =/  settlement-result=process-result
+    (nockchain-process-withdrawal-settlements:initial-nock settlement-block)
+  ?>  ?=(%& -.settlement-result)
+  =/  deferred-state=bridge-state  p.settlement-result
+  =/  deferred-base  ~(. base-lib deferred-state)
+  ?^  invalid=(validate-deferred-withdrawal-settlements:deferred-base withdrawal-blocks)
+    ~|  invalid  !!
+  =/  deferred-final=bridge-state
+    (commit-base-blocks:deferred-base withdrawal-blocks)
+  (expect-eq !>(hash-state.counterpart-final) !>(hash-state.deferred-final))
+:::
+:::  A block cannot settle one Base event twice through different note names.
+++  test-duplicate-withdrawal-counterpart-in-block-stops
+  ^-  tang
+  =/  state=bridge-state  *bridge-state
+  =.  constants.state  (small-constants:hel 1 10 0)
+  =.  base-hashchain-next-height.hash-state.state  11
+  =/  event-id=beid  (from-atom:blist 112)
+  =/  dest=nock-lock-root  *nock-lock-root
+  =/  wd=withdrawal  (create-withdrawal:hel event-id dest 10.000.000)
+  =/  withdrawals=(z-map beid withdrawal)
+    (~(put z-by *(z-map beid withdrawal)) event-id wd)
+  =/  blocks=base-blocks
+    (make-base-blocks:hel state withdrawals *(z-map beid deposit-settlement))
+  =/  actual-as-of=base-hash  (hash:base-blocks blocks)
+  =.  base-hashchain.hash-state.state
+    (~(put z-by base-hashchain.hash-state.state) actual-as-of blocks)
+  =.  unsettled-withdrawals.hash-state.state
+    (~(put z-bi unsettled-withdrawals.hash-state.state) actual-as-of event-id wd)
+  =/  name-a=nname:t  *nname:t
+  =/  name-b=nname:t
+    [[0x112 0x112 0x112 0x112 0x112] [0x212 0x212 0x212 0x212 0x212] ~]
+  =/  ordering-map=(z-map nname:t @)  *(z-map nname:t @)
+  =.  ordering-map  (~(put z-by ordering-map) name-a 0)
+  =.  ordering-map  (~(put z-by ordering-map) name-b 0)
+  =/  ordered=(list [nname:t @])  ~(tap z-by ordering-map)
+  ?>  ?=(^ ordered)
+  ?>  ?=(^ t.ordered)
+  =/  [known-name=nname:t ignored-a=@]  i.ordered
+  =/  [unknown-name=nname:t ignored-b=@]  i.t.ordered
+  =/  known=withdrawal-settlement
+    :*  *tx-id:t
+        known-name
+        event-id
+        last-height.blocks
+        actual-as-of
+        dest
+        7.000.000
+    ==
+  =/  wrong-as-of=base-hash  [0x112 0x212 0x312 0x412 0x512]
+  =/  unknown=withdrawal-settlement
+    :*  *tx-id:t
+        unknown-name
+        event-id
+        11
+        wrong-as-of
+        dest
+        7.000.000
+    ==
+  =/  settlements=(z-map nname:t withdrawal-settlement)
+    *(z-map nname:t withdrawal-settlement)
+  =.  settlements  (~(put z-by settlements) known-name known)
+  =.  settlements  (~(put z-by settlements) unknown-name unknown)
+  =/  block=nock-block
+    (produce-nock-block:hel state *(z-map nname:t deposit) settlements)
+  =/  nock  ~(. nock-lib state)
+  =/  result=process-result
+    (nockchain-process-withdrawal-settlements:nock block)
+  ?>  ?=(%| -.result)
+  =/  fail=process-fail  +.result
+  (expect !>(?=(%stop -.fail)))
+:::
 --
