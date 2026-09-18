@@ -1,6 +1,48 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+export interface CodeLensSettings {
+  references: boolean;
+  signatures: 'off' | 'novel' | 'always';
+  signatureStyle: 'hoon' | 'arrow';
+  inferredTypes: boolean;
+  signatureMaxLength: number;
+}
+
+/** Settings that only affect code lenses; the server retunes these live. */
+export const CODE_LENS_SECTION = 'honk.codeLens';
+
+/** Every other `honk.*` setting changes how the server is launched. */
+export const SERVER_SETTINGS = [
+  'honk.server.path',
+  'honk.preludePath',
+  'honk.dependenciesPath',
+  'honk.entryPath',
+  'honk.subjectTypeJamPath',
+  'honk.dbug',
+  'honk.vet',
+  'honk.checkDelayMilliseconds',
+  'honk.maxChecks',
+  'honk.workerStackBytes',
+];
+
+export interface ConfigurationReader {
+  get<T>(section: string, defaultValue: T): T;
+}
+
+export function readCodeLensSettings(config: ConfigurationReader): CodeLensSettings {
+  const style = config.get<string>('codeLens.signatureStyle', 'hoon');
+  const signatures = config.get<string>('codeLens.signatures', 'novel');
+  const maxLength = config.get<number>('codeLens.signatureMaxLength', 80);
+  return {
+    references: config.get('codeLens.references', true),
+    signatures: signatures === 'off' || signatures === 'always' ? signatures : 'novel',
+    signatureStyle: style === 'arrow' ? 'arrow' : 'hoon',
+    inferredTypes: config.get('codeLens.inferredTypes', true),
+    signatureMaxLength: Number.isFinite(maxLength) ? Math.max(8, Math.trunc(maxLength)) : 80,
+  };
+}
+
 export interface HonkSettings {
   serverPath: string;
   preludePath: string;

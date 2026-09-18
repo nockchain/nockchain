@@ -6,8 +6,12 @@ import {
   TransportKind,
 } from 'vscode-languageclient/node';
 
+import { parseShowReferencesArguments } from './codeLens';
 import {
+  CODE_LENS_SECTION,
   HonkSettings,
+  SERVER_SETTINGS,
+  readCodeLensSettings,
   resolveServerCommand,
   serverArguments,
 } from './config';
@@ -54,6 +58,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     outputChannel: output,
     initializationOptions: {
       checkDelayMs: settings.checkDelayMilliseconds,
+      codeLens: readCodeLensSettings(vscode.workspace.getConfiguration('honk')),
     },
   };
   client = new LanguageClient(
@@ -71,6 +76,38 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   }
 }
 
+function toPosition(position: { line: number; character: number }): vscode.Position {
+  return new vscode.Position(position.line, position.character);
+}
+
+/**
+ * Open the references peek for a resolved reference-count lens.
+ *
+ * The server emits `honk.showReferences` with LSP-typed JSON arguments, which
+ * `editor.action.showReferences` does not accept directly; convert them into
+ * editor types first.
+ */
+async function showReferences(...args: unknown[]): Promise<void> {
+  const parsed = parseShowReferencesArguments(args);
+  if (!parsed) {
+    output?.warn(`honk.showReferences received malformed arguments: ${JSON.stringify(args)}`);
+    return;
+  }
+  const locations = parsed.locations.map(
+    (location) =>
+      new vscode.Location(
+        vscode.Uri.parse(location.uri),
+        new vscode.Range(toPosition(location.range.start), toPosition(location.range.end)),
+      ),
+  );
+  await vscode.commands.executeCommand(
+    'editor.action.showReferences',
+    vscode.Uri.parse(parsed.uri),
+    toPosition(parsed.position),
+    locations,
+  );
+}
+
 async function restartClient(context: vscode.ExtensionContext): Promise<void> {
   if (client) {
     await client.stop();
@@ -85,9 +122,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('honk.restartServer', () => restartClient(context)),
     vscode.commands.registerCommand('honk.showOutput', () => output?.show()),
+    vscode.commands.registerCommand('honk.showReferences', showReferences),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('honk')) {
+      if (SERVER_SETTINGS.some((setting) => event.affectsConfiguration(setting))) {
         void restartClient(context);
+      } else if (event.affectsConfiguration(CODE_LENS_SECTION) && client) {
+        // Lens settings retune live: the server refreshes the lenses itself.
+        void client.sendNotification('workspace/didChangeConfiguration', {
+          settings: {
+            honk: { codeLens: readCodeLensSettings(vscode.workspace.getConfiguration('honk')) },
+          },
+        });
       }
     }),
   );

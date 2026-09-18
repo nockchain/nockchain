@@ -1,7 +1,11 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { expandWorkspacePath, serverArguments } = require('../dist/config.js');
+const {
+  expandWorkspacePath,
+  readCodeLensSettings,
+  serverArguments,
+} = require('../dist/config.js');
 const languageConfiguration = require('../language-configuration.json');
 
 test('Hoon words preserve hyphenated terms', () => {
@@ -42,4 +46,37 @@ test('server arguments preserve compiler toggles and numeric bounds', () => {
     '--max-compiles', '0',
     '--worker-stack-bytes', '1048576',
   ]);
+});
+
+test('code lens settings are normalised before they reach the server', () => {
+  const reader = (values) => ({ get: (key, fallback) => (key in values ? values[key] : fallback) });
+  assert.deepEqual(readCodeLensSettings(reader({})), {
+    references: true,
+    signatures: 'novel',
+    signatureStyle: 'hoon',
+    inferredTypes: true,
+    signatureMaxLength: 80,
+  });
+  assert.deepEqual(
+    readCodeLensSettings(
+      reader({
+        'codeLens.references': false,
+        'codeLens.signatures': 'always',
+        'codeLens.signatureStyle': 'arrow',
+        'codeLens.inferredTypes': false,
+        'codeLens.signatureMaxLength': 3.9,
+      }),
+    ),
+    {
+      references: false,
+      signatures: 'always',
+      signatureStyle: 'arrow',
+      inferredTypes: false,
+      signatureMaxLength: 8,
+    },
+  );
+  assert.equal(readCodeLensSettings(reader({ 'codeLens.signatureStyle': 'bogus' })).signatureStyle, 'hoon');
+  assert.equal(readCodeLensSettings(reader({ 'codeLens.signatures': true })).signatures, 'novel');
+  assert.equal(readCodeLensSettings(reader({ 'codeLens.signatures': 'off' })).signatures, 'off');
+  assert.equal(readCodeLensSettings(reader({ 'codeLens.signatureMaxLength': NaN })).signatureMaxLength, 80);
 });

@@ -132,6 +132,50 @@
           "default": 4294967296,
           "minimum": 1048576,
           "description": "Native compiler worker stack size in bytes."
+        },
+        "honk.codeLens.references": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a reference count above every arm and mold. Click it to open the references peek."
+        },
+        "honk.codeLens.signatures": {
+          "type": "string",
+          "enum": [
+            "off",
+            "novel",
+            "always"
+          ],
+          "enumDescriptions": [
+            "Never show signature lenses.",
+            "Only when the lens adds something the lines under the header do not: a sample or product spanning several lines or pushed down by comments, or a product the source leaves implicit that the compiler could infer.",
+            "Above every gate, door, and trap arm."
+          ],
+          "default": "novel",
+          "description": "When to show the sample and product of an arm above its header, read from the |= and ^- runes that open it."
+        },
+        "honk.codeLens.signatureStyle": {
+          "type": "string",
+          "enum": [
+            "hoon",
+            "arrow"
+          ],
+          "enumDescriptions": [
+            "The runes as written: |=  sample  ^-  product",
+            "Compact: sample -> product"
+          ],
+          "default": "hoon",
+          "description": "How a signature lens is rendered."
+        },
+        "honk.codeLens.inferredTypes": {
+          "type": "boolean",
+          "default": true,
+          "description": "When an arm does not write its product with ^-, fill it in from the compiler's inferred type if that type is concrete (atoms, cells, nouns). Lazy types such as gate calls and lists stay omitted."
+        },
+        "honk.codeLens.signatureMaxLength": {
+          "type": "number",
+          "default": 80,
+          "minimum": 8,
+          "description": "Longest signature lens before it is truncated with an ellipsis."
         }
       }
     }

@@ -14,28 +14,32 @@ use honk::workspace::{
 };
 use honk::{CompilerErrorLocation, CompilerResolutionFact, CompilerSemanticFact};
 use honk_service::semantic::{
-    completion_term_range, hoon_rune_at, hoon_term_at, range_from_one_based_spot,
+    arm_signature, completion_term_range, hoon_rune_at, hoon_term_at, range_from_one_based_spot,
     structural_completions, structural_declaration_ranges, structural_definition,
     structural_exported_definition, structural_rune_definition, structural_symbols,
-    validate_rename_name, SemanticCompletion, SemanticCompletionKind, SemanticHover,
-    SemanticNodeId, SemanticRename, SemanticRenameEdit, SemanticRenameError, SemanticRenameTarget,
-    SemanticSession, SemanticStructuralSymbol, SemanticSymbol, SemanticSymbolKind,
-    SemanticTextRange,
+    validate_rename_name, ArmShape, ArmSignature, SemanticCompletion, SemanticCompletionKind,
+    SemanticHover, SemanticNodeId, SemanticRename, SemanticRenameEdit, SemanticRenameError,
+    SemanticRenameTarget, SemanticSession, SemanticStructuralSymbol, SemanticSymbol,
+    SemanticSymbolKind, SemanticTextRange,
 };
 use honk_service::{CompilerHandle, CompilerService, CompilerServiceConfig, DocumentUpdate};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
+use lsp_server::{
+    Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseKind,
+};
 use lsp_types::notification::{
-    Cancel as CancelNotification, DidChangeTextDocument, DidChangeWatchedFiles,
-    DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit, LogMessage,
-    Notification as LspNotification, PublishDiagnostics, ShowMessage,
+    Cancel as CancelNotification, DidChangeConfiguration, DidChangeTextDocument,
+    DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
+    LogMessage, Notification as LspNotification, PublishDiagnostics, ShowMessage,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, PrepareRenameRequest,
-    References, Rename, Request as LspRequest, WorkspaceSymbolRequest,
+    CodeLensRefresh, CodeLensRequest, CodeLensResolve, Completion, DocumentSymbolRequest,
+    GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as LspRequest,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CancelParams, CompletionItem, CompletionItemKind, CompletionList, CompletionOptions,
-    CompletionParams, CompletionResponse, CompletionTextEdit, Diagnostic, DiagnosticSeverity,
+    CancelParams, CodeLens, CodeLensOptions, CodeLensParams, Command, CompletionItem,
+    CompletionItemKind, CompletionList, CompletionOptions, CompletionParams, CompletionResponse,
+    CompletionTextEdit, Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams,
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol,
     DocumentSymbolParams, DocumentSymbolResponse, FileChangeType, GotoDefinitionParams,
@@ -76,6 +80,9 @@ struct ResolvedConfig {
     max_compiles: u64,
     worker_stack_bytes: usize,
     check_delay: Duration,
+    /// The client accepts `workspace/codeLens/refresh` requests.
+    code_lens_refresh: bool,
+    code_lens_settings: CodeLensSettings,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -85,6 +92,59 @@ struct InitializationOptions {
     dependencies: Option<PathBuf>,
     entry: Option<PathBuf>,
     check_delay_ms: Option<u64>,
+    code_lens: Option<CodeLensSettings>,
+}
+
+/// Editor settings for code lenses. The extension sends the whole object at
+/// initialization and again in `workspace/didChangeConfiguration` whenever a
+/// `honk.codeLens.*` setting changes, so lenses retune without a restart.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+struct CodeLensSettings {
+    /// Show a reference count above every arm and mold.
+    references: bool,
+    /// When to show the sample and product above gate, door, and trap arms.
+    signatures: SignatureMode,
+    signature_style: SignatureStyle,
+    /// Fill in a product the source leaves implicit with the compiler's
+    /// inferred type, when that type is concrete enough to read.
+    inferred_types: bool,
+    /// Longest signature title before it is truncated with an ellipsis.
+    signature_max_length: usize,
+}
+
+impl Default for CodeLensSettings {
+    fn default() -> Self {
+        Self {
+            references: true,
+            signatures: SignatureMode::Novel,
+            signature_style: SignatureStyle::Hoon,
+            inferred_types: true,
+            signature_max_length: 80,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum SignatureMode {
+    Off,
+    /// Only when the lens says something the lines under the header do not:
+    /// a sample or product that spans lines or sits further down, or a
+    /// product the source leaves implicit and the compiler could infer.
+    #[default]
+    Novel,
+    Always,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum SignatureStyle {
+    /// `|=  sample  ^-  product`: the runes as written.
+    #[default]
+    Hoon,
+    /// `sample -> product`.
+    Arrow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,6 +301,15 @@ enum SemanticQuery {
         include_declaration: bool,
         workspace: Arc<SemanticWorkspace>,
     },
+    /// Unresolved lenses for every arm and mold declared in the document.
+    CodeLens,
+    /// Resolve one lens by counting the references to the declaration at
+    /// `byte_offset`, excluding the declaration itself.
+    CodeLensReferences {
+        byte_offset: u32,
+        workspace: Arc<SemanticWorkspace>,
+        lens: CodeLens,
+    },
     PrepareRename {
         byte_offset: u32,
         workspace: Arc<SemanticWorkspace>,
@@ -259,9 +328,17 @@ enum SemanticQueryResult {
     Definition(Option<SemanticDefinition>),
     Completion(SemanticCompletionResult),
     References(Option<Vec<SemanticReference>>),
+    CodeLens(Vec<SemanticSymbol>),
+    CodeLensReferences {
+        lens: CodeLens,
+        references: Option<Vec<SemanticReference>>,
+    },
     PrepareRename(Option<SemanticRenameTarget>),
     Rename(Option<Vec<SemanticDocumentEdits>>),
-    RequestError { code: ErrorCode, message: String },
+    RequestError {
+        code: ErrorCode,
+        message: String,
+    },
     Unavailable(String),
 }
 
@@ -336,6 +413,20 @@ struct SemanticState {
     type_facts: HashMap<PathBuf, DocumentTypeFacts>,
     resolution_facts: HashMap<PathBuf, DocumentResolutionFacts>,
     workspace_resolution: Option<WorkspaceResolutionFacts>,
+    code_lens_refresh: CodeLensRefreshState,
+    code_lens_settings: CodeLensSettings,
+}
+
+/// Server-initiated `workspace/codeLens/refresh` requests awaiting a reply.
+///
+/// Server requests use their own identifier space, so the replies must be
+/// recognised and consumed rather than logged as unexpected client traffic.
+#[derive(Default)]
+struct CodeLensRefreshState {
+    /// The client advertised `workspace.codeLens.refreshSupport`.
+    supported: bool,
+    next_id: u64,
+    outstanding: HashSet<RequestId>,
 }
 
 impl SemanticState {
@@ -405,6 +496,9 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions::default()),
         references_provider: Some(OneOf::Left(true)),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(true),
+        }),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
@@ -465,6 +559,8 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
 
     let mut published = HashSet::<String>::new();
     let mut semantics = SemanticState::default();
+    semantics.code_lens_refresh.supported = resolved.code_lens_refresh;
+    semantics.code_lens_settings = resolved.code_lens_settings.clone();
     let mut shutdown = false;
     while !shutdown {
         drain_worker_events(
@@ -472,7 +568,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         )?;
         drain_semantic_events(
             &connection, &state, &semantic_event_receiver, &mut semantics.pending,
-            &semantics.type_facts,
+            &semantics.type_facts, &semantics.code_lens_settings,
         )?;
         match connection.receiver.recv_timeout(Duration::from_millis(25)) {
             Ok(Message::Request(request)) => {
@@ -495,7 +591,13 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
                 }
             }
             Ok(Message::Response(response)) => {
-                debug!(?response, "ignoring unexpected client response");
+                if semantics.code_lens_refresh.outstanding.remove(&response.id) {
+                    if let ResponseKind::Err { error } = &response.response_kind {
+                        warn!(?error, "client rejected a code lens refresh request");
+                    }
+                } else {
+                    debug!(?response, "ignoring unexpected client response");
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -569,6 +671,14 @@ fn resolve_config(config: LspConfig, initialize: &InitializeParams) -> Result<Re
         .subject_type_jam
         .map(|path| resolve_path(&root, path));
     let workspace_files = discover_workspace_files(&dependencies)?;
+    let code_lens_refresh = initialize
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.code_lens.as_ref())
+        .and_then(|code_lens| code_lens.refresh_support)
+        .unwrap_or(false);
+    let code_lens_settings = initialization_options.code_lens.clone().unwrap_or_default();
 
     Ok(ResolvedConfig {
         workspace: WorkspaceConfig {
@@ -587,6 +697,8 @@ fn resolve_config(config: LspConfig, initialize: &InitializeParams) -> Result<Re
                 .check_delay_ms
                 .unwrap_or(config.check_delay_ms),
         ),
+        code_lens_refresh,
+        code_lens_settings,
     })
 }
 
@@ -777,6 +889,27 @@ fn handle_notification(
                 snapshot.mark_path_changed(path);
             }
             schedule_check(trigger);
+        }
+        DidChangeConfiguration::METHOD => {
+            let params: DidChangeConfigurationParams = parse_notification(notification)?;
+            let settings = params
+                .settings
+                .get("honk")
+                .and_then(|honk| honk.get("codeLens"))
+                .or_else(|| params.settings.get("codeLens"))
+                .cloned();
+            let Some(settings) = settings else {
+                return Ok(());
+            };
+            match serde_json::from_value::<CodeLensSettings>(settings) {
+                Ok(settings) => {
+                    if settings != semantics.code_lens_settings {
+                        semantics.code_lens_settings = settings;
+                        request_code_lens_refresh(connection, semantics)?;
+                    }
+                }
+                Err(error) => warn!(%error, "ignoring invalid honk.codeLens settings"),
+            }
         }
         DidChangeWatchedFiles::METHOD => {
             let params: DidChangeWatchedFilesParams = parse_notification(notification)?;
@@ -1094,6 +1227,163 @@ fn handle_request(
                 )?;
             }
         }
+        CodeLensRequest::METHOD => {
+            let params: CodeLensParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid code lens parameters: {error}"),
+                    );
+                }
+            };
+            let document = match open_document(state, &params.text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid code lens URI: {error:#}"),
+                    );
+                }
+            };
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                &mut semantics.pending,
+                request.id,
+                path,
+                document,
+                SemanticQuery::CodeLens,
+            )?;
+        }
+        CodeLensResolve::METHOD => {
+            let lens: CodeLens = match serde_json::from_value(request.params) {
+                Ok(lens) => lens,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid code lens resolve parameters: {error}"),
+                    );
+                }
+            };
+            if lens.command.is_some() {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::to_value(lens)?).into())?;
+                return Ok(());
+            }
+            let data: CodeLensData = match lens.data.clone().map(serde_json::from_value).transpose()
+            {
+                Ok(Some(data)) => data,
+                Ok(None) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        "code lens carries no honk resolve data".to_string(),
+                    );
+                }
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid honk code lens data: {error}"),
+                    );
+                }
+            };
+            let uri = match Uri::from_str(&data.uri) {
+                Ok(uri) => uri,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid code lens URI: {error}"),
+                    );
+                }
+            };
+            let document = match open_document(state, &uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid code lens URI: {error:#}"),
+                    );
+                }
+            };
+            let Some((path, document)) = document else {
+                return send_request_error(
+                    connection,
+                    request.id,
+                    ErrorCode::ContentModified,
+                    "code lens document is no longer open".to_string(),
+                );
+            };
+            if document.version != data.version {
+                // The lens was computed for an older snapshot; its byte
+                // offset no longer describes this text. The client requests
+                // fresh lenses after every change, so decline rather than
+                // count references at a stale position.
+                return send_request_error(
+                    connection,
+                    request.id,
+                    ErrorCode::ContentModified,
+                    "code lens is stale; the document changed since it was computed".to_string(),
+                );
+            }
+            if let Some(index) = semantics.workspace_resolution.as_ref() {
+                let editor = lock_snapshot(state)?.clone();
+                match compiler_workspace_references_at(
+                    &editor,
+                    &path,
+                    document.text.as_str(),
+                    data.offset,
+                    false,
+                    &config.workspace.dependencies,
+                    index,
+                ) {
+                    Ok(Some(references)) => {
+                        let resolved = resolved_code_lens(lens, &uri, Some(references))?;
+                        connection.sender.send(
+                            Response::new_ok(request.id, serde_json::to_value(resolved)?).into(),
+                        )?;
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(%error, "compiler workspace references are unavailable");
+                    }
+                }
+            }
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                &mut semantics.pending,
+                request.id,
+                path,
+                document,
+                SemanticQuery::CodeLensReferences {
+                    byte_offset: data.offset,
+                    workspace: semantic_workspace(state, config)?,
+                    lens,
+                },
+            )?;
+        }
         References::METHOD => {
             let params: ReferenceParams = match serde_json::from_value(request.params) {
                 Ok(params) => params,
@@ -1306,6 +1596,8 @@ fn enqueue_semantic_query(
         | SemanticQuery::Definition { .. }
         | SemanticQuery::Completion { .. }
         | SemanticQuery::References { .. }
+        | SemanticQuery::CodeLens
+        | SemanticQuery::CodeLensReferences { .. }
         | SemanticQuery::PrepareRename { .. }
         | SemanticQuery::Rename { .. } => None,
     };
@@ -1314,9 +1606,12 @@ fn enqueue_semantic_query(
         | SemanticQuery::Definition { workspace, .. }
         | SemanticQuery::Completion { workspace, .. }
         | SemanticQuery::References { workspace, .. }
+        | SemanticQuery::CodeLensReferences { workspace, .. }
         | SemanticQuery::PrepareRename { workspace, .. }
         | SemanticQuery::Rename { workspace, .. } => Some(workspace.sources.revision()),
-        SemanticQuery::DocumentSymbols | SemanticQuery::Hover { .. } => None,
+        SemanticQuery::DocumentSymbols | SemanticQuery::Hover { .. } | SemanticQuery::CodeLens => {
+            None
+        }
     };
     let job = SemanticJob {
         id: id.clone(),
@@ -1623,6 +1918,37 @@ fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<Se
                             graph,
                         ) {
                             Ok(references) => SemanticQueryResult::References(references),
+                            Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                        }
+                    }
+                    SemanticQuery::CodeLens => {
+                        match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
+                            Ok(snapshot) => SemanticQueryResult::CodeLens(snapshot.symbols.clone()),
+                            Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                        }
+                    }
+                    SemanticQuery::CodeLensReferences {
+                        byte_offset,
+                        workspace,
+                        lens,
+                    } => {
+                        let graph =
+                            cached_structural_workspace_graph(&mut structural_graph, &workspace);
+                        match structural_workspace_references(
+                            &mut semantics,
+                            StructuralReferenceQuery {
+                                path: &path,
+                                version,
+                                source: Arc::clone(&source),
+                                byte_offset,
+                                include_declaration: false,
+                            },
+                            &workspace,
+                            graph,
+                        ) {
+                            Ok(references) => {
+                                SemanticQueryResult::CodeLensReferences { lens, references }
+                            }
                             Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                         }
                     }
@@ -2620,6 +2946,7 @@ fn drain_semantic_events(
     events: &Receiver<SemanticEvent>,
     pending: &mut HashMap<RequestId, PendingSemanticRequest>,
     type_facts: &HashMap<PathBuf, DocumentTypeFacts>,
+    code_lens_settings: &CodeLensSettings,
 ) -> Result<()> {
     for event in events.try_iter() {
         let Some(request) = pending.remove(&event.id) else {
@@ -2776,21 +3103,37 @@ fn drain_semantic_events(
             }
             SemanticQueryResult::References(references) => {
                 let references = references
-                    .map(|references| -> Result<Vec<Location>> {
-                        let mut locations = Vec::with_capacity(references.len());
-                        for reference in references {
-                            let Some(range) =
-                                semantic_range_to_lsp(reference.source.as_ref(), reference.range)
-                            else {
-                                continue;
-                            };
-                            locations
-                                .push(Location::new(file_path_to_uri(&reference.path)?, range));
-                        }
-                        Ok(locations)
-                    })
+                    .map(semantic_references_to_locations)
                     .transpose()?;
                 serde_json::to_value(references)?
+            }
+            SemanticQueryResult::CodeLens(symbols) => {
+                let uri = file_path_to_uri(&request.path)?;
+                let inferred = |offset: u32| {
+                    inferred_type_at(
+                        type_facts,
+                        &request.path,
+                        request.version,
+                        request.source.as_ref(),
+                        offset,
+                    )
+                    .map(|(_, summary)| summary)
+                };
+                serde_json::to_value(Some(code_lenses_for_symbols(
+                    &symbols,
+                    request.source.as_ref(),
+                    &uri,
+                    request.version,
+                    code_lens_settings,
+                    &inferred,
+                )))?
+            }
+            SemanticQueryResult::CodeLensReferences { lens, references } => {
+                let uri = file_path_to_uri(&request.path)?;
+                let locations = references
+                    .map(semantic_references_to_locations)
+                    .transpose()?;
+                serde_json::to_value(resolved_code_lens(lens, &uri, locations)?)?
             }
             SemanticQueryResult::PrepareRename(target) => {
                 let target = target.and_then(|target| {
@@ -3273,6 +3616,288 @@ fn compiler_definition_to_lsp(
     Ok(semantic_range_to_lsp(&source, range).map(|range| Location::new(uri, range)))
 }
 
+/// Client command that opens VS Code's references peek for a resolved lens.
+///
+/// The extension registers this command and converts the LSP-typed
+/// arguments before delegating to `editor.action.showReferences`.
+const SHOW_REFERENCES_COMMAND: &str = "honk.showReferences";
+
+/// Resolve context stored on an unresolved lens and echoed back by the
+/// client in `codeLens/resolve`.
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct CodeLensData {
+    uri: String,
+    version: i32,
+    /// Byte offset of the declared name in the document version above.
+    offset: u32,
+}
+
+fn semantic_references_to_locations(references: Vec<SemanticReference>) -> Result<Vec<Location>> {
+    let mut locations = Vec::with_capacity(references.len());
+    for reference in references {
+        let Some(range) = semantic_range_to_lsp(reference.source.as_ref(), reference.range) else {
+            continue;
+        };
+        locations.push(Location::new(file_path_to_uri(&reference.path)?, range));
+    }
+    Ok(locations)
+}
+
+/// Code lenses for the document's arms and molds.
+///
+/// Every `++` and `+$` header gets an unresolved reference-count lens on its
+/// declared name; chapter labels and aliases have no references worth
+/// counting. Counting is deferred to `codeLens/resolve` so a large document
+/// costs one structural scan here and one reference query per lens the
+/// editor actually shows. `++` arms whose body opens with a gate, door, or
+/// trap rune additionally get a signature lens, built here from the written
+/// specs and, when the source leaves the product implicit, the compiler's
+/// inferred type for it (`inferred` looks a type up by byte offset). The
+/// signature lens spans the header from its rune so the editor lists it
+/// before the count.
+fn code_lenses_for_symbols(
+    symbols: &[SemanticSymbol],
+    source: &str,
+    uri: &Uri,
+    version: i32,
+    settings: &CodeLensSettings,
+    inferred: &dyn Fn(u32) -> Option<String>,
+) -> Vec<CodeLens> {
+    let mut lenses = Vec::new();
+    for symbol in symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.detail.as_str(), "++" | "+$"))
+    {
+        if settings.signatures != SignatureMode::Off && symbol.detail == "++" {
+            let body = SemanticTextRange {
+                start: symbol.selection_range.end,
+                end: symbol.range.end,
+            };
+            let title = arm_signature(source, body).and_then(|signature| {
+                let inferred_product = if settings.inferred_types && signature.product.is_none() {
+                    signature
+                        .product_offset
+                        .and_then(inferred)
+                        .filter(|summary| concrete_type_summary(summary))
+                } else {
+                    None
+                };
+                if settings.signatures == SignatureMode::Novel
+                    && inferred_product.is_none()
+                    && signature_visible_below(source, symbol.range.start, &signature)
+                {
+                    return None;
+                }
+                let product = signature.product.clone().or(inferred_product);
+                signature_title(&signature, product.as_deref(), settings)
+            });
+            let header = semantic_range_to_lsp(
+                source,
+                SemanticTextRange {
+                    start: symbol.range.start,
+                    end: symbol.selection_range.end,
+                },
+            );
+            if let (Some(title), Some(range)) = (title, header) {
+                lenses.push(CodeLens {
+                    range,
+                    command: Some(Command {
+                        title,
+                        command: String::new(),
+                        arguments: None,
+                    }),
+                    data: None,
+                });
+            }
+        }
+        if settings.references {
+            let Some(range) = semantic_range_to_lsp(source, symbol.selection_range) else {
+                continue;
+            };
+            let Ok(data) = serde_json::to_value(CodeLensData {
+                uri: uri.to_string(),
+                version,
+                offset: symbol.selection_range.start,
+            }) else {
+                continue;
+            };
+            lenses.push(CodeLens {
+                range,
+                command: None,
+                data: Some(data),
+            });
+        }
+    }
+    lenses
+}
+
+/// Whether the written signature already sits, one part per line, on the
+/// header line and the two below it, where a reader sees it without help.
+///
+/// A sample or product that spans lines, or that comments push further down,
+/// is worth restating on one line above the header.
+fn signature_visible_below(source: &str, header_start: u32, signature: &ArmSignature) -> bool {
+    let line_of = |offset: u32| byte_to_lsp_position(source, offset).map(|position| position.line);
+    let Some(header_line) = line_of(header_start) else {
+        return false;
+    };
+    let mut last_line = header_line;
+    for span in [signature.sample_span, signature.product_span]
+        .into_iter()
+        .flatten()
+    {
+        let (Some(start), Some(end)) = (line_of(span.start), line_of(span.end.max(span.start)))
+        else {
+            return false;
+        };
+        if start != end {
+            return false;
+        }
+        last_line = last_line.max(end);
+    }
+    last_line <= header_line + 2
+}
+
+/// Whether a compiler type summary reads as a type rather than a placeholder.
+///
+/// The summary printer names the holds it can — a mold (`kernel-state`,
+/// `(list @)`), the cast a called gate makes (`@`), the arm a wing fires
+/// (`add`) — and those read as types. What it cannot name stays opaque:
+/// `%hold`, `%fork`, `core(...)`, depth elided with `…` (including a call
+/// head like `(moat …)`); none of those tell a reader anything, so they
+/// never fill a signature.
+fn concrete_type_summary(summary: &str) -> bool {
+    !summary.is_empty()
+        && !summary.contains("%hold")
+        && !summary.contains("%fork")
+        && !summary.contains("core(")
+        && !summary.contains("face(")
+        && !summary.contains('…')
+}
+
+/// Render a signature lens title, or `None` when there is nothing to show.
+fn signature_title(
+    signature: &ArmSignature,
+    product: Option<&str>,
+    settings: &CodeLensSettings,
+) -> Option<String> {
+    let sample = signature.sample.as_deref();
+    // Render as prefix, sample, suffix so that an over-long title loses sample
+    // detail first and keeps its product, the half a reader is after.
+    let (prefix, suffix): (String, String) = match settings.signature_style {
+        SignatureStyle::Hoon => {
+            if sample.is_none() && product.is_none() {
+                return None;
+            }
+            let prefix = match (signature.rune, sample) {
+                (Some(rune), Some(_)) => format!("{rune}  "),
+                (Some(rune), None) => rune.to_string(),
+                (None, _) => String::new(),
+            };
+            let suffix = match (product, sample.is_some() || signature.rune.is_some()) {
+                (Some(product), true) => format!("  ^-  {product}"),
+                (Some(product), false) => format!("^-  {product}"),
+                (None, _) => String::new(),
+            };
+            (prefix, suffix)
+        }
+        SignatureStyle::Arrow => match (signature.shape, sample, product) {
+            (ArmShape::Door, Some(_), _) => ("|_ ".to_string(), String::new()),
+            (ArmShape::Gate, Some(_), Some(product)) => (String::new(), format!(" -> {product}")),
+            (ArmShape::Gate, Some(_), None) => (String::new(), " ->".to_string()),
+            (ArmShape::Trap | ArmShape::Value, _, Some(product)) => {
+                (String::new(), format!("-> {product}"))
+            }
+            _ => return None,
+        },
+    };
+    let max_chars = settings.signature_max_length.max(8);
+    let fixed = prefix.chars().count() + suffix.chars().count();
+    let sample = sample.unwrap_or_default();
+    let sample_chars = sample.chars().count();
+    if fixed + sample_chars <= max_chars {
+        return Some(format!("{prefix}{sample}{suffix}"));
+    }
+    // Leave the sample at least a few characters; otherwise cut the whole
+    // title, which only happens when the product alone overflows.
+    let allowance = max_chars.saturating_sub(fixed);
+    if allowance >= 8 {
+        let mut shortened = sample.chars().take(allowance - 1).collect::<String>();
+        shortened = shortened.trim_end().to_string();
+        shortened.push('…');
+        return Some(format!("{prefix}{shortened}{suffix}"));
+    }
+    let mut truncated = format!("{prefix}{sample}{suffix}")
+        .chars()
+        .take(max_chars - 1)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    truncated.push('…');
+    Some(truncated)
+}
+
+/// Attach the reference count to a lens.
+///
+/// `None` means the declaration could not be identified unambiguously, so the
+/// lens states that instead of claiming zero references. An empty command
+/// identifier renders as plain text in VS Code.
+fn resolved_code_lens(
+    lens: CodeLens,
+    uri: &Uri,
+    locations: Option<Vec<Location>>,
+) -> Result<CodeLens> {
+    let command = match locations {
+        Some(locations) => Command {
+            title: reference_count_title(locations.len()),
+            command: SHOW_REFERENCES_COMMAND.to_string(),
+            arguments: Some(vec![
+                serde_json::to_value(uri)?,
+                serde_json::to_value(lens.range.start)?,
+                serde_json::to_value(locations)?,
+            ]),
+        },
+        None => Command {
+            title: "references unavailable".to_string(),
+            command: String::new(),
+            arguments: None,
+        },
+    };
+    Ok(CodeLens {
+        range: lens.range,
+        command: Some(command),
+        data: lens.data,
+    })
+}
+
+fn reference_count_title(count: usize) -> String {
+    if count == 1 {
+        "1 reference".to_string()
+    } else {
+        format!("{count} references")
+    }
+}
+
+/// Ask the client to re-request code lenses, when it supports that.
+fn request_code_lens_refresh(connection: &Connection, semantics: &mut SemanticState) -> Result<()> {
+    if !semantics.code_lens_refresh.supported {
+        return Ok(());
+    }
+    let refresh = &mut semantics.code_lens_refresh;
+    refresh.next_id = refresh.next_id.wrapping_add(1);
+    let id = RequestId::from(format!("honk-code-lens-refresh-{}", refresh.next_id));
+    refresh.outstanding.insert(id.clone());
+    connection.sender.send(
+        Request::new(
+            id,
+            CodeLensRefresh::METHOD.to_string(),
+            serde_json::Value::Null,
+        )
+        .into(),
+    )?;
+    Ok(())
+}
+
 fn semantic_symbols_to_lsp(symbols: &[SemanticSymbol], source: &str) -> Vec<DocumentSymbol> {
     let mut children = HashMap::<Option<SemanticNodeId>, Vec<&SemanticSymbol>>::new();
     for symbol in symbols {
@@ -3633,6 +4258,9 @@ fn drain_worker_events(
                         &config.workspace.prelude, workspace_facts,
                     ));
                 }
+                // Reference counts shown by code lenses depend on the
+                // resolution facts that changed above.
+                request_code_lens_refresh(connection, semantics)?;
             }
             Ok(WorkerEvent::Error {
                 generation,
@@ -3644,6 +4272,7 @@ fn drain_worker_events(
                     semantics.clear_resolution_facts();
                     clear_published(connection, published)?;
                     send_show_message(connection, MessageType::ERROR, message)?;
+                    request_code_lens_refresh(connection, semantics)?;
                 }
             }
             Err(TryRecvError::Empty) => break,
@@ -3965,13 +4594,155 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        byte_to_lsp_position, cancel_semantic_request, definition_at, drain_semantic_events,
-        drain_worker_events, file_path_to_uri, inferred_type_at, lsp_position_to_byte,
-        uri_to_file_path, workspace_diagnostic_to_lsp, DocumentResolutionFacts, DocumentTypeFacts,
+        byte_to_lsp_position, cancel_semantic_request, code_lenses_for_symbols,
+        concrete_type_summary, definition_at, drain_semantic_events, drain_worker_events,
+        file_path_to_uri, inferred_type_at, lsp_position_to_byte, uri_to_file_path,
+        workspace_diagnostic_to_lsp, CodeLensSettings, DocumentResolutionFacts, DocumentTypeFacts,
         EditorSnapshot, OpenDocument, PendingSemanticRequest, ResolvedConfig, SemanticEvent,
-        SemanticQueryResult, SemanticState, SemanticWorkspace, StructuralWorkspaceGraph,
-        WorkerEvent, WorkspaceConfig, WorkspaceDiagnostic, WorkspaceDiagnosticKind,
+        SemanticQueryResult, SemanticSession, SemanticState, SemanticWorkspace, SignatureMode,
+        SignatureStyle, StructuralWorkspaceGraph, WorkerEvent, WorkspaceConfig,
+        WorkspaceDiagnostic, WorkspaceDiagnosticKind,
     };
+
+    #[test]
+    fn signature_lenses_render_written_specs_and_concrete_inferred_products() {
+        let source = concat!(
+            "|%\n", "++  brel  |=([i=@ n=@] ^-(@ (mul i n)))\n", "++  open\n", "  |=  t=tape\n",
+            "  =/  cha  (crip t)\n", "  cha\n", "++  door\n", "  |_  [n=@ items=(list @)]\n",
+            "  ++  size  n\n", "  --\n", "++  loop  |-  ^-  @ud  42\n", "++  version  %1\n",
+            "++  inner  |%  ++  x  1  --\n", "++  wide\n", "  |=  $:  a=@\n",
+            "          b=(list @)\n", "      ==\n", "  ^-  (unit @)\n", "  ~\n",
+            "++  documented\n", "  ::  a comment block pushes the runes out of view\n",
+            "  ::  so the lens restates them\n", "  |=  a=@\n", "  ^-  @\n", "  a\n", "--\n",
+        );
+        let path = std::path::Path::new("/tmp/lens-titles.hoon");
+        let symbols = SemanticSession::default()
+            .snapshot(path, 1, source)
+            .expect("snapshot")
+            .symbols
+            .clone();
+        let uri = file_path_to_uri(path).expect("uri");
+        let inferred = |offset: u32| -> Option<String> {
+            let rest = &source[offset as usize..];
+            if rest.starts_with("=/  cha") {
+                Some("@t".to_string())
+            } else if rest.starts_with("%1") {
+                Some("@ud".to_string())
+            } else if rest.starts_with("|%") {
+                Some("core([… …])".to_string())
+            } else {
+                None
+            }
+        };
+        let titles = |settings: &CodeLensSettings| {
+            code_lenses_for_symbols(&symbols, source, &uri, 1, settings, &inferred)
+                .into_iter()
+                .filter_map(|lens| lens.command.map(|command| command.title))
+                .collect::<Vec<_>>()
+        };
+
+        let always = CodeLensSettings {
+            signatures: SignatureMode::Always,
+            ..CodeLensSettings::default()
+        };
+        assert_eq!(
+            titles(&always),
+            [
+                "|=  [i=@ n=@]  ^-  @", "|=  t=tape  ^-  @t", "|_  [n=@ items=(list @)]",
+                "|-  ^-  @ud", "^-  @ud", "|=  [a=@ b=(list @)]  ^-  (unit @)", "|=  a=@  ^-  @",
+            ]
+        );
+        assert_eq!(
+            titles(&CodeLensSettings::default()),
+            [
+                "|=  t=tape  ^-  @t", "^-  @ud", "|=  [a=@ b=(list @)]  ^-  (unit @)",
+                "|=  a=@  ^-  @",
+            ],
+            "novel: inferred products, a multi-line sample, and runes pushed down by comments; \
+             signatures plainly visible under the header are not restated"
+        );
+        assert_eq!(
+            titles(&CodeLensSettings {
+                signature_style: SignatureStyle::Arrow,
+                inferred_types: false,
+                ..always.clone()
+            }),
+            [
+                "[i=@ n=@] -> @", "t=tape ->", "|_ [n=@ items=(list @)]", "-> @ud",
+                "[a=@ b=(list @)] -> (unit @)", "a=@ -> @",
+            ],
+            "without inferred types an implicit product stays open and value arms get nothing"
+        );
+        assert_eq!(
+            titles(&CodeLensSettings {
+                signature_max_length: 12,
+                ..always.clone()
+            })[0],
+            "|=  [i=@ n=…",
+            "when the product alone overflows, the whole title is cut"
+        );
+        assert_eq!(
+            titles(&CodeLensSettings {
+                signature_max_length: 19,
+                ..always.clone()
+            })[0],
+            "|=  [i=@ n=…  ^-  @",
+            "otherwise the sample is shortened and the product kept"
+        );
+        assert!(titles(&CodeLensSettings {
+            signatures: SignatureMode::Off,
+            ..CodeLensSettings::default()
+        })
+        .is_empty());
+
+        let all = code_lenses_for_symbols(
+            &symbols,
+            source,
+            &uri,
+            1,
+            &CodeLensSettings::default(),
+            &inferred,
+        );
+        let counts = all.iter().filter(|lens| lens.data.is_some()).count();
+        assert_eq!(
+            counts, 9,
+            "every arm keeps its count lens, nested `size` and `x` included"
+        );
+        assert!(all
+            .iter()
+            .filter(|lens| lens.command.is_some())
+            .all(|lens| lens.data.is_none()));
+        let none = code_lenses_for_symbols(
+            &symbols,
+            source,
+            &uri,
+            1,
+            &CodeLensSettings {
+                references: false,
+                signatures: SignatureMode::Off,
+                ..CodeLensSettings::default()
+            },
+            &inferred,
+        );
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn concrete_type_summaries_exclude_opaque_printer_output() {
+        for concrete in [
+            "@", "@ud", "*", "[a=@ b=@]", "x=[@tas version=@ud]", "%void",
+            // Named holds: a mold, a mold call, a gate's cast, an arm.
+            "kernel-state", "typ:typ", "(list @)", "x=(unit kernel-state)", "$-(@ @)", "add",
+        ] {
+            assert!(concrete_type_summary(concrete), "{concrete}");
+        }
+        for opaque in [
+            "", "%hold", "%fork", "core([%hold core([… …])])", "[a=@ …]", "face(@)", "(moat …)",
+            "$@(~ [i=item t=(list …)])",
+        ] {
+            assert!(!concrete_type_summary(opaque), "{opaque}");
+        }
+    }
 
     #[test]
     fn file_uri_round_trip_preserves_spaces() {
@@ -4232,6 +5003,8 @@ mod tests {
             max_compiles: 0,
             worker_stack_bytes: 1024 * 1024,
             check_delay: Duration::ZERO,
+            code_lens_refresh: false,
+            code_lens_settings: CodeLensSettings::default(),
         };
         let mut published = std::collections::HashSet::new();
         let mut semantics = SemanticState::default();
@@ -4323,8 +5096,15 @@ mod tests {
             })
             .expect("semantic event");
 
-        drain_semantic_events(&server, &state, &receiver, &mut pending, &HashMap::new())
-            .expect("drain stale semantic event");
+        drain_semantic_events(
+            &server,
+            &state,
+            &receiver,
+            &mut pending,
+            &HashMap::new(),
+            &CodeLensSettings::default(),
+        )
+        .expect("drain stale semantic event");
 
         assert!(pending.is_empty());
         let Message::Response(response) = client.receiver.recv().expect("stale response") else {

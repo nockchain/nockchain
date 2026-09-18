@@ -1903,16 +1903,387 @@ impl LineIndex {
     }
 }
 
+/// The shape of an arm body as far as its written signature goes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArmShape {
+    /// `|=`, `|*`, `|~`, `|:`, or `|$`: a sample and a product.
+    Gate,
+    /// `|_`: a sample shared by the door's arms.
+    Door,
+    /// `|-` or `|.`: a product only.
+    Trap,
+    /// Any other expression; only an inferred type can describe it.
+    Value,
+}
+
+/// The parts of an arm's signature that its source states explicitly.
+///
+/// Hoon types are structural: once checked, `tape`, `(list @)`, and
+/// `typ:typ` are all anonymous holds, so the specs the author wrote in `|=`
+/// and `^-` are the only readable signature an arm has. This scanner reads
+/// them back from the text without parsing the whole file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArmSignature {
+    pub shape: ArmShape,
+    /// The rune that opens the body, for shapes that have one.
+    pub rune: Option<&'static str>,
+    /// The sample spec, with comments removed and whitespace collapsed.
+    pub sample: Option<String>,
+    /// Where the sample spec sits in the source.
+    pub sample_span: Option<SemanticTextRange>,
+    /// The `^-` product spec written directly after the sample, if any.
+    pub product: Option<String>,
+    /// Where the written product spec sits in the source.
+    pub product_span: Option<SemanticTextRange>,
+    /// Byte offset of the expression whose type is the arm's product: the
+    /// `^-` cast when written, otherwise the body that produces the value.
+    /// `None` for doors and cores, which have no product.
+    pub product_offset: Option<u32>,
+}
+
+/// Read the written signature of the arm body at `body` (exclusive of the
+/// `++  name` header). Returns `None` when the body is a core or empty.
+pub fn arm_signature(source: &str, body: SemanticTextRange) -> Option<ArmSignature> {
+    let start = usize::try_from(body.start).ok()?;
+    let end = usize::try_from(body.end).ok()?.min(source.len());
+    if start > end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    let text = &source[..end];
+    let mut cursor = skip_trivia(text, start);
+    if cursor >= end {
+        return None;
+    }
+    let rest = &text[cursor..];
+    let rune = ["|=", "|*", "|~", "|:", "|$", "|_", "|-", "|.", "|%", "|^", "|@", "|?"]
+        .into_iter()
+        .find(|rune| {
+            rest.strip_prefix(rune).is_some_and(|after| {
+                after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '(')
+            })
+        });
+    let Some(rune) = rune else {
+        return Some(ArmSignature {
+            shape: ArmShape::Value,
+            rune: None,
+            sample: None,
+            sample_span: None,
+            product: None,
+            product_span: None,
+            product_offset: u32::try_from(cursor).ok(),
+        });
+    };
+    cursor += rune.len();
+    // The irregular wide form `|=(sample body)` wraps the arguments.
+    let irregular = text[cursor..].starts_with('(');
+    if irregular {
+        cursor += 1;
+    }
+    let shape = match rune {
+        "|=" | "|*" | "|~" | "|:" | "|$" => ArmShape::Gate,
+        "|_" => ArmShape::Door,
+        "|-" | "|." => ArmShape::Trap,
+        _ => return None,
+    };
+    let span = |start: usize, end: usize| {
+        Some(SemanticTextRange {
+            start: u32::try_from(start).ok()?,
+            end: u32::try_from(end).ok()?,
+        })
+    };
+    let mut sample = None;
+    let mut sample_span = None;
+    if matches!(shape, ArmShape::Gate | ArmShape::Door) {
+        cursor = skip_trivia(text, cursor);
+        let (spec_end, spec) = read_spec(text, cursor)?;
+        sample = Some(spec);
+        sample_span = span(cursor, spec_end);
+        cursor = spec_end;
+    }
+    if shape == ArmShape::Door {
+        return Some(ArmSignature {
+            shape,
+            rune: Some(rune),
+            sample,
+            sample_span,
+            product: None,
+            product_span: None,
+            product_offset: None,
+        });
+    }
+    cursor = skip_trivia(text, cursor);
+    let mut product = None;
+    let mut product_span = None;
+    let product_offset = (cursor < end).then_some(cursor);
+    if let Some(after) = text[cursor..].strip_prefix("^-") {
+        if after.starts_with(|c: char| c.is_whitespace() || c == '(') {
+            let mut spec_start = cursor + 2;
+            if text[spec_start..].starts_with('(') {
+                spec_start += 1;
+            }
+            spec_start = skip_trivia(text, spec_start);
+            if let Some((spec_end, spec)) = read_spec(text, spec_start) {
+                product = Some(spec);
+                product_span = span(spec_start, spec_end);
+            }
+        }
+    }
+    Some(ArmSignature {
+        shape,
+        rune: Some(rune),
+        sample,
+        sample_span,
+        product,
+        product_span,
+        product_offset: product_offset.and_then(|offset| u32::try_from(offset).ok()),
+    })
+}
+
+/// Advance past whitespace and `::` comments.
+fn skip_trivia(text: &str, mut cursor: usize) -> usize {
+    loop {
+        let rest = &text[cursor..];
+        let trimmed = rest.trim_start();
+        cursor += rest.len() - trimmed.len();
+        if trimmed.starts_with("::") {
+            cursor += trimmed.find('\n').unwrap_or(trimmed.len());
+        } else {
+            return cursor;
+        }
+    }
+}
+
+/// Read one spec and render it on one line.
+///
+/// A wide spec is a single balanced token. The tall forms `$:`, `$%`, and
+/// `$?` run to their closing `==`, nesting included; `$:` renders as the
+/// bracket tuple it denotes and the other two in their irregular form.
+fn read_spec(text: &str, start: usize) -> Option<(usize, String)> {
+    let token_end = read_balanced(text, start);
+    if token_end == start {
+        return None;
+    }
+    let token = &text[start..token_end];
+    let tall = matches!(token, "$:" | "$%" | "$?")
+        && text[token_end..].starts_with(|c: char| c.is_whitespace());
+    if !tall {
+        return Some((token_end, normalize_spec(token)));
+    }
+    let mut items = Vec::new();
+    let mut cursor = token_end;
+    loop {
+        cursor = skip_trivia(text, cursor);
+        if cursor >= text.len() {
+            return None;
+        }
+        let word_end = read_balanced(text, cursor);
+        if &text[cursor..word_end] == "==" {
+            cursor = word_end;
+            break;
+        }
+        let (item_end, item) = read_spec(text, cursor)?;
+        items.push(item);
+        cursor = item_end;
+    }
+    let rendered = match token {
+        "$:" => format!("[{}]", items.join(" ")),
+        opener => format!("{opener}({})", items.join(" ")),
+    };
+    Some((cursor, rendered))
+}
+
+/// Read one spec or expression token: it ends at whitespace or a closing
+/// bracket outside any bracket nesting of its own. Comments inside a
+/// bracketed spec are skipped, so multi-line samples read as one token.
+fn read_balanced(text: &str, start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut cursor = start;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        if depth > 0 && rest.starts_with("::") {
+            cursor += rest.find('\n').unwrap_or(rest.len());
+            continue;
+        }
+        let c = rest.chars().next().expect("non-empty rest");
+        match c {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            c if c.is_whitespace() && depth == 0 => break,
+            _ => {}
+        }
+        cursor += c.len_utf8();
+    }
+    cursor
+}
+
+/// Drop comments and collapse whitespace so a spec reads as one line.
+fn normalize_spec(spec: &str) -> String {
+    let mut out = String::with_capacity(spec.len());
+    for line in spec.lines() {
+        let code = line.find("::").map_or(line, |at| &line[..at]);
+        for word in code.split_whitespace() {
+            if !out.is_empty()
+                && !out.ends_with(['[', '(', '{'])
+                && !word.starts_with([']', ')', '}'])
+            {
+                out.push(' ');
+            }
+            out.push_str(word);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::{
-        completion_term_range, hoon_rune_at, range_from_one_based_spot, scan_arm_headers,
-        structural_completions, structural_definition, structural_exported_definition,
-        structural_rune_definition, structural_symbols, LineIndex, SemanticCompletionKind,
-        SemanticRenameError, SemanticSession, SemanticSymbolKind, SemanticTextRange,
+        arm_signature, completion_term_range, hoon_rune_at, range_from_one_based_spot,
+        scan_arm_headers, structural_completions, structural_definition,
+        structural_exported_definition, structural_rune_definition, structural_symbols, ArmShape,
+        LineIndex, SemanticCompletionKind, SemanticRenameError, SemanticSession,
+        SemanticSymbolKind, SemanticTextRange,
     };
+
+    fn signature_of(body: &str) -> Option<super::ArmSignature> {
+        let source = format!("++  name{body}");
+        arm_signature(
+            &source,
+            SemanticTextRange {
+                start: "++  name".len() as u32,
+                end: source.len() as u32,
+            },
+        )
+    }
+
+    #[test]
+    fn arm_signatures_read_written_samples_and_products() {
+        let tall_body =
+            "\n  |=  [e=env:typ t=typ:typ h=hair]\n  ^-  *\n  =/  cq  (mcli e t ~ h)\n  cq\n";
+        let tall = signature_of(tall_body).expect("gate signature");
+        assert_eq!(tall.shape, ArmShape::Gate);
+        assert_eq!(tall.rune, Some("|="));
+        assert_eq!(tall.sample.as_deref(), Some("[e=env:typ t=typ:typ h=hair]"));
+        assert_eq!(tall.product.as_deref(), Some("*"));
+        let tall_source = format!("++  name{tall_body}");
+        let spanned =
+            |span: SemanticTextRange| &tall_source[span.start as usize..span.end as usize];
+        assert_eq!(
+            spanned(tall.sample_span.expect("sample span")),
+            "[e=env:typ t=typ:typ h=hair]"
+        );
+        assert_eq!(spanned(tall.product_span.expect("product span")), "*");
+        let source = format!(
+            "++  name{}",
+            "\n  |=  [e=env:typ t=typ:typ h=hair]\n  ^-  *\n"
+        );
+        assert_eq!(
+            &source[tall.product_offset.expect("product offset") as usize..][..2],
+            "^-",
+            "the product offset is the cast when one is written"
+        );
+
+        let no_product =
+            signature_of("\n  |=  t=tape\n  =/  cha  (crip t)\n  cha\n").expect("gate");
+        assert_eq!(no_product.sample.as_deref(), Some("t=tape"));
+        assert_eq!(no_product.product, None);
+        let source = "++  name\n  |=  t=tape\n  =/  cha  (crip t)\n  cha\n";
+        assert!(
+            source[no_product.product_offset.expect("product offset") as usize..]
+                .starts_with("=/  cha"),
+            "without a cast the product offset is the body expression"
+        );
+
+        let irregular = signature_of("  |=([a=@ b=@] (add a b))\n").expect("irregular gate");
+        assert_eq!(irregular.sample.as_deref(), Some("[a=@ b=@]"));
+        assert_eq!(irregular.product, None);
+        let irregular_cast = signature_of("  |=(a=@ ^-(@ud (add a a)))\n").expect("irregular cast");
+        assert_eq!(irregular_cast.product.as_deref(), Some("@ud"));
+
+        let wet = signature_of("  |*  a=*  ^-  (list _a)  ~[a]\n").expect("wet gate");
+        assert_eq!(wet.rune, Some("|*"));
+        assert_eq!(wet.sample.as_deref(), Some("a=*"));
+        assert_eq!(wet.product.as_deref(), Some("(list _a)"));
+
+        let multiline = signature_of(concat!(
+            "\n  |=  $:  a=@        ::  the count\n", "          b=(list @)  ::  the items\n",
+            "      ==\n", "  ^-  (unit @)\n", "  ~\n",
+        ));
+        let multiline = multiline.expect("tall sample");
+        assert_eq!(
+            multiline.sample.as_deref(),
+            Some("[a=@ b=(list @)]"),
+            "a tall `$:` sample renders as the tuple it denotes"
+        );
+        assert_eq!(multiline.product.as_deref(), Some("(unit @)"));
+        let nested = signature_of(concat!(
+            "\n  |=  $:  kind=$?(%a %b)\n", "          $%  [%x p=@]\n", "              [%y q=@]\n",
+            "          ==\n", "          $:  c=@\n", "              d=@\n", "          ==\n",
+            "      ==\n", "  kind\n",
+        ))
+        .expect("nested tall sample");
+        assert_eq!(
+            nested.sample.as_deref(),
+            Some("[kind=$?(%a %b) $%([%x p=@] [%y q=@]) [c=@ d=@]]")
+        );
+        assert_eq!(nested.product, None);
+        assert_eq!(
+            signature_of("\n  |=  $:  a=@\n  a\n"),
+            None,
+            "an unterminated tall sample is declined"
+        );
+        let bracketed = signature_of(concat!(
+            "\n  |=  [ a=@       ::  the count\n", "        b=(list @) ::  the items\n",
+            "      ]\n", "  ^-  (unit @)\n", "  ~\n",
+        ))
+        .expect("multi-line sample");
+        assert_eq!(bracketed.sample.as_deref(), Some("[a=@ b=(list @)]"));
+        assert_eq!(bracketed.product.as_deref(), Some("(unit @)"));
+    }
+
+    #[test]
+    fn arm_signatures_cover_doors_traps_values_and_cores() {
+        let door =
+            signature_of("\n  |_  [n=@ items=(list @)]\n  ++  size  n\n  --\n").expect("door");
+        assert_eq!(door.shape, ArmShape::Door);
+        assert_eq!(door.sample.as_deref(), Some("[n=@ items=(list @)]"));
+        assert_eq!(door.product, None);
+        assert_eq!(door.product_offset, None);
+
+        let trap = signature_of("\n  |-  ^-  @ud\n  42\n").expect("trap");
+        assert_eq!(trap.shape, ArmShape::Trap);
+        assert_eq!(trap.rune, Some("|-"));
+        assert_eq!(trap.sample, None);
+        assert_eq!(trap.product.as_deref(), Some("@ud"));
+
+        let value = signature_of("  %1\n").expect("value arm");
+        assert_eq!(value.shape, ArmShape::Value);
+        assert_eq!(value.rune, None);
+        assert_eq!(
+            &"++  name  %1\n"[value.product_offset.expect("product offset") as usize..],
+            "%1\n"
+        );
+
+        assert_eq!(
+            signature_of("\n  |%\n  ++  inner  1\n  --\n"),
+            None,
+            "cores have no signature"
+        );
+        assert_eq!(
+            signature_of("\n  ::  only a comment\n"),
+            None,
+            "empty bodies have none"
+        );
+        let commented =
+            signature_of("  ::  leading note\n  |=  a=@  a\n").expect("comment skipped");
+        assert_eq!(commented.sample.as_deref(), Some("a=@"));
+    }
 
     const SOURCE: &str = "|%\n++  answer\n  42\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
 

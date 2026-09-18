@@ -27,6 +27,37 @@ unambiguous imported molds and standard-library symbols. Safe structural rename
 can edit unopened configured sources and declines ambiguous, colliding, or
 capturing changes.
 
+Every `++` arm and `+$` mold shows a reference-count code lens above its
+header. Clicking it opens the references peek. Counts exclude the declaration
+and use the same resolution as Shift+F12: compiler-resolved within the latest
+successfully checked import graph, structural otherwise, and the lens reads
+"references unavailable" when the declaration is ambiguous. Lenses are counted
+lazily for the visible part of the editor and recounted after each compiler
+check.
+
+Arms that open with a gate, door, or trap rune can also show a signature lens,
+such as `|=  [e=env:typ t=typ:typ h=hair]  ^-  *`. It is read from the source:
+Hoon types are structural, so after checking, `tape`, `(list @)`, and
+`typ:typ` are all anonymous, and the specs written in `|=` and `^-` are the
+only readable signature an arm has. Tall `$:` samples render as the tuple they
+denote. By default (`honk.codeLens.signatures` is `novel`) the lens appears
+only when it adds something the lines under the header do not: a sample or
+product that spans several lines or is pushed down by a comment block, or a
+product the source leaves implicit that the compiler could infer. A gate whose
+`|=` and `^-` sit directly under its header gets no lens, since restating them
+one line higher helps nobody. `always` shows every signature and `off` none.
+When an arm leaves its product implicit, `honk.codeLens.inferredTypes` fills it
+in from the compiler only when the inferred type is concrete (atoms, cells,
+nouns); products that are gate calls or lists are lazy `%hold` types in the
+compiler and stay omitted rather than shown as placeholders.
+
+The `honk.codeLens.*` settings retune lenses without restarting the server:
+`references` toggles the counts, `signatures` is `off`, `novel`, or `always`,
+`signatureStyle` chooses between the runes as written (`hoon`) and
+`sample -> product` (`arrow`), and `signatureMaxLength` truncates long
+signatures. VS Code's `editor.codeLens` setting turns all lenses off; scope it
+to Hoon with `"[hoon]": { "editor.codeLens": false }`.
+
 ## Development setup
 
 From the nockchain repository root:

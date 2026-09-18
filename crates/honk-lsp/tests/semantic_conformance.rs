@@ -14,8 +14,8 @@ use lsp_types::notification::{
 };
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionResponse, DidOpenTextDocumentParams,
-    DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location, PrepareRenameResponse,
-    TextDocumentItem, Uri, WorkspaceEdit,
+    DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location,
+    PrepareRenameResponse, TextDocumentItem, Uri, WorkspaceEdit,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -176,6 +176,32 @@ fn start_server_with_dependencies(
     dependencies: &Path,
     check_delay_ms: u64,
 ) -> (Connection, std::thread::JoinHandle<anyhow::Result<()>>) {
+    start_server_with_capabilities(root, dependencies, check_delay_ms, json!({}))
+}
+
+/// Wait for a server-initiated request, discarding unrelated traffic.
+fn receive_request(client: &Connection, method: &str) -> Request {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let message = client
+            .receiver
+            .recv_timeout(remaining)
+            .unwrap_or_else(|_| panic!("server did not send {method}"));
+        if let Message::Request(request) = message {
+            if request.method == method {
+                return request;
+            }
+        }
+    }
+}
+
+fn start_server_with_capabilities(
+    root: &Path,
+    dependencies: &Path,
+    check_delay_ms: u64,
+    capabilities: Value,
+) -> (Connection, std::thread::JoinHandle<anyhow::Result<()>>) {
     let (server, client) = Connection::memory();
     let server_thread = std::thread::spawn({
         let root = root.to_path_buf();
@@ -207,7 +233,7 @@ fn start_server_with_dependencies(
                 json!({
                     "processId": null,
                     "rootUri": root_url,
-                    "capabilities": {},
+                    "capabilities": capabilities,
                     "workspaceFolders": [{ "uri": root_url, "name": "nockchain" }]
                 }),
             )
@@ -216,6 +242,10 @@ fn start_server_with_dependencies(
         .expect("send initialize");
     let initialize = receive_response(&client, 1);
     assert_eq!(initialize["capabilities"]["documentSymbolProvider"], true);
+    assert_eq!(
+        initialize["capabilities"]["codeLensProvider"]["resolveProvider"],
+        true
+    );
     assert_eq!(initialize["capabilities"]["hoverProvider"], true);
     assert_eq!(initialize["capabilities"]["definitionProvider"], true);
     assert_eq!(initialize["capabilities"]["referencesProvider"], true);
@@ -409,6 +439,98 @@ fn document_symbols_hover_and_definition_use_current_unsaved_snapshot() {
     assert_eq!(definition.range.start.character, 2);
 
     shutdown_server(&client, server_thread, definition_request_id + 1);
+}
+
+/// Hover at `line`/`character` until the compiler's inferred type arrives,
+/// and return that type's summary.
+fn inferred_type_summary(
+    client: &Connection,
+    request_id: &mut i32,
+    uri: &Uri,
+    line: u32,
+    character: u32,
+) -> String {
+    const MARKER: &str = "Inferred type: **`";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        *request_id += 1;
+        client
+            .sender
+            .send(
+                Request::new(
+                    RequestId::from(*request_id),
+                    "textDocument/hover".to_string(),
+                    json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": line, "character": character }
+                    }),
+                )
+                .into(),
+            )
+            .expect("request inferred-type hover");
+        let hover = serde_json::from_value::<Option<Hover>>(receive_response(client, *request_id))
+            .expect("inferred-type hover response");
+        if let Some(hover) = hover {
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("hover must be markdown");
+            };
+            if let Some(start) = markup.value.find(MARKER) {
+                let summary = &markup.value[start + MARKER.len()..];
+                let end = summary
+                    .find("`**")
+                    .expect("inferred type closes its code span");
+                return summary[..end].to_string();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "compiler-owned inferred type at {line}:{character} did not become available"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// The compiler types a mold reference and a gate call as lazy holds; the
+/// printer names them from syntax instead of showing `%hold`.
+#[test]
+fn hover_names_mold_references_and_gate_call_products() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let entry = temp.path().join("holds.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = file_uri(&entry);
+    let source = concat!(
+        "|%\n", "+$  kernel-state  [%state version=%1]\n",
+        "++  moat  |=(x=kernel-state (add 1 version.x))\n", "++  greet  |=(t=tape (crip t))\n",
+        "++  boxed  |=(x=@ `(unit @)`[~ x])\n", "++  again  |=(y=kernel-state (moat y))\n", "--\n",
+    );
+    let (client, server_thread) = start_server(&root, 0);
+    open_document(&client, &entry_uri, 1, source);
+    let mut request_id = 1;
+    let inferred = |request_id: &mut i32, line: u32, character: u32| {
+        inferred_type_summary(&client, request_id, &entry_uri, line, character)
+    };
+
+    // A mold reference: `kernel-state` in a sample spec is a hold on the
+    // mold's normalizing gate, and the sample's face carries the name.
+    assert_eq!(inferred(&mut request_id, 2, 18), "kernel-state");
+    assert_eq!(inferred(&mut request_id, 2, 13), "x=kernel-state");
+    // The prelude's `tape`, both as the written spec and as the leg it
+    // binds, which has no spec of its own at the use site.
+    assert_eq!(inferred(&mut request_id, 3, 17), "tape");
+    assert_eq!(inferred(&mut request_id, 3, 27), "tape");
+    // A gate call is a hold on the gate's `$` arm, named by the cast its
+    // body makes: `++add` ends in `^-  @`, `++crip` in `` `@t` ``.
+    assert_eq!(inferred(&mut request_id, 2, 28), "@");
+    assert_eq!(inferred(&mut request_id, 3, 21), "@t");
+    // The gate itself, referenced by name, is the arm the hold fires.
+    assert_eq!(inferred(&mut request_id, 2, 30), "add");
+    // A written cast to a mold call keeps the call as written.
+    assert_eq!(inferred(&mut request_id, 4, 19), "(unit @)");
+    // A call to a gate whose body has no cast is only known by its head.
+    assert_eq!(inferred(&mut request_id, 5, 29), "(moat …)");
+
+    shutdown_server(&client, server_thread, request_id + 1);
 }
 
 #[test]
@@ -1082,6 +1204,324 @@ fn bare_names_skip_arms_nested_in_wildcard_imports_and_reach_the_prelude() {
     }
 
     shutdown_server(&client, server_thread, request_id);
+}
+
+fn open_document(client: &Connection, uri: &Uri, version: i32, source: &str) {
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        uri.clone(),
+                        "hoon".to_string(),
+                        version,
+                        source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("send didOpen");
+}
+
+fn request_code_lenses(client: &Connection, request_id: i32, uri: &Uri) -> Vec<Value> {
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "textDocument/codeLens".to_string(),
+                json!({ "textDocument": { "uri": uri } }),
+            )
+            .into(),
+        )
+        .expect("request code lenses");
+    let lenses = receive_response(client, request_id);
+    lenses
+        .as_array()
+        .unwrap_or_else(|| panic!("code lenses must be an array, got {lenses}"))
+        .clone()
+}
+
+fn resolve_code_lens(client: &Connection, request_id: i32, lens: &Value) -> Response {
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "codeLens/resolve".to_string(),
+                lens.clone(),
+            )
+            .into(),
+        )
+        .expect("resolve code lens");
+    receive_response_message(client, request_id)
+}
+
+fn resolved_lens(response: Response) -> Value {
+    let ResponseKind::Ok { result } = response.response_kind else {
+        panic!("code lens resolve failed: {:?}", response.response_kind);
+    };
+    result
+}
+
+/// Every `++` and `+$` header gets one lens on its declared name. The source
+/// compiles cleanly so the compiler-resolved and structural paths can be
+/// compared on the same text.
+const LENS_SOURCE: &str = concat!(
+    "|%\n", "+$  kernel-state  [%state version=%1]\n",
+    "++  moat  |=(x=kernel-state (add 1 version.x))\n", "++  lonely  ~\n", "--\n",
+);
+
+fn configure_code_lenses(client: &Connection, settings: Value) {
+    client
+        .sender
+        .send(
+            Notification::new(
+                "workspace/didChangeConfiguration".to_string(),
+                json!({ "settings": { "honk": { "codeLens": settings } } }),
+            )
+            .into(),
+        )
+        .expect("send didChangeConfiguration");
+}
+
+/// Split a lens response into reference-count lenses (unresolved, carrying
+/// data) and signature lenses (resolved on delivery, no data).
+fn split_lenses(lenses: &[Value]) -> (Vec<Value>, Vec<Value>) {
+    let (counts, signatures): (Vec<Value>, Vec<Value>) = lenses
+        .iter()
+        .cloned()
+        .partition(|lens| lens.get("data").is_some());
+    for signature in &signatures {
+        assert_eq!(
+            signature["command"]["command"], "",
+            "signature lenses are informational: {signature}"
+        );
+        assert!(signature["command"]["title"]
+            .as_str()
+            .is_some_and(|title| !title.is_empty()));
+    }
+    (counts, signatures)
+}
+
+fn assert_lens_layout(lenses: &[Value], version: i32) {
+    let names = [(1, 4, 16), (2, 4, 8), (3, 4, 10)];
+    assert_eq!(lenses.len(), names.len(), "lenses: {lenses:?}");
+    for (lens, (line, start, end)) in lenses.iter().zip(names) {
+        assert_eq!(
+            lens["range"]["start"],
+            json!({ "line": line, "character": start })
+        );
+        assert_eq!(
+            lens["range"]["end"],
+            json!({ "line": line, "character": end })
+        );
+        assert!(
+            lens.get("command").is_none(),
+            "lenses must be delivered unresolved: {lens}"
+        );
+        assert_eq!(lens["data"]["version"], version);
+        assert!(lens["data"]["offset"].is_u64());
+        assert!(lens["data"]["uri"]
+            .as_str()
+            .is_some_and(|uri| uri.starts_with("file://")));
+    }
+}
+
+fn assert_kernel_state_lens(lens: &Value, entry_uri: &Uri) {
+    let command = &lens["command"];
+    assert_eq!(command["title"], "1 reference");
+    assert_eq!(command["command"], "honk.showReferences");
+    let arguments = command["arguments"].as_array().expect("command arguments");
+    assert_eq!(arguments.len(), 3);
+    assert_eq!(arguments[0], json!(entry_uri));
+    assert_eq!(arguments[1], json!({ "line": 1, "character": 4 }));
+    let locations =
+        serde_json::from_value::<Vec<Location>>(arguments[2].clone()).expect("locations");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].uri, *entry_uri);
+    assert_eq!(locations[0].range.start.line, 2);
+    assert_eq!(locations[0].range.start.character, 15);
+    assert_eq!(locations[0].range.end.character, 27);
+}
+
+#[test]
+fn code_lenses_resolve_reference_counts_lazily_and_reject_stale_lenses() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let entry = temp.path().join("lens-entry.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = file_uri(&entry);
+    let (client, server_thread) = start_server(&root, 0);
+    // Written specs only, so the titles do not depend on when the check lands,
+    // and shown unconditionally so a one-line gate keeps its lens here.
+    configure_code_lenses(
+        &client,
+        json!({ "inferredTypes": false, "signatures": "always" }),
+    );
+    open_document(&client, &entry_uri, 1, LENS_SOURCE);
+
+    let (lenses, signatures) = split_lenses(&request_code_lenses(&client, 2, &entry_uri));
+    assert_lens_layout(&lenses, 1);
+    assert_eq!(
+        signatures.len(),
+        1,
+        "only the gate arm has a written signature: {signatures:?}"
+    );
+    assert_eq!(signatures[0]["command"]["title"], "|=  x=kernel-state");
+    assert_eq!(
+        signatures[0]["range"]["start"],
+        json!({ "line": 2, "character": 0 })
+    );
+    assert_eq!(
+        signatures[0]["range"]["end"],
+        json!({ "line": 2, "character": 8 })
+    );
+
+    let kernel_state = resolved_lens(resolve_code_lens(&client, 3, &lenses[0]));
+    assert_kernel_state_lens(&kernel_state, &entry_uri);
+    assert_eq!(kernel_state["range"], lenses[0]["range"]);
+    assert_eq!(kernel_state["data"], lenses[0]["data"]);
+
+    let lonely = resolved_lens(resolve_code_lens(&client, 4, &lenses[2]));
+    assert_eq!(lonely["command"]["title"], "0 references");
+    assert_eq!(lonely["command"]["arguments"][2], json!([]));
+
+    // Resolving an already resolved lens is idempotent.
+    let again = resolved_lens(resolve_code_lens(&client, 5, &kernel_state));
+    assert_eq!(again, kernel_state);
+
+    // A lens computed for an older version must not be resolved against the
+    // new text: its byte offset may point anywhere now.
+    client
+        .sender
+        .send(
+            Notification::new(
+                "textDocument/didChange".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri, "version": 2 },
+                    "contentChanges": [{ "text": format!("::  edited\n{LENS_SOURCE}") }]
+                }),
+            )
+            .into(),
+        )
+        .expect("send didChange");
+    let stale = resolve_code_lens(&client, 6, &lenses[0]);
+    let ResponseKind::Err { error } = stale.response_kind else {
+        panic!("a stale lens must be rejected");
+    };
+    assert_eq!(error.code, ErrorCode::ContentModified as i32);
+
+    let (lenses, _) = split_lenses(&request_code_lenses(&client, 7, &entry_uri));
+    assert_lens_layout(
+        &lenses
+            .iter()
+            .map(|lens| {
+                let line = |edge: &str| {
+                    lens["range"][edge]["line"]
+                        .as_i64()
+                        .unwrap_or_else(|| panic!("lens range has a {edge} line: {lens}"))
+                };
+                let mut shifted = lens.clone();
+                shifted["range"]["start"]["line"] = json!(line("start") - 1);
+                shifted["range"]["end"]["line"] = json!(line("end") - 1);
+                shifted
+            })
+            .collect::<Vec<_>>(),
+        2,
+    );
+
+    shutdown_server(&client, server_thread, 8);
+}
+
+#[test]
+fn code_lens_refresh_follows_compiler_checks() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let entry = temp.path().join("lens-refresh.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = file_uri(&entry);
+    let (client, server_thread) = start_server_with_capabilities(
+        &root,
+        &root.join("hoon"),
+        0,
+        json!({ "workspace": { "codeLens": { "refreshSupport": true } } }),
+    );
+    open_document(&client, &entry_uri, 1, LENS_SOURCE);
+
+    // The check completes, the resolution facts change, and the server asks
+    // the editor to re-request lenses.
+    let refresh = receive_request(&client, "workspace/codeLens/refresh");
+    client
+        .sender
+        .send(Response::new_ok(refresh.id, Value::Null).into())
+        .expect("acknowledge refresh");
+
+    // Compiler-resolved and structural counts agree for the same symbol.
+    let (lenses, signatures) = split_lenses(&request_code_lenses(&client, 2, &entry_uri));
+    assert_lens_layout(&lenses, 1);
+    let kernel_state = resolved_lens(resolve_code_lens(&client, 3, &lenses[0]));
+    assert_kernel_state_lens(&kernel_state, &entry_uri);
+    let moat = resolved_lens(resolve_code_lens(&client, 4, &lenses[1]));
+    assert_eq!(moat["command"]["title"], "0 references");
+
+    // With the check done, implicit products come from the compiler when they
+    // are concrete: `lonely` is the null atom, which is news, so it gets a
+    // lens. `moat`'s product is a gate call, which the compiler records as a
+    // lazy hold on `++add` and names by the `^-  @` that arm's body casts
+    // to; that is news too, so its signature is restated with the product.
+    let titles = signatures
+        .iter()
+        .map(|lens| {
+            lens["command"]["title"]
+                .as_str()
+                .expect("title")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        ["|=  x=kernel-state  ^-  @", "^-  @n"],
+        "signature lenses: {signatures:?}"
+    );
+
+    // Settings retune the lenses without a restart: the server asks for a
+    // refresh and the next request reflects the new style.
+    configure_code_lenses(
+        &client,
+        json!({
+            "references": false,
+            "signatures": "always",
+            "signatureStyle": "arrow",
+            "signatureMaxLength": 16
+        }),
+    );
+    let refresh = receive_request(&client, "workspace/codeLens/refresh");
+    client
+        .sender
+        .send(Response::new_ok(refresh.id, Value::Null).into())
+        .expect("acknowledge refresh");
+    let (lenses, signatures) = split_lenses(&request_code_lenses(&client, 5, &entry_uri));
+    assert!(lenses.is_empty(), "reference counts are off: {lenses:?}");
+    let titles = signatures
+        .iter()
+        .map(|lens| {
+            lens["command"]["title"]
+                .as_str()
+                .expect("title")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        ["x=kernel-s… -> @", "-> @n"],
+        "an over-long signature loses sample detail, not its product"
+    );
+
+    shutdown_server(&client, server_thread, 6);
 }
 
 #[test]
