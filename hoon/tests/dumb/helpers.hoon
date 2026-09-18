@@ -1121,7 +1121,7 @@
 ++  grpc-wire  `path`/poke/grpc/1
 ::
 ::  the wire the libp2p driver stamps on a tx a peer gossiped to us (cf.
-::  +Libp2pWire in the rust nockchain-libp2p-io crate: source %libp2p,
+::  +P2pWire in the Rust nockchain-network crate: source %libp2p,
 ::  version 1, tags [verb %peer-id <base58 peer id>]). +heard-tx must NOT
 ::  re-gossip a tx it already holds when it arrives on this wire.
 ++  libp2p-gossip-wire  `path`/poke/libp2p/1/gossip/peer-id/peer

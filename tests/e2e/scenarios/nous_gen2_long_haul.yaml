@@ -17,9 +17,6 @@ nodes:
     fakenet_log_difficulty: 1
     fakenet_v1_phase: 3
     no_default_peers: true
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "miner-b"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -34,9 +31,6 @@ nodes:
     peer_from:
       - node: "miner-a"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "full-a"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -51,9 +45,6 @@ nodes:
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
       - node: "miner-b"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "full-b"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -70,9 +61,6 @@ nodes:
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
       - node: "full-a"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "full-c"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -91,9 +79,6 @@ nodes:
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
       - node: "full-b"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_3}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "full-d"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -112,9 +97,6 @@ nodes:
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_3}/quic-v1"
       - node: "full-c"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_4}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "full-e"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -133,9 +115,6 @@ nodes:
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_4}/quic-v1"
       - node: "full-d"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_5}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
 steps:
   - action: start_nodes

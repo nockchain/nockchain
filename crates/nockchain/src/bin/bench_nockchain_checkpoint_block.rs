@@ -15,10 +15,10 @@ use nockapp::save::{CheckpointBootstrapReader, SaveableCheckpoint};
 use nockapp::utils::make_tas;
 use nockapp::wire::Wire;
 use nockapp::{AtomExt, NockApp, NockAppError};
-use nockchain_libp2p_io::driver::Libp2pWire;
-use nockchain_libp2p_io::tip5_util::tip5_hash_to_base58_stack;
 use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::structs::HoonMapIter;
+use nockchain_network::driver::P2pWire;
+use nockchain_network::tip5_util::tip5_hash_to_base58_stack;
 use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D, SIG};
 use nockvm_macros::tas;
 use tempfile::{Builder, TempDir};
@@ -200,7 +200,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let preload_start = Instant::now();
         for fact in raw_tx_facts {
             let _ = target
-                .poke(Libp2pWire::Gossip(PeerId::random()).to_wire(), fact)
+                .poke(P2pWire::Gossip(PeerId::random()).to_wire(), fact)
                 .await?;
         }
         info!(
@@ -220,7 +220,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let poke_start = Instant::now();
     let effects = target
-        .poke(Libp2pWire::Gossip(PeerId::random()).to_wire(), fact_poke)
+        .poke(P2pWire::Gossip(PeerId::random()).to_wire(), fact_poke)
         .await?;
     let poke_wall = poke_start.elapsed();
 

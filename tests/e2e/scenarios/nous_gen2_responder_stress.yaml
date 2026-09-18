@@ -40,8 +40,6 @@ nodes:
     fakenet_v1_phase: 3
     no_default_peers: true
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -62,8 +60,6 @@ nodes:
       - node: "miner-a"
         listen: "/ip4/127.0.0.1/udp/4501/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -84,8 +80,6 @@ nodes:
       - node: "responder-a"
         listen: "/ip4/127.0.0.1/udp/4502/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -106,8 +100,6 @@ nodes:
       - node: "responder-a"
         listen: "/ip4/127.0.0.1/udp/4502/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -128,8 +120,6 @@ nodes:
       - node: "responder-a"
         listen: "/ip4/127.0.0.1/udp/4502/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"
@@ -150,8 +140,6 @@ nodes:
       - node: "responder-a"
         listen: "/ip4/127.0.0.1/udp/4502/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
       RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
       NO_COLOR: "1"

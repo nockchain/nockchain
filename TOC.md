@@ -20,7 +20,7 @@ This guide lists the Rust crates in the open workspace and briefly explains what
 | `nockchain` | `open/crates/nockchain` | Main Nockchain node binary and application wiring. |
 | `nockchain-api` | `open/crates/nockchain-api` | Public API types and helpers for interacting with Nockchain. |
 | `nockchain-explorer-tui` | `open/crates/nockchain-explorer-tui` | Terminal UI for exploring Nockchain state. |
-| `nockchain-libp2p-io` | `open/crates/nockchain-libp2p-io` | libp2p networking IO support for Nockchain. |
+| `nockchain-network` | `open/crates/nockchain-network` | Transport-neutral networking core with libp2p and direct-only Iroh backends. |
 | `nockchain-math` | `open/crates/nockchain-math` | Shared math, numeric, and proof-related helpers. |
 | `nockchain-peek` | `open/crates/nockchain-peek` | CLI/tooling for peeking Nockchain state. |
 | `nockchain-types` | `open/crates/nockchain-types` | Shared Nockchain domain types, JAM fixtures, and serialization helpers. |

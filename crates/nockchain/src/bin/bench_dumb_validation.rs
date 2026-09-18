@@ -48,10 +48,10 @@ use nockapp::utils::make_tas;
 use nockapp::wire::{SystemWire, Wire};
 use nockapp::{AtomExt, NockApp, NockAppError};
 use nockchain::setup::{self, REALNET_GENESIS_MESSAGE};
-use nockchain_libp2p_io::driver::Libp2pWire;
-use nockchain_libp2p_io::tip5_util::tip5_hash_to_base58_stack;
 use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::structs::HoonMapIter;
+use nockchain_network::driver::P2pWire;
+use nockchain_network::tip5_util::tip5_hash_to_base58_stack;
 use nockchain_types::BlockchainConstants;
 use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D, SIG, T};
 use nockvm_macros::tas;
@@ -213,7 +213,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // genesis block
             target
                 .poke(
-                    Libp2pWire::Gossip(PeerId::random()).to_wire(),
+                    P2pWire::Gossip(PeerId::random()).to_wire(),
                     genesis.block_fact,
                 )
                 .await?;
@@ -269,12 +269,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let start = Instant::now();
         for tx_fact in block.tx_facts {
             target
-                .poke(Libp2pWire::Gossip(PeerId::random()).to_wire(), tx_fact)
+                .poke(P2pWire::Gossip(PeerId::random()).to_wire(), tx_fact)
                 .await?;
         }
         let result = target
             .poke(
-                Libp2pWire::Gossip(PeerId::random()).to_wire(),
+                P2pWire::Gossip(PeerId::random()).to_wire(),
                 block.block_fact,
             )
             .await;

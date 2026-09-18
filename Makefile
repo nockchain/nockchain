@@ -6,7 +6,7 @@ include .env
 
 # Set default env variables if not set in .env
 export RUST_BACKTRACE ?= full
-export RUST_LOG ?= info,nockchain=info,nockchain_libp2p_io=info,libp2p=info,libp2p_quic=info
+export RUST_LOG ?= info,nockchain=info,nockchain_network=info,libp2p=info,libp2p_quic=info,iroh=info
 export MINIMAL_LOG_FORMAT ?= true
 export MINING_PKH ?= 9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV
 export
