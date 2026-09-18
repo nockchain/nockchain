@@ -5,7 +5,7 @@ use crate::form::belt::Belt;
 use crate::form::felt::{fadd_, finv_, fmul_, fpow_, fsub_, Felt};
 use crate::form::math::prover::ProcessedDegrees;
 use crate::form::poly::{BPolySlice, FPolySlice};
-use crate::form::proof::{CountMap, MPUltraSlice, ProofMap};
+use crate::form::proof::{CountMap, MPUltraSlice};
 
 #[inline(always)]
 pub fn bpeval_lift_(bpoly: &[Belt], x: &Felt) -> Felt {
@@ -22,7 +22,7 @@ fn mpeval_mega_felt(
     args: &[Felt],
     chals: &[Belt],
     dyns: &[Belt],
-    com_map: Option<&ProofMap<usize, Felt>>,
+    com_map: Option<&[Felt]>,
 ) -> Felt {
     use crate::form::proof::ConstraintMegaTyp::*;
 
@@ -42,7 +42,7 @@ fn mpeval_mega_felt(
                 CON => continue,
                 COM => *com_map
                     .expect("composition dependencies are available")
-                    .get(&mega.idx)
+                    .get(mega.idx)
                     .expect("composition dependency exists"),
             };
             acc_inner = acc_inner * value.pow(mega.exp as usize);
@@ -199,10 +199,9 @@ pub fn mpeval_ultra_felt(
     match mp {
         MPUltraSlice::Mega(mp_mega) => vec![mpeval_mega_felt(&mp_mega.0, args, chals, dyns, None)],
         MPUltraSlice::Comp(mp_comp) => {
-            let mut deps: ProofMap<usize, Felt> = ProofMap::new();
-            for (i, dep) in mp_comp.dep.iter().enumerate() {
-                let res = mpeval_mega_felt(&dep.0, args, chals, dyns, None);
-                deps.insert(i, res);
+            let mut deps = Vec::with_capacity(mp_comp.dep.len());
+            for dep in &mp_comp.dep {
+                deps.push(mpeval_mega_felt(&dep.0, args, chals, dyns, None));
             }
 
             mp_comp
