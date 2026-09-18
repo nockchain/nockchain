@@ -8,6 +8,9 @@ nock_contract_address = "0x..."
 # Nockchain confirmations required before sequencer settlement observations are final.
 nockchain_confirmation_depth = 400
 
+# Must match every bridge node's versioned withdrawal policy.
+withdrawal_policy = "withdrawal-policy-v1"
+
 # Optional manual operator approval gate for authorized withdrawal submission.
 manual_submit_approval = false
 manual_submit_approval_dir = "/var/lib/nockchain-bridge-sequencer/withdrawal-approvals"
@@ -36,7 +39,7 @@ secret_access_key = "..."  # Prefer WITHDRAWAL_SEQUENCER_JOURNAL_OBJECT_STORE_SE
 [constants]
 min_signers = 3
 total_signers = 5
-minimum_event_nocks = 1000000
+minimum_event_nocks = 100000
 nicks_fee_per_nock = 195
 base_blocks_chunk = 100
 base_start_height = 33387036

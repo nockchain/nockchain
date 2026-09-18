@@ -2,7 +2,7 @@
 
 Status: Draft
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-05-06
+Last Reviewed: 2026-08-27
 
 This punchlist tracks release-blocking bridge launch checks that are easy to miss
 when moving from fakenet to mainnet.
@@ -31,7 +31,10 @@ when moving from fakenet to mainnet.
    - `MessageInbox.withdrawalsEnabled()` controls whether Base accepts new burns.
    - `withdrawal_processing_enabled` controls whether bridge nodes assemble,
      sign, exchange, and submit withdrawal proposals.
-   - Production readiness requires both controls to be enabled.
+   - Keep both gates false while recovery, monitoring, SDK, frontend, and
+     certification gates are incomplete.
+   - Enable both only during the controlled cutover after every bridge node and
+     the sequencer report the certified readiness frontier.
 
 ## Rendered Production Config
 
@@ -42,10 +45,12 @@ when moving from fakenet to mainnet.
    - `bridge_lock_root`
    - `inbox_contract_address`
    - `nock_contract_address`
+   - `base_chain_id`
    - `base_confirmation_depth`
    - `nockchain_confirmation_depth`
    - `withdrawal_processing_enabled`
    - `withdrawal_activation_nock_next_height`
+   - `withdrawal_policy = "withdrawal-policy-v1"`
    - all five `[[nodes]]` entries
 3. Confirm production values are not inherited from fakenet / bridge-dev.
    - No Base Sepolia, Tenderly VNET, localhost, or dev-only endpoints unless
@@ -54,6 +59,115 @@ when moving from fakenet to mainnet.
 4. Confirm secrets are injected from secret management.
    - Private keys and object-store credentials must not be committed in rendered
      configs or checked-in vars.
+
+## Withdrawal Contract Compatibility
+
+1. Confirm the production contract identity and configuration.
+   - Record Base chain id, `MessageInbox` proxy, `Nock` token, code hashes,
+     reciprocal pairing, owner, five signers, and threshold.
+2. Confirm the official SDK implements `WithdrawalWireV1`.
+   - Exact calldata length is 116 bytes.
+   - Bytes `68..76` are ASCII `NOCKWD1!`.
+   - Bytes `76..116` are the five unsigned 64-bit big-endian Tip5 limbs.
+   - Commitment vectors match
+     `test-fixtures/withdrawal_wire_v1_vectors.json` byte for byte.
+   - The published SDK version is immutable and installable without Git SSH
+     credentials or a moving branch.
+3. Confirm NockSwap exclusively uses the official codec.
+   - No generated `writeContract` call invokes
+     `burn(uint256,bytes32)`.
+   - The exact same raw calldata is locally decoded, simulated, gas-estimated,
+     and submitted.
+   - Account, chain, token, amount, or destination changes invalidate the
+     previous calldata.
+4. Confirm malformed-burn quarantine is operational.
+   - Every excluded `BurnForWithdrawal` persists one immutable
+     `sequencer_base_burn_rejections` row.
+   - Alerts include chain/deployment, tx hash, log index, `base_event_id`,
+     burner, amount, commitment, rejection code, and detail.
+   - A malformed burn followed by a valid burn must advance the scanner and
+     admit only the valid burn.
+   - Zero unresolved malformed-burn incidents remain at cutover.
+5. Confirm the compensation process is rehearsed.
+   - Ordinary 68-byte burns cannot be replayed because the destination is
+     absent.
+   - Governance and independent-verifier roles are assigned.
+   - Every compensation has an exact coordinate-validated config entry on all
+     bridge nodes and the sequencer.
+   - Sequencer startup persists those entries before Base scanning or RPC.
+   - Public lookup returns `COMPENSATED`; registration and Base recovery reject
+     the same identity before any compensation transfer.
+   - A compensated `base_event_id` cannot later enter withdrawal state.
+
+## NockSwap End-to-End Product Gate
+
+1. Pin NockSwap to one immutable, publicly fetchable Iris SDK release.
+   - The local `0.3.3` candidate is not a release until it is published and a
+     clean install resolves it without a sibling checkout, moving branch, or
+     Git SSH credentials.
+   - Run the published Rust parity vectors from the installed package.
+2. Keep the Base-to-Nockchain route flag disabled until every item in this
+   section passes together.
+   - A direction selector or Base wallet connection is not launch proof.
+   - Runtime/UI state manipulation must not bypass the same flag.
+3. Verify the exact client value boundary.
+   - User amount remains a decimal string plus bigint nicks/Base units.
+   - Unsupported nick precision is rejected before the wallet opens.
+   - Displayed, simulated, and encoded amounts are identical.
+4. Verify the Base transaction lifecycle.
+   - Resolve a v1 PKH or explicit lock root to one normalized five-limb value
+     and show it before confirmation.
+   - Self-validate one 116-byte payload and pass those exact bytes to simulation,
+     gas estimation, and raw submission.
+   - Wait for a successful Base receipt and verify the exact
+     `BurnForWithdrawal` log before entering `withdrawal_pending`.
+   - Persist chain id, tx hash, log index, `base_event_id`, amount, destination,
+     calldata identity, and timestamps before polling.
+5. Verify the public withdrawal lifecycle.
+   - Reload resumes the existing pending record and never offers an automatic
+     second burn.
+   - Poll only the public deployment-bound lookup/history API.
+   - Render success only after confirmed Nockchain settlement evidence.
+   - Delayed, invalidated, reorg-held, corrupt, and unavailable states provide
+     safe next action and support references.
+6. Verify fees against the submitted transaction.
+   - Estimate the exact 116-byte Base request.
+   - Include or explicitly disclose the OP Stack L1 data fee.
+   - Label Nockchain payout as an estimate until confirmed.
+7. Run browser E2E from Base wallet through reload to confirmed settlement.
+   - Assert exactly one burn and one payout.
+   - Assert ordinary/malformed ABI paths cannot be initiated.
+   - Record exact NockSwap, SDK, backend, contracts, policy, and deployment
+     revisions in the result.
+
+## Private Sequencer, Reorg, And Behavioral Gates
+
+1. Run private sequencer smoke from all five intended production bridge hosts.
+   - The intended private network or tunnel path must succeed.
+   - The public listener must not serve private `WithdrawalSequencer` methods.
+2. Certify confirmation assumptions and post-confirmation recovery.
+   - Lock the approved Base and Nockchain confirmation depths in every
+     production node; zero or reduced depths require a new safety review.
+   - Ordinary shallow forks are withheld from Hoon. The real-kernel mismatch
+     tests model history changing only after it crossed that buffer.
+   - A post-confirmation mismatch must stop every bridge, block sequencer
+     mutation/readiness, and trigger closure of the Base burn gate.
+   - Exercise the audited ancestor restore/rebuild, canonical replay, and Rust
+     reconciliation procedure. Automatic Hoon rewind is optional when this
+     procedure satisfies the same safety invariant.
+3. Keep the pinned Forge gate required on contract, decoder, fixture, or
+   withdrawal changes.
+   - The current required suite is 57 tests, including 13 withdrawal
+     compatibility/fail-closed tests and explicit 68-vs-116 behavior.
+   - Forge success does not imply Rust, Hoon, Anvil observer, R2, or browser
+     success.
+4. Run a deterministic nonignored local Anvil smoke using the exact published
+   SDK artifact and production Rust decoder.
+5. Run real-R2, real-chain restart, degraded-quorum, and reorg suites with
+   revision-bound redacted artifacts.
+6. Do not enable the on-chain gate or frontend flag while any P0, unresolved
+   malformed burn, unapproved compensation case, recovery hold, or proof gap
+   remains.
 
 ## R2 / Object-Store Journal Configuration
 
@@ -162,9 +276,12 @@ when moving from fakenet to mainnet.
 2. Confirm planner idle behavior when liquidity is unsafe or insufficient.
    - The bridge should wait and retry later, not construct spends from unsafe
      notes.
-3. Confirm withdrawal burn inputs are validated before users submit.
-   - Destination lock root must fit the Solidity `bytes32` withdrawal field.
-   - Amounts must satisfy minimum event and fee policy expectations.
+3. Confirm official withdrawal input validation before users submit.
+   - Destination parses to five bounded Tip5 limbs and serializes to 40 bytes.
+   - Amount satisfies `withdrawal-policy-v1`, including exact nick divisibility
+     and the inclusive 100,000-NOCK gross minimum.
+   - A current quote reports a positive estimated payout.
+   - Final 116-byte calldata passes local SDK decode/self-validation.
 
 ## Networking And Operations
 

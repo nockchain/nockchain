@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "protocol": "WithdrawalWireV1",
+  "constants": {
+    "commitment_domain": "nock-withdrawal-calldata-v1",
+    "calldata_length": 116,
+    "base_calldata_length": 68,
+    "trailer_magic_ascii": "NOCKWD1!",
+    "full_lock_root_length": 40,
+    "tip5_prime": "18446744069414584321",
+    "nock_base_units_per_nick": "152587890625"
+  },
+  "valid_vectors": [
+    {
+      "name": "minimum_inclusive",
+      "nock_token_address": "0x1111111111111111111111111111111111111111",
+      "burner_address": "0x2222222222222222222222222222222222222222",
+      "amount_base_units": "1000000000000000000000",
+      "lock_root_limbs": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "selector": "0xbcf64e05",
+      "commitment": "0x76bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab03231",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000076bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab032314e4f434b5744312100000000000000010000000000000002000000000000000300000000000000040000000000000005"
+    },
+    {
+      "name": "leading_zero_and_max_limb",
+      "nock_token_address": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+      "burner_address": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "amount_base_units": "1000000000152587890625",
+      "lock_root_limbs": [
+        "0",
+        "18446744069414584320",
+        "42",
+        "4294967296",
+        "99"
+      ],
+      "selector": "0xbcf64e05",
+      "commitment": "0xf463c089b4074b6f63e50a0552d584ff24743aa003042a94062a9a56d5727e90",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9ade965926fc1f463c089b4074b6f63e50a0552d584ff24743aa003042a94062a9a56d5727e904e4f434b574431210000000000000000ffffffff00000000000000000000002a00000001000000000000000000000063"
+    },
+    {
+      "name": "maximum_u64_nicks",
+      "nock_token_address": "0x0101010101010101010101010101010101010101",
+      "burner_address": "0xfefefefefefefefefefefefefefefefefefefefe",
+      "amount_base_units": "2814749767106559999847412109375",
+      "lock_root_limbs": [
+        "18446744069414584319",
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "selector": "0xbcf64e05",
+      "commitment": "0x991a7b8a2bfb015302153ce9bb5576b9f4968200de9cbff39262abd3f1ed19f0",
+      "calldata": "0xbcf64e05000000000000000000000000000000000000002386f26fc0ffffffdc790d903f991a7b8a2bfb015302153ce9bb5576b9f4968200de9cbff39262abd3f1ed19f04e4f434b57443121fffffffeffffffff0000000000000000000000000000000100000000000000020000000000000003"
+    }
+  ],
+  "amount_policy_vectors": [
+    {
+      "name": "zero",
+      "amount_base_units": "0",
+      "expected": "amount_not_positive"
+    },
+    {
+      "name": "one_nick_below_minimum",
+      "amount_base_units": "999999999847412109375",
+      "expected": "amount_below_minimum"
+    },
+    {
+      "name": "minimum_inclusive",
+      "amount_base_units": "1000000000000000000000",
+      "expected": "valid",
+      "amount_nicks": "6553600000",
+      "bridge_fee_nicks": "19500000",
+      "amount_after_bridge_fee_nicks": "6534100000"
+    },
+    {
+      "name": "minimum_plus_one_nick",
+      "amount_base_units": "1000000000152587890625",
+      "expected": "valid",
+      "amount_nicks": "6553600001",
+      "bridge_fee_nicks": "19500195",
+      "amount_after_bridge_fee_nicks": "6534099806"
+    },
+    {
+      "name": "one_base_unit_dust",
+      "amount_base_units": "1000000000000000000001",
+      "expected": "amount_not_divisible"
+    },
+    {
+      "name": "maximum_u64_nicks",
+      "amount_base_units": "2814749767106559999847412109375",
+      "expected": "valid",
+      "amount_nicks": "18446744073709551615",
+      "bridge_fee_nicks": "54887620458577920",
+      "amount_after_bridge_fee_nicks": "18391856453250973695"
+    },
+    {
+      "name": "overflow_u64_nicks",
+      "amount_base_units": "2814749767106560000000000000000",
+      "expected": "amount_overflow"
+    }
+  ],
+  "invalid_vectors": [
+    {
+      "name": "missing_trailer",
+      "base_vector": "minimum_inclusive",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000076bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab03231",
+      "expected_error": "missing_calldata_trailer"
+    },
+    {
+      "name": "wrong_selector",
+      "base_vector": "minimum_inclusive",
+      "calldata": "0xbdf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000076bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab032314e4f434b5744312100000000000000010000000000000002000000000000000300000000000000040000000000000005",
+      "expected_error": "malformed_calldata"
+    },
+    {
+      "name": "wrong_magic",
+      "base_vector": "minimum_inclusive",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000076bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab03231004f434b5744312100000000000000010000000000000002000000000000000300000000000000040000000000000005",
+      "expected_error": "malformed_calldata"
+    },
+    {
+      "name": "limb_equal_to_prime",
+      "base_vector": "minimum_inclusive",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000076bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab032314e4f434b57443121ffffffff000000010000000000000002000000000000000300000000000000040000000000000005",
+      "expected_error": "invalid_lock_root"
+    },
+    {
+      "name": "extra_trailing_byte",
+      "base_vector": "minimum_inclusive",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000076bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab032314e4f434b574431210000000000000001000000000000000200000000000000030000000000000004000000000000000500",
+      "expected_error": "malformed_calldata"
+    },
+    {
+      "name": "calldata_amount_mismatch",
+      "base_vector": "minimum_inclusive",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000176bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab032314e4f434b5744312100000000000000010000000000000002000000000000000300000000000000040000000000000005",
+      "expected_error": "calldata_amount_mismatch"
+    },
+    {
+      "name": "calldata_commitment_mismatch",
+      "base_vector": "minimum_inclusive",
+      "calldata": "0xbcf64e0500000000000000000000000000000000000000000000003635c9adc5dea0000077bdf80083f6c3ea86e4ddd4fd62c28d0400c1c783a1e5919afdd5e9cab032314e4f434b5744312100000000000000010000000000000002000000000000000300000000000000040000000000000005",
+      "expected_error": "calldata_commitment_mismatch"
+    }
+  ]
+}
