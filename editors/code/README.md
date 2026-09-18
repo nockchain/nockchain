@@ -69,10 +69,12 @@ npm ci
 npm test
 ```
 
-Open the repository in VS Code and install the extension from this directory or
-run its extension-development launch configuration. With an empty
-`honk.server.path`, the extension checks `target/release/honk-lsp`, then
-`target/debug/honk-lsp`, then `PATH`.
+`just build-honk-lsp` builds the server and `just vscode-install` packages the
+extension and installs it with the `code` CLI; reload the VS Code window
+afterwards. With an empty `honk.server.path`, the extension checks
+`target/release/honk-lsp`, then `target/debug/honk-lsp`, then `PATH`.
+`just install-honk` builds `honk` and `honk-lsp` and copies them into
+`~/.local/bin` so workspaces outside this repository find the server on `PATH`.
 
 The default repository layout resolves the dependency root to `hoon` and the
 prelude to `hoon/common/hoon.hoon`. Other projects can set

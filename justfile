@@ -19,6 +19,40 @@ npm-build:
     npm --prefix editors/code ci
     npm --prefix editors/code run package
 
+# Build the honk-lsp language server (the extension looks in target/release first).
+build-honk-lsp:
+    cargo build --release -p honk-lsp
+
+# Build honk and honk-lsp and install them into ~/.local/bin (for workspaces outside this repo).
+install-honk: build-honk build-honk-lsp
+    #!/usr/bin/env sh
+    set -eu
+    dest="${HOME}/.local/bin"
+    mkdir -p "$dest"
+    for bin in honk honk-lsp; do
+        # Remove first so the copy is a new file. Overwriting a running binary
+        # in place leaves macOS with a stale code-signature cache, and every
+        # later launch of it dies with SIGKILL.
+        rm -f "$dest/$bin"
+        cp "target/release/$bin" "$dest/$bin"
+        echo "installed $dest/$bin"
+    done
+    case ":${PATH}:" in
+        *":$dest:"*) ;;
+        *) echo "install-honk: $dest is not on PATH; add it so editors can find honk-lsp" >&2 ;;
+    esac
+
+# Package the VS Code extension and install it with the `code` CLI; reload VS Code afterwards.
+vscode-install: npm-build
+    #!/usr/bin/env sh
+    set -eu
+    if ! command -v code >/dev/null 2>&1; then
+        echo "vscode-install: the 'code' CLI is not on PATH; in VS Code run 'Shell Command: Install code command in PATH'" >&2
+        exit 1
+    fi
+    version=$(node -p "require('./editors/code/package.json').version")
+    code --install-extension "editors/code/honk-hoon-${version}.vsix" --force
+
 build-honk-assets: honc-cold-138-asset hoonc-octs-type-138-asset
 
 honc-cold-138-asset:
