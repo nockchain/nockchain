@@ -32,7 +32,7 @@ This spec focuses on:
 2. Nock-side settlement processing no longer intentionally rejects withdrawals:
    - `open/hoon/apps/bridge/nock.hoon`
    - arm: `++ nockchain-process-withdrawal-settlements`
-   - current behavior: reconciles settlements against tracked withdrawals by counterpart identity and destination, enforces `0 < settled_amount < burned_amount`, emits hold when referenced `as_of` base hash is unknown, stops on irreconcilable counterpart issues or out-of-bounds settlement amounts, and clears matched unsettled entries
+   - current behavior: reconciles settlements against tracked withdrawals by exact Base hash, batch-end height, counterpart identity, destination, and `0 < settled_amount < burned_amount`; unknown future Base hashes are deferred without blocking Nock progress; stale, cross-hash, duplicate-counterpart, or otherwise irreconcilable settlements stop; matched unsettled entries are cleared
 
 3. Base-side withdrawal proposal arm is now implemented:
    - `open/hoon/apps/bridge/base.hoon`
@@ -260,9 +260,12 @@ This spec focuses on:
     clears unsettled withdrawal state. Exact fee correctness remains a Rust
     proposal-validation concern. There is no dedicated `%withdrawal-terminal`
     effect on the current Rust bridge surface.
-24. If settlement references an unknown `as_of` base hash, hold logic blocks
-    advancement until that base hash is ingested. If `as_of` is known but
-    counterpart data is inconsistent/missing, processing stops.
+24. If settlement references an unknown future `as_of` Base hash, the kernel
+    persists it as a deferred dependency and continues Nock processing. The
+    referenced Base event ID must be globally unique across deferred hashes.
+    Once the claimed batch end is reached, the exact hash and counterpart must
+    reconcile; a stale hash, cross-hash counterpart, or inconsistent/missing
+    known counterpart stops before a new withdrawal request is persisted.
 
 ## Coordination Model
 
@@ -1081,10 +1084,12 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
      live/unconfirmed withdrawals, and confirmed settlements clear them
 2. Harden Base-side proposal generation in `++ base-propose-withdrawals` (already emitting `nock-withdrawal-request`) with queue semantics suitable for single-flight assembly/canonicalization.
 3. Harden withdrawal parsing path in `++ process-nock-txs` (already creating `withdrawal-settlement`) and close remaining schema/validation gaps.
-4. Finalize `++ nockchain-process-withdrawal-settlements` behavior in `open/hoon/apps/bridge/nock.hoon`:
-   - reconcile settlement against tracked unsettled withdrawals
-   - apply hold/stop semantics for out-of-order or inconsistent settlement
-   - tolerate sequencer retries of the same authorized tx without treating them as a second withdrawal
+4. Keep `++ nockchain-process-withdrawal-settlements` fail-closed:
+   - reconcile known settlements against the exact Base hash, batch-end height,
+     event ID, tracked unsettled withdrawal, destination, and amount bound
+   - defer only unknown future dependencies, without a global cross-chain hold
+   - stop stale, duplicate-counterpart, cross-hash, or inconsistent settlements
+     before mutating settlement state
 5. The dedicated `create-withdrawal-tx` poke/cause is the bridge-side tx
    builder seam.
    - it includes `epoch` and pinned
@@ -1283,11 +1288,17 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
    - after sequencer authorization, only the sequencer may submit or retry the same tx
    - if the sequencer is unavailable, withdrawals pause
 7. Unknown counterpart policy:
-   - if `as_of` base hash is unknown: set hold and wait for counterpart chain progress
-   - if `as_of` is known but counterpart event/state is missing: stop
+   - if `as_of` is unknown and `base_batch_end` has not been consumed, persist a
+     deferred dependency and continue Nock processing
+   - one Base event ID may appear in at most one deferred hash bucket
+   - if the Base cursor reaches `base_batch_end` without the exact `as_of`, or
+     the event appears under another hash, stop before emitting new work
+   - if `as_of` is known but its batch end, counterpart event, unsettled state,
+     destination, or amount bound is inconsistent, stop
 8. Any irreconcilable mismatch is a stop condition.
 9. No silent divergence:
-   - kernel withdrawal-state failures remain explicitly one of ignore, hold, or stop
+   - settlement reconciliation results are exactly defer, reconcile, or stop;
+     deferred dependencies do not globally hold either source-chain observer
    - Rust proposal-validation failures must be durably recorded and surfaced,
      not hidden as kernel state transitions
 10. At most one withdrawal may hold the assembly/canonicalization lock at a time for the bridge-controlled spend authority / note pool.
@@ -1300,13 +1311,17 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
 1. Burn event enters `unsettled-withdrawals`.
 2. Valid fee-bearing settlement with `0 < settled_amount < burned_amount`
    clears the corresponding unsettled entry.
-3. Settlement-before-counterpart sets hold and later resolves.
-4. Settlement with known `as_of` but missing counterpart triggers stop.
-5. Settlement with missing unsettled withdrawal triggers stop.
-6. Settlement with destination mismatch triggers stop.
-7. Settlement with `settled_amount <= 0` or `settled_amount >= burned_amount`
+3. Settlement-before-counterpart is deferred and later reconciles without a
+   duplicate proposal.
+4. A stale unknown `as_of` or a counterpart under a different hash triggers
+   stop before Base withdrawal persistence.
+5. Settlement with known `as_of` but a mismatched batch end or missing
+   counterpart triggers stop.
+6. Settlement with missing unsettled withdrawal triggers stop.
+7. Settlement with destination mismatch triggers stop.
+8. Settlement with `settled_amount <= 0` or `settled_amount >= burned_amount`
    triggers stop.
-8. Duplicate/replay settlement does not corrupt state.
+9. Duplicate/replay settlement does not corrupt state.
 
 ### Rust tests
 
@@ -1352,14 +1367,15 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
 4. Sequencer restart mid-flight preserves reservations, the in-flight withdrawal set, and the confirmed-withdrawal record, then resumes safely.
 5. Sequencer unavailability pauses withdrawal progress rather than failing over submission to peers.
 6. Conflicting later proposal for an already authorized withdrawal is treated as an invariant violation / stop.
-7. Simulated out-of-order Base/Nock arrival with hold release.
+7. Simulated out-of-order Base/Nock arrival with deferred reconciliation and cross-hash rejection.
 
 ## Remaining Policy Questions
 
 1. Fee model:
    - exact formula for withdrawal fee deduction and where it is applied
-2. Hold metadata requirements:
-   - whether base block height must be embedded in tx metadata for deterministic unblock behavior
+2. Deferred dependency observability:
+   - alert thresholds for unexpectedly old or numerous bridge-authorized
+     deferred settlements
 3. Whether single-flight policy should remain permanent, or only the current intended design
 
 ## Remaining Hardening Themes
@@ -1367,7 +1383,7 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
 1. Kernel hardening
    - keep kernel settlement reconciliation scoped to identity plus basic amount
      bounds while moving exact fee validation into Rust proposal acceptance
-   - keep hold/stop behavior deterministic
+   - keep defer/reconcile/stop behavior deterministic and observable
 2. Runtime and integration hardening
    - continue exercising multi-node proposal convergence, assembly failover,
      sequencer restart recovery, and reservation integrity
@@ -1383,7 +1399,7 @@ safe_nock_tip = max(0, current_nock_tip - nockchain_confirmation_depth)
    - `Assembling` rotates same-epoch pre-canonical handoff
    - `Prepared` expires the built attempt and advances replacement assembly to the next epoch
 4. If a tx becomes peer-canonical, only the sequencer may authorize and submit it.
-5. Out-of-order chain arrival is handled via deterministic hold behavior.
+5. Out-of-order chain arrival is handled by deterministic deferred reconciliation; stale or cross-hash dependencies stop.
 6. Submitted-but-unconfirmed withdrawal inputs are not reused for later withdrawal planning.
 7. Existing deposit pipeline remains unchanged and green.
 8. Integration tests cover nominal, sequencer-stop, restart, and note-reservation scenarios.

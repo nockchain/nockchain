@@ -25,7 +25,7 @@ use crate::observability::tui::types::{
     AlertSeverity, ChainState, NetworkState, NockchainApiStatus,
 };
 use crate::shared::errors::BridgeError;
-use crate::shared::runtime::{BridgeEvent, BridgeRuntimeHandle, ChainEvent, NockBlockEvent};
+use crate::shared::runtime::{BridgeRuntimeHandle, NockBlockEvent};
 use crate::shared::stop::StopHandle;
 use crate::shared::types::{NockchainTxsMap, Tx};
 use crate::withdrawal::snapshot::BridgeNoteSnapshotService;
@@ -307,11 +307,50 @@ fn decode_blockchain_constants_response(
     })
 }
 
-fn nock_block_still_waiting_for_kernel(
-    in_flight_height: Option<u64>,
-    next_needed_height: Option<u64>,
-) -> bool {
-    in_flight_height.is_some() && in_flight_height == next_needed_height
+#[async_trait]
+trait NockWatcherKernelPort: Send + Sync {
+    async fn peek_nock_hold(&self) -> Result<bool, BridgeError>;
+    async fn peek_nock_next_height(&self) -> Result<Option<u64>, BridgeError>;
+    async fn send_nock_block_and_wait(&self, block: NockBlockEvent) -> Result<(), BridgeError>;
+}
+
+#[async_trait]
+impl NockWatcherKernelPort for BridgeRuntimeHandle {
+    async fn peek_nock_hold(&self) -> Result<bool, BridgeError> {
+        BridgeRuntimeHandle::peek_nock_hold(self).await
+    }
+
+    async fn peek_nock_next_height(&self) -> Result<Option<u64>, BridgeError> {
+        BridgeRuntimeHandle::peek_nock_next_height(self).await
+    }
+
+    async fn send_nock_block_and_wait(&self, block: NockBlockEvent) -> Result<(), BridgeError> {
+        self.inject_nock_block_blocking(block).await.map(|_| ())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NockBlockDelivery {
+    Accepted,
+    Deferred,
+}
+
+async fn deliver_nock_block(
+    kernel: &(dyn NockWatcherKernelPort + Send + Sync),
+    event: NockBlockEvent,
+) -> Result<NockBlockDelivery, BridgeError> {
+    let height = event.block.height;
+    kernel.send_nock_block_and_wait(event).await?;
+    match kernel.peek_nock_next_height().await? {
+        Some(next_height) if next_height > height => Ok(NockBlockDelivery::Accepted),
+        Some(next_height) if next_height == height => Ok(NockBlockDelivery::Deferred),
+        Some(next_height) => Err(BridgeError::Runtime(format!(
+            "nock kernel next height regressed after block {height}: {next_height}"
+        ))),
+        None => Err(BridgeError::Runtime(format!(
+            "nock kernel next height disappeared after block {height}"
+        ))),
+    }
 }
 
 fn retain_hydratable_prefix(blocks: &mut Vec<NockBlockEvent>) -> Option<&mut NockBlockEvent> {
@@ -604,7 +643,7 @@ struct NockWatcherConnection {
 }
 
 struct NockWatcherDeps {
-    runtime: Arc<BridgeRuntimeHandle>,
+    runtime: Arc<dyn NockWatcherKernelPort>,
     stop: StopHandle,
     confirmed_snapshot: Option<Arc<BridgeNoteSnapshotService>>,
 }
@@ -839,7 +878,6 @@ impl NockchainWatcher {
             confirmation_depth = self.config.confirmation_depth,
             "starting nock observer with confirmation depth"
         );
-        let mut nock_block_in_flight: Option<u64> = None;
         let mut cached_tip_info: Option<NockTipInfo> = None;
         let mut tip_refreshed_at: Option<Instant> = None;
         let mut prefetched_blocks: VecDeque<NockBlockEvent> = VecDeque::new();
@@ -862,7 +900,6 @@ impl NockchainWatcher {
                 }
             };
             if nock_hold_active {
-                nock_block_in_flight = None;
                 prefetched_blocks.clear();
                 sleep(poll_interval).await;
                 continue;
@@ -880,18 +917,6 @@ impl NockchainWatcher {
                     continue;
                 }
             };
-
-            if nock_block_still_waiting_for_kernel(nock_block_in_flight, next_needed_height) {
-                let height = nock_block_in_flight.unwrap_or_default();
-                debug!(
-                    target: "bridge.nock-watcher",
-                    height,
-                    "nock block already enqueued, waiting for kernel height advance"
-                );
-                sleep(poll_interval).await;
-                continue;
-            }
-            nock_block_in_flight = None;
 
             let cached_tip_covers_next = tip_covers_next_confirmed_height(
                 cached_tip_info.as_ref(),
@@ -962,7 +987,6 @@ impl NockchainWatcher {
                     tip_height,
                     confirmed_target,
                 } => {
-                    nock_block_in_flight = None;
                     prefetched_blocks.clear();
                     debug!(
                         target: "bridge.nock-watcher",
@@ -1069,11 +1093,17 @@ impl NockchainWatcher {
                     let block_hash = event.block.digest.to_base58();
                     let confirmed_block_id = event.block.digest.clone();
                     let txs_count = event.txs.len();
-                    self.deps
-                        .runtime
-                        .send_event(BridgeEvent::Chain(Box::new(ChainEvent::Nock(event))))
-                        .await?;
-                    nock_block_in_flight = Some(height);
+                    let delivery = deliver_nock_block(self.deps.runtime.as_ref(), event).await?;
+                    if delivery == NockBlockDelivery::Deferred {
+                        warn!(
+                            target: "bridge.nock-watcher",
+                            height,
+                            "kernel did not advance after confirmed nock block; retrying"
+                        );
+                        prefetched_blocks.clear();
+                        sleep(poll_interval).await;
+                        continue;
+                    }
                     if let Some(snapshot_service) = &self.deps.confirmed_snapshot {
                         if txs_count == 0 {
                             snapshot_service.refresh_in_background();
@@ -1567,12 +1597,50 @@ mod tests {
         assert!(!base58.is_empty());
     }
 
-    #[test]
-    fn nock_in_flight_guard_waits_until_kernel_height_advances() {
-        assert!(nock_block_still_waiting_for_kernel(Some(7), Some(7)));
-        assert!(!nock_block_still_waiting_for_kernel(Some(7), Some(8)));
-        assert!(!nock_block_still_waiting_for_kernel(Some(7), None));
-        assert!(!nock_block_still_waiting_for_kernel(None, Some(7)));
+    struct RejectOnceKernel {
+        next_height: std::sync::Mutex<Option<u64>>,
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl NockWatcherKernelPort for RejectOnceKernel {
+        async fn peek_nock_hold(&self) -> Result<bool, BridgeError> {
+            Ok(false)
+        }
+
+        async fn peek_nock_next_height(&self) -> Result<Option<u64>, BridgeError> {
+            Ok(*self.next_height.lock().expect("next height mutex poisoned"))
+        }
+
+        async fn send_nock_block_and_wait(&self, block: NockBlockEvent) -> Result<(), BridgeError> {
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt > 0 {
+                *self.next_height.lock().expect("next height mutex poisoned") =
+                    Some(block.block.height + 1);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn nock_delivery_retries_after_transient_kernel_deferral() {
+        let kernel = RejectOnceKernel {
+            next_height: std::sync::Mutex::new(Some(7)),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let first = deliver_nock_block(&kernel, sample_block_event(7, false))
+            .await
+            .expect("first delivery");
+        assert_eq!(first, NockBlockDelivery::Deferred);
+
+        let second = deliver_nock_block(&kernel, sample_block_event(7, false))
+            .await
+            .expect("retried delivery");
+        assert_eq!(second, NockBlockDelivery::Accepted);
+        assert_eq!(kernel.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

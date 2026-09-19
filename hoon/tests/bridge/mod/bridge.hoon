@@ -208,14 +208,49 @@
         config.base
         constants.base
         [~ legacy-constants]
-        hash-state.base
+        *hash-state-2
         last-nock-deposit-height.base
         last-block.base
         stop.base
     ==
-  =/  loaded=bridge-state  (upgrade-pre-logos-state old)
+  =/  loaded=bridge-state-4  (upgrade-pre-logos-state old)
   ;:  weld
     (expect-eq !>(%4) !>(-.loaded))
     (expect-eq !>([~ current]) !>(nockchain-constants.loaded))
+  ==
+:::  Current persisted state upgrades without losing replay cursors or holds.
+++  test-upgrade-state-4-adds-deferred-settlement-maps
+  ^-  tang
+  =/  base=bridge-state  *bridge-state
+  =/  old-hash-state=hash-state-2  *hash-state-2
+  =.  nock-hold.old-hash-state  `[[0x1 0x2 0x3 0x4 0x5] 77]
+  =.  base-hold.old-hash-state  `[[0x6 0x7 0x8 0x9 0xa] 88]
+  =.  nock-hashchain-next-height.old-hash-state  99
+  =.  base-hashchain-next-height.old-hash-state  111
+  =/  old=bridge-state-4
+    :*  %4
+        config.base
+        constants.base
+        nockchain-constants.base
+        old-hash-state
+        last-nock-deposit-height.base
+        last-block.base
+        stop.base
+    ==
+  =/  loaded=bridge-state  (upgrade-deferred-settlement-state old)
+  ;:  weld
+    (expect-eq !>(%5) !>(-.loaded))
+  ::
+    (expect-eq !>(nock-hold.old-hash-state) !>(nock-hold.hash-state.loaded))
+  ::
+    (expect-eq !>(base-hold.old-hash-state) !>(base-hold.hash-state.loaded))
+  ::
+    (expect-eq !>(99) !>(nock-hashchain-next-height.hash-state.loaded))
+  ::
+    (expect-eq !>(111) !>(base-hashchain-next-height.hash-state.loaded))
+  ::
+    (expect !>(?=(~ deferred-deposit-settlements.hash-state.loaded)))
+  ::
+    (expect !>(?=(~ deferred-withdrawal-settlements.hash-state.loaded)))
   ==
 --

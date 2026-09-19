@@ -35,9 +35,32 @@
     ?>  ?=(%0 -.cause)
     ~&  %handle-cause
     ?:  ?=(%start +<.cause)
-      =/  msg=@t  'bridge stop state removed. resuming cause processing.'
+      =/  resumed=(unit bridge-state)
+        ?~  base-hold.hash-state.state
+          `state
+        =/  hold  u.base-hold.hash-state.state
+        ?:  (gte height.hold nock-hashchain-next-height.hash-state.state)
+          `state
+        ?:  (~(has z-by nock-hashchain.hash-state.state) hash.hold)
+          `state(base-hold.hash-state ~)
+        (repair-stale-base-hold:nock ~)
+      ?~  resumed
+        =/  msg=@t  'bridge start refused: stale base hold lineage could not be repaired'
+        =/  info=stop-info  (get-stop-info state)
+        ~>  %slog.[0 msg]
+        [[%0 %stop msg info]~ state(stop `info)]
+      =/  resume-base  ~(. base-lib u.resumed)
+      =/  reconciled=(unit bridge-state)
+        (reconcile-mainnet-pre-repair-deposit:resume-base ~)
+      ?~  reconciled
+        =/  msg=@t  'bridge start refused: finalized mainnet deposit could not be reconciled exactly'
+        =/  info=stop-info  (get-stop-info state)
+        ~>  %slog.[0 msg]
+        [[%0 %stop msg info]~ state(stop `info)]
+      =.  state  (resume-bridge-state u.reconciled)
+      =/  msg=@t  'bridge stop and recoverable legacy state reconciled. resuming cause processing.'
       ~>  %slog.[0 msg]
-      [~ state(stop ~)]
+      [~ state]
     ?^  stop.state
        =+  base-hash-b58=(to-b58:hash:t hash.base.u.stop.state)
        =+  nock-hash-b58=(to-b58:hash:t hash.nock.u.stop.state)
@@ -51,10 +74,6 @@
           ==
         ~>  %slog.[0 msg]
         [~ state]
-    ?:  ?&  ?=(^ base-hold.hash-state.state)
-            ?=(^ nock-hold.hash-state.state)
-        ==
-      [[%0 %stop 'fatal: hold on both nock and base detected' (get-stop-info state)]~ state]
     ::  virtualize the cause handler to catch crashes that may not have been caught.
     =;  result
       ?-    -.result
@@ -314,18 +333,25 @@
   ^-  bridge-state
   |^
   |-
-  ?:  ?=(%4 -.old)
+  ?:  ?=(%5 -.old)
     old
   ~>  %slog.[0 'bridge: +load state upgrade required']
   ?-  -.old
+    %4  $(old state-4-5)
     %3  $(old state-3-4)
     %2  $(old state-2-3)
     %1  $(old state-1-2)
     %0  $(old state-0-1)
   ==
   ::
-  ++  state-3-4
+  ++  state-4-5
     ^-  bridge-state
+    ?>  ?=(%4 -.old)
+    ~>  %slog.[0 'bridge: upgrade state %4 -> %5']
+    (upgrade-deferred-settlement-state old)
+  ::
+  ++  state-3-4
+    ^-  bridge-state-4
     ?>  ?=(%3 -.old)
     ~>  %slog.[0 'bridge: upgrade state %3 -> %4']
     (upgrade-pre-logos-state old)
@@ -341,8 +367,8 @@
           my-eth-key.config.old
           my-nock-key.config.old
       ==
-    =/  new-hash-state=hash-state
-      %*  .  *hash-state
+    =/  new-hash-state=hash-state-2
+      %*  .  *hash-state-2
           last-nock-block            last-nock-block.hash-state.old
           last-base-blocks           last-base-blocks.hash-state.old
           nock-hashchain             nock-hashchain.hash-state.old
@@ -490,13 +516,16 @@
       ``last
     ::
         [%nock-hashchain-deposits ~]
-      =/  blocks=(list [as-of=nock-hash block=nock-block])
-        ~(tap z-by nock-hashchain.hash-state.state)
-      =/  reqs=(list nock-deposit-request:effect)
-        %+  roll  blocks
-        |=  [[as-of=nock-hash block=nock-block] reqs=(list nock-deposit-request:effect)]
-        =/  dep-entries=(list [name=nname:t =deposit])
-          ~(tap z-by deposits.block)
+      =|  reqs=(list nock-deposit-request:effect)
+      =/  cur-hash=nock-hash  last-nock-block.hash-state.state
+      ?:  =(*hash:t cur-hash)
+        [~ ~]
+      |-
+      =/  block=nock-block
+        (~(got z-by nock-hashchain.hash-state.state) cur-hash)
+      =/  dep-entries=(list [name=nname:t =deposit])
+        ~(tap z-by deposits.block)
+      =.  reqs
         %+  roll  dep-entries
         |=  [[name=nname:t =deposit] reqs=_reqs]
         ?~  dest.deposit  reqs
@@ -506,10 +535,12 @@
             u.dest.deposit
             amount-to-mint.deposit
             height.block
-            as-of
+            cur-hash
         ==
-      ::  flop not required, but nice because it gives deposits in order of earliest to latest blocks
-      ``(flop reqs)
+      ?:  =(*hash:t prev.block)
+        ``(flop reqs)
+      =.  cur-hash  prev.block
+      $(reqs reqs)
     ::
         [%nock-hashchain-deposits-since-height start-height=@ta ~]
       =/  maybe-start  (rush start-height.pole dim:ag)

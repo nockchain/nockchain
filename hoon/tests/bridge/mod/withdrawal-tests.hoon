@@ -341,9 +341,10 @@
     (~(has z-bi unsettled-withdrawals.hash-state.new-state) as-of event-id)
   (expect !>(!has-unsettled))
 ::
-++  test-withdrawal-settlement-unknown-as-of-triggers-hold
+++  test-withdrawal-settlement-unknown-as-of-is-deferred
   ^-  tang
   =/  state=bridge-state  *bridge-state
+  =.  base-hashchain-next-height.hash-state.state  123
   =/  recipient=nock-lock-root  *hash:t
   =/  as-of=base-hash  [0x7 0x7 0x7 0x7 0x7]
   =/  settlement=withdrawal-settlement
@@ -355,18 +356,12 @@
   =/  nock  ~(. nock-lib state)
   =/  result=process-result
     (nockchain-process-withdrawal-settlements:nock latest)
-  ?>  ?=(%| -.result)
-  =/  fail=process-fail  +.result
-  ?>  ?=(%hold -.fail)
-  =/  hold=[hash=hash:t height=@]  hold.fail
+  ?>  ?=(%& -.result)
+  =/  new-state=bridge-state  p.result
   ;:  weld
-    %+  expect-eq
-      !>(as-of)
-    !>(hash.hold)
+    (expect !>((~(has z-bi deferred-withdrawal-settlements.hash-state.new-state) as-of nname.settlement)))
   ::
-    %+  expect-eq
-      !>(123)
-    !>(height.hold)
+    (expect !>(?=(~ nock-hold.hash-state.new-state)))
   ==
 ::
 ++  test-withdrawal-settlement-mismatch-stops
