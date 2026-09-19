@@ -136,8 +136,9 @@
     !>((~(has z-bi unsettled-deposits.hash-state.final) as-of name))
   ==
 ::
-::  The closed mainnet lineage range reconciles by its unique canonical note,
-::  while the same hash mismatch outside the immutable nonce range still stops.
+:::  The closed mainnet lineage range reconciles by its unique canonical note
+:::  even when the note's historical hashchain entry was already discarded.
+:::  The same hash mismatch outside the immutable nonce range still stops.
 ++  test-mainnet-pre-repair-deferred-lineage-range
   ^-  tang
   =/  state=bridge-state  *bridge-state
@@ -153,7 +154,7 @@
   =/  block=nock-block
     :*  %nock
         %0
-        146.586
+        48.015
         [0x231 0x232 0x233 0x234 0x235]
         deposits
         *(z-map nname:t withdrawal-settlement)
@@ -162,15 +163,17 @@
   =/  canonical-as-of=nock-hash  (hash:nock-block block)
   =/  historical-as-of=nock-hash
     [0x6ed8.e075.476a.722a 0x251.7f0e.dcf4.5b09 0x53a5.d1f8.80b9.1bac 0xab72.0e9d.a61c.cc4c 0xae0c.cdd4.b817.46b9]
+  =/  orphaned-as-of=nock-hash  [0x241 0x242 0x243 0x244 0x245]
+  =/  orphaned-as-of-2=nock-hash  [0x251 0x252 0x253 0x254 0x255]
   =/  event-id=beid  (from-atom:blist 529)
   =/  settlement=deposit-settlement
-    (create-deposit-settlement:hel event-id name historical-as-of 146.586 0x1234 1.000.000 529)
-  =.  nock-hashchain.hash-state.state
-    (~(put z-by nock-hashchain.hash-state.state) canonical-as-of block)
+    (create-deposit-settlement:hel event-id name historical-as-of 48.015 0x1234 1.000.000 109)
   =.  last-nock-block.hash-state.state  canonical-as-of
-  =.  nock-hashchain-next-height.hash-state.state  146.587
+  =.  nock-hashchain-next-height.hash-state.state  48.016
   =.  unsettled-deposits.hash-state.state
-    (~(put z-bi unsettled-deposits.hash-state.state) canonical-as-of name dep)
+    (~(put z-bi unsettled-deposits.hash-state.state) orphaned-as-of name dep)
+  =.  unsettled-deposits.hash-state.state
+    (~(put z-bi unsettled-deposits.hash-state.state) orphaned-as-of-2 name dep)
   =.  deferred-deposit-settlements.hash-state.state
     (~(put z-bi deferred-deposit-settlements.hash-state.state) historical-as-of event-id settlement)
   =/  nock  ~(. nock-lib state)
@@ -184,12 +187,22 @@
   =/  future-nock  ~(. nock-lib future)
   =/  future-result=process-result
     (nockchain-process-deferred-deposit-settlements:future-nock block)
+  =/  conflicting=bridge-state  state
+  =.  unsettled-deposits.hash-state.conflicting
+    (~(put z-bi unsettled-deposits.hash-state.conflicting) orphaned-as-of-2 name dep(amount-to-mint 2.000.000))
+  =/  conflicting-nock  ~(. nock-lib conflicting)
+  =/  conflicting-result=process-result
+    (nockchain-process-deferred-deposit-settlements:conflicting-nock block)
   ;:  weld
-    (expect !>(!(~(has z-bi unsettled-deposits.hash-state.final) canonical-as-of name)))
+    (expect !>(!(~(has z-bi unsettled-deposits.hash-state.final) orphaned-as-of name)))
+  ::
+    (expect !>(!(~(has z-bi unsettled-deposits.hash-state.final) orphaned-as-of-2 name)))
   ::
     (expect !>(!(~(has z-bi deferred-deposit-settlements.hash-state.final) historical-as-of event-id)))
   ::
     (expect !>(?=(%| -.future-result)))
+  ::
+    (expect !>(?=(%| -.conflicting-result)))
   ==
 ::
 :::  A Nockchain settlement that arrives first suppresses the later withdrawal

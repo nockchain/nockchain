@@ -413,6 +413,33 @@
   ?.  (check-deposit-settlement +.i.tracked settlement)
     ~
   `block
+:::
+++  mainnet-finalized-orphaned-lineage-settlement
+  |=  settlement=deposit-settlement
+  ^-  ?
+  =/  bridge-root=hash:t
+    [0xf480.0376.e5c6.138d 0x9a4c.e7c6.94db.95f1 0x6c18.a134.f480.fde0 0xbe1c.4b92.e6d4.61d0 0x6c6d.671d.8d73.ef3b]
+  ?&  =(46.810 nockchain-start-height.constants.state)
+      =(39.694.000 base-start-height.constants.state)
+      =(bridge-root -.counterpart.settlement)
+      (gte nonce.settlement 14)
+      (lte nonce.settlement 529)
+      (gte nock-height.settlement 46.849)
+      (lte nock-height.settlement 146.586)
+  ==
+:::
+++  mainnet-pre-repair-orphaned-lineage-settlement
+  |=  [settlement=deposit-settlement tracked=(list [nock-hash deposit])]
+  ^-  ?
+  ?.  (mainnet-finalized-orphaned-lineage-settlement settlement)
+    %.n
+  ?~  tracked  %.n
+  =/  expected=deposit  +.i.tracked
+  ?.  %+  levy  `(list [nock-hash deposit])`tracked
+      |=  [ignored=nock-hash candidate=deposit]
+      =(expected candidate)
+    %.n
+  (check-deposit-settlement expected settlement)
 ::
 ++  deferred-deposit-settlement-source-block
   |=  [settlement=deposit-settlement latest=nock-block]
@@ -453,6 +480,9 @@
   =/  maybe-block=(unit nock-block)
     (deferred-deposit-settlement-source-block settlement latest)
   ?~  maybe-block
+    ?:  (mainnet-pre-repair-orphaned-lineage-settlement settlement tracked)
+      $(settlements t.settlements, seen next-seen)
+    ~&  [%unreconciled-mainnet-lineage (mainnet-finalized-orphaned-lineage-settlement settlement) (lent tracked) settlement tracked]
     ?^  tracked
       [~ 'failed to reconcile deposit settlement: counterpart note is tracked under an unknown as-of hash']
     ?:  (~(has z-by deposits.latest) name)
@@ -482,7 +512,6 @@
 :::    Reconcile Base settlements that arrived before their Nockchain block.
 ++  nockchain-process-deferred-deposit-settlements
   |=  latest=nock-block
-  =/  current-as-of=nock-hash  (hash:nock-block latest)
   ^-  process-result
   ?^  invalid=(validate-deferred-deposit-settlements latest)
     [%| [%stop u.invalid]]
@@ -492,17 +521,23 @@
   ?~  settlements  [%& state]
   =/  [as-of=nock-hash [event-id=beid settlement=deposit-settlement]]
     i.settlements
-  =/  maybe-block=(unit nock-block)
-    (deferred-deposit-settlement-source-block settlement latest)
-  ?~  maybe-block
-    $(settlements t.settlements)
   =/  name=nname:t  counterpart.settlement
   =/  tracked=(list [nock-hash deposit])
     (unsettled-deposits-by-counterpart name)
+  =/  maybe-block=(unit nock-block)
+    (deferred-deposit-settlement-source-block settlement latest)
+  =/  resolved=?
+    ?^  maybe-block
+      %.y
+    (mainnet-pre-repair-orphaned-lineage-settlement settlement tracked)
+  ?.  resolved
+    $(settlements t.settlements)
   ?~  tracked
     [%| [%stop 'failed to reconcile deposit settlement: validated counterpart disappeared from state']]
   =.  unsettled-deposits.hash-state.state
-    (~(del z-bi unsettled-deposits.hash-state.state) [-.i.tracked name])
+    %+  roll  `(list [nock-hash deposit])`tracked
+    |=  [[tracked-as-of=nock-hash ignored=deposit] acc=_unsettled-deposits.hash-state.state]
+    (~(del z-bi acc) [tracked-as-of name])
   =.  deferred-deposit-settlements.hash-state.state
     (~(del z-bi deferred-deposit-settlements.hash-state.state) [as-of event-id])
   $(settlements t.settlements)

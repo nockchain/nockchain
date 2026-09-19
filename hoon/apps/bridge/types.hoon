@@ -1107,11 +1107,11 @@
     ==
   [settlement counterpart]
 ::
-::  Base deposit nonces 121 through 529 were finalized against the old Nock
-::  hash lineage before the repaired chain became authoritative. Base enforces
-::  strictly increasing nonces, so this closed range cannot admit a future
-::  event. The height and bridge-root bounds are the observed endpoints of the
-::  immutable mainnet event range.
+:::  Base deposit nonces 121 through 529 were finalized against the old Nock
+:::  hash lineage before the repaired chain became authoritative. Base enforces
+:::  strictly increasing nonces, so this closed range cannot admit a future
+:::  event. The height and bridge-root bounds are the observed endpoints of the
+:::  immutable mainnet event range.
 ++  mainnet-pre-repair-lineage-settlement
   |=  [constants=bridge-constants settlement=deposit-settlement]
   ^-  ?
