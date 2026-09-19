@@ -663,38 +663,6 @@
         c
       =.  pending-blocks.c  (~(del h-by pending-blocks.c) ~(digest get:page:t pag))
       c
-    ++  stored-postactivation-pages-valid
-      |=  [arg=kernel-state:dk only-noncanonical=?]
-      ^-  ?
-      =/  mainnet=(unit ?)
-        (~(is-mainnet dumb-derived d.arg constants.arg) c.arg)
-      ::  Ambiguous nonempty states are reset by +check-checkpoints.  Avoid
-      ::  cueing arbitrary pages before a network identity is established.
-      ?~  mainnet  %.y
-      =/  arg-t  ~(. c-transact constants.arg)
-      =/  require-stored-proof=?  ?|(u.mainnet check-pow-flag:arg-t)
-      %-  ~(rep h-by blocks.c.arg)
-      |=  [[block-id=block-id:t local=local-page:t] valid=?]
-      ?.  valid  %.n
-      ::  Audit every artifact from the first consensus change that adds a
-      ::  versioned proof path. Earlier pages retain their historical encoding.
-      =/  height=page-number:t  ~(height get:local-page:t local)
-      =/  first-versioned-height=page-number:t
-        ?:  (lth ai-pow-activation-height.constants.arg proof-version-3-start:con)
-          ai-pow-activation-height.constants.arg
-        proof-version-3-start:con
-      ?:  (lth height first-versioned-height)
-        %.y
-      =/  canonical-id  (~(get z-by heaviest-chain.d.arg) height)
-      =/  canonical=?
-        ?&  ?=(^ canonical-id)
-            =(u.canonical-id block-id)
-        ==
-      ?:  ?&(only-noncanonical canonical)
-        %.y
-      =/  pag=page:t  (to-page:local-page:t local)
-      %-  persisted-page-valid:con
-      [require-stored-proof height block-id pag]
     ::
     ++  check-checkpoints
       |=  arg=kernel-state:dk
@@ -791,16 +759,6 @@
         ==
       ?.  activation-valid
         ~>  %slog.[1 'load: Invalid Zoe activation page, resetting state']
-        reset-state
-      ::  The canonical activation page is not the only persisted page that
-      ::  can become consensus-relevant after restart.  A pre-Zoe node may
-      ::  also have accepted a %2 side fork at or above the boundary; if left
-      ::  in .blocks, a later %3 child can extend that trusted parent and
-      ::  reorg it onto the canonical chain without rechecking the parent's
-      ::  proof version.  Audit every stored post-activation page so no stale
-      ::  fork can cross the upgrade boundary through the duplicate fast path.
-      ?.  (stored-postactivation-pages-valid [arg %.y])
-        ~>  %slog.[1 'load: Invalid stored post-Zoe side-fork page, resetting state']
         reset-state
       arg
     --
