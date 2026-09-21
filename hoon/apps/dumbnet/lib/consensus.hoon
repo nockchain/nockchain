@@ -1462,8 +1462,11 @@
   =/  canonical=(unit (h-set block-id:t))
     ~>  %bout  canonical-block-ids
   ?~  canonical
-    ~>  %slog.[1 'repair-orphaned-claims: heaviest chain does not reach genesis, skipping repair']
-    c
+    ::  Without a complete ancestry set no stored page can safely be called an
+    ::  orphan. Returning unchanged would retain stale Zoe parents; resetting
+    ::  would discard recoverable state. A failed +load commits neither.
+    ~|  'load: Heaviest chain does not reach stored genesis; preserving state and refusing to boot'
+    !!
   ~>  %slog.[0 'repair-orphaned-claims: scanning .blocks for orphans']
   =/  mempool-before=@  ~(wyt h-in excluded-txs.c)
   =/  orphans=(list block-id:t)
