@@ -17,6 +17,86 @@
 ::  need the real derived-state shadow this with a local `=/  der`.
 ++  der  ^-  derived-state  *derived-state
 ::
+++  zoe-load-state
+  |=  [rooted=? page-pow=(unit proof:t)]
+  ^-  kernel-state
+  =/  genesis-page=page:v1:t  *page:v1:t
+  =.  genesis-page  genesis-page(digest (compute-digest:page:t genesis-page))
+  =/  genesis-id=block-id:t  ~(digest get:page:t genesis-page)
+  =/  tip-page=page:v1:t
+    %*  .  *page:v1:t
+      height  proof-version-3-start:dcon
+      parent  genesis-id
+      pow     page-pow
+    ==
+  =.  tip-page  tip-page(digest (compute-digest:page:t tip-page))
+  =/  tip-id=block-id:t  ~(digest get:page:t tip-page)
+  =/  blocks=(h-map block-id:t local-page:t)
+    (~(put h-by *(h-map block-id:t local-page:t)) tip-id (to-local-page:page:t tip-page))
+  =?  blocks  rooted
+    (~(put h-by blocks) genesis-id (to-local-page:page:t genesis-page))
+  =/  con=consensus-state
+    %*  .  *consensus-state
+      blocks          blocks
+      heaviest-block  `tip-id
+      genesis-seal    `[0 *hash:t]
+    ==
+  =/  der=derived-state
+    %*  .  *derived-state
+      highest-block-height  `proof-version-3-start:dcon
+      heaviest-chain
+        %-  ~(gas z-by *(z-map page-number:t block-id:t))
+        :~  [0 genesis-id]
+            [proof-version-3-start:dcon tip-id]
+        ==
+    ==
+  %*  .  *kernel-state
+    c          con
+    d          der
+    constants  constants(check-pow-flag %.n)
+  ==
+::
+++  test-load-prunes-stale-zoe-side-fork-without-reset
+  =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
+  =/  state=kernel-state  (zoe-load-state [%.y `v3])
+  =/  tip-id=block-id:t  (need heaviest-block.c.state)
+  =/  stale-page=page:v1:t
+    %*  .  *page:v1:t
+      height  proof-version-3-start:dcon
+      pow     (some stale-v2)
+    ==
+  =.  stale-page  stale-page(digest (compute-digest:page:t stale-page))
+  =/  stale-id=block-id:t  ~(digest get:page:t stale-page)
+  =.  blocks.c.state
+    (~(put h-by blocks.c.state) stale-id (to-local-page:page:t stale-page))
+  =/  loaded=kernel-state  (load:inner:dumb state)
+  %+  expect-eq
+    !>([%.y %.y 2 %.n %.y])
+  !>  :*  =(heaviest-block.c.state heaviest-block.c.loaded)
+          (~(has h-by blocks.c.loaded) tip-id)
+          ~(wyt h-by blocks.c.loaded)
+          (~(has h-by blocks.c.loaded) stale-id)
+          =(genesis-seal.c.state genesis-seal.c.loaded)
+      ==
+::
+++  test-load-refuses-incomplete-ancestry-without-reset
+  =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  =/  state=kernel-state  (zoe-load-state [%.n `v3])
+  %+  expect-fail
+    |.((load:inner:dumb state))
+  `"preserving state and refusing to boot"
+::
+++  test-load-refuses-invalid-canonical-zoe-page-without-reset
+  =/  base=proof:t  *proof:t
+  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
+  =/  state=kernel-state  (zoe-load-state [%.y `stale-v2])
+  %+  expect-fail
+    |.((load:inner:dumb state))
+  `"preserving state and refusing to boot"
+::
 ++  test-garbage-collect-after-genesis
   =/  con=consensus-state  initial-consensus-state:h
   =.  con  (~(garbage-collect dcon con der constants) default-retain:h)

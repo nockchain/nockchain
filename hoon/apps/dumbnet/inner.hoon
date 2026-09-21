@@ -666,7 +666,9 @@
     ::
     ++  check-checkpoints
       |=  arg=kernel-state:dk
-      =/  reset-state=kernel-state:dk  (reset-consensus-state arg)
+      ::  Validation failures abort +load instead of returning a fresh state.
+      ::  NockApp installs the new root only after +load succeeds, so this
+      ::  preserves the checkpoint for explicit operator recovery.
       =/  chain-empty=?
         ?&  =(~ heaviest-block.c.arg)
             =(0 ~(wyt h-by blocks.c.arg))
@@ -678,8 +680,8 @@
       ?~  mainnet
         ?:  chain-empty
           arg
-        ~>  %slog.[1 'load: Ambiguous nonempty chain has no network identity, resetting state']
-        reset-state
+        ~|  'load: Ambiguous nonempty chain has no network identity; preserving state and refusing to boot'
+        !!
       =/  arg-t  ~(. c-transact constants.arg)
       =/  require-stored-proof=?  ?|(u.mainnet check-pow-flag:arg-t)
       =/  genesis-id  (~(get z-by heaviest-chain.d.arg) 0)
@@ -690,16 +692,16 @@
         ::  like duplicates and wedge the node permanently.
         ?:  chain-empty
           arg
-        ~>  %slog.[1 'load: Chain is missing stored genesis, resetting state']
-        reset-state
+        ~|  'load: Chain is missing stored genesis; preserving state and refusing to boot'
+        !!
       =/  tip-id  heaviest-block.c.arg
       ?~  tip-id
-        ~>  %slog.[1 'load: Indexed chain has no heaviest block, resetting state']
-        reset-state
+        ~|  'load: Indexed chain has no heaviest block; preserving state and refusing to boot'
+        !!
       =/  tip-local  (~(get h-by blocks.c.arg) u.tip-id)
       ?~  tip-local
-        ~>  %slog.[1 'load: Heaviest block page is missing, resetting state']
-        reset-state
+        ~|  'load: Heaviest block page is missing; preserving state and refusing to boot'
+        !!
       =/  tip-page=page:t  (to-page:local-page:t u.tip-local)
       =/  tip-height=page-number:t  ~(height get:page:t tip-page)
       =/  indexed-tip  (~(get z-by heaviest-chain.d.arg) tip-height)
@@ -708,8 +710,8 @@
               %-  persisted-page-valid:con
               [require-stored-proof tip-height u.tip-id tip-page]
           ==
-        ~>  %slog.[1 'load: Invalid stored heaviest block proof, resetting state']
-        reset-state
+        ~|  'load: Invalid stored heaviest block proof; preserving state and refusing to boot'
+        !!
       ::  Every pinned checkpoint at or below the tip must have both its
       ::  expected ID and a canonical stored proof envelope.  ID-only checks
       ::  cannot detect legacy proof-version or stream-bookkeeping retags.
@@ -737,8 +739,8 @@
           %.n
         $(checkpoints t.checkpoints)
       ?.  checkpoints-valid
-        ~>  %slog.[1 'load: Invalid or missing checkpoint page, resetting state']
-        reset-state
+        ~|  'load: Invalid or missing checkpoint page; preserving state and refusing to boot'
+        !!
       ::  A node upgraded from pre-Zoe software may already have accepted %2
       ::  pages at the %3 boundary.  Audit the boundary page whenever the tip
       ::  has crossed it; auditing the tip above also catches the ordinary
@@ -758,8 +760,8 @@
             (to-page:local-page:t u.activation-local)
         ==
       ?.  activation-valid
-        ~>  %slog.[1 'load: Invalid Zoe activation page, resetting state']
-        reset-state
+        ~|  'load: Invalid Zoe activation page; preserving state and refusing to boot'
+        !!
       arg
     --
   ::
