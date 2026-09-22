@@ -29,12 +29,7 @@ rust_library(
         "templates/**/*",
     ]),
     edition = "2021",
-    # Set environment variables for the library too
     rustc_env = {
-        "BUILD_TIMESTAMP": "{BUILD_TIMESTAMP}",
-        "GIT_HASH": "{BUILD_EMBED_LABEL}",
-        "BUILD_USER": "{BUILD_USER}",
-        "BUILD_HOST": "{BUILD_HOST}",
         "FULL_VERSION": "0.4.0",
         "CARGO_PKG_VERSION": "0.4.0",
     },
@@ -51,17 +46,11 @@ rust_binary(
         "templates/**/*",
     ]),
     edition = "2021",
-    # Set environment variables directly (replaces build.rs)
+    # Keep the version used by the CLI without volatile build metadata.
     rustc_env = {
-        "BUILD_TIMESTAMP": "{BUILD_TIMESTAMP}",
-        "GIT_HASH": "{BUILD_EMBED_LABEL}",
-        "BUILD_USER": "{BUILD_USER}",
-        "BUILD_HOST": "{BUILD_HOST}",
         "FULL_VERSION": "0.4.0",
         "CARGO_PKG_VERSION": "0.4.0",
     },
-    # Enable stamping for build metadata
-    stamp = 1,
     deps = all_crate_deps() + [":nockup_lib"],
 )
 
