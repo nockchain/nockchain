@@ -52,17 +52,23 @@ jobs:
       - name: Extract Cargo versions
         id: cargo-versions
         run: |
-          # Get workspace version - simpler approach
-          HOON_VERSION=$(sed -n '/\[workspace.package\]/,/\[/p' Cargo.toml | grep '^version' | cut -d'"' -f2)
-          
-          # Get hoonc version
-          HOONC_VERSION=$(grep '^version' crates/hoonc/Cargo.toml | cut -d'"' -f2)
-          
-          # Get nockup version  
-          NOCKUP_VERSION=$(grep '^version' crates/nockup/Cargo.toml | cut -d'"' -f2)
-          
-          # Get nockchain version
-          NOCKCHAIN_VERSION=$(grep '^version' crates/nockchain/Cargo.toml | cut -d'"' -f2)
+          WORKSPACE_VERSION=$(sed -n '/\[workspace.package\]/,/\[/p' Cargo.toml | grep '^version' | cut -d'"' -f2)
+
+          package_version() {
+            local manifest="$1"
+            local explicit
+            explicit=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)
+            if [[ -n "$explicit" ]]; then
+              echo "$explicit"
+            elif grep -Eq '^version\.workspace[[:space:]]*=[[:space:]]*true' "$manifest"; then
+              echo "$WORKSPACE_VERSION"
+            fi
+          }
+
+          HOON_VERSION=$(package_version crates/hoon/Cargo.toml)
+          HOONC_VERSION=$(package_version crates/hoonc/Cargo.toml)
+          NOCKUP_VERSION=$(package_version crates/nockup/Cargo.toml)
+          NOCKCHAIN_VERSION=$(package_version crates/nockchain/Cargo.toml)
           
           # For nightly, append date
           if [[ "${{ steps.channel.outputs.channel }}" == "nightly" ]]; then
