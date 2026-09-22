@@ -87,6 +87,45 @@
           =(genesis-seal.c.state genesis-seal.c.loaded)
       ==
 ::
+++  test-load-cleans-deleted-block-metadata
+  =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  =/  state=kernel-state  (zoe-load-state [%.y `v3])
+  =/  tip-id=block-id:t  (need heaviest-block.c.state)
+  =/  genesis-id=block-id:t  (~(got z-by heaviest-chain.d.state) 0)
+  =.  block-versions.c.state
+    (~(put h-by block-versions.c.state) tip-id %3)
+  =.  puzzle-asert-states.d.state
+    (~(put h-by puzzle-asert-states.d.state) tip-id [7 3 `tip-id `genesis-id])
+  =/  expected=kernel-state  state
+  ::  Model a checkpoint saved after an older boot already deleted the block.
+  ::  No accepted orphan remains for the .blocks scan to discover.
+  =/  deleted-id=block-id:t  *block-id:t
+  ?<  (~(has h-by blocks.c.state) deleted-id)
+  =.  block-versions.c.state
+    (~(put h-by block-versions.c.state) deleted-id %4)
+  =.  puzzle-asert-states.d.state
+    (~(put h-by puzzle-asert-states.d.state) deleted-id [2 1 `deleted-id ~])
+  =/  loaded=kernel-state  (load:inner:dumb state)
+  ;:  weld
+    (expect-eq !>(expected) !>(loaded))
+    (expect-eq !>(loaded) !>((load:inner:dumb loaded)))
+  ==
+::
+++  test-load-cleans-block-metadata-without-chain
+  =/  expected=kernel-state  *kernel-state
+  =/  state=kernel-state  expected
+  =/  deleted-id=block-id:t  *block-id:t
+  =.  block-versions.c.state
+    (~(put h-by block-versions.c.state) deleted-id %4)
+  =.  puzzle-asert-states.d.state
+    (~(put h-by puzzle-asert-states.d.state) deleted-id [2 1 `deleted-id ~])
+  =/  loaded=kernel-state  (load:inner:dumb state)
+  ;:  weld
+    (expect-eq !>(expected) !>(loaded))
+    (expect-eq !>(loaded) !>((load:inner:dumb loaded)))
+  ==
+::
 ++  test-load-refuses-incomplete-ancestry-without-reset
   =/  base=proof:t  *proof:t
   =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]

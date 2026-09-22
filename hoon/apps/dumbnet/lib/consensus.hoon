@@ -1421,7 +1421,7 @@
   ~/  %delete-orphan-blocks
   |=  orphans=(list block-id:t)
   ^-  [consensus-state:dk derived-state:dk]
-  =/  cleaned-c=consensus-state:dk
+  =.  c
     %+  roll  orphans
     |=  [=block-id:t con=_c]
     =.  c  con
@@ -1433,15 +1433,21 @@
       (delete-asert-anchor-min-timestamps block-id asert-anchor-min-timestamps.c)
     =.  epoch-start.c     (~(del h-by epoch-start.c) block-id)
     =.  targets.c         (~(del h-by targets.c) block-id)
-    =.  block-versions.c  (~(del h-by block-versions.c) block-id)
     c
-  =/  cleaned-d=derived-state:dk
-    %+  roll  orphans
-    |=  [=block-id:t der=_d]
-    =.  d  der
-    =.  puzzle-asert-states.d  (~(del h-by puzzle-asert-states.d) block-id)
-    d
-  [cleaned-c cleaned-d]
+  ::  Older boots deleted orphan blocks without deleting these two maps. Those
+  ::  IDs no longer appear in .orphans, so retain metadata only for blocks that
+  ::  still exist after deletion. Preserve the values for every retained block.
+  =.  block-versions.c
+    %-  ~(rep h-by block-versions.c)
+    |=  [[=block-id:t version=proof-version:sp] versions=_block-versions.c]
+    ?:  (~(has h-by blocks.c) block-id)  versions
+    (~(del h-by versions) block-id)
+  =.  puzzle-asert-states.d
+    %-  ~(rep h-by puzzle-asert-states.d)
+    |=  [[=block-id:t state=puzzle-asert-state:dk] states=_puzzle-asert-states.d]
+    ?:  (~(has h-by blocks.c) block-id)  states
+    (~(del h-by states) block-id)
+  [c d]
 ::
 ::  +repair-orphaned-claims: BOOT-ONLY. Release the claims of every block that is
 ::  not on the heaviest chain, then delete those blocks.
@@ -1454,18 +1460,19 @@
 ::    Released txs land in excluded-txs, where the next +garbage-collect applies
 ::    the spent-input check and drops any the canonical chain has since spent.
 ::
-::    Two passes over the size of the chain: the ancestry walk, then the .blocks
-::    scan. Boot-only for that reason -- an event must never pay for the size of
+::    Walks the ancestry, scans .blocks, and sweeps the two proof/puzzle metadata
+::    maps. Boot-only for that reason -- an event must never pay for the size of
 ::    the chain.
 ++  repair-orphaned-claims
   ^-  [consensus-state:dk derived-state:dk]
-  ::  no chain yet, so nothing can be orphaned. Tested with `=(~ ...)` rather
+  ::  Without a chain, only metadata for missing blocks can need cleanup.
+  ::  Tested with `=(~ ...)` rather
   ::  than `?~`: `?~` would narrow .c's type to one whose heaviest-block is known
   ::  non-null, and the roll below seeds its accumulator from `_c` -- so the full
   ::  consensus-state that +release-orphan-claims returns would no longer nest.
   ?:  =(~ heaviest-block.c)
-    ~>  %slog.[0 'repair-orphaned-claims: no heaviest block yet, nothing to repair']
-    [c d]
+    ~>  %slog.[0 'repair-orphaned-claims: no heaviest block yet, checking block metadata']
+    (delete-orphan-blocks ~)
   ::  the release and the delete must classify against one set: a block deleted
   ::  without its claims released strands those txs (+apt:
   ::  %txs-fell-through-cracks).
