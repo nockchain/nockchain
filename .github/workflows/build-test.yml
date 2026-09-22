@@ -24,8 +24,25 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          repository-cache: true
-          disk-cache: build-test
+          repository-cache: |
+            - MODULE.bazel
+            - MODULE.bazel.lock
+            - Cargo.lock
+            - .bazelversion
+
+      # Refresh the action cache on every revision, including source-only changes.
+      # setup-bazel's BUILD-file key otherwise keeps restoring an old snapshot.
+      - name: Restore Bazel action cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel-disk
+          key: bazel-action-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion') }}-${{ github.sha }}
+          restore-keys: |
+            bazel-action-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion') }}-
+            setup-bazel-1-linux-x64-disk-build-test-
+
+      - name: Configure Bazel action cache
+        run: printf '\nbuild --disk_cache=%s/.cache/bazel-disk\n' "$HOME" >> "$HOME/.bazelrc"
 
       - name: Build release binaries and run unit tests
         run: |
