@@ -41,18 +41,12 @@ pub fn eval_composition_poly_jet(context: &mut Context, subject: Noun) -> Result
     let deep_challenge = deep_challange.as_felt(&space)?;
     let table_full_widths: Vec<u64> = HoonList::try_from(table_full_widths, &space)?
         .into_iter()
-        .map(|x| {
-            x.in_space(&space)
-                .as_atom()
-                .expect("table_full_widths element should be an atom")
-                .as_u64()
-                .expect("table_full_widths element should be a u64")
-        })
-        .collect();
+        .map(|x| Ok(x.in_space(&space).as_atom()?.as_u64()?))
+        .collect::<Result<Vec<u64>, JetErr>>()?;
     let is_extra = unsafe { is_extra.raw_equals(&D(0)) };
 
     let processed_degrees = degree_processing(&heights, is_extra, &constraint_map);
-    let weights = weights_by_table(&weights_map, heights.len());
+    let weights = weights_by_table(&weights_map, heights.len())?;
     let res = eval_composition_poly_with_degrees(
         &trace_evaluations, &heights, &processed_degrees, &counts_map, &dyn_list, &weights,
         &challenges, deep_challenge, &table_full_widths, is_extra,
@@ -63,14 +57,12 @@ pub fn eval_composition_poly_jet(context: &mut Context, subject: Noun) -> Result
     Ok(res_atom.as_noun())
 }
 
-fn weights_by_table<'a>(weights_map: &'a IndexBPolyMap<'a>, table_count: usize) -> Vec<&'a [Belt]> {
+fn weights_by_table<'a>(
+    weights_map: &'a IndexBPolyMap<'a>,
+    table_count: usize,
+) -> Result<Vec<&'a [Belt]>, JetErr> {
     (0..table_count)
-        .map(|i| {
-            *weights_map
-                .0
-                .get(&i)
-                .expect("weights_map should have entry for table index")
-        })
+        .map(|i| weights_map.0.get(&i).copied().ok_or(BAIL_FAIL))
         .collect()
 }
 

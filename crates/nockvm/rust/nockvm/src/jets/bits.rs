@@ -242,23 +242,26 @@ pub fn jet_rev(context: &mut Context, subject: Noun) -> Result {
     }
 
     let boz = boz as usize;
-    let len = slot(arg, 6, &space)?.as_atom()?.as_direct()?.data();
+    let len = slot(arg, 6, &space)?.as_atom()?.as_direct()?.data() as usize;
     let dat = slot(arg, 7, &space)?.as_atom()?;
-    let bits = len << boz;
+    if len == 0 {
+        return Ok(D(0));
+    }
+    let total_len = checked_left_shift(boz, len)?;
+    let output_words = bits_to_word(total_len)?;
 
     let dat_handle = dat.in_space(&space);
     let src = dat_handle.as_bitslice();
     let (mut output, dest) =
-        unsafe { IndirectAtom::new_raw_mut_bitslice(&mut context.stack, bits as usize) };
+        unsafe { IndirectAtom::new_raw_mut_bitslice(&mut context.stack, output_words) };
 
-    let len = len as usize;
-    let total_len = len << boz;
-
-    for (start, end) in (0..len)
-        .map(|b| (b << boz, (b + 1) << boz))
-        .filter(|(start, _)| (total_len - start) <= src.len())
-    {
-        dest[start..end].copy_from_bitslice(&src[(total_len - end)..(total_len - start)]);
+    for (start, end) in (0..len).map(|b| (b << boz, (b + 1) << boz)) {
+        let source_start = total_len - end;
+        let source_end = cmp::min(total_len - start, src.len());
+        if source_start < source_end {
+            let copied_bits = source_end - source_start;
+            dest[start..(start + copied_bits)].copy_from_bitslice(&src[source_start..source_end]);
+        }
     }
 
     Ok(unsafe { output.normalize_as_atom(&space) }.as_noun())
@@ -901,6 +904,28 @@ mod tests {
         assert_jet(c, jet_rev, sam, D(0));
         let sam = T(&mut c.stack, &[D(3), D(5), D(0x2)]);
         assert_jet(c, jet_rev, sam, D(0x200000000));
+
+        let sam = T(&mut c.stack, &[D(7), D(5), D(2)]);
+        let res = A(&mut c.stack, &(ubig!(2) << 512));
+        assert_jet(c, jet_rev, sam, res);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_rev_zero_length() {
+        let c = &mut init_context();
+        let sam = T(&mut c.stack, &[D(7), D(0), D(42)]);
+
+        assert_jet(c, jet_rev, sam, D(0));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_rev_rejects_oversized_output() {
+        let c = &mut init_context();
+        let sam = T(&mut c.stack, &[D(63), D(2), D(2)]);
+
+        assert_jet_err(c, jet_rev, sam, BAIL_FAIL);
     }
 
     #[test]

@@ -19,9 +19,6 @@ nodes:
     fakenet_log_difficulty: 1
     fakenet_v1_phase: 3
     no_default_peers: true
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "full-a"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -34,9 +31,6 @@ nodes:
     peer_from:
       - node: "miner-a"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
 steps:
   - action: start_nodes

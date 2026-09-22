@@ -1,4 +1,7 @@
+use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::fmt;
+use std::marker::PhantomData;
 use std::mem::size_of;
 
 use bytes::Bytes;
@@ -9,6 +12,8 @@ use nockapp::NockAppError;
 use nockvm::noun::{Atom, Noun, NounAllocator, NounHandle, NounSpace, D, T};
 use nockvm_macros::tas;
 use rand::{rng, Rng};
+use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 
 use crate::p2p_util::PeerIdExt;
@@ -17,6 +22,177 @@ use crate::tip5_util::{tip5_hash_to_base58, tip5_hash_to_base58_stack};
 pub(crate) const FACT_POKE_VERSION: u64 = 0;
 const GEN2_BATCH_POW_DOMAIN_SEPARATOR: &[u8] = b"nockchain:req-res:gen2:pow:v1";
 const GOSSIP_POW_DOMAIN_SEPARATOR: &[u8] = b"nockchain:req-res:gossip:pow:v1";
+// Must match +heard-elders in hoon/apps/dumbnet/inner.hoon.
+const HEARD_ELDERS_MAX_IDS: usize = 24;
+/// Maximum encoded noun positions accepted from one network payload.
+///
+/// A valid jam stream can encode cells much more densely than their decoded
+/// arena, stack, and back-reference representation. This cap bounds that
+/// amplification before the decoder allocates an attacker-selected number of
+/// nodes.
+pub(crate) const NETWORK_CUE_MAX_NODES: usize = 1_000_000;
+
+/// Additional heap budget for decoded container elements. Byte strings and
+/// string contents remain bounded by the codec's 10 MB wire limit; this budget
+/// bounds the `Vec`/`String` object amplification that wire bytes do not cover.
+const GEN2_DECODE_CONTAINER_BUDGET_BYTES: usize = 4 * 1024 * 1024;
+const GEN2_BATCH_WIRE_MAX_ITEMS: usize = 4_096;
+const GEN2_BUNDLE_WIRE_MAX_ITEMS: usize = 262_144;
+const GEN2_RANGE_WIRE_MAX_BLOCKS: usize = BLOCK_RANGE_REQUEST_MAX_LEN as usize;
+
+thread_local! {
+    static DECODE_CONTAINER_BUDGET: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+struct DecodeContainerBudgetGuard {
+    installed: bool,
+}
+
+impl DecodeContainerBudgetGuard {
+    fn enter() -> Self {
+        let installed = DECODE_CONTAINER_BUDGET.with(|budget| {
+            if budget.get().is_some() {
+                false
+            } else {
+                budget.set(Some(GEN2_DECODE_CONTAINER_BUDGET_BYTES));
+                true
+            }
+        });
+        Self { installed }
+    }
+}
+
+impl Drop for DecodeContainerBudgetGuard {
+    fn drop(&mut self) {
+        if self.installed {
+            DECODE_CONTAINER_BUDGET.with(|budget| budget.set(None));
+        }
+    }
+}
+
+fn charge_decode_container<E: de::Error>(bytes: usize) -> Result<(), E> {
+    DECODE_CONTAINER_BUDGET.with(|budget| match budget.get() {
+        Some(remaining) if bytes <= remaining => {
+            budget.set(Some(remaining - bytes));
+            Ok(())
+        }
+        Some(_) => Err(E::custom(format!(
+            "decoded container allocation exceeded {GEN2_DECODE_CONTAINER_BUDGET_BYTES} bytes"
+        ))),
+        None => Ok(()),
+    })
+}
+
+struct BoundedVec<T, const MAX_ITEMS: usize>(Vec<T>);
+
+impl<'de, T, const MAX_ITEMS: usize> Deserialize<'de> for BoundedVec<T, MAX_ITEMS>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BoundedVecVisitor<T, const MAX_ITEMS: usize>(PhantomData<T>);
+
+        impl<'de, T, const MAX_ITEMS: usize> Visitor<'de> for BoundedVecVisitor<T, MAX_ITEMS>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = BoundedVec<T, MAX_ITEMS>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "a sequence containing at most {MAX_ITEMS} items")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                if seq.size_hint().is_some_and(|count| count > MAX_ITEMS) {
+                    return Err(de::Error::invalid_length(
+                        seq.size_hint().unwrap_or_default(),
+                        &self,
+                    ));
+                }
+
+                let mut values = Vec::new();
+                loop {
+                    if values.len() == MAX_ITEMS {
+                        if seq.next_element::<IgnoredAny>()?.is_some() {
+                            return Err(de::Error::invalid_length(MAX_ITEMS + 1, &self));
+                        }
+                        break;
+                    }
+                    let Some(value) = seq.next_element::<T>()? else {
+                        break;
+                    };
+                    charge_decode_container::<A::Error>(size_of::<T>().max(1))?;
+                    values.push(value);
+                }
+                Ok(BoundedVec(values))
+            }
+        }
+
+        deserializer.deserialize_seq(BoundedVecVisitor(PhantomData))
+    }
+}
+
+fn deserialize_bounded_vec<'de, D, T, const MAX_ITEMS: usize>(
+    deserializer: D,
+) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    BoundedVec::<T, MAX_ITEMS>::deserialize(deserializer).map(|bounded| bounded.0)
+}
+
+fn deserialize_optional_bounded_vec<'de, D, T, const MAX_ITEMS: usize>(
+    deserializer: D,
+) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<BoundedVec<T, MAX_ITEMS>>::deserialize(deserializer)
+        .map(|bounded| bounded.map(|bounded| bounded.0))
+}
+
+fn deserialize_bundled_tx_envelopes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<BundledTxEnvelope>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<_, _, GEN2_BUNDLE_WIRE_MAX_ITEMS>(deserializer)
+}
+
+fn deserialize_optional_bundled_tx_envelopes<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<BundledTxEnvelope>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_bounded_vec::<_, _, GEN2_BUNDLE_WIRE_MAX_ITEMS>(deserializer)
+}
+
+fn deserialize_tx_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<_, _, GEN2_BUNDLE_WIRE_MAX_ITEMS>(deserializer)
+}
+
+fn deserialize_optional_tx_ids<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_bounded_vec::<_, _, GEN2_BUNDLE_WIRE_MAX_ITEMS>(deserializer)
+}
+
+fn deserialize_optional_range_blocks<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<BundledBlockWithTxs>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_bounded_vec::<_, _, GEN2_RANGE_WIRE_MAX_BLOCKS>(deserializer)
+}
 
 #[derive(Debug, Clone)]
 pub enum NockchainFact {
@@ -55,7 +231,13 @@ impl NockchainFact {
             let elders_dat = root.as_cell()?.tail();
             let oldest = elders_dat.as_cell()?.head().as_atom()?.as_u64()?;
             let elder_ids = elders_dat.as_cell()?.tail();
-            let mut elder_id_strings = Vec::new();
+            let elder_count = elder_ids.list_iter().take(HEARD_ELDERS_MAX_IDS + 1).count();
+            if elder_count > HEARD_ELDERS_MAX_IDS {
+                return Err(NockAppError::OtherError(format!(
+                    "heard-elders exceeded ancestor limit {HEARD_ELDERS_MAX_IDS}",
+                )));
+            }
+            let mut elder_id_strings = Vec::with_capacity(elder_count);
             for id_noun in elder_ids.list_iter() {
                 elder_id_strings.push(tip5_hash_to_base58_stack(
                     &mut slab,
@@ -76,7 +258,8 @@ impl NockchainFact {
 
     pub fn from_message_bytes(message: &[u8]) -> Result<Self, NockAppError> {
         let mut slab = NounSlab::new();
-        let noun = slab.cue_into(Bytes::copy_from_slice(message))?;
+        let noun =
+            slab.cue_into_with_max_nodes(Bytes::copy_from_slice(message), NETWORK_CUE_MAX_NODES)?;
         slab.set_root(noun);
         Self::from_rooted_message_slab(slab)
     }
@@ -90,6 +273,22 @@ impl NockchainFact {
         let mut message_slab = NounSlab::new();
         message_slab.copy_from_slab(slab);
         Self::from_rooted_message_slab(message_slab)
+    }
+
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        let base = size_of::<Self>() as u64;
+        match self {
+            Self::HeardBlock(block_id, slab) | Self::HeardTx(block_id, slab) => base
+                .saturating_add(block_id.capacity() as u64)
+                .saturating_add(slab.allocated_bytes()),
+            Self::HeardElders(_, elder_ids, slab) => elder_ids
+                .iter()
+                .fold(
+                    base.saturating_add((elder_ids.capacity() * size_of::<String>()) as u64),
+                    |total, id| total.saturating_add(id.capacity() as u64),
+                )
+                .saturating_add(slab.allocated_bytes()),
+        }
     }
 
     pub fn fact_poke(&self) -> &NounSlab {
@@ -325,14 +524,16 @@ pub(crate) fn decode_request_item_message(
     message: &[u8],
 ) -> Result<NockchainDataRequest, NockAppError> {
     let mut request_slab: NounSlab = NounSlab::new();
-    let request_noun = request_slab.cue_into(Bytes::copy_from_slice(message))?;
+    let request_noun = request_slab
+        .cue_into_with_max_nodes(Bytes::copy_from_slice(message), NETWORK_CUE_MAX_NODES)?;
     let space = request_slab.noun_space();
     NockchainDataRequest::from_noun(request_noun, &space)
 }
 
 pub(crate) fn request_slab_from_message(message: &[u8]) -> Result<NounSlab, NockAppError> {
     let mut request_slab = NounSlab::new();
-    let request_noun = request_slab.cue_into(Bytes::copy_from_slice(message))?;
+    let request_noun = request_slab
+        .cue_into_with_max_nodes(Bytes::copy_from_slice(message), NETWORK_CUE_MAX_NODES)?;
     request_slab.set_root(request_noun);
     Ok(request_slab)
 }
@@ -388,7 +589,9 @@ pub enum EnvelopeKind {
 pub struct BundledBlockWithTxs {
     pub block_id: String,
     pub block_message: ByteBuf,
+    #[serde(deserialize_with = "deserialize_bundled_tx_envelopes")]
     pub tx_envelopes: Vec<BundledTxEnvelope>,
+    #[serde(deserialize_with = "deserialize_tx_ids")]
     pub unincluded_tx_ids: Vec<String>,
 }
 
@@ -408,18 +611,30 @@ pub struct ResponseEnvelope {
     /// Only populated when `kind == HeardBlockWithTxs`. Skipped on the
     /// wire for every other envelope kind so peers running older code
     /// with `deny_unknown_fields` never see a field they don't know.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_bundled_tx_envelopes"
+    )]
     pub tx_envelopes: Option<Vec<BundledTxEnvelope>>,
     /// Tx-ids named in the block that did not fit in this bundle response
     /// under the block-batch response cap. Requester must chase each via
     /// `RawTransactionById`. Only populated for `HeardBlockWithTxs`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_tx_ids"
+    )]
     pub unincluded_tx_ids: Option<Vec<String>>,
     /// Contiguous range of bundled blocks. Only populated for
     /// `HeardBlockRangeWithTxs`. Skipped on the wire for every other
     /// envelope kind so peers running older code with `deny_unknown_fields`
     /// never see a field they don't know.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_range_blocks"
+    )]
     pub range_blocks: Option<Vec<BundledBlockWithTxs>>,
 }
 
@@ -781,24 +996,6 @@ fn canonical_batch_item_bytes(items: &[BatchRequestItem]) -> Result<Vec<u8>, Noc
     Ok(bytes)
 }
 
-fn gen1_pow_preimage(
-    nonce: u64,
-    sender_peer_id: &libp2p::PeerId,
-    receiver_peer_id: &libp2p::PeerId,
-    message: &[u8],
-) -> Vec<u8> {
-    let sender_peer_bytes = (*sender_peer_id).to_bytes();
-    let receiver_peer_bytes = (*receiver_peer_id).to_bytes();
-    let mut pow_buf = Vec::with_capacity(
-        size_of::<u64>() + sender_peer_bytes.len() + receiver_peer_bytes.len() + message.len(),
-    );
-    pow_buf.extend_from_slice(&nonce.to_le_bytes());
-    pow_buf.extend_from_slice(&sender_peer_bytes);
-    pow_buf.extend_from_slice(&receiver_peer_bytes);
-    pow_buf.extend_from_slice(message);
-    pow_buf
-}
-
 fn gen2_pow_preimage(
     nonce: u64,
     sender_peer_id: &libp2p::PeerId,
@@ -868,29 +1065,65 @@ fn solve_pow(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 /// Network struct (in serde/CBOR) for requests
 pub enum NockchainRequest {
-    /// Request a block or TX from another node, carry PoW
-    Request {
-        pow: equix::SolutionByteArray,
-        nonce: u64,
-        message: ByteBuf,
-    },
-    /// Gossip a block or TX to another node
-    Gossip { message: ByteBuf },
-    /// Request a batch of transport items from another node, carry PoW
+    /// Request a batch of transport items from another node, carry PoW.
     BatchRequest {
         pow: equix::SolutionByteArray,
         nonce: u64,
         items: Vec<BatchRequestItem>,
     },
-    /// Gossip a block or TX to another node with sender-bound PoW
+    /// Gossip a block or TX to another node with sender-bound PoW.
     AuthenticatedGossip {
         pow: equix::SolutionByteArray,
         nonce: u64,
         message: ByteBuf,
     },
+}
+
+#[derive(serde::Deserialize)]
+enum NockchainRequestWire {
+    BatchRequest {
+        pow: equix::SolutionByteArray,
+        nonce: u64,
+        #[serde(deserialize_with = "deserialize_batch_request_items")]
+        items: Vec<BatchRequestItem>,
+    },
+    AuthenticatedGossip {
+        pow: equix::SolutionByteArray,
+        nonce: u64,
+        message: ByteBuf,
+    },
+}
+
+fn deserialize_batch_request_items<'de, D>(
+    deserializer: D,
+) -> Result<Vec<BatchRequestItem>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<_, _, GEN2_BATCH_WIRE_MAX_ITEMS>(deserializer)
+}
+
+impl<'de> Deserialize<'de> for NockchainRequest {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let _budget = DecodeContainerBudgetGuard::enter();
+        match NockchainRequestWire::deserialize(deserializer)? {
+            NockchainRequestWire::BatchRequest { pow, nonce, items } => {
+                Ok(Self::BatchRequest { pow, nonce, items })
+            }
+            NockchainRequestWire::AuthenticatedGossip {
+                pow,
+                nonce,
+                message,
+            } => Ok(Self::AuthenticatedGossip {
+                pow,
+                nonce,
+                message,
+            }),
+        }
+    }
 }
 
 const REPLAY_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -947,14 +1180,6 @@ fn batch_items_replay_hash(items: &[BatchRequestItem]) -> Result<(u64, usize), N
 }
 
 impl NockchainRequest {
-    /// Make a new "request" which gossips a block or a TX
-    pub(crate) fn new_gossip(message: &NounSlab) -> NockchainRequest {
-        let message_bytes = ByteBuf::from(message.jam().as_ref());
-        NockchainRequest::Gossip {
-            message: message_bytes,
-        }
-    }
-
     pub fn authenticated_gossip_from_message(
         builder: &mut equix::EquiXBuilder,
         local_peer_id: &libp2p::PeerId,
@@ -972,47 +1197,6 @@ impl NockchainRequest {
             nonce,
             message,
         })
-    }
-
-    pub(crate) fn authenticate_gossip(
-        self,
-        builder: &mut equix::EquiXBuilder,
-        local_peer_id: &libp2p::PeerId,
-        remote_peer_id: &libp2p::PeerId,
-    ) -> Result<NockchainRequest, NockAppError> {
-        match self {
-            Self::Gossip { message } => Self::authenticated_gossip_from_message(
-                builder, local_peer_id, remote_peer_id, message,
-            ),
-            other => Ok(other),
-        }
-    }
-
-    /// Make a new request for a block or a TX
-    pub(crate) fn new_request(
-        builder: &mut equix::EquiXBuilder,
-        local_peer_id: &libp2p::PeerId,
-        remote_peer_id: &libp2p::PeerId,
-        message: &NounSlab,
-    ) -> NockchainRequest {
-        let message_bytes = ByteBuf::from(message.jam().as_ref());
-
-        let mut nonce = 0u64;
-        let sol_bytes = loop {
-            let pow_buf = gen1_pow_preimage(nonce, local_peer_id, remote_peer_id, &message_bytes);
-            if let Ok(sols) = builder.solve(&pow_buf) {
-                if !sols.is_empty() {
-                    break sols[0].to_bytes();
-                }
-            }
-            nonce += 1;
-        };
-
-        NockchainRequest::Request {
-            pow: sol_bytes,
-            nonce,
-            message: message_bytes,
-        }
     }
 
     pub fn new_batch_request(
@@ -1036,14 +1220,13 @@ impl NockchainRequest {
 
     pub fn validate(&self) -> Result<(), NockAppError> {
         match self {
-            Self::Request { .. } | Self::Gossip { .. } | Self::AuthenticatedGossip { .. } => Ok(()),
             Self::BatchRequest { items, .. } => validate_batch_item_ids(items),
+            Self::AuthenticatedGossip { .. } => Ok(()),
         }
     }
 
     pub(crate) fn replay_key(&self) -> Result<Option<RequestReplayKey>, NockAppError> {
         match self {
-            Self::Request { .. } => Ok(None),
             Self::BatchRequest { nonce, items, .. } => {
                 let (payload_hash, payload_bytes) = batch_items_replay_hash(items)?;
                 Ok(Some(RequestReplayKey {
@@ -1063,7 +1246,6 @@ impl NockchainRequest {
                     payload_bytes: message.len(),
                 }))
             }
-            Self::Gossip { .. } => Ok(None),
         }
     }
 
@@ -1075,19 +1257,6 @@ impl NockchainRequest {
         remote_peer_id: &libp2p::PeerId,
     ) -> Result<(), NockAppError> {
         match self {
-            NockchainRequest::Request {
-                pow,
-                nonce,
-                message,
-            } => {
-                // This looks backwards, but it's because local/remote swap between
-                // sender-side generation and receiver-side verification.
-                let pow_buf = gen1_pow_preimage(*nonce, remote_peer_id, local_peer_id, message);
-                builder.verify_bytes(&pow_buf, pow).map_err(|err| {
-                    NockAppError::OtherError(format!("pow verification failed: {err}"))
-                })
-            }
-            NockchainRequest::Gossip { message: _ } => Ok(()),
             NockchainRequest::BatchRequest { pow, nonce, items } => {
                 let pow_buf = gen2_pow_preimage(*nonce, remote_peer_id, local_peer_id, items)?;
                 builder.verify_bytes(&pow_buf, pow).map_err(|err| {
@@ -1108,15 +1277,44 @@ impl NockchainRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 /// Responses to Nockchain requests
 pub enum NockchainResponse {
-    /// The requested block or raw-tx
+    /// Internal single-item execution result. Never accepted on the wire.
+    #[serde(skip)]
     Result { message: ByteBuf },
-    /// If the request was a gossip, no actual response is needed
+    /// Acknowledgement for authenticated gossip.
     Ack { acked: bool },
     /// Per-item outcomes for a batched request
     BatchResult { results: Vec<BatchResultItem> },
+}
+
+#[derive(serde::Deserialize)]
+enum NockchainResponseWire {
+    Ack {
+        acked: bool,
+    },
+    BatchResult {
+        #[serde(deserialize_with = "deserialize_batch_result_items")]
+        results: Vec<BatchResultItem>,
+    },
+}
+
+fn deserialize_batch_result_items<'de, D>(deserializer: D) -> Result<Vec<BatchResultItem>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<_, _, GEN2_BATCH_WIRE_MAX_ITEMS>(deserializer)
+}
+
+impl<'de> Deserialize<'de> for NockchainResponse {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let _budget = DecodeContainerBudgetGuard::enter();
+        match NockchainResponseWire::deserialize(deserializer)? {
+            NockchainResponseWire::Ack { acked } => Ok(Self::Ack { acked }),
+            NockchainResponseWire::BatchResult { results } => Ok(Self::BatchResult { results }),
+        }
+    }
 }
 
 impl NockchainResponse {
@@ -1150,6 +1348,7 @@ impl NockchainResponse {
 
 #[cfg(test)]
 mod tests {
+    use nockapp::AtomExt;
     use nockvm::noun::{Atom, NounAllocator, D, T};
     use nockvm_macros::tas;
     use serde_bytes::ByteBuf;
@@ -1161,6 +1360,21 @@ mod tests {
         ResponseEnvelope,
     };
 
+    const EXPECTED_HEARD_ELDERS_MAX_IDS: usize = 24;
+
+    fn heard_elders_message_slab(id_count: usize) -> NounSlab {
+        let mut slab = NounSlab::new();
+        let elder_id = T(&mut slab, &[D(1), D(2), D(3), D(4), D(5)]);
+        let ids = (0..id_count).fold(D(0), |tail, _| T(&mut slab, &[elder_id, tail]));
+        let payload = T(&mut slab, &[D(0), ids]);
+        let tag = Atom::from_value(&mut slab, "heard-elders")
+            .expect("heard-elders tag should fit in an atom")
+            .as_noun();
+        let message = T(&mut slab, &[tag, payload]);
+        slab.set_root(message);
+        slab
+    }
+
     #[test]
     fn test_nockchain_fact_rejects_invalid_jam_without_panicking() {
         let result = std::panic::catch_unwind(|| NockchainFact::from_message_bytes(&[0; 13]));
@@ -1168,6 +1382,20 @@ mod tests {
         assert!(result
             .expect("catch_unwind result should be present")
             .is_err());
+    }
+
+    #[test]
+    fn heard_elders_rejects_more_than_ancestor_window() {
+        let mut at_limit = heard_elders_message_slab(EXPECTED_HEARD_ELDERS_MAX_IDS);
+        let decoded = NockchainFact::from_noun_slab(&mut at_limit)
+            .expect("maximum heard-elders ancestor window should decode");
+        let NockchainFact::HeardElders(_, elder_ids, _) = decoded else {
+            panic!("heard-elders message should decode as heard-elders");
+        };
+        assert_eq!(elder_ids.len(), EXPECTED_HEARD_ELDERS_MAX_IDS);
+
+        let mut over_limit = heard_elders_message_slab(EXPECTED_HEARD_ELDERS_MAX_IDS + 1);
+        assert!(NockchainFact::from_noun_slab(&mut over_limit).is_err());
     }
 
     #[test]
@@ -1236,19 +1464,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_key_ignores_singleton_requests() {
-        let replay_key = NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 9,
-            message: ByteBuf::from(b"first".to_vec()),
-        }
-        .replay_key()
-        .expect("singleton request replay decision should build");
-
-        assert!(replay_key.is_none());
-    }
-
-    #[test]
     fn replay_key_matches_identical_batch_payloads() {
         let items = vec![
             BatchRequestItem {
@@ -1305,17 +1520,6 @@ mod tests {
         .expect("batch has a replay key");
 
         assert_ne!(first, second);
-    }
-
-    #[test]
-    fn replay_key_ignores_legacy_gossip() {
-        let key = NockchainRequest::Gossip {
-            message: ByteBuf::from(b"gossip".to_vec()),
-        }
-        .replay_key()
-        .expect("legacy gossip replay key should be absent");
-
-        assert!(key.is_none());
     }
 
     #[test]
@@ -1488,6 +1692,40 @@ mod tests {
         decoded
             .validate()
             .expect("decoded bundle should revalidate");
+    }
+
+    #[test]
+    fn network_response_decode_rejects_container_amplification() {
+        let id_count =
+            super::GEN2_DECODE_CONTAINER_BUDGET_BYTES / std::mem::size_of::<String>() + 2;
+        let response = NockchainResponse::BatchResult {
+            results: vec![BatchResultItem {
+                item_id: 1,
+                status: BatchResultStatus::Result,
+                error: None,
+                envelope: Some(ResponseEnvelope::heard_block_with_txs(
+                    String::from("block-id"),
+                    [1],
+                    Vec::new(),
+                    vec![String::new(); id_count],
+                )),
+            }],
+        };
+        let encoded =
+            cbor4ii::serde::to_vec(Vec::new(), &response).expect("response should encode");
+        assert!(
+            encoded.len() < 1_000_000,
+            "empty strings should produce a compact amplification payload"
+        );
+
+        let error = cbor4ii::serde::from_slice::<NockchainResponse>(&encoded)
+            .expect_err("container amplification must be rejected during decode");
+        assert!(
+            error
+                .to_string()
+                .contains("decoded container allocation exceeded"),
+            "unexpected decode error: {error}"
+        );
     }
 
     #[test]

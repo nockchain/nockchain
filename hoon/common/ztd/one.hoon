@@ -809,13 +809,25 @@
   (lth a p)
 ::
 ::  is this noun based
+++  max-noun-logical-nodes  1.048.576
 ++  based-noun
   ~/  %based-noun
   |=  n=*
   ^-  ?
+  -:(based-noun-with-budget n max-noun-logical-nodes)
+++  based-noun-with-budget
+  |=  [n=* remaining=@]
+  ^-  [? @]
+  ?:  =(remaining 0)
+    [%.n 0]
+  =/  next-remaining  (dec remaining)
   ?@  n
-    (based n)
-  &($(n -.n) $(n +.n))
+    [(based n) next-remaining]
+  =/  [head-ok=? head-remaining=@]
+    $(n -.n, remaining next-remaining)
+  ?.  head-ok
+    [%.n head-remaining]
+  $(n +.n, remaining head-remaining)
 ::
 ::  +badd: base field addition
 ++  badd

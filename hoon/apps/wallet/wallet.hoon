@@ -900,11 +900,9 @@
     =/  raw=raw-tx:v1:transact  (new:raw-tx:v1:transact signed-spends)
     =/  =tx:v1:transact  (new:tx:v1:transact raw height.balance.state)
     =/  fees=@  (roll-fees:spends:v1:transact signed-spends)
-    ::  Consensus word-count min-fee for the FULLY-SIGNED spends -- this is what
-    ::  +process:tx-acc enforces at block inclusion (a short fee is rejected with
-    ::  %v1-insufficient-fee), while the mempool/heard-tx path does NOT check it.
-    ::  Surfacing paid-vs-required makes an underpaid tx (which would gossip fine
-    ::  but never get mined) visible up front.
+    ::  Consensus word-count min-fee for the fully signed spends. Both block
+    ::  inclusion and mempool admission reject a short fee, so surface the
+    ::  paid-vs-required comparison before broadcast.
     =/  min-fee=@  (calculate-min-fee:spends:t [signed-spends height.balance.state])
     =/  fee-ok=?  (gte fees min-fee)
     =/  tx-display=@t
@@ -933,7 +931,7 @@
         ## Broadcast Tx
         - TX {(trip (to-b58:hash:transact id.raw))} passed local validation and was broadcast to the node.
         - NOTE: this only means it entered the mempool -- it is NOT yet mined. Track it with `nockchain-wallet tx-status {(trip (to-b58:hash:transact id.raw))}`.
-        - Fee: paid {(trip (format-ui:common:display:utils fees))} nicks, consensus minimum {(trip (format-ui:common:display:utils min-fee))} nicks{?:(fee-ok "" " -- WARNING: fee is below the consensus minimum; miners will reject it at block inclusion, so it will gossip but never confirm")}.
+        - Fee: paid {(trip (format-ui:common:display:utils fees))} nicks, consensus minimum {(trip (format-ui:common:display:utils min-fee))} nicks{?:(fee-ok "" " -- WARNING: fee is below the consensus minimum; nodes will reject it at mempool admission")}.
         ---
 
         """

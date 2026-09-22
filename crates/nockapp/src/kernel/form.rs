@@ -2468,7 +2468,7 @@ impl Serf {
     ///
     /// Result containing the poke response or an error.
     #[tracing::instrument(level = "info", skip_all, fields(
-        src = wire.source
+        src = %wire.source
     ))]
     fn poke(&mut self, wire: WireRepr, cause: Noun) -> Result<AcceptedPoke> {
         let metadata = self.prepare_accepted_event_metadata(&wire, cause)?;

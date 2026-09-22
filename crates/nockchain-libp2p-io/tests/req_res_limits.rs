@@ -13,14 +13,12 @@ use nockchain_libp2p_io::config::LibP2PConfig;
 use nockchain_libp2p_io::peer_stats::PeerReqResGeneration;
 use nockchain_libp2p_io::test_support::{
     BatchRequestItem, BatchResultItem, BatchResultStatus, NockchainRequest, NockchainResponse,
-    ReqResFailureObservabilityProbe, ReqResGeneration, ResponseEnvelope,
+    ReqResFailureObservabilityProbe, ResponseEnvelope,
 };
 use serde_bytes::ByteBuf;
 
 fn limited_gen2_config(max_bytes: usize) -> LibP2PConfig {
     LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         gen2_batch_max_bytes: max_bytes,
         ..default_test_config()
     }
@@ -40,17 +38,6 @@ fn encoded_response_bytes(response: &NockchainResponse) -> usize {
 
 fn timeout_gen2_config(timeout_secs: u64) -> LibP2PConfig {
     LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
-        request_response_timeout_secs: timeout_secs,
-        ..default_test_config()
-    }
-}
-
-fn timeout_gen1_config(timeout_secs: u64) -> LibP2PConfig {
-    LibP2PConfig {
-        req_res_gen2_accept_enabled: false,
-        req_res_gen2_send_enabled: false,
         request_response_timeout_secs: timeout_secs,
         ..default_test_config()
     }
@@ -763,12 +750,7 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
 
     let observability = ReqResFailureObservabilityProbe::new(requester_peer_id, &requester_config);
     observability
-        .observe_connected_peer(
-            responder_peer_id,
-            &responder_addr,
-            &requester_addr,
-            ReqResGeneration::Gen2,
-        )
+        .observe_connected_peer(responder_peer_id, &responder_addr, &requester_addr)
         .await;
 
     let timed_out_request = NockchainRequest::BatchRequest {
@@ -802,7 +784,6 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
     observability
         .observe_outbound_failure(
             responder_peer_id,
-            ReqResGeneration::Gen2,
             timed_out_request,
             request_response::OutboundFailure::Timeout,
         )
@@ -810,8 +791,6 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
 
     let counters = observability.snapshot();
     assert_eq!(counters.request_failed, 1);
-    assert_eq!(counters.gen1_outbound_failures, 0);
-    assert_eq!(counters.gen1_outbound_timeouts, 0);
     assert_eq!(counters.gen2_outbound_failures, 1);
     assert_eq!(counters.gen2_outbound_timeouts, 1);
 
@@ -859,113 +838,4 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
     assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
     assert!(rendered.contains("outbound failure"));
     assert!(rendered.contains("shape=batch-result"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn req_res_gen1_timeout_updates_observability_and_recovers() {
-    init_tracing();
-
-    let timeout_secs = 1;
-    let requester_config = timeout_gen1_config(timeout_secs);
-    let responder_config = timeout_gen1_config(timeout_secs);
-    let transcript = Transcript::default();
-    let _guard = TranscriptGuard::new(&transcript, "gen1_timeout_observability");
-    transcript.record(
-        "scenario",
-        format!(
-            "gen1 timeout observability expected_common_protocol={:?} request_timeout_secs={timeout_secs}",
-            expected_common_protocol(&requester_config, &responder_config),
-        ),
-    );
-
-    let mut requester = build_test_peer("requester", requester_config.clone());
-    let mut responder = build_test_peer("responder", responder_config.clone());
-    let requester_peer_id = *requester.swarm.local_peer_id();
-    let responder_peer_id = *responder.swarm.local_peer_id();
-
-    let requester_addr = wait_for_listen_addr(&mut requester, &transcript).await;
-    let responder_addr = wait_for_listen_addr(&mut responder, &transcript).await;
-    connect_peers(&mut requester, &mut responder, &responder_addr, &transcript).await;
-
-    let observability = ReqResFailureObservabilityProbe::new(requester_peer_id, &requester_config);
-    observability
-        .observe_connected_peer(
-            responder_peer_id,
-            &responder_addr,
-            &requester_addr,
-            ReqResGeneration::Gen1,
-        )
-        .await;
-
-    let timed_out_request = NockchainRequest::Request {
-        pow: Default::default(),
-        nonce: 0,
-        message: ByteBuf::from(b"gen1-timeout-request".to_vec()),
-    };
-
-    let observation = run_request_until_outbound_timeout(
-        &mut requester,
-        &mut responder,
-        responder_peer_id,
-        timed_out_request.clone(),
-        &transcript,
-    )
-    .await;
-    assert!(matches!(
-        observation.requester_error,
-        request_response::OutboundFailure::Timeout
-    ));
-
-    observability
-        .observe_outbound_failure(
-            responder_peer_id,
-            ReqResGeneration::Gen1,
-            timed_out_request,
-            request_response::OutboundFailure::Timeout,
-        )
-        .await;
-
-    let counters = observability.snapshot();
-    assert_eq!(counters.request_failed, 1);
-    assert_eq!(counters.gen1_outbound_failures, 1);
-    assert_eq!(counters.gen1_outbound_timeouts, 1);
-    assert_eq!(counters.gen2_outbound_failures, 0);
-    assert_eq!(counters.gen2_outbound_timeouts, 0);
-
-    let peer_stats = observability.peer_stats_snapshot();
-    let entry = peer_stats
-        .peers
-        .iter()
-        .find(|entry| entry.peer_id == responder_peer_id.to_base58())
-        .expect("expected peer stats entry for responder");
-    assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen1);
-    assert_eq!(entry.request_count, 1);
-    assert_eq!(entry.failure_count, 1);
-    assert_eq!(entry.timeout_count, 1);
-
-    drain_pending_events(&mut requester, &transcript).await;
-    drain_pending_events(&mut responder, &transcript).await;
-
-    let followup_response = NockchainResponse::Result {
-        message: ByteBuf::from(b"gen1-timeout-followup-response".to_vec()),
-    };
-    let observed = run_round_trip(
-        &mut requester,
-        &mut responder,
-        responder_peer_id,
-        NockchainRequest::Request {
-            pow: Default::default(),
-            nonce: 1,
-            message: ByteBuf::from(b"gen1-timeout-followup".to_vec()),
-        },
-        followup_response.clone(),
-        &transcript,
-    )
-    .await;
-    assert_eq!(observed, followup_response);
-
-    let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-1-req-res\")"));
-    assert!(rendered.contains("outbound failure"));
-    assert!(rendered.contains("shape=result"));
 }

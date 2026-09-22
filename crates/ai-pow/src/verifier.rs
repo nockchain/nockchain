@@ -27,7 +27,7 @@ use thiserror::Error;
 use crate::commit::{a_row_leaf_hash, b_col_leaf_hash, merkle_recover_root, MerkleError};
 use crate::fiat_shamir::{
     attempt_tile_index, block_state, canonical_noise_seeds_from_matrix_commitments,
-    challenge_indices, challenge_seed, commitment_key, pow_key_for_nonce,
+    challenge_indices, challenge_seed, commitment_key, pow_key_for_nonce, FiatShamirError,
 };
 use crate::matmul::compute_tile_from_slices;
 use crate::params::{MatmulParams, ParamError};
@@ -44,6 +44,8 @@ pub enum VerifyError {
     Params(#[from] ParamError),
     #[error("merkle: {0}")]
     Merkle(#[from] MerkleError),
+    #[error("Fiat-Shamir challenge: {0}")]
+    FiatShamir(#[from] FiatShamirError),
     #[error("params tag in proof does not match expected")]
     ParamsTagMismatch,
     #[error("found tile coordinates out of range")]
@@ -127,7 +129,7 @@ pub fn verify_at_target(
     let (s_a, s_b) = canonical_noise_seeds_from_matrix_commitments(
         &kappa, &proof.h_a_chunk, &proof.h_b_chunk, params.m, params.n,
     );
-    let expected_found = attempt_tile_index(&state, &tag, &s_a, num_tiles);
+    let expected_found = attempt_tile_index(&state, &tag, &s_a, num_tiles)?;
 
     if (proof.spot.len() as u32) != params.spot_checks {
         return Err(VerifyError::SpotCountMismatch);
@@ -157,7 +159,7 @@ pub fn verify_at_target(
         return Err(VerifyError::FoundAboveTarget);
     }
 
-    let expected_indices = challenge_indices(&chal, params.spot_checks, num_tiles);
+    let expected_indices = challenge_indices(&chal, params.spot_checks, num_tiles)?;
     for (k, opening) in proof.spot.iter().enumerate() {
         let claimed_idx = params.tile_index(opening.i, opening.j);
         if claimed_idx != expected_indices[k] {

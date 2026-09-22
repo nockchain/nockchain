@@ -150,6 +150,7 @@ pub mod util {
     use crate::mem::NockStack;
     use crate::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, NO, T, YES};
     use crate::site::{site_slam, Site};
+    use crate::unifying_equality::unifying_equality;
 
     /// Reverse order of list
     pub fn flop<T: NounAllocator>(alloc: &mut T, noun: Noun, space: &NounSpace) -> Result {
@@ -332,13 +333,17 @@ pub mod util {
                     return Ok(D(0)); // (unit @ud)  ~
                 }
 
-                if unsafe {
-                    n.in_space(&space)
-                        .as_cell()?
-                        .head()
-                        .noun()
-                        .raw_equals(&h.in_space(&space).as_cell()?.head().noun())
-                } {
+                let mut needle_item = n.in_space(&space).as_cell()?.head().noun();
+                let mut haystack_item = h.in_space(&space).as_cell()?.head().noun();
+                let items_equal = unsafe {
+                    needle_item.raw_equals(&haystack_item)
+                        || (!needle_item.is_direct()
+                            && !haystack_item.is_direct()
+                            && unifying_equality(
+                                &mut context.stack, &mut needle_item, &mut haystack_item,
+                            ))
+                };
+                if items_equal {
                     if unsafe {
                         n.in_space(&space)
                             .as_cell()?
@@ -396,7 +401,7 @@ mod tests {
     use super::*;
     use crate::jets::util::test::{assert_jet, assert_jet_err, init_context};
     use crate::jets::util::BAIL_EXIT;
-    use crate::noun::{D, T};
+    use crate::noun::{IndirectAtom, D, T};
 
     #[test]
     #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
@@ -611,6 +616,21 @@ mod tests {
         let sam = T(&mut c.stack, &[c41, c1341342]);
         let res = T(&mut c.stack, &[D(0), D(2)]);
         assert_jet(c, jet_find, sam, res);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn test_find_uses_value_equality() {
+        let c = &mut init_context();
+        let value = u64::MAX;
+        let needle_atom = unsafe { IndirectAtom::new_raw(&mut c.stack, 1, &value) }.as_noun();
+        let haystack_atom = unsafe { IndirectAtom::new_raw(&mut c.stack, 1, &value) }.as_noun();
+        let needle = T(&mut c.stack, &[needle_atom, D(0)]);
+        let haystack = T(&mut c.stack, &[haystack_atom, D(0)]);
+        let sam = T(&mut c.stack, &[needle, haystack]);
+        let expected = T(&mut c.stack, &[D(0), D(0)]);
+
+        assert_jet(c, jet_find, sam, expected);
     }
 
     #[test]

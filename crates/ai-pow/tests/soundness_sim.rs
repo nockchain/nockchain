@@ -47,7 +47,8 @@ fn empirical_rejection_rate(num_tiles: u32, f: f64, sigma: u32, trials: u32, see
         let mut s = [0u8; 32];
         s[..8].copy_from_slice(&(trial as u64).to_le_bytes());
         s[8..16].copy_from_slice(&seed.to_le_bytes());
-        let indices = challenge_indices(&s, sigma, u64::from(num_tiles));
+        let indices = challenge_indices(&s, sigma, u64::from(num_tiles))
+            .expect("simulation parameters satisfy challenge bounds");
         if indices.iter().any(|i| lies.contains(&(*i as u32))) {
             detected += 1;
         }
@@ -102,7 +103,9 @@ fn fs_sample_indices_distribute_uniformly() {
     for trial in 0..trials {
         let mut s = [0u8; 32];
         s[..8].copy_from_slice(&(trial as u64).to_le_bytes());
-        for &i in &challenge_indices(&s, sigma, u64::from(num_tiles)) {
+        for &i in &challenge_indices(&s, sigma, u64::from(num_tiles))
+            .expect("simulation parameters satisfy challenge bounds")
+        {
             hist[i as usize] += 1;
         }
     }

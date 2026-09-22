@@ -1,18 +1,7 @@
-# Nous rollout scenario: node restart and rejoin after gen2 session
+# Nous gen2 restart and rejoin scenario
 #
-# Verifies that a gen2-enabled node can be stopped and restarted while its
-# peer continues mining, then successfully re-syncs the missed blocks.
-# This exercises the restart/reconnect path that operators use during
-# rolling upgrades and the rollback procedure.
-#
-# NOTE: The current scenario schema does not support changing env vars
-# between stop/start cycles.  The protocol-ordering rollback (disabling
-# send_enabled) is verified at the crate level by the integration test
-# req_res_gen2_rollback_reverts_outbound_to_gen1.  This scenario verifies
-# the node-level restart/rejoin behavior.
-#
-# Generation matrix cell: new(enabled) restart + rejoin
-# Expected behavior: head convergence after restart and catch-up.
+# Verifies that a gen2 node can be stopped and restarted while its peer
+# continues mining, then successfully re-syncs the missed blocks.
 
 name: "nous_rollback"
 seed: 24
@@ -29,8 +18,6 @@ nodes:
     fakenet_v1_phase: 3
     no_default_peers: true
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
       NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
 
@@ -46,13 +33,11 @@ nodes:
       - node: "node-stable"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
       NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
 
 steps:
-  # Phase 1: both gen2-enabled, sync normally
+  # Phase 1: both nodes sync normally
   - action: start_nodes
     ids: ["node-stable", "node-restart"]
 

@@ -16,7 +16,7 @@ use nockchain_math::structs::HoonMapIter;
 use nockchain_types::tx_engine::common::Page;
 use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name};
 use nockchain_types::tx_engine::v0::{Lock, NoteV0, RawTx};
-use nockvm::noun::{Noun, NounAllocator, NounHandle, NounSpace, SIG};
+use nockvm::noun::{DirectAtom, Noun, NounAllocator, NounHandle, NounSpace, SIG};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -25,6 +25,14 @@ use crate::error::{NockAppGrpcError, Result as GrpcResult};
 use crate::pb::common::v1 as pb_common;
 use crate::public_nockchain::v2::metrics::NockchainGrpcApiMetrics;
 use crate::public_nockchain::v2::server::BalanceHandle;
+
+fn direct_height_noun(height: u64) -> GrpcResult<Noun> {
+    DirectAtom::new(height)
+        .map(DirectAtom::as_noun)
+        .map_err(|_| {
+            NockAppGrpcError::InvalidRequest("height exceeds maximum supported value".into())
+        })
+}
 
 struct PageHeader {
     digest: Hash,
@@ -677,9 +685,8 @@ impl BlockExplorerCache {
 
         let mut path_slab = NounSlab::new();
         let tag = nockapp::utils::make_tas(&mut path_slab, "heaviest-chain-blocks-range").as_noun();
-        let start_noun = nockvm::noun::D(height);
-        let end_noun = nockvm::noun::D(height);
-        let path_noun = nockvm::noun::T(&mut path_slab, &[tag, start_noun, end_noun, SIG]);
+        let height_noun = direct_height_noun(height)?;
+        let path_noun = nockvm::noun::T(&mut path_slab, &[tag, height_noun, height_noun, SIG]);
         path_slab.set_root(path_noun);
 
         let result = handle
@@ -1014,9 +1021,8 @@ impl BlockExplorerCache {
         tracing::Span::current().record("height", &tracing::field::display(height));
         let mut path_slab = NounSlab::new();
         let tag = nockapp::utils::make_tas(&mut path_slab, "heaviest-chain-blocks-range").as_noun();
-        let start_noun = nockvm::noun::D(height);
-        let end_noun = nockvm::noun::D(height);
-        let path_noun = nockvm::noun::T(&mut path_slab, &[tag, start_noun, end_noun, SIG]);
+        let height_noun = direct_height_noun(height)?;
+        let path_noun = nockvm::noun::T(&mut path_slab, &[tag, height_noun, height_noun, SIG]);
         path_slab.set_root(path_noun);
 
         let result = handle
@@ -1266,8 +1272,8 @@ impl BlockExplorerCache {
             .expect("chunk semaphore closed");
         let mut path_slab = NounSlab::new();
         let tag = nockapp::utils::make_tas(&mut path_slab, "heaviest-chain-blocks-range").as_noun();
-        let start_noun = nockvm::noun::D(start);
-        let end_noun = nockvm::noun::D(end);
+        let start_noun = direct_height_noun(start)?;
+        let end_noun = direct_height_noun(end)?;
         let path_noun = nockvm::noun::T(&mut path_slab, &[tag, start_noun, end_noun, SIG]);
         path_slab.set_root(path_noun);
 
@@ -2891,6 +2897,103 @@ mod tests {
         assert_eq!(BlockExplorerCache::range_chunk_start(255), 128);
         assert_eq!(BlockExplorerCache::range_chunk_end(1, 255), 128);
         assert_eq!(BlockExplorerCache::range_chunk_end(129, 255), 255);
+    }
+
+    #[derive(Default)]
+    struct NoDataHandle {
+        peek_calls: AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl BalanceHandle for NoDataHandle {
+        async fn peek(
+            &self,
+            _path: NounSlab,
+        ) -> std::result::Result<Option<NounSlab>, NockAppError> {
+            self.peek_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
+        }
+
+        async fn poke(
+            &self,
+            _wire: WireRepr,
+            _payload: NounSlab,
+        ) -> std::result::Result<PokeResult, NockAppError> {
+            Err(NockAppError::OtherError(
+                "poke not supported in test handle".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn load_full_page_by_height_rejects_non_direct_heights() {
+        let metrics = crate::public_nockchain::v2::metrics::init_metrics();
+        let cache = BlockExplorerCache::new(metrics);
+        let handle = Arc::new(NoDataHandle::default());
+        let balance_handle: Arc<dyn BalanceHandle> = handle.clone();
+
+        for height in [0, nockvm::noun::DIRECT_MAX] {
+            assert!(matches!(
+                cache
+                    .load_full_page_by_height(&balance_handle, height)
+                    .await,
+                Err(NockAppGrpcError::PeekFailed)
+            ));
+        }
+
+        for height in [nockvm::noun::DIRECT_MAX + 1, u64::MAX] {
+            assert!(
+                matches!(
+                    cache
+                        .load_full_page_by_height(&balance_handle, height)
+                        .await,
+                    Err(NockAppGrpcError::InvalidRequest(_))
+                ),
+                "height {height} should be rejected"
+            );
+        }
+
+        assert_eq!(handle.peek_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn explorer_rejects_non_direct_heights_on_all_paths() {
+        let metrics = crate::public_nockchain::v2::metrics::init_metrics();
+        let cache = BlockExplorerCache::new(metrics);
+        let handle = Arc::new(NoDataHandle::default());
+        let balance_handle: Arc<dyn BalanceHandle> = handle.clone();
+
+        assert!(
+            matches!(
+                cache
+                    .load_block_with_transactions(&balance_handle, u64::MAX)
+                    .await,
+                Err(NockAppGrpcError::InvalidRequest(_))
+            ),
+            "load_block_with_transactions should reject u64::MAX"
+        );
+        assert!(
+            matches!(
+                cache
+                    .peek_blocks_range(&balance_handle, nockvm::noun::DIRECT_MAX + 1, 0)
+                    .await,
+                Err(NockAppGrpcError::InvalidRequest(_))
+            ),
+            "peek_blocks_range should reject a non-direct start"
+        );
+        assert!(
+            matches!(
+                cache.peek_blocks_range(&balance_handle, 0, u64::MAX).await,
+                Err(NockAppGrpcError::InvalidRequest(_))
+            ),
+            "peek_blocks_range should reject a non-direct end"
+        );
+
+        assert_eq!(
+            handle.peek_calls.load(Ordering::Relaxed),
+            0,
+            "non-direct heights must be rejected before any kernel peek"
+        );
     }
 
     struct RecordingRangeHandle {

@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use either::{Left, Right};
 use ibig::UBig;
 use nockvm::interpreter::Context;
@@ -7,7 +9,7 @@ use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, IndirectAtom, Noun, NounSpace, D, T};
 use nockvm_macros::tas;
 
-use crate::form::belt::{mont_reduction, montify, montiply, Belt};
+use crate::form::belt::{based_check, mont_reduction, montify, montiply, Belt};
 use crate::form::felt::Felt;
 use crate::form::handle::{finalize_mary, new_handle_mut_mary};
 use crate::form::mary::{MarySlice, MarySliceMut};
@@ -59,11 +61,36 @@ pub fn do_init_mary_jet(context: &mut Context, subject: Noun) -> Result<Noun, Je
 
     let list: Vec<Noun> = HoonList::try_from(poly, &space)?.into_iter().collect();
     let list_len = list.len();
+    let step_usize = step as usize;
+
+    // The Hoon gate handles an empty list through zero-mary rather than the
+    // packed representation below. Punt so the authoritative path preserves
+    // that behavior.
+    if list.is_empty() || u32::try_from(list_len).is_err() {
+        return Err(JetErr::Punt);
+    }
+
+    // Mirror do-init-mary's levy guard. Each element is either one base-field
+    // word at step 1, or `step` data words plus its encoding marker. Invalid
+    // input must reach the Hoon guard instead of being truncated or indexed.
+    for p in &list {
+        let atom = p.in_space(&space).as_atom().map_err(|_| JetErr::Punt)?;
+        let bytes = atom.as_ne_bytes();
+        let word_count = bytes.len() / size_of::<u64>();
+        let valid_width =
+            (step_usize == 1 && word_count == 1) || step_usize.checked_add(1) == Some(word_count);
+        let all_words_based = bytes.chunks_exact(size_of::<u64>()).all(|chunk| {
+            let word = <[u8; 8]>::try_from(chunk).expect("word-sized atom chunk");
+            based_check(u64::from_ne_bytes(word))
+        });
+
+        if step_usize == 0 || !valid_width || !all_words_based {
+            return Err(JetErr::Punt);
+        }
+    }
 
     let (res, res_mary): (IndirectAtom, MarySliceMut) =
-        new_handle_mut_mary(&mut context.stack, step as usize, list_len);
-
-    let step_usize = step as usize;
+        new_handle_mut_mary(&mut context.stack, step_usize, list_len);
     for (j, p) in list.iter().enumerate() {
         let atom = p.in_space(&space).as_atom()?;
         match atom.as_either() {
@@ -452,27 +479,50 @@ pub fn hash_hashable_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
 }
 
 pub fn hash_hashable(stack: &mut NockStack, h: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
+    let mut remaining = 1usize << 20;
+    let mut cache = std::collections::HashMap::new();
+    hash_hashable_with_budget(stack, h, space, &mut remaining, &mut cache)
+}
+
+fn hash_hashable_with_budget(
+    stack: &mut NockStack,
+    h: Noun,
+    space: &NounSpace,
+    remaining: &mut usize,
+    cache: &mut std::collections::HashMap<usize, Noun>,
+) -> Result<Noun, JetErr> {
     if !h.is_cell() {
         return Err(BAIL_FAIL);
     }
 
     let h_cell = h.in_space(space).as_cell()?;
+    let key = unsafe { h_cell.raw_pointer() } as usize;
+    if let Some(&digest) = cache.get(&key) {
+        return Ok(digest);
+    }
+    if *remaining == 0 {
+        return Err(BAIL_FAIL);
+    }
+    *remaining -= 1;
+
     let h_head = h_cell.head().noun();
     let h_tail = h_cell.tail().noun();
 
-    if h_head.is_direct() {
+    let digest = if h_head.is_direct() {
         let tag = h_head.as_direct()?;
 
         match tag.data() {
             tas!(b"hash") => hash_hashable_hash(stack, h_tail),
             tas!(b"leaf") => hash_hashable_leaf(stack, h_tail, space),
-            tas!(b"list") => hash_hashable_list(stack, h_tail, space),
-            tas!(b"mary") => hash_hashable_mary(stack, h_tail, space),
-            _ => hash_hashable_other(stack, h_head, h_tail, space),
+            tas!(b"list") => hash_hashable_list(stack, h_tail, space, remaining, cache),
+            tas!(b"mary") => hash_hashable_mary(stack, h_tail, space, remaining, cache),
+            _ => hash_hashable_other(stack, h_head, h_tail, space, remaining, cache),
         }
     } else {
-        hash_hashable_other(stack, h_head, h_tail, space)
-    }
+        hash_hashable_other(stack, h_head, h_tail, space, remaining, cache)
+    }?;
+    cache.insert(key, digest);
+    Ok(digest)
 }
 
 fn hash_hashable_hash(_stack: &mut NockStack, p: Noun) -> Result<Noun, JetErr> {
@@ -481,17 +531,29 @@ fn hash_hashable_hash(_stack: &mut NockStack, p: Noun) -> Result<Noun, JetErr> {
 fn hash_hashable_leaf(stack: &mut NockStack, p: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
     tip5::hash::hash_noun_varlen(stack, p, space)
 }
-fn hash_hashable_list(stack: &mut NockStack, p: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
+fn hash_hashable_list(
+    stack: &mut NockStack,
+    p: Noun,
+    space: &NounSpace,
+    remaining: &mut usize,
+    cache: &mut std::collections::HashMap<usize, Noun>,
+) -> Result<Noun, JetErr> {
     // Propagate any per-element error as a jet error (falling back to Hoon)
     // instead of panicking.
     let turn: Vec<Noun> = HoonList::try_from(p, space)?
         .into_iter()
-        .map(|x| hash_hashable(stack, x, space))
+        .map(|x| hash_hashable_with_budget(stack, x, space, remaining, cache))
         .collect::<Result<Vec<Noun>, JetErr>>()?;
     let turn_list = vecnoun_to_hoon_list(stack, &turn, space);
     tip5::hash::hash_noun_varlen(stack, turn_list, space)
 }
-fn hash_hashable_mary(stack: &mut NockStack, p: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
+fn hash_hashable_mary(
+    stack: &mut NockStack,
+    p: Noun,
+    space: &NounSpace,
+    remaining: &mut usize,
+    cache: &mut std::collections::HashMap<usize, Noun>,
+) -> Result<Noun, JetErr> {
     let (ma_step, ma_array_len, _ma_array_dat) = get_mary_fields(p, space)?;
 
     let ma_changed = change_step(stack, p, D(1), space)?;
@@ -504,7 +566,7 @@ fn hash_hashable_mary(stack: &mut NockStack, p: Noun, space: &NounSpace) -> Resu
     let hash = T(stack, &[D(tas!(b"hash")), hash_belts_list]);
     let arg = T(stack, &[leaf_step, leaf_len, hash]);
 
-    hash_hashable(stack, arg, space)
+    hash_hashable_with_budget(stack, arg, space, remaining, cache)
 }
 
 fn hash_hashable_other(
@@ -512,9 +574,11 @@ fn hash_hashable_other(
     p: Noun,
     q: Noun,
     space: &NounSpace,
+    remaining: &mut usize,
+    cache: &mut std::collections::HashMap<usize, Noun>,
 ) -> Result<Noun, JetErr> {
-    let ph = hash_hashable(stack, p, space)?;
-    let qh = hash_hashable(stack, q, space)?;
+    let ph = hash_hashable_with_budget(stack, p, space, remaining, cache)?;
+    let qh = hash_hashable_with_budget(stack, q, space, remaining, cache)?;
 
     let cell = T(stack, &[ph, qh]);
 
@@ -555,6 +619,7 @@ pub fn digest_to_atom_jet(context: &mut Context, subject: Noun) -> Result<Noun, 
 
 #[cfg(test)]
 mod tests {
+    use ibig::ubig;
     use nockvm::jets::util::test::*;
     use nockvm::noun::{D, T};
 
@@ -750,6 +815,17 @@ mod tests {
     }
 
     #[test]
+    fn hash_hashable_reuses_shared_subtrees() {
+        let c = &mut init_context();
+        let mut hashable = T(&mut c.stack, &[D(tas!(b"leaf")), D(0)]);
+        for _ in 0..60 {
+            hashable = T(&mut c.stack, &[hashable, hashable]);
+        }
+        let space = c.stack.noun_space();
+        assert!(hash_hashable(&mut c.stack, hashable, &space).is_ok());
+    }
+
+    #[test]
     fn hash_felts_mary_digest_rejects_empty_input_without_panicking() {
         let mary = MarySlice {
             step: 3,
@@ -758,5 +834,94 @@ mod tests {
         };
 
         assert!(hash_felts_mary_digest(&mary).is_err());
+    }
+
+    #[test]
+    fn do_init_mary_punts_on_zero_step_with_nonempty_poly() {
+        let c = &mut init_context();
+        let poly = T(&mut c.stack, &[D(1), D(0)]);
+        let sam = T(&mut c.stack, &[D(0), poly]);
+        let subject = T(&mut c.stack, &[D(0), sam, D(0)]);
+
+        assert!(matches!(do_init_mary_jet(c, subject), Err(JetErr::Punt)));
+    }
+
+    #[test]
+    fn do_init_mary_punts_on_element_width_mismatch() {
+        let c = &mut init_context();
+        let poly = T(&mut c.stack, &[D(1), D(0)]);
+        let sam = T(&mut c.stack, &[D(2), poly]);
+        let subject = T(&mut c.stack, &[D(0), sam, D(0)]);
+
+        assert!(matches!(do_init_mary_jet(c, subject), Err(JetErr::Punt)));
+    }
+
+    #[test]
+    fn do_init_mary_punts_on_non_field_word() {
+        let c = &mut init_context();
+        let non_field_word = Atom::new(&mut c.stack, crate::form::belt::PRIME).as_noun();
+        let poly = T(&mut c.stack, &[non_field_word, D(0)]);
+        let sam = T(&mut c.stack, &[D(1), poly]);
+        let subject = T(&mut c.stack, &[D(0), sam, D(0)]);
+
+        assert!(matches!(do_init_mary_jet(c, subject), Err(JetErr::Punt)));
+    }
+
+    #[test]
+    fn do_init_mary_packs_elements_like_rep() {
+        // Success-path coverage: the packed result must equal the Hoon gate's
+        // (add (rep [6 step] poly) high-bit).
+        // (rep [6 1] ~[x] = x, plus the high-bit marker at bit 64).
+        let c = &mut init_context();
+        let x = D(0x1234_5678_9abc_def0);
+        let poly = T(&mut c.stack, &[x, D(0)]);
+        let sam = T(&mut c.stack, &[D(1), poly]);
+        let packed = A(
+            &mut c.stack,
+            &(ubig!(0x1234_5678_9abc_def0) + (ubig!(1) << 64)),
+        );
+        let array = T(&mut c.stack, &[D(1), packed]);
+        let expected = T(&mut c.stack, &[D(1), array]);
+        assert_jet(c, do_init_mary_jet, sam, expected);
+
+        // step=1, 2-word element (lent v = step+1 = 2): rep [6 1] keeps only
+        // the low word, matching `end [6 1]` in the Hoon gate.
+        let c = &mut init_context();
+        let elt = A(
+            &mut c.stack,
+            &(ubig!(0xdead_beef_cafe_f00d) + (ubig!(0x1010) << 64)),
+        );
+        let poly = T(&mut c.stack, &[elt, D(0)]);
+        let sam = T(&mut c.stack, &[D(1), poly]);
+        let packed = A(
+            &mut c.stack,
+            &(ubig!(0xdead_beef_cafe_f00d) + (ubig!(1) << 64)),
+        );
+        let array = T(&mut c.stack, &[D(1), packed]);
+        let expected = T(&mut c.stack, &[D(1), array]);
+        assert_jet(c, do_init_mary_jet, sam, expected);
+
+        // step=3, 4-word element (3 data words + marker): rep [6 3] keeps the
+        // low 3 words; marker bit lands at bit 64*3.
+        let c = &mut init_context();
+        let elt = A(
+            &mut c.stack,
+            &(ubig!(0x1111_2222_3333_4444)
+                + (ubig!(0x5555_6666_7777_8888) << 64)
+                + (ubig!(0x9999_aaaa_bbbb_cccc) << 128)
+                + (ubig!(0xeeee_ffff) << 192)),
+        );
+        let poly = T(&mut c.stack, &[elt, D(0)]);
+        let sam = T(&mut c.stack, &[D(3), poly]);
+        let packed = A(
+            &mut c.stack,
+            &(ubig!(0x1111_2222_3333_4444)
+                + (ubig!(0x5555_6666_7777_8888) << 64)
+                + (ubig!(0x9999_aaaa_bbbb_cccc) << 128)
+                + (ubig!(1) << 192)),
+        );
+        let array = T(&mut c.stack, &[D(1), packed]);
+        let expected = T(&mut c.stack, &[D(3), array]);
+        assert_jet(c, do_init_mary_jet, sam, expected);
     }
 }

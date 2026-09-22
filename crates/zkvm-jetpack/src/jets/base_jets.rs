@@ -2,7 +2,7 @@ use nockchain_math::belt::*;
 use nockvm::interpreter::Context;
 use nockvm::jets::bits::util::rip;
 use nockvm::jets::util::{bite, slot, BAIL_FAIL};
-use nockvm::jets::Result;
+use nockvm::jets::{JetErr, Result};
 use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, Noun, NounSpace, D, NO, T, YES};
 use tracing::debug;
@@ -172,16 +172,18 @@ pub fn rip_correct(
     rip(stack, bloq, step, b, space)
 }
 
-pub fn levy_based(a_noun: Noun, space: &NounSpace) -> bool {
+/// Wire nouns are attacker-supplied: an improper list terminator must be
+/// an error, never a panic.
+pub fn levy_based(a_noun: Noun, space: &NounSpace) -> std::result::Result<bool, JetErr> {
     let mut list = a_noun;
     loop {
         if unsafe { list.raw_equals(&D(0)) } {
-            return true;
+            return Ok(true);
         }
-        let cell = list.in_space(space).as_cell().expect("cell not found");
+        let cell = list.in_space(space).as_cell()?;
         let based_res = based(cell.head().noun(), space);
         if !based_res {
-            return false;
+            return Ok(false);
         }
 
         list = cell.tail().noun();
@@ -219,19 +221,128 @@ pub fn based_noun_jet(_context: &mut Context, subject: Noun) -> Result {
     }
 }
 
+const MAX_NOUN_LOGICAL_NODES: usize = 1 << 20;
+
 pub fn based_noun(n: Noun, space: &NounSpace) -> bool {
-    if n.is_atom() {
-        return based(n, space);
+    enum Task {
+        Visit(Noun),
+        Finish(usize),
     }
 
-    let n_cell = n
-        .in_space(space)
-        .as_cell()
-        .expect("n should be a cell since it's not an atom");
-    let res1 = based_noun(n_cell.head().noun(), space);
-    if !res1 {
-        return false;
+    // Compute the logical size with a post-order DAG walk. Reusing a cached
+    // subtree count preserves the logical-tree result without revisiting the
+    // subtree, while saturation makes oversized inputs fail closed.
+    let mut sizes = std::collections::HashMap::<usize, usize>::new();
+    let mut values = Vec::new();
+    let mut work = vec![Task::Visit(n)];
+
+    while let Some(task) = work.pop() {
+        match task {
+            Task::Visit(current) => {
+                if current.is_atom() {
+                    if !based(current, space) {
+                        return false;
+                    }
+                    values.push(1);
+                    continue;
+                }
+
+                let Ok(cell) = current.in_space(space).as_cell() else {
+                    return false;
+                };
+                let key = unsafe { cell.raw_pointer() } as usize;
+                if let Some(&size) = sizes.get(&key) {
+                    values.push(size);
+                    continue;
+                }
+
+                work.push(Task::Finish(key));
+                work.push(Task::Visit(cell.tail().noun()));
+                work.push(Task::Visit(cell.head().noun()));
+            }
+            Task::Finish(key) => {
+                let Some(tail_size) = values.pop() else {
+                    return false;
+                };
+                let Some(head_size) = values.pop() else {
+                    return false;
+                };
+                let size = 1usize.saturating_add(head_size).saturating_add(tail_size);
+                if size > MAX_NOUN_LOGICAL_NODES {
+                    return false;
+                }
+                sizes.insert(key, size);
+                values.push(size);
+            }
+        }
     }
 
-    based_noun(n_cell.tail().noun(), space)
+    matches!(values.as_slice(), [_])
+}
+
+#[cfg(test)]
+mod based_noun_tests {
+    use nockvm::mem::NockStack;
+    use nockvm::noun::{D, T};
+
+    use super::based_noun;
+
+    #[test]
+    fn based_noun_bounds_logical_size_in_linear_time() {
+        let start = std::time::Instant::now();
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+        let mut noun = D(0);
+        for _ in 0..60 {
+            noun = T(&mut stack, &[noun, noun]);
+        }
+        let space = stack.noun_space();
+        assert!(!based_noun(noun, &space));
+        assert!(
+            start.elapsed().as_secs() < 10,
+            "logical-size accounting must be linear in physical nodes"
+        );
+
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+        let mut noun = D(0);
+        for _ in 0..18 {
+            noun = T(&mut stack, &[noun, noun]);
+        }
+        let space = stack.noun_space();
+        assert!(based_noun(noun, &space));
+
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+        let non_based = nockvm::noun::Atom::new(&mut stack, nockchain_math::belt::PRIME).as_noun();
+        let shared = T(&mut stack, &[D(1), non_based]);
+        let noun = T(&mut stack, &[shared, shared]);
+        let space = stack.noun_space();
+        assert!(!based_noun(noun, &space));
+    }
+}
+
+#[cfg(test)]
+mod levy_based_tests {
+    use nockvm::mem::NockStack;
+    use nockvm::noun::{D, T};
+
+    use super::levy_based;
+
+    /// Wire nouns are attacker-supplied: an improper list terminator must
+    /// be an error, never a panic.
+    #[test]
+    fn levy_based_improper_list_returns_error() {
+        let mut stack = NockStack::new(1 << 20, 0);
+        let space = stack.noun_space();
+        let improper = T(&mut stack, &[D(1), D(5)]);
+        assert!(levy_based(improper, &space).is_err());
+    }
+
+    #[test]
+    fn levy_based_proper_list_returns_ok() {
+        let mut stack = NockStack::new(1 << 20, 0);
+        let space = stack.noun_space();
+        let proper = T(&mut stack, &[D(1), D(0)]);
+        assert_eq!(levy_based(proper, &space).ok(), Some(true));
+        let empty = D(0);
+        assert_eq!(levy_based(empty, &space).ok(), Some(true));
+    }
 }

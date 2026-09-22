@@ -1,3 +1,5 @@
+use nockvm::jets::util::BAIL_FAIL;
+use nockvm::jets::JetErr;
 use nockvm_macros::tas;
 
 use crate::form::belt::Belt;
@@ -61,15 +63,42 @@ fn mega_exp(term: u64) -> u64 {
     (term & (((1 << EXP_LEN) - 1) << (TYP_LEN + IDX_LEN))) >> (TYP_LEN + IDX_LEN)
 }
 
-pub fn brek(ter: Belt) -> (MegaTyp, usize, u64) {
+/// Decode a mega-poly term. Proof terms are attacker-supplied, so an
+/// invalid type tag must be an error, never a panic (the Hoon gate's
+/// `?+  ...  !!` crashes deterministically on the same input).
+pub fn brek(ter: Belt) -> Result<(MegaTyp, usize, u64), JetErr> {
     //  |=  ter=mega-term
     //  ^-  [mega-typ @ @ud]
     //  :+  ~(typ mega ter)
     //    ~(idx mega ter)
     //  ~(exp mega ter)
-    (
-        mega_typ(ter.0).expect("Invalid term passed"),
+    Ok((
+        mega_typ(ter.0).map_err(|_| BAIL_FAIL)?,
         mega_idx(ter.0),
         mega_exp(ter.0),
-    )
+    ))
+}
+
+#[cfg(test)]
+mod brek_tests {
+    use super::{brek, MegaTyp};
+    use crate::form::belt::Belt;
+
+    #[test]
+    fn brek_decodes_valid_terms() {
+        // %com term: type=4, idx=9, exp=2
+        let (typ, idx, exp) = brek(Belt(4 | (9 << 3) | (2 << 13))).expect("valid term decodes");
+        assert!(matches!(typ, MegaTyp::Com));
+        assert_eq!(idx, 9);
+        assert_eq!(exp, 2);
+    }
+
+    /// Proof terms are attacker-supplied: an invalid type tag must be an
+    /// error, never a panic (panics pre-fix at mega.rs:71).
+    #[test]
+    fn brek_invalid_type_returns_error() {
+        let invalid = 5 | (1 << 3) | (1 << 13);
+        assert!(brek(Belt(invalid)).is_err());
+        assert!(brek(Belt(7 | (1 << 3) | (1 << 13))).is_err());
+    }
 }

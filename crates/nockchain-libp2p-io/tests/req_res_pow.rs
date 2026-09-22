@@ -6,7 +6,7 @@ use nockchain_libp2p_io::test_support::{
 use serde_bytes::ByteBuf;
 
 #[test]
-fn req_res_pow_binds_singleton_to_peer_pair_and_message() {
+fn req_res_pow_binds_single_item_batch_to_peer_pair_and_message() {
     let sender = PeerId::random();
     let receiver = PeerId::random();
     let other_sender = PeerId::random();
@@ -17,14 +17,17 @@ fn req_res_pow_binds_singleton_to_peer_pair_and_message() {
     assert!(!request_pow_verifies_at(&request, &receiver, &other_sender));
     assert!(!request_pow_verifies_at(&request, &other_receiver, &sender));
 
-    let NockchainRequest::Request { pow, nonce, .. } = request else {
-        panic!("singleton solver should produce a singleton request");
-    };
-    let tampered = NockchainRequest::Request {
+    let NockchainRequest::BatchRequest {
         pow,
         nonce,
-        message: ByteBuf::from(jam_block_by_height_request(43)),
+        mut items,
+    } = request
+    else {
+        panic!("single-item solver should produce a batch request");
     };
+    assert_eq!(items.len(), 1);
+    items[0].message = ByteBuf::from(jam_block_by_height_request(43));
+    let tampered = NockchainRequest::BatchRequest { pow, nonce, items };
     assert!(!request_pow_verifies_at(&tampered, &receiver, &sender));
 }
 
@@ -73,17 +76,6 @@ fn req_res_pow_binds_batch_to_peer_pair_items_and_order() {
         items: reversed_items,
     };
     assert!(!request_pow_verifies_at(&reordered, &receiver, &sender));
-}
-
-#[test]
-fn req_res_pow_leaves_gossip_out_of_powork() {
-    let receiver = PeerId::random();
-    let sender = PeerId::random();
-    let request = NockchainRequest::Gossip {
-        message: ByteBuf::from(b"legacy gossip has no powork".to_vec()),
-    };
-
-    assert!(request_pow_verifies_at(&request, &receiver, &sender));
 }
 
 #[test]

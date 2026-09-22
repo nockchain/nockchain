@@ -696,6 +696,16 @@
     (txs-size-by-id:page:t pag got-raw-tx)
   max-block-size:t
 ::
+++  coinbase-version-valid-at-height
+  |=  pag=page:t
+  ^-  ?
+  =/  cb=coinbase-split:t  ~(coinbase get:page:t pag)
+  =/  height=page-number:t  ~(height get:page:t pag)
+  ?-  -.cb
+    %0  (lth height v1-phase.blockchain-constants)
+    %1  (gte height v1-phase.blockchain-constants)
+  ==
+::
 ++  accept-page
   ~/  %accept-page
   |=  [pag=page:t acc=tx-acc:t now=@da]
@@ -812,6 +822,8 @@
             page-pow
         ==
     [%.n %proof-version-invalid]
+  ?.  (coinbase-version-valid-at-height pag)
+    [%.n %coinbase-version-height-mismatch]
   =/  ai-target-valid=?
     ?~  page-pow
       %.y
@@ -949,6 +961,8 @@
     ==
   ?.  version-check
     [%.n %proof-version-invalid]
+  ?.  (coinbase-version-valid-at-height pag)
+    [%.n %coinbase-version-height-mismatch]
   =/  digest-b58=cord  (to-b58:hash:t ~(digest get:page:t pag))
   ?.  (check-size pag)
     ~>  %slog.[1 (cat 3 'validate-page-with-txs: Block too large: ' digest-b58)]
@@ -1238,6 +1252,18 @@
   =/  pag  page:(~(got h-by pending-blocks.c) block-id)
   =.  pending-blocks.c  (~(del h-by pending-blocks.c) ~(digest get:page:t pag))
   =.  blocks.c  (~(put h-by blocks.c) block-id (to-local-page:page:t pag))
+  ::  Persist proof versions for post-activation blocks exactly as
+  ::  +accept-block does: since AI-PoW activation height alone no longer
+  ::  identifies the puzzle, and this is the only road from
+  ::  `.pending-blocks` to `.blocks`, a promoted block must carry the
+  ::  same `block-versions` entry the direct path writes — or
+  ::  +block-id-to-proof-version falls back to the height-derived legacy
+  ::  version and misclassifies the block.
+  =?  block-versions.c
+      (gte ~(height get:page:t pag) ai-pow-activation-height.blockchain-constants)
+    %+  ~(put h-by block-versions.c)
+      block-id
+    (pow-artifact-to-proof-version (need ~(pow get:page:t pag)))
   c
 ::
 ::  list of pending blocks which are lower than the minimum retention height

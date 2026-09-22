@@ -174,7 +174,9 @@ fn decode_does_not_amplify_attacker_declared_counts() {
     let seed = [0xA5u8; 32];
     let count: u32 = 80; // Pearl-class
     let range: u64 = 1u64 << 32; // == H1's tile-count ceiling
-    let (out, peak) = measure_alloc_peak(|| challenge_indices(&seed, count, range));
+    let (out, peak) = measure_alloc_peak(|| {
+        challenge_indices(&seed, count, range).expect("valid challenge bounds")
+    });
     assert_eq!(
         out.len(),
         count as usize,

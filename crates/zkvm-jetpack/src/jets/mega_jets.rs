@@ -76,7 +76,7 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
         for i in 0..k.len() {
             let ter = k.0[i];
 
-            let (typ, idx, exp) = brek(ter);
+            let (typ, idx, exp) = brek(ter)?;
 
             match typ {
                 MegaTyp::Var => {

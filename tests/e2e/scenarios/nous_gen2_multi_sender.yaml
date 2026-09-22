@@ -20,8 +20,6 @@ nodes:
     fakenet_v1_phase: 3
     no_default_peers: true
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
 
   - id: "miner-b"
@@ -38,8 +36,6 @@ nodes:
       - node: "miner-a"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
 
   - id: "full-a"
@@ -56,8 +52,6 @@ nodes:
       - node: "miner-b"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
 
   - id: "full-b"
@@ -76,8 +70,6 @@ nodes:
       - node: "full-a"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
     env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
       NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
 
 steps:

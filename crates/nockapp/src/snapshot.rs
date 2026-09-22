@@ -610,7 +610,7 @@ fn create_ready_snapshot(
     if let Err(err) = verify_snapshot(
         &snapshot_manifest_path,
         &snapshot_pma_path,
-        SnapshotVerifyMode::Fast,
+        SnapshotVerifyMode::Full,
     ) {
         let _ = fs::remove_file(&snapshot_manifest_path);
         let _ = fs::remove_file(&snapshot_pma_path);

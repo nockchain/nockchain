@@ -4,6 +4,12 @@ use noun_serde::{NounDecodeError, NounEncode};
 use crate::belt::{based_check, Belt};
 use crate::tip5;
 
+/// Upper bound on owned nodes materialized by [`OwnedBasedNoun::from_noun`].
+/// A jam DAG with structural sharing decodes in `O(input)` but implies an
+/// exponentially larger logical tree; without this budget a ~60-byte crafted
+/// noun would allocate billions of nodes.
+pub const MAX_OWNED_BASED_NOUN_NODES: usize = 1 << 20;
+
 /// Errors raised while converting allocator-backed nouns into owned based-noun trees.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OwnedBasedNounError {
@@ -16,6 +22,11 @@ pub enum OwnedBasedNounError {
     /// The source noun did not match the expected atom/cell structure.
     #[error("{0}")]
     Malformed(&'static str),
+    /// The source noun expanded past the owned-node budget. A jam DAG with
+    /// structural sharing can imply an exponentially larger logical tree, so
+    /// conversion is bounded instead of materializing every node.
+    #[error("owned based noun exceeds the node budget of {0}")]
+    TooLarge(usize),
 }
 
 /// Maps owned based-noun conversion failures into the generic noun-serde decode error.
@@ -45,36 +56,93 @@ pub enum OwnedBasedNoun {
     Cell(Box<OwnedBasedNoun>, Box<OwnedBasedNoun>),
 }
 
-impl OwnedBasedNoun {
-    /// Copies an allocator-backed noun into an owned tree that can outlive the
-    /// source allocator.
-    ///
-    /// This rejects any atom that is either larger than `u64` or not a valid
-    /// base-field element.
-    pub fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, OwnedBasedNounError> {
-        if noun.is_atom() {
-            let atom = noun
-                .in_space(space)
-                .as_atom()
-                .map_err(|_| OwnedBasedNounError::Malformed("expected atom"))?;
-            let atom = atom
-                .as_u64()
-                .map_err(|_| OwnedBasedNounError::AtomTooLarge)?;
-            if !based_check(atom) {
-                return Err(OwnedBasedNounError::AtomNotBased(atom));
-            }
-            let atom = Belt(atom);
-            Ok(Self::Atom(atom))
-        } else {
-            let cell = noun
-                .in_space(space)
-                .as_cell()
-                .map_err(|_| OwnedBasedNounError::Malformed("expected cell"))?;
-            Ok(Self::cell(
-                Self::from_noun(cell.head().noun(), space)?,
-                Self::from_noun(cell.tail().noun(), space)?,
-            ))
+impl Drop for OwnedBasedNoun {
+    fn drop(&mut self) {
+        // Box children drop recursively, so a deep spine (attacker-chosen
+        // via wallet RPC nouns, or a long byte-tape note) would overflow
+        // the dropping thread's stack. Take children out of their boxes
+        // onto a worklist instead; every popped value is then either an
+        // atom (whose drop is a no-op) or a cell already flattened to
+        // trivial children, so no drop re-enters with work to do.
+        let mut worklist: Vec<Box<Self>> = Vec::new();
+        if let Self::Cell(head, tail) = self {
+            worklist.push(std::mem::replace(head, Box::new(Self::Atom(Belt(0)))));
+            worklist.push(std::mem::replace(tail, Box::new(Self::Atom(Belt(0)))));
         }
+        while let Some(mut boxed) = worklist.pop() {
+            if let Self::Cell(head, tail) = &mut *boxed {
+                worklist.push(std::mem::replace(head, Box::new(Self::Atom(Belt(0)))));
+                worklist.push(std::mem::replace(tail, Box::new(Self::Atom(Belt(0)))));
+            }
+        }
+    }
+}
+
+impl OwnedBasedNoun {
+    pub fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, OwnedBasedNounError> {
+        Self::from_noun_with_budget(noun, space, MAX_OWNED_BASED_NOUN_NODES)
+    }
+
+    /// Budget-bounded variant of [`OwnedBasedNoun::from_noun`].
+    ///
+    /// The walk is iterative: a deep source noun (attacker-chosen via wallet
+    /// RPC hax preimages and note blobs) must not recurse on the worker
+    /// thread's stack, and a structurally shared DAG must not expand into
+    /// its exponentially larger logical tree.
+    pub fn from_noun_with_budget(
+        noun: Noun,
+        space: &NounSpace,
+        max_nodes: usize,
+    ) -> Result<Self, OwnedBasedNounError> {
+        enum Task {
+            Convert(Noun),
+            FinishCell,
+        }
+
+        let mut stack = vec![Task::Convert(noun)];
+        let mut results: Vec<Self> = Vec::new();
+        let mut count = 0usize;
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Convert(noun) => {
+                    if noun.is_atom() {
+                        let atom = noun
+                            .in_space(space)
+                            .as_atom()
+                            .map_err(|_| OwnedBasedNounError::Malformed("expected atom"))?;
+                        let atom = atom
+                            .as_u64()
+                            .map_err(|_| OwnedBasedNounError::AtomTooLarge)?;
+                        if !based_check(atom) {
+                            return Err(OwnedBasedNounError::AtomNotBased(atom));
+                        }
+                        count += 1;
+                        if count > max_nodes {
+                            return Err(OwnedBasedNounError::TooLarge(max_nodes));
+                        }
+                        results.push(Self::Atom(Belt(atom)));
+                    } else {
+                        let cell = noun
+                            .in_space(space)
+                            .as_cell()
+                            .map_err(|_| OwnedBasedNounError::Malformed("expected cell"))?;
+                        stack.push(Task::FinishCell);
+                        stack.push(Task::Convert(cell.tail().noun()));
+                        stack.push(Task::Convert(cell.head().noun()));
+                    }
+                }
+                Task::FinishCell => {
+                    let tail = results.pop().expect("cell tail result is pending");
+                    let head = results.pop().expect("cell head result is pending");
+                    count += 1;
+                    if count > max_nodes {
+                        return Err(OwnedBasedNounError::TooLarge(max_nodes));
+                    }
+                    results.push(Self::cell(head, tail));
+                }
+            }
+        }
+        Ok(results.pop().expect("from_noun produces exactly one root"))
     }
 
     /// Builds an owned atom noun directly from a validated base-field element.
@@ -281,6 +349,60 @@ mod tests {
         assert_eq!(
             OwnedBasedNoun::from_noun(noun, &space),
             Err(OwnedBasedNounError::AtomTooLarge)
+        );
+    }
+
+    #[test]
+    fn from_noun_survives_deep_chain_on_worker_stack() {
+        // GHSA-qrw6-mmw4-vjfq: an 80,000-deep right-leaning spine in an
+        // ~61 KB hax preimage must convert without stack overflow on a
+        // tokio-worker-sized (2 MB) thread.
+        let depth = 80_000;
+        let result = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+                let mut noun = nockvm::noun::D(0);
+                for _ in 0..depth {
+                    noun = nockvm::noun::T(&mut stack, &[nockvm::noun::D(1), noun]);
+                }
+                let space = stack.noun_space();
+                let converted = OwnedBasedNoun::from_noun(noun, &space)
+                    .expect("deep chain converts iteratively");
+                // Walk the spine to confirm the full depth materialized.
+                let mut cur = &converted;
+                let mut levels = 0;
+                while let OwnedBasedNoun::Cell(_, tail) = cur {
+                    levels += 1;
+                    cur = tail;
+                }
+                levels
+            })
+            .expect("spawn worker thread")
+            .join();
+        assert_eq!(result.expect("thread must not overflow"), depth);
+    }
+
+    #[test]
+    fn from_noun_rejects_exponential_dag_expansion() {
+        // GHSA-3f53-rmcr-5jmf: a doubling tower `cN = [c(N-1) c(N-1)]`
+        // shares structure in the slab but implies a 2^(N+1)-1 node
+        // logical tree. Conversion must stop at the budget and return an
+        // error instead of allocating until the process aborts.
+        let levels = 30;
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+        let mut noun = nockvm::noun::D(0);
+        for _ in 0..levels {
+            let cell = nockvm::noun::Cell::new(&mut stack, noun, noun);
+            noun = cell.as_noun();
+        }
+        let space = stack.noun_space();
+
+        assert_eq!(
+            OwnedBasedNoun::from_noun(noun, &space),
+            Err(OwnedBasedNounError::TooLarge(
+                super::MAX_OWNED_BASED_NOUN_NODES
+            ))
         );
     }
 }

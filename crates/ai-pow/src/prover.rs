@@ -28,7 +28,7 @@ use thiserror::Error;
 use crate::commit::{a_row_leaf_hash, b_col_leaf_hash, merkle_path, merkle_root, MerkleError};
 use crate::fiat_shamir::{
     attempt_tile_index, block_state, canonical_noise_seeds_from_matrix_commitments,
-    challenge_indices, challenge_seed, commitment_key, pow_key_for_nonce,
+    challenge_indices, challenge_seed, commitment_key, pow_key_for_nonce, FiatShamirError,
 };
 use crate::matmul::{compute_tile, BlockNoise, Matrices, TileState};
 use crate::params::{MatmulParams, ParamError};
@@ -44,6 +44,8 @@ pub enum MineError {
     Params(#[from] ParamError),
     #[error("merkle: {0}")]
     Merkle(#[from] MerkleError),
+    #[error("Fiat-Shamir challenge: {0}")]
+    FiatShamir(#[from] FiatShamirError),
     #[error("A has wrong length: expected m*k = {expected}, got {actual}")]
     InputAShape { expected: usize, actual: usize },
     #[error("B has wrong length: expected n*k = {expected}, got {actual}")]
@@ -433,13 +435,13 @@ fn mine_inner(
     let chal = challenge_seed(&ctx.attempt_state, &comm_m, &ctx.tag);
 
     let found_idx =
-        attempt_tile_index(&ctx.attempt_state, &ctx.tag, &ctx.s_a, num_tiles as u64) as u32;
+        attempt_tile_index(&ctx.attempt_state, &ctx.tag, &ctx.s_a, num_tiles as u64)? as u32;
     let h = &leaves[found_idx as usize];
     if !hash_le_target(h, target) {
         return Ok(None);
     }
 
-    let spot_indices = challenge_indices(&chal, params.spot_checks, num_tiles as u64);
+    let spot_indices = challenge_indices(&chal, params.spot_checks, num_tiles as u64)?;
 
     let found_opening = build_tile_opening(ctx, &leaves, found_idx.into())?;
     let mut spot = Vec::with_capacity(spot_indices.len());

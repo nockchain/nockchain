@@ -490,6 +490,16 @@ structurally valid across the boundary.
 
 ## Security Considerations
 
+- **Proof-version bookkeeping is acceptance-path invariant.** Both roads into
+  `.blocks` record a `block-versions` entry for a post-activation block: the direct
+  `+accept-block` write and the pending-promotion path
+  (`+accept-pending-block`, reached when a block's transactions arrive after its
+  header). Before this invariant was enforced on the promotion path, a promoted
+  AI-PoW block was persisted with no entry and `+block-id-to-proof-version`
+  answered with the height-derived legacy ZK version (GHSA-g3g3-q33c-6fwh). Fork
+  choice and ASERT never read the map — they price from the verified block
+  artifact — so the defect was a durable misclassification for future consumers,
+  not a live split.
 - **Fail-closed verification.** The Hoon `++ai-pow-verify` arm `!!`s if the jet
   is absent, and the jet returns a deterministic `NO` (not a crash) on any
   malformed/forged input. A stale, forged, or mis-shaped certificate is rejected.
@@ -497,6 +507,14 @@ structurally valid across the boundary.
   in `catch_unwind`; a build guard forbids `panic = "abort"` for the verifier
   crate. Decode is bounded (proof-node depth/count/atom-byte caps), and a
   trace-height above the `2^19` accept-band is rejected before the setup lookup.
+  Invalid Fiat-Shamir tile counts, ranges, and sample counts return typed errors
+  before challenge sampling instead of panicking.
+- **Overflow-safe trace construction.** BLAKE3 trace construction derives a
+  prior chaining-value row only for noninitial blocks, so a row-zero trace
+  cannot underflow with checked arithmetic.
+- **Deterministic virtual-scry failures.** A malformed virtual-scry response
+  becomes a deterministic `%exit` tone with its `%hunk` trace instead of
+  escaping as a `ScryCrashed` interpreter error.
 - **Invalid-proof spam escalation.** A `%failed-pow-check` liar effect blocks
   every peer that supplied the block and records objective cryptographic
   misbehavior against its authenticated connection address; repeated peer-ID
@@ -537,9 +555,11 @@ structurally valid across the boundary.
 ## Operational Impact
 
 - **One-time boot delay.** First boot generates the AI-PoW verifier setup
-  (~15 minutes, logged: "Generating the AI-PoW verifier-setup table…"). Do not
-  kill a node that appears "hung" during this step; subsequent boots load the
-  cache in seconds. Ship the cache to skip it.
+  (~15 minutes, logged: "Generating the AI-PoW verifier-setup table…").
+  Contexts and checksum sidecars are synced to temporary files and atomically
+  renamed into place. An interrupted build leaves no partial final context;
+  restart regenerates it without operator cleanup. Subsequent boots load the
+  cache in seconds. Ship the cache to skip generation.
 - **Verifier-setup RSS.** The DoS-safe default retains all 13 contexts after first
   use, requiring the measured setup-table RSS budget. Lower caps reduce RSS by
   paging contexts in and out. jemalloc is required (not optional).

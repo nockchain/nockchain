@@ -39,22 +39,19 @@ use crate::ip_block::{
     AddressCooldownOutcome, ExclusionOutcome, IpExclusionOutcome, PeerExclusions,
 };
 use crate::messages::{
-    block_with_txs_by_height_request_message, decode_request_item_message,
-    request_slab_from_message, NockchainDataRequest, NockchainRequest, NockchainResponse,
-    FACT_POKE_VERSION,
+    block_with_txs_by_height_request_message, decode_request_item_message, NockchainDataRequest,
+    NockchainRequest, NockchainResponse, FACT_POKE_VERSION,
 };
 use crate::metrics::NockchainP2PMetrics;
-use crate::p2p_state::{OutboundRequestContext, P2PState, RangeCapability, ReqResGeneration};
+use crate::p2p_state::{OutboundRequestContext, P2PState, RangeCapability};
 use crate::p2p_util::{
     log_fail2ban_ipv4, log_fail2ban_ipv6, multiaddr_without_p2p, MultiaddrExt, PeerIdExt,
 };
-use crate::peer_stats::PeerReqResGeneration;
 use crate::tip5_util::tip5_hash_to_base58_stack;
 use crate::tracked_join_set::TrackedJoinSet;
 use crate::traffic_cop;
 
 mod actions;
-mod gen1;
 mod gen2;
 mod kernel_io;
 #[cfg(test)]
@@ -64,7 +61,6 @@ mod watchdog;
 
 pub(crate) use actions::SwarmAction;
 use actions::{process_swarm_action, SwarmActionDispatcher};
-pub(crate) use gen1::build_unsupported_protocol_fallback_contexts;
 pub(crate) use gen2::{
     build_retry_request_contexts, collect_tip5_zset_strings, handle_outbound_request_failure,
     heard_block_height_from_fact_poke, heard_block_tx_ids_from_fact_poke,
@@ -350,20 +346,15 @@ async fn pick_prefetch_peer(
     requested_window: u8,
 ) -> PrefetchPeerSelection {
     if connected_peers.is_empty() {
-        return PrefetchPeerSelection::NoCandidate { saw_gen2: false };
+        return PrefetchPeerSelection::NoCandidate;
     }
     let state_guard = driver_state.lock().await;
     let bandwidth_cap = state_guard.prefetch_bandwidth_cap_per_peer_bytes_per_min();
     let mut throttled = false;
-    let mut saw_gen2 = false;
     let mut supported = Vec::new();
     let mut unknown = Vec::new();
 
     for peer_id in connected_peers {
-        if state_guard.peer_req_res_generation(peer_id) != PeerReqResGeneration::Gen2 {
-            continue;
-        }
-        saw_gen2 = true;
         if state_guard.inflight_prefetch_count_for_peer(peer_id) >= max_inflight_per_peer {
             continue;
         }
@@ -406,7 +397,7 @@ async fn pick_prefetch_peer(
     if throttled {
         PrefetchPeerSelection::Throttled
     } else {
-        PrefetchPeerSelection::NoCandidate { saw_gen2 }
+        PrefetchPeerSelection::NoCandidate
     }
 }
 
@@ -421,7 +412,7 @@ struct PrefetchPeer {
 enum PrefetchPeerSelection {
     Selected(PrefetchPeer),
     Throttled,
-    NoCandidate { saw_gen2: bool },
+    NoCandidate,
 }
 
 fn select_request_peers_with_preferences(
@@ -494,13 +485,6 @@ pub fn make_libp2p_driver(
             debug!("Libp2p config: {:?}", libp2p_config);
             let peer_exclusion_config = libp2p_config.peer_exclusion_config()?;
             let peer_exclusions = PeerExclusions::new(peer_exclusion_config);
-            if LibP2PConfig::gen2_block_batch_max_response_bytes_override_present() {
-                warn!(
-                    configured_cap = libp2p_config.gen2_block_batch_max_response_bytes(),
-                    env_var = "NOCKCHAIN_LIBP2P_GEN2_BLOCK_BATCH_MAX_RESPONSE_BYTES",
-                    "Ignoring inactive BlockByHeight gen2 response-budget override because outbound BlockByHeight requests remain singleton gen1 traffic"
-                );
-            }
             let kademlia_bootstrap_interval = libp2p_config.kademlia_bootstrap_interval();
             let force_peer_dial_interval = libp2p_config.force_peer_dial_interval();
             let request_high_reset = libp2p_config.request_high_reset();
@@ -514,9 +498,6 @@ pub fn make_libp2p_driver(
                 ip_bucket_connection_limit: libp2p_config.ip_bucket_connection_limit,
                 gossip_bucket_capacity: libp2p_config.gossip_bucket_capacity,
                 gossip_bucket_refill_per_second: libp2p_config.gossip_bucket_refill_per_second,
-                authenticated_gossip_send_enabled: libp2p_config
-                    .req_res_authenticated_gossip_send_enabled,
-                legacy_gossip_accept_enabled: libp2p_config.req_res_legacy_gossip_accept_enabled,
                 block_range_max_len: libp2p_config.prefetch_window_max.max(1),
                 gen2_batch_max_items: libp2p_config.gen2_batch_max_items(),
                 gen2_batch_max_bytes: libp2p_config.gen2_batch_max_bytes(),
@@ -530,7 +511,6 @@ pub fn make_libp2p_driver(
             let min_peers = libp2p_config.min_peers();
             let low_priority_peek_timeout = libp2p_config.low_priority_peek_timeout();
             let failed_pings_before_close = libp2p_config.failed_pings_before_close();
-            let req_res_gen2_send_enabled = libp2p_config.req_res_gen2_send_enabled;
             let req_res_gen2_bundle_enabled = libp2p_config.req_res_gen2_bundle_enabled;
             let prefetch_config = PrefetchConfig {
                 enabled: libp2p_config.prefetch_enabled,
@@ -607,7 +587,6 @@ pub fn make_libp2p_driver(
 
             let mut initial_peer_redial_backoff = INITIAL_PEER_REDIAL_INTERVAL;
             let mut pending_gen2_batches = BTreeMap::<PeerId, gen2::PendingGen2Batch>::new();
-            let mut peer_gen2_inbound = BTreeMap::<PeerId, bool>::new();
             gen2::update_pending_batch_metrics(&metrics, &pending_gen2_batches);
             // Start the round-robin at a random offset so nodes don't all dial
             // the same backbone subset first; each dial then advances the window.
@@ -671,8 +650,8 @@ pub fn make_libp2p_driver(
                     process_swarm_action(
                         swarm_action, &mut swarm, &mut buffered_swarm_actions, &swarm_tx,
                         &mut join_set, &driver_state, &metrics, &peer_exclusions,
-                        &mut equix_builder, &mut peer_gen2_inbound, &mut pending_gen2_batches,
-                        req_res_gen2_send_enabled, req_res_limits, &traffic_cop,
+                        &mut equix_builder, &mut pending_gen2_batches, req_res_limits,
+                        &traffic_cop,
                     )
                     .await?;
                     continue;
@@ -735,17 +714,7 @@ pub fn make_libp2p_driver(
                             },
                             SwarmEvent::Behaviour(NockchainEvent::Identify(Received { connection_id: _, peer_id, info })) => {
                                 trace!("SEvent: identify_received");
-                                let supports_gen2 = identify_received(&mut swarm, peer_id, info, &peer_exclusions, &metrics)?;
-                                driver_state.lock().await.observe_peer_generation(
-                                    peer_id,
-                                    if supports_gen2 {
-                                        ReqResGeneration::Gen2
-                                    } else {
-                                        ReqResGeneration::Gen1
-                                    },
-                                );
-                                peer_gen2_inbound.insert(peer_id, supports_gen2);
-                                trace!(peer = %peer_id, supports_gen2, "peer gen2 inbound support recorded");
+                                identify_received(&mut swarm, peer_id, info, &peer_exclusions, &metrics)?;
                             },
                             SwarmEvent::Behaviour(NockchainEvent::Kad(event)) => {
                                 trace!("SEvent: kad event {event:?}");
@@ -793,9 +762,6 @@ pub fn make_libp2p_driver(
                                 {
                                     let mut state_guard = driver_state.lock().await;
                                     let _ = state_guard.lost_connection(connection_id);
-                                    if !state_guard.peer_connections.contains_key(&peer_id) {
-                                        peer_gen2_inbound.remove(&peer_id);
-                                    }
                                 }
                                 if let Some(cause) = &cause {
                                     debug!("SEvent: friendship ended with {peer_id} via: {endpoint:?}. cause: {cause:?}");
@@ -983,7 +949,7 @@ pub fn make_libp2p_driver(
                         debug!("Force dialing peers");
                         dial_peers(&mut swarm, &force_peers)?;
                     },
-                    _ = gen2_batch_flush.tick(), if req_res_gen2_send_enabled => {
+                    _ = gen2_batch_flush.tick() => {
                         let local_peer_id = *swarm.local_peer_id();
                         let peers_to_flush: Vec<_> = pending_gen2_batches.keys().copied().collect();
                         for peer_id in peers_to_flush {
@@ -1260,15 +1226,13 @@ async fn handle_effect_with_dispatcher(
                 }
             }
 
-            let gossip_request = NockchainRequest::new_gossip(&tail_slab);
+            let gossip_message = ByteBuf::from(tail_slab.jam().as_ref());
             debug!("Gossiping to {} peers", connected_peers.len());
             for peer_id in connected_peers.clone() {
-                let gossip_request_clone = gossip_request.clone();
                 swarm_actions
-                    .dispatch(SwarmAction::SendRequest {
+                    .dispatch(SwarmAction::SendGossip {
                         peer_id,
-                        request: gossip_request_clone,
-                        request_context: None,
+                        message: gossip_message.clone(),
                     })
                     .await
                     .map_err(|_e| {
@@ -1526,11 +1490,8 @@ async fn handle_effect_with_dispatcher(
                                 "Skipping catch-up prefetch: candidate peers over bandwidth cap"
                             );
                         }
-                        PrefetchPeerSelection::NoCandidate { saw_gen2 } => {
+                        PrefetchPeerSelection::NoCandidate => {
                             metrics.prefetch_no_eligible_peer_total.increment();
-                            if !saw_gen2 {
-                                metrics.prefetch_peer_no_gen2_range_peer_total.increment();
-                            }
                         }
                     }
                 }
@@ -2403,17 +2364,13 @@ fn log_outbound_failure(
 ) {
     metrics.request_failed.increment();
     if let Some(request_context) = request_context {
-        gen2::increment_outbound_generation_failure_metrics(
-            &metrics, request_context.generation, &error,
-        );
+        gen2::increment_outbound_failure_metrics(&metrics, &error);
         debug!(
             peer = %peer,
             request_id = %request_id,
-            ?request_context.generation,
             request_shape = gen2::outbound_request_shape(&request_context.request),
             batch_items = gen2::batch_request_item_count(&request_context.request),
             retry_count = request_context.retry_count,
-            fallback_attempted = request_context.fallback_attempted,
             "Outbound request failed with retained context"
         );
     } else {
@@ -2566,28 +2523,19 @@ pub(crate) fn start_swarm(
     Ok(swarm)
 }
 
-///** Handler for "identify" messages */
-//#[instrument(skip(swarm))]
-/// Returns whether the remote peer advertises inbound support for the Gen2
-/// req-res protocol.  The caller stores this in a per-peer map so the
-/// batching decision can skip Gen2 batches for Gen1-only peers.
+/// Handler for identify messages.
 pub(crate) fn identify_received(
     swarm: &mut Swarm<NockchainBehaviour>,
     peer_id: PeerId,
     info: libp2p::identify::Info,
     peer_exclusions: &PeerExclusions,
     metrics: &NockchainP2PMetrics,
-) -> Result<bool, NockAppError> {
+) -> Result<(), NockAppError> {
     swarm.add_external_address(info.observed_addr.clone());
     if let Some(ip) = info.observed_addr.ip_addr() {
         peer_exclusions.record_positive_ip(ip);
     }
     let us = *swarm.local_peer_id();
-
-    let peer_supports_gen2_inbound = info
-        .protocols
-        .iter()
-        .any(|p| p.as_ref() == LibP2PConfig::req_res_gen2_protocol_version());
 
     let kad = &mut swarm.behaviour_mut().kad;
     trace!("identify received for peer {}", peer_id);
@@ -2605,7 +2553,7 @@ pub(crate) fn identify_received(
         trace!("Adding address {} for peer {}", addr, peer_id);
         kad.add_address(&peer_id, addr);
     }
-    Ok(peer_supports_gen2_inbound)
+    Ok(())
 }
 
 fn log_ping_success(peer: PeerId, connection_address: Option<Multiaddr>, duration: Duration) {

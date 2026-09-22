@@ -4,12 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use libp2p::request_response::ResponseChannel;
 use libp2p::swarm::ConnectionId;
 use libp2p::PeerId;
 use nockapp::driver::PokeResult;
-use nockapp::noun::slab::NounSlab;
 use nockapp::wire::Wire;
 use nockapp::NockAppError;
 use nockvm::noun::NounAllocator;
@@ -22,7 +20,8 @@ use crate::driver::{
 };
 use crate::ip_block::PeerExclusions;
 use crate::messages::{
-    BatchErrorClass, BatchResultStatus, NockchainFact, NockchainRequest, NockchainResponse,
+    request_slab_from_message, BatchErrorClass, BatchResultStatus, NockchainFact, NockchainRequest,
+    NockchainResponse,
 };
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{
@@ -99,25 +98,8 @@ pub(super) async fn handle_inbound_request(
             return Ok(());
         }
     }
-    if matches!(&request, NockchainRequest::Gossip { .. }) {
-        metrics.legacy_gossip_received.increment();
-    }
-    if matches!(&request, NockchainRequest::Gossip { .. })
-        && !req_res_limits.legacy_gossip_accept_enabled
-    {
-        metrics.legacy_gossip_compatibility_rejected.increment();
-        metrics.gossip_dropped.increment();
-        warn!(
-            peer = %peer,
-            "Rejecting legacy gossip because unauthenticated gossip compatibility is disabled"
-        );
-        return Ok(());
-    }
 
-    if !matches!(
-        &request,
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. }
-    ) {
+    if matches!(&request, NockchainRequest::BatchRequest { .. }) {
         let admission = driver_state.lock().await.admit_request_from_connection(
             connection_id, req_res_limits.ip_bucket_request_admission_limit,
         );
@@ -262,27 +244,7 @@ pub(super) async fn handle_inbound_request(
     let driver_state_for_release = Arc::clone(&driver_state);
     let request_result: Result<(), NockAppError> = async move {
         match request {
-            NockchainRequest::Request {
-                pow: _,
-                nonce: _,
-                message,
-            } => {
-                trace!("handle_request_response: Request received");
-                let data_request = decode_request_item_message(&message)?;
-                let response = execute_request_item(
-                    peer, data_request, req_res_limits, &traffic, &metrics, &driver_state,
-                )
-                .await?
-                .into_single_response();
-                swarm_tx
-                    .send(SwarmAction::SendResponse { channel, response })
-                    .await
-                    .map_err(|_| {
-                        NockAppError::OtherError(String::from("Failed to send SwarmAction response"))
-                    })
-            }
-            NockchainRequest::Gossip { message }
-            | NockchainRequest::AuthenticatedGossip { message, .. } => {
+            NockchainRequest::AuthenticatedGossip { message, .. } => {
                 trace!("handle_request_response: Gossip received");
                 let admission = driver_state.lock().await.admit_gossip_from_connection(
                     connection_id,
@@ -312,10 +274,7 @@ pub(super) async fn handle_inbound_request(
                     .await?;
                     return Ok(());
                 }
-                let mut request_slab: NounSlab = NounSlab::new();
-                let message_bytes = Bytes::from(message.to_vec());
-                let request_noun = request_slab.cue_into(message_bytes)?;
-                request_slab.set_root(request_noun);
+                let request_slab = request_slab_from_message(&message)?;
                 trace!("handle_request_response: Gossip noun parsed");
                 let driver_state_for_poke = driver_state.clone();
                 let metrics_for_poke = metrics.clone();

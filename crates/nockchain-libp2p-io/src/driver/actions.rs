@@ -36,6 +36,10 @@ pub(crate) enum SwarmAction {
         request: NockchainRequest,
         request_context: Option<OutboundRequestContext>,
     },
+    SendGossip {
+        peer_id: PeerId,
+        message: ByteBuf,
+    },
     RetryRequests {
         requests: Vec<OutboundRequestContext>,
         delay: Duration,
@@ -80,9 +84,7 @@ pub(super) async fn process_swarm_action(
     metrics: &Arc<NockchainP2PMetrics>,
     peer_exclusions: &PeerExclusions,
     equix_builder: &mut equix::EquiXBuilder,
-    peer_gen2_inbound: &mut BTreeMap<PeerId, bool>,
     pending_gen2_batches: &mut BTreeMap<PeerId, gen2::PendingGen2Batch>,
-    req_res_gen2_send_enabled: bool,
     req_res_limits: gen2::ReqResRuntimeLimits,
     traffic_cop: &traffic_cop::TrafficCop,
 ) -> Result<(), NockAppError> {
@@ -93,7 +95,7 @@ pub(super) async fn process_swarm_action(
         } => {
             gen2::process_queue_kernel_request_action(
                 peer_id, request_message, swarm, driver_state, metrics, equix_builder,
-                peer_gen2_inbound, pending_gen2_batches, req_res_gen2_send_enabled, req_res_limits,
+                pending_gen2_batches, req_res_limits,
             )
             .await
         }
@@ -103,8 +105,13 @@ pub(super) async fn process_swarm_action(
             request_context,
         } => {
             gen2::process_send_request_action(
-                peer_id, request, request_context, swarm, driver_state, metrics, equix_builder,
-                peer_gen2_inbound, pending_gen2_batches, req_res_gen2_send_enabled, req_res_limits,
+                peer_id, request, request_context, swarm, driver_state, metrics,
+            )
+            .await
+        }
+        SwarmAction::SendGossip { peer_id, message } => {
+            gen2::process_send_gossip_action(
+                peer_id, message, swarm, driver_state, metrics, equix_builder,
             )
             .await
         }

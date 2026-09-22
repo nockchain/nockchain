@@ -12,6 +12,7 @@ metrics_struct![
     (gossip_erred_heard_tx, "nockchain-libp2p-io.gossip_erred_heard_tx", Count),
     (gossip_erred_heard_elders, "nockchain-libp2p-io.gossip_erred_heard_elders", Count),
     (gossip_dropped, "nockchain-libp2p-io.gossip_dropped", Count),
+    // Retained for the public metrics schema; gen2-only networking never increments these.
     (legacy_gossip_received, "nockchain-libp2p-io.legacy_gossip_received", Count),
     (
         legacy_gossip_compatibility_rejected,
@@ -175,9 +176,10 @@ metrics_struct![
     ),
     (peer_request_rate_limited, "nockchain-libp2p-io.peer_request_rate_limited", Count),
     (request_failed, "nockchain-libp2p-io.request_failed", Count),
+    // Retained for the public metrics schema; gen2-only networking never increments these.
     (gen1_outbound_failures, "nockchain-libp2p-io.gen1_outbound_failures", Count),
-    (gen2_outbound_failures, "nockchain-libp2p-io.gen2_outbound_failures", Count),
     (gen1_outbound_timeouts, "nockchain-libp2p-io.gen1_outbound_timeouts", Count),
+    (gen2_outbound_failures, "nockchain-libp2p-io.gen2_outbound_failures", Count),
     (gen2_outbound_timeouts, "nockchain-libp2p-io.gen2_outbound_timeouts", Count),
     (gen2_batch_requests_sent, "nockchain-libp2p-io.gen2_batch_requests_sent", Count),
     (gen2_batch_requests_received, "nockchain-libp2p-io.gen2_batch_requests_received", Count),
@@ -214,6 +216,7 @@ metrics_struct![
         gen2_batch_result_unexpected_item_id,
         "nockchain-libp2p-io.gen2_batch_result_unexpected_item_id", Count
     ),
+    // Retained for the public metrics schema; gen2-only networking never increments these.
     (req_res_fallback_total, "nockchain-libp2p-io.req_res_fallback_total", Count),
     (
         req_res_block_by_height_gen1_routed,
@@ -302,6 +305,8 @@ metrics_struct![
     // prefetch_buffer_size: total deferred heard-blocks across all
     // heights, exposed as a gauge so growth and drain are both visible.
     (prefetch_buffer_size, "nockchain-libp2p-io.prefetch_buffer_size", Gauge),
+    // Backing allocation bytes retained by deferred heard-block facts.
+    (prefetch_buffer_bytes, "nockchain-libp2p-io.prefetch_buffer_bytes", Gauge),
     // ---- Phase 4: kernel-demand range prefetch issuance ----
     // prefetch_issued_total: range prefetches dispatched alongside a
     // kernel-singleton block-by-height request.
@@ -354,11 +359,5 @@ metrics_struct![
     ),
     // prefetch_peer_cooldown_total: transient range failures that put a
     // peer on range-prefetch cooldown.
-    (prefetch_peer_cooldown_total, "nockchain-libp2p-io.prefetch_peer_cooldown_total", Count),
-    // prefetch_peer_no_gen2_range_peer_total: range prefetch skipped
-    // because no connected Gen2 peer could be selected.
-    (
-        prefetch_peer_no_gen2_range_peer_total,
-        "nockchain-libp2p-io.prefetch_peer_no_gen2_range_peer_total", Count
-    )
+    (prefetch_peer_cooldown_total, "nockchain-libp2p-io.prefetch_peer_cooldown_total", Count)
 ];

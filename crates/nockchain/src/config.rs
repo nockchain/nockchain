@@ -500,6 +500,13 @@ impl NockchainCli {
     pub fn validate(&self) -> Result<(), String> {
         self.fakenet_asert.clone().into_config()?;
         self.effective_fakenet_ai_activation_height()?;
+        if self.max_system_memory_bytes.is_some() && self.max_system_memory_fraction.is_some() {
+            return Err(
+                "must provide neither or one of --max-system-memory-bytes and \
+                 --max-system-memory-fraction"
+                    .into(),
+            );
+        }
         Ok(())
     }
 }
@@ -547,6 +554,17 @@ mod tests {
             bind_private_grpc_port: 5555,
             ai_pow_verifier_cache_cap: None,
         }
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_memory_limit_flags() {
+        let mut cli = base_cli();
+        cli.max_system_memory_bytes = Some(1_000_000_000);
+        cli.max_system_memory_fraction = Some(0.5);
+        let err = cli
+            .validate()
+            .expect_err("both memory limit flags must be rejected");
+        assert!(err.contains("--max-system-memory"));
     }
 
     // clap requires unique arg ids across all flattened arg structs. Because the

@@ -31,6 +31,19 @@ Serf initialization now wraps the phases that can trigger NockStack allocation p
 ## Operational Expectations
 
 If an operator sees a malformed checkpoint or state-jam error, the artifact should be treated as corrupt or incomplete. For checkpoints, the operator can remove the bad checkpoint and allow the peer to use another local checkpoint if one exists, or restore checkpoints from a known-good synced peer. For exported state jams, the operator should re-export from a known-good node or bootstrap from a valid checkpoint instead.
+Ready-snapshot creation additionally verifies structurally
+(`SnapshotVerifyMode::Full`): the manifest hash alone accepts a torn PMA
+whose used-range hash matches, so a torn local write that would brick a
+later restore is rejected and its files removed before the snapshot can
+enter the ready set. Snapshot restore already required the structural walk;
+creation now agrees with it.
+Node startup converts its remaining panic paths into operator-actionable
+errors: the allowed-peers file is size-capped (10 MiB) before it is read and
+each malformed line is a decode error rather than a panic; conflicting
+`--max-system-memory-bytes` / `--max-system-memory-fraction` flags are
+rejected by CLI validation before any boot work; and a failed or malformed
+genesis-seal or mainnet kernel peek at startup returns an error naming the
+corrupt state instead of aborting the process.
 
 If an operator sees a Serf init allocation error, the first configuration fix is to retry with a larger `--stack-size`, typically `large` or `huge`. If the peer still cannot boot with the largest supported stack size, the operator should preserve the failing artifact for debugging and restore a checkpoint or state jam from a synced peer. The error includes checkpoint and kernel hash context so the operator can distinguish stack sizing from artifact or binary compatibility issues without needing raw panic output.
 

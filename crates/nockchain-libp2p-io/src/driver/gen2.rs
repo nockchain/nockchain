@@ -1,6 +1,5 @@
 use rand::Rng;
 
-use super::gen1::build_unsupported_protocol_fallback_contexts;
 use super::*;
 use crate::messages::{block_by_height_message, BatchErrorClass};
 
@@ -27,7 +26,7 @@ pub(crate) use responses::{
     batch_request_item_ids, missing_batch_result_item_ids, response_envelope_from_result_message,
     response_fact_from_envelope, response_fact_from_result_message, response_fact_trace_summary,
     route_block_range_envelope_with_dispatcher, route_bundle_envelope,
-    validate_response_envelope_for_request, validate_response_fact_for_request,
+    validate_response_envelope_for_request,
 };
 #[cfg(test)]
 pub(crate) use routing::checkpoint_route_trace;
@@ -37,45 +36,6 @@ pub(crate) use routing::{
     ResponseProcessingGate,
 };
 
-pub(super) async fn enqueue_unsupported_protocol_fallback(
-    swarm_actions: &mut SwarmActionDispatcher<'_>,
-    request_context: &OutboundRequestContext,
-    local_peer_id: &PeerId,
-    equix_builder: &mut equix::EquiXBuilder,
-) -> Result<usize, NockAppError> {
-    let fallback_contexts = build_unsupported_protocol_fallback_contexts(
-        request_context, local_peer_id, equix_builder,
-    )?;
-    let fallback_count = fallback_contexts.len();
-
-    for fallback_context in fallback_contexts {
-        let request = fallback_context.request.clone();
-        swarm_actions
-            .dispatch(SwarmAction::SendRequest {
-                peer_id: fallback_context.peer_id,
-                request,
-                request_context: Some(fallback_context),
-            })
-            .await
-            .map_err(|_| {
-                NockAppError::OtherError(String::from("Failed to queue fallback request"))
-            })?;
-    }
-
-    Ok(fallback_count)
-}
-
-pub(super) async fn outbound_request_estimated_response_bytes(
-    request: &NockchainRequest,
-    limits: ReqResRuntimeLimits,
-    driver_state: &Arc<Mutex<P2PState>>,
-) -> usize {
-    let NockchainRequest::Request { message, .. } = request else {
-        return limits.gen2_batch_max_bytes;
-    };
-
-    outbound_request_message_estimated_response_bytes(message, limits, driver_state).await
-}
 pub(super) async fn outbound_request_message_estimated_response_bytes(
     message: &[u8],
     limits: ReqResRuntimeLimits,
@@ -108,32 +68,9 @@ pub(super) fn take_pending_batch_request(
 
     let items = pending_batch.take_items();
     pending_gen2_batches.remove(&peer_id);
-    // Keep actual multi-item block batches on gen2, but avoid regressing
-    // singleton block sync by wrapping a lone BlockByHeight into a one-item
-    // gen2 batch.
-    if let [item] = items.as_slice() {
-        if matches!(
-            decode_request_item_message(&item.message),
-            Ok(NockchainDataRequest::BlockByHeight(_))
-        ) {
-            let request_slab = request_slab_from_message(&item.message)?;
-            let request = NockchainRequest::new_request(
-                equix_builder, local_peer_id, &peer_id, &request_slab,
-            );
-            return Ok(Some(OutboundRequestContext::new(
-                peer_id,
-                ReqResGeneration::Gen1,
-                request,
-            )));
-        }
-    }
     let request =
         NockchainRequest::new_batch_request(equix_builder, local_peer_id, &peer_id, items)?;
-    Ok(Some(OutboundRequestContext::new(
-        peer_id,
-        ReqResGeneration::Gen2,
-        request,
-    )))
+    Ok(Some(OutboundRequestContext::new(peer_id, request)))
 }
 pub(super) async fn send_outbound_request_now(
     swarm: &mut Swarm<NockchainBehaviour>,
@@ -164,14 +101,12 @@ pub(super) async fn send_outbound_request_now(
     debug!(
         peer = %peer_id,
         request_id = %request_id,
-        generation = ?request_context.generation,
         request_shape = outbound_request_shape(&request_context.request),
         request_keys = %outbound_request_keys_csv(&request_context.request),
         request_block_heights = %outbound_request_block_heights_csv(&request_context.request),
         batch_items = batch_request_item_count(&request_context.request),
         batch_payload_bytes,
         retry_count = request_context.retry_count,
-        fallback_attempted = request_context.fallback_attempted,
         "Nous req-res outbound request sent"
     );
     driver_state
@@ -228,10 +163,6 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
         metrics.request_peer_cooldowns_created.increment();
     }
     let timed_out = matches!(&error, request_response::OutboundFailure::Timeout);
-    let unsupported_protocols = matches!(
-        &error,
-        request_response::OutboundFailure::UnsupportedProtocols
-    );
     let transient_failure = transient_outbound_failure(&error);
     let mut skip_transient_retry = false;
     let mut retry_item_filter = None;
@@ -239,33 +170,6 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
     if timed_out {
         if let Some(request_context) = request_context.as_ref() {
             match &request_context.request {
-                NockchainRequest::Request { .. } => {
-                    if let Some((height, request_message)) =
-                        range_singleton_fallback_message(&request_context.request).or_else(|| {
-                            block_height_single_request_message(&request_context.request)
-                        })
-                    {
-                        match queue_block_height_retry_to_alternate_peer_with_dispatcher(
-                            swarm_actions, &driver_state, height, request_message,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                skip_transient_retry = true;
-                            }
-                            Ok(false) => {}
-                            Err(err) => {
-                                warn!(
-                                    peer = %peer,
-                                    request_id = %request_id,
-                                    height,
-                                    error = %err,
-                                    "Failed to queue alternate peer retry after block-by-height timeout"
-                                );
-                            }
-                        }
-                    }
-                }
                 NockchainRequest::BatchRequest { items, .. } => {
                     let mut retry_item_ids = BTreeSet::new();
                     for item in items {
@@ -313,105 +217,7 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
                         }
                     }
                 }
-                NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {}
-            }
-        }
-    }
-
-    if unsupported_protocols {
-        if let Some(request_context) = request_context.as_ref() {
-            let range_fallbacks = range_singleton_fallback_messages(&request_context.request);
-            if !range_fallbacks.is_empty() {
-                let mut fallback_count = 0usize;
-                for (height, request_message) in range_fallbacks {
-                    let request_slab = match request_slab_from_message(&request_message) {
-                        Ok(request_slab) => request_slab,
-                        Err(err) => {
-                            warn!(
-                                peer = %peer,
-                                request_id = %request_id,
-                                height,
-                                error = %err,
-                                "Failed to decode singleton fallback after range unsupported-protocol failure"
-                            );
-                            continue;
-                        }
-                    };
-                    let request = NockchainRequest::new_request(
-                        equix_builder, &local_peer_id, &request_context.peer_id, &request_slab,
-                    );
-                    let fallback_context = OutboundRequestContext::with_attempt(
-                        request_context.peer_id,
-                        ReqResGeneration::Gen1,
-                        request.clone(),
-                        request_context.retry_count.saturating_add(1),
-                        true,
-                    );
-                    match swarm_actions
-                        .dispatch(SwarmAction::SendRequest {
-                            peer_id: request_context.peer_id,
-                            request,
-                            request_context: Some(fallback_context),
-                        })
-                        .await
-                    {
-                        Ok(()) => {
-                            fallback_count = fallback_count.saturating_add(1);
-                        }
-                        Err(err) => {
-                            warn!(
-                                peer = %peer,
-                                request_id = %request_id,
-                                height,
-                                error = %err,
-                                "Failed to queue singleton fallback after range unsupported-protocol failure"
-                            );
-                        }
-                    }
-                }
-                record_req_res_fallback(metrics.as_ref(), fallback_count);
-                if fallback_count > 0 {
-                    info!(
-                        peer = %peer,
-                        request_id = %request_id,
-                        fallback_count,
-                        retry_count = request_context.retry_count.saturating_add(1),
-                        "Queued gen1 singleton fallback after range unsupported-protocol failure"
-                    );
-                }
-                skip_transient_retry = true;
-            } else {
-                match enqueue_unsupported_protocol_fallback(
-                    swarm_actions, request_context, &local_peer_id, equix_builder,
-                )
-                .await
-                {
-                    Ok(fallback_count) if fallback_count > 0 => {
-                        record_req_res_fallback(metrics.as_ref(), fallback_count);
-                        info!(
-                            peer = %peer,
-                            request_id = %request_id,
-                            fallback_count,
-                            retry_count = request_context.retry_count.saturating_add(1),
-                            "Queued gen1 fallback after gen2 unsupported-protocol failure"
-                        );
-                    }
-                    Ok(_) => {
-                        debug!(
-                            peer = %peer,
-                            request_id = %request_id,
-                            "No explicit fallback queued for unsupported-protocol failure"
-                        );
-                    }
-                    Err(err) => {
-                        warn!(
-                            peer = %peer,
-                            request_id = %request_id,
-                            error = %err,
-                            "Failed to queue unsupported-protocol fallback"
-                        );
-                    }
-                }
+                NockchainRequest::AuthenticatedGossip { .. } => {}
             }
         }
     }
@@ -456,14 +262,7 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
     }
 
     if let Some(request_context) = request_context.as_ref() {
-        let mut state_guard = driver_state.lock().await;
-        if unsupported_protocols && request_context.generation == ReqResGeneration::Gen2 {
-            state_guard.observe_peer_generation(request_context.peer_id, ReqResGeneration::Gen1);
-            if request_is_block_range_with_txs(&request_context.request) {
-                state_guard.mark_peer_non_range_capable(request_context.peer_id);
-            }
-        }
-        state_guard.record_outbound_failure(
+        driver_state.lock().await.record_outbound_failure(
             request_context,
             timed_out,
             request_context.logical_request_count().unwrap_or(0),
@@ -491,64 +290,17 @@ pub(crate) async fn handle_outbound_request_failure(
     )
     .await
 }
-pub(super) fn should_batch_request(
-    request_context: &OutboundRequestContext,
-    req_res_gen2_send_enabled: bool,
-    peer_supports_gen2: bool,
-    gen2_item_max_bytes: usize,
-    gen2_batch_max_bytes: usize,
-) -> bool {
-    req_res_gen2_send_enabled
-        && peer_supports_gen2
-        && request_context.generation == ReqResGeneration::Gen2
-        && matches!(
-            request_context.request,
-            NockchainRequest::Request { ref message, .. }
-                if message.len() <= gen2_item_max_bytes
-                    && (std::mem::size_of::<u32>()
-                        + std::mem::size_of::<u32>()
-                        + std::mem::size_of::<u32>()
-                        + message.len())
-                        <= gen2_batch_max_bytes
-        )
-}
 pub(super) fn request_message_can_join_batch(
-    generation: ReqResGeneration,
     request_message: &[u8],
     gen2_item_max_bytes: usize,
     gen2_batch_max_bytes: usize,
 ) -> bool {
-    generation == ReqResGeneration::Gen2
-        && request_message.len() <= gen2_item_max_bytes
+    request_message.len() <= gen2_item_max_bytes
         && (std::mem::size_of::<u32>()
             + std::mem::size_of::<u32>()
             + std::mem::size_of::<u32>()
             + request_message.len())
             <= gen2_batch_max_bytes
-}
-pub(super) fn request_is_block_by_height(request: &NockchainRequest) -> bool {
-    match request {
-        NockchainRequest::Request { message, .. } => request_message_is_block_by_height(message),
-        NockchainRequest::BatchRequest { .. }
-        | NockchainRequest::Gossip { .. }
-        | NockchainRequest::AuthenticatedGossip { .. } => false,
-    }
-}
-
-pub(super) fn request_uses_response_budget(request: &NockchainRequest) -> bool {
-    match request {
-        NockchainRequest::Request { message, .. } => request_message_uses_response_budget(message),
-        NockchainRequest::BatchRequest { .. }
-        | NockchainRequest::Gossip { .. }
-        | NockchainRequest::AuthenticatedGossip { .. } => false,
-    }
-}
-
-pub(super) fn request_message_is_block_by_height(message: &[u8]) -> bool {
-    matches!(
-        decode_request_item_message(message),
-        Ok(NockchainDataRequest::BlockByHeight(_))
-    )
 }
 
 pub(super) fn request_message_uses_response_budget(message: &[u8]) -> bool {
@@ -559,18 +311,6 @@ pub(super) fn request_message_uses_response_budget(message: &[u8]) -> bool {
             | NockchainDataRequest::BlockRangeWithTxs { .. }
             | NockchainDataRequest::RawTransactionById(_, _))
     )
-}
-
-pub(super) fn request_is_block_range_with_txs(request: &NockchainRequest) -> bool {
-    match request {
-        NockchainRequest::Request { message, .. } => {
-            request_message_block_range_start(message).is_some()
-        }
-        NockchainRequest::BatchRequest { items, .. } => items
-            .iter()
-            .any(|item| request_message_block_range_start(&item.message).is_some()),
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => false,
-    }
 }
 
 pub(super) fn request_message_is_raw_tx_by_id(message: &[u8]) -> bool {
@@ -605,45 +345,6 @@ pub(super) fn block_height_from_request_message(message: &[u8]) -> Option<u64> {
         | Ok(NockchainDataRequest::RawTransactionById(_, _))
         | Err(_) => None,
     }
-}
-pub(super) fn block_height_single_request_message(
-    request: &NockchainRequest,
-) -> Option<(u64, ByteBuf)> {
-    let NockchainRequest::Request { message, .. } = request else {
-        return None;
-    };
-    block_height_from_request_message(message).map(|height| (height, message.clone()))
-}
-
-pub(super) fn range_singleton_fallback_message(
-    request: &NockchainRequest,
-) -> Option<(u64, ByteBuf)> {
-    let NockchainRequest::Request { message, .. } = request else {
-        return None;
-    };
-    block_range_singleton_fallback_message(message)
-}
-
-pub(super) fn range_singleton_fallback_messages(request: &NockchainRequest) -> Vec<(u64, ByteBuf)> {
-    match request {
-        NockchainRequest::Request { .. } => range_singleton_fallback_message(request)
-            .into_iter()
-            .collect(),
-        NockchainRequest::BatchRequest { items, .. } => items
-            .iter()
-            .filter_map(|item| block_range_singleton_fallback_message(&item.message))
-            .collect(),
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {
-            Vec::new()
-        }
-    }
-}
-
-pub(super) fn block_height_single_request(request: &NockchainRequest) -> Option<u64> {
-    let NockchainRequest::Request { message, .. } = request else {
-        return None;
-    };
-    block_height_from_request_message(message)
 }
 pub(super) fn block_height_batch_item_message(
     request_context: Option<&OutboundRequestContext>,
@@ -869,33 +570,12 @@ pub(crate) fn build_retry_request_contexts(
                         chunk.to_vec(),
                     )?;
                     Ok(OutboundRequestContext::with_attempt(
-                        request_context.peer_id,
-                        ReqResGeneration::Gen2,
-                        request,
-                        next_retry_count,
-                        request_context.fallback_attempted,
+                        request_context.peer_id, request, next_retry_count,
                     ))
                 })
                 .collect()
         }
-        NockchainRequest::Request { .. } => {
-            if retry_item_ids.is_some() {
-                return Ok(Vec::new());
-            }
-            if request_is_block_range_with_txs(&request_context.request) {
-                return Ok(Vec::new());
-            }
-            Ok(vec![OutboundRequestContext::with_attempt(
-                request_context.peer_id,
-                request_context.generation,
-                request_context.request.clone(),
-                next_retry_count,
-                request_context.fallback_attempted,
-            )])
-        }
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {
-            Ok(Vec::new())
-        }
+        NockchainRequest::AuthenticatedGossip { .. } => Ok(Vec::new()),
     }
 }
 
@@ -941,77 +621,32 @@ pub(super) async fn process_queue_kernel_request_action(
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &Arc<NockchainP2PMetrics>,
     equix_builder: &mut equix::EquiXBuilder,
-    peer_gen2_inbound: &mut BTreeMap<PeerId, bool>,
     pending_gen2_batches: &mut BTreeMap<PeerId, PendingGen2Batch>,
-    req_res_gen2_send_enabled: bool,
     req_res_limits: ReqResRuntimeLimits,
 ) -> Result<(), NockAppError> {
     if suppress_duplicate_active_outbound_request(
-        driver_state, metrics, peer_id, "request", &request_message,
+        driver_state, metrics, peer_id, "batch-request", &request_message,
     )
     .await
     {
         return Ok(());
     }
 
-    let peer_supports_gen2 = peer_gen2_inbound.get(&peer_id).copied().unwrap_or(false);
-    let generation = if req_res_gen2_send_enabled && peer_supports_gen2 {
-        ReqResGeneration::Gen2
-    } else {
-        ReqResGeneration::Gen1
-    };
-    let local_peer_id = *swarm.local_peer_id();
-    if generation != ReqResGeneration::Gen2 {
-        if let Some((height, classic_message)) =
-            block_range_singleton_fallback_message(&request_message)
-        {
-            warn!(
-                peer = %peer_id,
-                height,
-                peer_supports_gen2,
-                req_res_gen2_send_enabled,
-                "Suppressing range request to non-gen2 peer"
-            );
-            metrics.prefetch_peer_no_gen2_range_peer_total.increment();
-            let request_slab = request_slab_from_message(&classic_message)?;
-            let request = NockchainRequest::new_request(
-                equix_builder, &local_peer_id, &peer_id, &request_slab,
-            );
-            record_block_by_height_gen1_routed(
-                metrics, generation, req_res_gen2_send_enabled, peer_supports_gen2, &request,
-            );
-            send_outbound_request_now(
-                swarm,
-                driver_state,
-                metrics,
-                OutboundRequestContext::new(peer_id, generation, request),
-            )
-            .await;
-            return Ok(());
-        }
-    }
-    let batchable = request_message_can_join_batch(
-        generation, &request_message, req_res_limits.gen2_item_max_bytes,
-        req_res_limits.gen2_batch_max_bytes,
-    );
-
-    if !batchable {
-        let request_slab = request_slab_from_message(&request_message)?;
-        let request =
-            NockchainRequest::new_request(equix_builder, &local_peer_id, &peer_id, &request_slab);
-        record_block_by_height_gen1_routed(
-            metrics, generation, req_res_gen2_send_enabled, peer_supports_gen2, &request,
+    if !request_message_can_join_batch(
+        &request_message, req_res_limits.gen2_item_max_bytes, req_res_limits.gen2_batch_max_bytes,
+    ) {
+        metrics.requests_dropped.increment();
+        warn!(
+            peer = %peer_id,
+            observed_bytes = request_message.len(),
+            item_cap = req_res_limits.gen2_item_max_bytes,
+            batch_cap = req_res_limits.gen2_batch_max_bytes,
+            "Dropping outbound request that cannot fit the gen2 wire limits"
         );
-        send_outbound_request_now(
-            swarm,
-            driver_state,
-            metrics,
-            OutboundRequestContext::new(peer_id, generation, request),
-        )
-        .await;
         return Ok(());
     }
 
+    let local_peer_id = *swarm.local_peer_id();
     let contains_response_budget_item = request_message_uses_response_budget(&request_message);
     let estimated_response_bytes = outbound_request_message_estimated_response_bytes(
         &request_message, req_res_limits, driver_state,
@@ -1049,7 +684,7 @@ pub(super) async fn process_queue_kernel_request_action(
     )?;
     match insert_outcome {
         PendingBatchInsertOutcome::Duplicate => {
-            log_pending_gen2_batch_duplicate(&peer_id, "request", &request_message);
+            log_pending_gen2_batch_duplicate(&peer_id, "batch-request", &request_message);
         }
         PendingBatchInsertOutcome::Inserted {
             item_count,
@@ -1078,7 +713,6 @@ pub(super) async fn process_queue_kernel_request_action(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn process_send_request_action(
     peer_id: PeerId,
     request: NockchainRequest,
@@ -1086,123 +720,34 @@ pub(super) async fn process_send_request_action(
     swarm: &mut Swarm<NockchainBehaviour>,
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &Arc<NockchainP2PMetrics>,
-    equix_builder: &mut equix::EquiXBuilder,
-    peer_gen2_inbound: &mut BTreeMap<PeerId, bool>,
-    pending_gen2_batches: &mut BTreeMap<PeerId, PendingGen2Batch>,
-    req_res_gen2_send_enabled: bool,
-    req_res_limits: ReqResRuntimeLimits,
 ) -> Result<(), NockAppError> {
-    let peer_supports_gen2 = peer_gen2_inbound.get(&peer_id).copied().unwrap_or(false);
-    let mut request_context = request_context.unwrap_or_else(|| {
-        let generation =
-            outbound_request_generation(&request, req_res_gen2_send_enabled, peer_supports_gen2);
-        record_block_by_height_gen1_routed(
-            metrics, generation, req_res_gen2_send_enabled, peer_supports_gen2, &request,
-        );
-        OutboundRequestContext::new(peer_id, generation, request.clone())
-    });
-    let local_peer_id = *swarm.local_peer_id();
-    if should_authenticate_outbound_gossip(
-        &request_context.request, req_res_limits, req_res_gen2_send_enabled, peer_supports_gen2,
-        request_context.generation,
-    ) {
-        request_context.request = request_context
-            .request
-            .authenticate_gossip(equix_builder, &local_peer_id, &peer_id)?;
-    }
-    if let NockchainRequest::Request { message, .. } = &request_context.request {
-        if suppress_duplicate_active_outbound_request(
-            driver_state,
-            metrics,
-            peer_id,
-            outbound_request_shape(&request_context.request),
-            message,
-        )
-        .await
-        {
-            return Ok(());
-        }
-    }
-    let batchable = should_batch_request(
-        &request_context, req_res_gen2_send_enabled, peer_supports_gen2,
-        req_res_limits.gen2_item_max_bytes, req_res_limits.gen2_batch_max_bytes,
-    );
+    let request_context =
+        request_context.unwrap_or_else(|| OutboundRequestContext::new(peer_id, request));
+    send_outbound_request_now(swarm, driver_state, metrics, request_context).await;
+    Ok(())
+}
 
-    if !batchable {
-        send_outbound_request_now(swarm, driver_state, metrics, request_context).await;
-        return Ok(());
-    }
-
-    let NockchainRequest::Request { message, .. } = &request_context.request else {
-        unreachable!("batchable requests must be singleton requests");
-    };
-    let contains_response_budget_item = request_uses_response_budget(&request_context.request);
-    let estimated_response_bytes = outbound_request_estimated_response_bytes(
-        &request_context.request, req_res_limits, driver_state,
+pub(super) async fn process_send_gossip_action(
+    peer_id: PeerId,
+    message: ByteBuf,
+    swarm: &mut Swarm<NockchainBehaviour>,
+    driver_state: &Arc<Mutex<P2PState>>,
+    metrics: &Arc<NockchainP2PMetrics>,
+    equix_builder: &mut equix::EquiXBuilder,
+) -> Result<(), NockAppError> {
+    let request = NockchainRequest::authenticated_gossip_from_message(
+        equix_builder,
+        swarm.local_peer_id(),
+        &peer_id,
+        message,
+    )?;
+    send_outbound_request_now(
+        swarm,
+        driver_state,
+        metrics,
+        OutboundRequestContext::new(peer_id, request),
     )
     .await;
-
-    let flush_reason = pending_gen2_batches
-        .get(&peer_id)
-        .map(|pending_batch| {
-            pending_batch_pre_insert_flush_reason(
-                pending_batch,
-                message.len(),
-                estimated_response_bytes,
-                contains_response_budget_item,
-                req_res_limits,
-            )
-        })
-        .transpose()?
-        .flatten();
-    if let Some(flush_reason) = flush_reason {
-        if let Some(pending_batch) = pending_gen2_batches.get(&peer_id) {
-            log_pending_gen2_batch_flush(&peer_id, flush_reason, pending_batch, req_res_limits);
-        }
-        if let Some(flushed_batch) = take_pending_batch_request(
-            pending_gen2_batches, peer_id, &local_peer_id, equix_builder,
-        )? {
-            send_outbound_request_now(swarm, driver_state, metrics, flushed_batch).await;
-        }
-        update_pending_batch_metrics(metrics, pending_gen2_batches);
-    }
-
-    let insert_outcome = queue_pending_gen2_batch_request(
-        metrics, pending_gen2_batches, peer_id, message, estimated_response_bytes,
-        contains_response_budget_item,
-    )?;
-    match insert_outcome {
-        PendingBatchInsertOutcome::Duplicate => {
-            log_pending_gen2_batch_duplicate(
-                &peer_id,
-                outbound_request_shape(&request_context.request),
-                message,
-            );
-        }
-        PendingBatchInsertOutcome::Inserted {
-            item_count,
-            payload_bytes,
-            estimated_response_bytes,
-            contains_response_budget_item,
-        } => {
-            if let Some(flush_reason) = inserted_batch_flush_reason(
-                item_count, payload_bytes, estimated_response_bytes, contains_response_budget_item,
-                req_res_limits,
-            ) {
-                if let Some(pending_batch) = pending_gen2_batches.get(&peer_id) {
-                    log_pending_gen2_batch_flush(
-                        &peer_id, flush_reason, pending_batch, req_res_limits,
-                    );
-                }
-                if let Some(flushed_batch) = take_pending_batch_request(
-                    pending_gen2_batches, peer_id, &local_peer_id, equix_builder,
-                )? {
-                    send_outbound_request_now(swarm, driver_state, metrics, flushed_batch).await;
-                }
-                update_pending_batch_metrics(metrics, pending_gen2_batches);
-            }
-        }
-    }
     Ok(())
 }
 

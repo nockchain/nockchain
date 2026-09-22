@@ -51,6 +51,8 @@ pub(crate) const PROCESSING_CLAIM_TTL: Duration = Duration::from_secs(60);
 const RESPONSE_SIZE_HINT_CAP: usize = 16_384;
 const DEFERRED_HEARD_BLOCK_TOTAL_CAP: usize = 65_536;
 pub(crate) const DEFERRED_HEARD_BLOCK_PER_PEER_CAP: usize = 4_096;
+const DEFERRED_HEARD_BLOCK_TOTAL_BYTES_CAP: u64 = 256 * 1024 * 1024;
+pub(crate) const DEFERRED_HEARD_BLOCK_PER_PEER_BYTES_CAP: u64 = 64 * 1024 * 1024;
 const INBOUND_REPLAY_TOTAL_CAP: usize = 65_536;
 
 #[derive(Default)]
@@ -219,18 +221,8 @@ fn height_in_prefetch(height: u64, prefetch: &InflightPrefetch) -> bool {
 /// surface.
 fn prefetch_range_from_request(request: &NockchainRequest) -> Option<(u64, u8)> {
     let items: &[crate::messages::BatchRequestItem] = match request {
-        NockchainRequest::Request { message, .. } => {
-            return match crate::messages::decode_request_item_message(message) {
-                Ok(NockchainDataRequest::BlockRangeWithTxs { start_height, len }) => {
-                    Some((start_height, len))
-                }
-                _ => None,
-            }
-        }
         NockchainRequest::BatchRequest { items, .. } => items.as_slice(),
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {
-            return None;
-        }
+        NockchainRequest::AuthenticatedGossip { .. } => return None,
     };
     if let [item] = items {
         if let Ok(NockchainDataRequest::BlockRangeWithTxs { start_height, len }) =
@@ -258,6 +250,7 @@ pub enum BlockSource {
 struct DeferredHeardBlock {
     peer_id: PeerId,
     fact: NockchainFact,
+    retained_bytes: u64,
     /// Provenance of the buffered block. Phase 4 (catch-up prefetch trigger)
     /// reads this for cache-hit attribution and reorg invalidation; Phase 2
     /// only sets it. The `dead_code` allow keeps the field visible to
@@ -454,49 +447,32 @@ impl ResponseSizeHints {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReqResGeneration {
-    Gen1,
-    Gen2,
-}
-
 #[derive(Debug, Clone)]
 pub struct OutboundRequestContext {
     pub peer_id: PeerId,
-    pub generation: ReqResGeneration,
     pub request: NockchainRequest,
     pub retry_count: u8,
-    pub fallback_attempted: bool,
     pub started_at: Instant,
 }
 
 impl OutboundRequestContext {
-    pub fn new(peer_id: PeerId, generation: ReqResGeneration, request: NockchainRequest) -> Self {
-        Self::with_attempt(peer_id, generation, request, 0, false)
+    pub fn new(peer_id: PeerId, request: NockchainRequest) -> Self {
+        Self::with_attempt(peer_id, request, 0)
     }
 
-    pub fn with_attempt(
-        peer_id: PeerId,
-        generation: ReqResGeneration,
-        request: NockchainRequest,
-        retry_count: u8,
-        fallback_attempted: bool,
-    ) -> Self {
+    pub fn with_attempt(peer_id: PeerId, request: NockchainRequest, retry_count: u8) -> Self {
         Self {
             peer_id,
-            generation,
             request,
             retry_count,
-            fallback_attempted,
             started_at: Instant::now(),
         }
     }
 
     pub fn logical_request_count(&self) -> Option<u64> {
         match &self.request {
-            NockchainRequest::Request { .. } => Some(1),
             NockchainRequest::BatchRequest { items, .. } => Some(items.len() as u64),
-            NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => None,
+            NockchainRequest::AuthenticatedGossip { .. } => None,
         }
     }
 
@@ -507,19 +483,15 @@ impl OutboundRequestContext {
 
 fn request_item_messages(request: &NockchainRequest) -> Vec<&[u8]> {
     match request {
-        NockchainRequest::Request { message, .. } => vec![message.as_ref()],
         NockchainRequest::BatchRequest { items, .. } => {
             items.iter().map(|item| item.message.as_ref()).collect()
         }
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {
-            Vec::new()
-        }
+        NockchainRequest::AuthenticatedGossip { .. } => Vec::new(),
     }
 }
 
 #[derive(Debug, Clone, Default)]
 struct PeerStatsAccumulator {
-    generation: PeerReqResGeneration,
     connected_at: Option<Instant>,
     request_count: u64,
     request_exchange_count: u64,
@@ -619,6 +591,10 @@ pub struct P2PState {
     deferred_heard_blocks: BTreeMap<u64, BTreeMap<String, DeferredHeardBlock>>,
     deferred_heard_block_count_by_peer: BTreeMap<PeerId, usize>,
     deferred_heard_block_total_count: usize,
+    deferred_heard_block_bytes_by_peer: BTreeMap<PeerId, u64>,
+    deferred_heard_block_total_bytes: u64,
+    deferred_heard_block_total_bytes_cap: u64,
+    deferred_heard_block_per_peer_bytes_cap: u64,
     kernel_block_height_request_order: VecDeque<u64>,
     kernel_requested_block_heights: BTreeSet<u64>,
     /// Peers that returned a `Decode` error for a block-with-txs bundle
@@ -730,6 +706,10 @@ impl P2PState {
             deferred_heard_blocks: BTreeMap::new(),
             deferred_heard_block_count_by_peer: BTreeMap::new(),
             deferred_heard_block_total_count: 0,
+            deferred_heard_block_bytes_by_peer: BTreeMap::new(),
+            deferred_heard_block_total_bytes: 0,
+            deferred_heard_block_total_bytes_cap: DEFERRED_HEARD_BLOCK_TOTAL_BYTES_CAP,
+            deferred_heard_block_per_peer_bytes_cap: DEFERRED_HEARD_BLOCK_PER_PEER_BYTES_CAP,
             kernel_block_height_request_order: VecDeque::new(),
             kernel_requested_block_heights: BTreeSet::new(),
             non_bundle_capable_peers: BTreeSet::new(),
@@ -752,13 +732,6 @@ impl P2PState {
         state
     }
 
-    fn req_res_generation(generation: ReqResGeneration) -> PeerReqResGeneration {
-        match generation {
-            ReqResGeneration::Gen1 => PeerReqResGeneration::Gen1,
-            ReqResGeneration::Gen2 => PeerReqResGeneration::Gen2,
-        }
-    }
-
     fn ensure_peer_stats(&mut self, peer_id: PeerId) -> &mut PeerStatsAccumulator {
         self.peer_stats.entry(peer_id).or_default()
     }
@@ -779,7 +752,7 @@ impl P2PState {
                 let stats = self.peer_stats.get(&peer_id).cloned().unwrap_or_default();
                 PeerStatsEntry {
                     peer_id: peer_id.to_base58(),
-                    protocol_generation: stats.generation,
+                    protocol_generation: PeerReqResGeneration::Gen2,
                     request_count: stats.request_count,
                     bytes_sent: stats.bytes_sent,
                     bytes_received: stats.bytes_received,
@@ -1454,7 +1427,13 @@ impl P2PState {
     }
 
     fn evict_tx_source_hints(&mut self) {
-        while self.tx_id_to_peers.len() > TX_SOURCE_HINT_CAP {
+        // Gate on the order queue's own length: transaction ids leave the
+        // live map through paths that never pop the queue (per-id removal,
+        // peer disconnect), so a live-map gate can stay below the cap
+        // forever while stale queue entries strand memory. A queue-length
+        // gate bounds both structures regardless of which path removed
+        // entries.
+        while self.tx_source_hint_order.len() > TX_SOURCE_HINT_CAP {
             let Some(oldest_tx_id) = self.tx_source_hint_order.pop_front() else {
                 break;
             };
@@ -1488,18 +1467,29 @@ impl P2PState {
     }
 
     fn discard_deferred_blocks_for_peer(&mut self, peer_id: &PeerId) {
-        let mut removed = 0usize;
+        let mut removed_count = 0usize;
+        let mut removed_bytes = 0u64;
         self.deferred_heard_blocks.retain(|_, blocks| {
-            let before = blocks.len();
-            blocks.retain(|_, block| &block.peer_id != peer_id);
-            removed = removed.saturating_add(before.saturating_sub(blocks.len()));
+            blocks.retain(|_, block| {
+                if &block.peer_id == peer_id {
+                    removed_count = removed_count.saturating_add(1);
+                    removed_bytes = removed_bytes.saturating_add(block.retained_bytes);
+                    false
+                } else {
+                    true
+                }
+            });
             !blocks.is_empty()
         });
-        if removed > 0 {
+        if removed_count > 0 {
             self.deferred_heard_block_total_count = self
                 .deferred_heard_block_total_count
-                .saturating_sub(removed);
+                .saturating_sub(removed_count);
+            self.deferred_heard_block_total_bytes = self
+                .deferred_heard_block_total_bytes
+                .saturating_sub(removed_bytes);
             self.deferred_heard_block_count_by_peer.remove(peer_id);
+            self.deferred_heard_block_bytes_by_peer.remove(peer_id);
             self.publish_deferred_metrics();
         }
     }
@@ -1718,13 +1708,6 @@ impl P2PState {
     #[allow(dead_code)]
     pub fn is_peer_non_range_capable(&self, peer_id: &PeerId) -> bool {
         self.non_range_capable_peers.contains(peer_id)
-    }
-
-    pub fn peer_req_res_generation(&self, peer_id: &PeerId) -> PeerReqResGeneration {
-        self.peer_stats
-            .get(peer_id)
-            .map(|stats| stats.generation)
-            .unwrap_or_default()
     }
 
     pub fn peer_range_capability(&self, peer_id: &PeerId) -> RangeCapability {
@@ -2023,22 +2006,39 @@ impl P2PState {
         }
     }
 
-    fn increment_deferred_count(&mut self, peer_id: PeerId) {
+    fn increment_deferred_accounting(&mut self, peer_id: PeerId, retained_bytes: u64) {
         self.deferred_heard_block_total_count =
             self.deferred_heard_block_total_count.saturating_add(1);
         *self
             .deferred_heard_block_count_by_peer
             .entry(peer_id)
             .or_default() += 1;
+        self.deferred_heard_block_total_bytes = self
+            .deferred_heard_block_total_bytes
+            .saturating_add(retained_bytes);
+        let peer_bytes = self
+            .deferred_heard_block_bytes_by_peer
+            .entry(peer_id)
+            .or_default();
+        *peer_bytes = peer_bytes.saturating_add(retained_bytes);
     }
 
-    fn decrement_deferred_count(&mut self, peer_id: PeerId) {
+    fn decrement_deferred_accounting(&mut self, peer_id: PeerId, retained_bytes: u64) {
         self.deferred_heard_block_total_count =
             self.deferred_heard_block_total_count.saturating_sub(1);
         if let Some(count) = self.deferred_heard_block_count_by_peer.get_mut(&peer_id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 self.deferred_heard_block_count_by_peer.remove(&peer_id);
+            }
+        }
+        self.deferred_heard_block_total_bytes = self
+            .deferred_heard_block_total_bytes
+            .saturating_sub(retained_bytes);
+        if let Some(bytes) = self.deferred_heard_block_bytes_by_peer.get_mut(&peer_id) {
+            *bytes = bytes.saturating_sub(retained_bytes);
+            if *bytes == 0 {
+                self.deferred_heard_block_bytes_by_peer.remove(&peer_id);
             }
         }
     }
@@ -2055,25 +2055,37 @@ impl P2PState {
         {
             self.deferred_heard_blocks.remove(&height);
         }
-        self.decrement_deferred_count(removed.peer_id);
+        self.decrement_deferred_accounting(removed.peer_id, removed.retained_bytes);
         Some(removed)
     }
 
-    fn evict_deferred_total_if_needed(&mut self) {
-        while self.deferred_heard_block_total_count >= DEFERRED_HEARD_BLOCK_TOTAL_CAP {
+    fn evict_deferred_total_if_needed(&mut self, incoming_bytes: u64) {
+        while self.deferred_heard_block_total_count >= DEFERRED_HEARD_BLOCK_TOTAL_CAP
+            || self
+                .deferred_heard_block_total_bytes
+                .saturating_add(incoming_bytes)
+                > self.deferred_heard_block_total_bytes_cap
+        {
             if !self.evict_oldest_deferred_entry(None) {
                 break;
             }
         }
     }
 
-    fn evict_deferred_for_peer_if_needed(&mut self, peer_id: PeerId) {
+    fn evict_deferred_for_peer_if_needed(&mut self, peer_id: PeerId, incoming_bytes: u64) {
         while self
             .deferred_heard_block_count_by_peer
             .get(&peer_id)
             .copied()
             .unwrap_or_default()
             >= DEFERRED_HEARD_BLOCK_PER_PEER_CAP
+            || self
+                .deferred_heard_block_bytes_by_peer
+                .get(&peer_id)
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(incoming_bytes)
+                > self.deferred_heard_block_per_peer_bytes_cap
         {
             if !self.evict_oldest_deferred_entry(Some(peer_id)) {
                 break;
@@ -2374,18 +2386,43 @@ impl P2PState {
         {
             return false;
         }
-        self.evict_deferred_for_peer_if_needed(peer_id);
-        self.evict_deferred_total_if_needed();
+        let retained_bytes = fact
+            .retained_bytes()
+            .saturating_add(block_id.capacity() as u64)
+            .saturating_add(std::mem::size_of::<String>() as u64)
+            .saturating_add(std::mem::size_of::<DeferredHeardBlock>() as u64);
+        if retained_bytes > self.deferred_heard_block_per_peer_bytes_cap
+            || retained_bytes > self.deferred_heard_block_total_bytes_cap
+        {
+            return false;
+        }
+        self.evict_deferred_for_peer_if_needed(peer_id, retained_bytes);
+        self.evict_deferred_total_if_needed(retained_bytes);
+        if self
+            .deferred_heard_block_bytes_by_peer
+            .get(&peer_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(retained_bytes)
+            > self.deferred_heard_block_per_peer_bytes_cap
+            || self
+                .deferred_heard_block_total_bytes
+                .saturating_add(retained_bytes)
+                > self.deferred_heard_block_total_bytes_cap
+        {
+            return false;
+        }
         let deferred = self.deferred_heard_blocks.entry(height).or_default();
         deferred.insert(
             block_id,
             DeferredHeardBlock {
                 peer_id,
                 fact,
+                retained_bytes,
                 source,
             },
         );
-        self.increment_deferred_count(peer_id);
+        self.increment_deferred_accounting(peer_id, retained_bytes);
         self.note_deferred_changed();
         true
     }
@@ -2433,6 +2470,43 @@ impl P2PState {
         self.deferred_heard_block_total_count
     }
 
+    pub fn deferred_heard_block_total_bytes(&self) -> u64 {
+        self.deferred_heard_block_total_bytes
+    }
+
+    pub(crate) fn set_deferred_heard_block_byte_caps(
+        &mut self,
+        per_peer_bytes_cap: u64,
+        total_bytes_cap: u64,
+    ) {
+        self.deferred_heard_block_per_peer_bytes_cap = per_peer_bytes_cap;
+        self.deferred_heard_block_total_bytes_cap = total_bytes_cap;
+        let peers = self
+            .deferred_heard_block_bytes_by_peer
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for peer_id in peers {
+            while self
+                .deferred_heard_block_bytes_by_peer
+                .get(&peer_id)
+                .copied()
+                .unwrap_or_default()
+                > per_peer_bytes_cap
+            {
+                if !self.evict_oldest_deferred_entry(Some(peer_id)) {
+                    break;
+                }
+            }
+        }
+        while self.deferred_heard_block_total_bytes > total_bytes_cap {
+            if !self.evict_oldest_deferred_entry(None) {
+                break;
+            }
+        }
+        self.note_deferred_changed();
+    }
+
     pub fn has_ready_deferred_heard_blocks(&self) -> bool {
         self.deferred_heard_blocks
             .iter()
@@ -2464,7 +2538,7 @@ impl P2PState {
                     BlockSource::Prefetch => requested,
                 };
                 if flushable {
-                    self.decrement_deferred_count(block.peer_id);
+                    self.decrement_deferred_accounting(block.peer_id, block.retained_bytes);
                     ready.push((block.peer_id, block.fact));
                 } else {
                     retained.insert(block_id, block);
@@ -2491,6 +2565,10 @@ impl P2PState {
             .metrics
             .prefetch_buffer_size
             .swap(self.deferred_heard_block_total() as f64);
+        let _ = self
+            .metrics
+            .prefetch_buffer_bytes
+            .swap(self.deferred_heard_block_total_bytes() as f64);
     }
     #[cfg(test)]
     pub fn deferred_heard_block_heights(&self) -> Vec<u64> {
@@ -2551,14 +2629,6 @@ impl P2PState {
         self.remove_block_id_str(block_id_str);
 
         peers_to_ban
-    }
-
-    /// Records settled peer capability from Identify or unsupported-protocol
-    /// fallback. Per-request bookkeeping intentionally does not overwrite this
-    /// with provisional send-path guesses during startup or reconnect.
-    pub fn observe_peer_generation(&mut self, peer_id: PeerId, generation: ReqResGeneration) {
-        self.ensure_peer_stats(peer_id).generation = Self::req_res_generation(generation);
-        self.refresh_peer_stats_snapshot();
     }
 
     pub fn record_outbound_response(
@@ -2927,14 +2997,16 @@ mod tests {
         let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
             request_response::cbor::Behaviour::new(
                 [(
-                    libp2p::StreamProtocol::new(LibP2PConfig::req_res_gen1_protocol_version()),
+                    libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
             );
         behaviour.send_request(
             &PeerId::random(),
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0xAB]),
             },
         )
@@ -3093,8 +3165,9 @@ mod tests {
         let request_id = fresh_outbound_request_id();
         let context = OutboundRequestContext::new(
             peer_id,
-            ReqResGeneration::Gen1,
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0x01, 0x02]),
             },
         );
@@ -3105,7 +3178,6 @@ mod tests {
             .outbound_request_context(request_id)
             .expect("expected stored outbound request context");
         assert_eq!(stored.peer_id, peer_id);
-        assert_eq!(stored.generation, ReqResGeneration::Gen1);
         assert_eq!(state.outbound_request_count_for_peer(peer_id), 1);
         assert_eq!(state.total_outbound_request_count(), 1);
 
@@ -3131,20 +3203,24 @@ mod tests {
             NockchainResponse,
         > = request_response::cbor::Behaviour::new(
             [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_gen1_protocol_version()),
+                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
                 request_response::ProtocolSupport::Full,
             )],
             request_response::Config::default(),
         );
         let single_request_id = request_id_source.send_request(
             &PeerId::random(),
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0xaa]),
             },
         );
         let batch_request_id = request_id_source.send_request(
             &PeerId::random(),
-            NockchainRequest::Gossip {
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
                 message: ByteBuf::from(vec![0xbb]),
             },
         );
@@ -3156,11 +3232,13 @@ mod tests {
             single_request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen1,
-                NockchainRequest::Request {
+                NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
-                    message: ByteBuf::from(singleton_message.clone()),
+                    items: vec![crate::messages::BatchRequestItem {
+                        item_id: 0,
+                        message: ByteBuf::from(singleton_message.clone()),
+                    }],
                 },
             ),
         );
@@ -3168,7 +3246,6 @@ mod tests {
             batch_request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
@@ -3418,11 +3495,13 @@ mod tests {
         let request_id = fresh_outbound_request_id();
         let request_context = OutboundRequestContext::new(
             peer_id,
-            ReqResGeneration::Gen2,
-            NockchainRequest::Request {
+            NockchainRequest::BatchRequest {
                 pow: [0; 16],
                 nonce: 0,
-                message: ByteBuf::from(vec![0xAA; 32]),
+                items: vec![crate::messages::BatchRequestItem {
+                    item_id: 0,
+                    message: ByteBuf::from(vec![0xAA; 32]),
+                }],
             },
         );
 
@@ -3435,7 +3514,6 @@ mod tests {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state.observe_peer_generation(peer_id, ReqResGeneration::Gen2);
         state.record_outbound_request(request_id, request_context.clone());
         state.record_outbound_response(&request_context, 256, Duration::from_millis(40), 1);
         state.record_outbound_failure(&request_context, true, 1);
@@ -3528,11 +3606,13 @@ mod tests {
         let request_id = fresh_outbound_request_id();
         let request_context = OutboundRequestContext::new(
             peer_id,
-            ReqResGeneration::Gen1,
-            NockchainRequest::Request {
+            NockchainRequest::BatchRequest {
                 pow: [0; 16],
                 nonce: 0,
-                message: ByteBuf::from(vec![0xAB; 16]),
+                items: vec![crate::messages::BatchRequestItem {
+                    item_id: 0,
+                    message: ByteBuf::from(vec![0xAB; 16]),
+                }],
             },
         );
 
@@ -3555,7 +3635,7 @@ mod tests {
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry");
 
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Unknown);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
         assert_eq!(entry.request_count, 1);
         assert_eq!(entry.bytes_received, 128);
         assert!(entry.average_round_trip_ms >= 15.0);
@@ -3590,16 +3670,17 @@ mod tests {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state.observe_peer_generation(peer_id, ReqResGeneration::Gen2);
         state.record_outbound_request(
             request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen1,
-                NockchainRequest::Request {
+                NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
-                    message: ByteBuf::from(vec![0xBC; 8]),
+                    items: vec![crate::messages::BatchRequestItem {
+                        item_id: 0,
+                        message: ByteBuf::from(vec![0xBC; 8]),
+                    }],
                 },
             ),
         );
@@ -3643,7 +3724,6 @@ mod tests {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state.observe_peer_generation(peer_id, ReqResGeneration::Gen2);
         assert_eq!(
             peer_stats_registry.snapshot().peers[0].protocol_generation,
             PeerReqResGeneration::Gen2
@@ -3672,7 +3752,7 @@ mod tests {
             .iter()
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry after reconnect");
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Unknown);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
     }
 
     #[test]
@@ -3703,7 +3783,6 @@ mod tests {
             request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
@@ -3734,11 +3813,13 @@ mod tests {
             request_id,
             OutboundRequestContext::new(
                 peer_id,
-                ReqResGeneration::Gen2,
-                NockchainRequest::Request {
+                NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 0,
-                    message: ByteBuf::from(vec![0x01]),
+                    items: vec![crate::messages::BatchRequestItem {
+                        item_id: 0,
+                        message: ByteBuf::from(vec![0x01]),
+                    }],
                 },
             ),
         );
@@ -4939,6 +5020,37 @@ mod tests {
             .contains(&format!("block-{}", SEEN_BLOCKS_CAP + 7)));
     }
 
+    #[test]
+    fn tx_source_hint_order_stays_bounded_across_disconnect_cycles() {
+        // GHSA-76mh-596x-hpjh: transaction ids leave the live map on
+        // disconnect without popping the order queue, and a live-map gate
+        // never fires while each cycle lands exactly at the cap (the map
+        // is never strictly greater). The queue itself must stay capped.
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        for cycle in 0..3 {
+            let attacker = PeerId::random();
+            let tx_ids: Vec<String> = (0..TX_SOURCE_HINT_CAP)
+                .map(|index| format!("disconnect-tx-{cycle}-{index}"))
+                .collect();
+            state.track_tx_ids_and_peer(tx_ids, attacker);
+            state.remove_peer(&attacker);
+            assert_eq!(state.tx_id_to_peers.len(), 0);
+        }
+        assert!(
+            state.tx_source_hint_order.len() <= TX_SOURCE_HINT_CAP,
+            "order queue must stay bounded, got {}",
+            state.tx_source_hint_order.len()
+        );
+
+        // Live entries still bound the queue and the map together.
+        let honest = PeerId::random();
+        let tx_ids: Vec<String> = (0..(TX_SOURCE_HINT_CAP + 8))
+            .map(|index| format!("live-tx-{index}"))
+            .collect();
+        state.track_tx_ids_and_peer(tx_ids, honest);
+        assert!(state.tx_source_hint_order.len() <= TX_SOURCE_HINT_CAP);
+        assert!(state.tx_id_to_peers.len() <= TX_SOURCE_HINT_CAP);
+    }
     #[test]
     fn elders_negative_cache_stays_bounded() {
         let mut state = P2PState::new(isolated_test_metrics(), 100);

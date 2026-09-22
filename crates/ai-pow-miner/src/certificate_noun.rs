@@ -4992,7 +4992,8 @@ mod tests {
         let (s_a, _) = canonical_noise_seeds_from_matrix_commitments(
             &kappa, &commitments.h_a_chunk, &commitments.h_b_chunk, params.m, params.n,
         );
-        let found_idx = attempt_tile_index(&state, &tag, &s_a, params.num_tiles()) as u32;
+        let found_idx = attempt_tile_index(&state, &tag, &s_a, params.num_tiles())
+            .expect("validated params have a nonzero tile count") as u32;
         let pow_key = pow_key_for_nonce(&s_a, nonce);
         let mut pis = CompositePublicInputs::zero();
         pis.job_key = words_le(&kappa);

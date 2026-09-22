@@ -2,7 +2,6 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::future::Future;
-use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
@@ -31,7 +30,6 @@ use serde_bytes::ByteBuf;
 use tempfile::TempDir;
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
-use super::gen1::*;
 use super::gen2::*;
 use super::*;
 use crate::messages::{
@@ -532,7 +530,6 @@ struct RecoveryEnqueueSample {
     duplicate_requests: usize,
     outbound_request_count: usize,
     gen2_batch_request_count: usize,
-    gen1_request_count: usize,
     single_item_batch_count: usize,
     min_outbound_items: usize,
     p50_outbound_items: usize,
@@ -592,7 +589,6 @@ struct RecoveryTuningSample {
     duplicate_requests: usize,
     outbound_request_count: usize,
     gen2_batch_request_count: usize,
-    gen1_request_count: usize,
     single_item_batch_count: usize,
     flush_reason_histogram: BTreeMap<String, usize>,
     min_outbound_items: usize,
@@ -2775,7 +2771,6 @@ async fn prefetch_disabled_falls_through_to_singleton_outbound() {
     let peer = PeerId::random();
     {
         let mut state_guard = state_arc.lock().await;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.mark_peer_range_supported(peer);
     }
     let request_slab = request_slab_from_message(block_by_height_message(50).as_ref())
@@ -2891,7 +2886,6 @@ async fn prefetch_replaces_singleton_with_range_request_when_eligible() {
             );
         }
         state_guard.first_negative = 43;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.mark_peer_range_supported(peer);
     }
 
@@ -2976,7 +2970,6 @@ async fn prefetch_replaces_frontier_singleton_when_kernel_demand_threshold_is_on
     {
         let mut state_guard = state_arc.lock().await;
         state_guard.first_negative = 50;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.mark_peer_range_supported(peer);
     }
 
@@ -3069,7 +3062,6 @@ async fn prefetch_window_targets_response_budget_when_cold() {
             );
         }
         state_guard.first_negative = 43;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.mark_peer_range_supported(peer);
     }
 
@@ -3148,7 +3140,6 @@ async fn prefetch_window_uses_observed_range_bytes_for_next_tail() {
             },
             1_995_241,
         );
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.mark_peer_range_supported(peer);
     }
 
@@ -3222,8 +3213,6 @@ async fn prefetch_skips_peers_marked_non_range_capable() {
         }
         // Mark BOTH connected peers as non-range-capable to force the
         // no-eligible-peer path.
-        state_guard.observe_peer_generation(peer_a, ReqResGeneration::Gen2);
-        state_guard.observe_peer_generation(peer_b, ReqResGeneration::Gen2);
         state_guard.mark_peer_non_range_capable(peer_a);
         state_guard.mark_peer_non_range_capable(peer_b);
     }
@@ -3271,28 +3260,26 @@ async fn prefetch_skips_peers_marked_non_range_capable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prefetch_selects_supported_gen2_peer_when_gen1_is_listed_first() {
+async fn prefetch_skips_non_range_peer_listed_first() {
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::new(
         metrics.clone(),
         LIBP2P_CONFIG.seen_tx_clear_interval,
     )));
-    let gen1_peer = PeerId::random();
-    let gen2_peer = PeerId::random();
+    let unsupported_peer = PeerId::random();
+    let range_peer = PeerId::random();
     {
         let mut state_guard = state_arc.lock().await;
         for h in 1_000..1_010u64 {
             state_guard.defer_heard_block(
-                gen2_peer,
+                range_peer,
                 h,
                 format!("future-block-{h}"),
                 heard_block_fact_with_tx_ids(h, &[]).0,
             );
         }
         state_guard.first_negative = 43;
-        state_guard.observe_peer_generation(gen1_peer, ReqResGeneration::Gen1);
-        state_guard.observe_peer_generation(gen2_peer, ReqResGeneration::Gen2);
-        state_guard.mark_peer_range_supported(gen2_peer);
+        state_guard.mark_peer_range_supported(range_peer);
     }
 
     let prefetch_config = PrefetchConfig {
@@ -3309,7 +3296,7 @@ async fn prefetch_selects_supported_gen2_peer_when_gen1_is_listed_first() {
     handle_effect_with_dispatcher(
         request_slab,
         &mut swarm_actions,
-        vec![gen1_peer, gen2_peer],
+        vec![unsupported_peer, range_peer],
         false,
         prefetch_config,
         runtime_limits_from_config(&LIBP2P_CONFIG),
@@ -3325,7 +3312,7 @@ async fn prefetch_selects_supported_gen2_peer_when_gen1_is_listed_first() {
             peer_id,
             request_message,
         }) => {
-            assert_eq!(peer_id, gen2_peer);
+            assert_eq!(peer_id, range_peer);
             let parsed = crate::messages::decode_request_item_message(&request_message)
                 .expect("range request should decode");
             match parsed {
@@ -3341,7 +3328,7 @@ async fn prefetch_selects_supported_gen2_peer_when_gen1_is_listed_first() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prefetch_probes_unknown_gen2_peer_with_bounded_range() {
+async fn prefetch_probes_peer_with_unknown_range_capability() {
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::new(
         metrics.clone(),
@@ -3359,7 +3346,6 @@ async fn prefetch_probes_unknown_gen2_peer_with_bounded_range() {
             );
         }
         state_guard.first_negative = 43;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
     }
 
     let prefetch_config = PrefetchConfig {
@@ -3409,7 +3395,7 @@ async fn prefetch_probes_unknown_gen2_peer_with_bounded_range() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prefetch_falls_back_to_singleton_when_no_gen2_peer_is_available() {
+async fn prefetch_falls_back_to_singleton_when_no_connected_peer_is_available() {
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::new(
         metrics.clone(),
@@ -3427,7 +3413,6 @@ async fn prefetch_falls_back_to_singleton_when_no_gen2_peer_is_available() {
             );
         }
         state_guard.first_negative = 0;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen1);
     }
 
     let prefetch_config = PrefetchConfig {
@@ -3453,7 +3438,7 @@ async fn prefetch_falls_back_to_singleton_when_no_gen2_peer_is_available() {
         PeerExclusions::default(),
     )
     .await
-    .expect("no-gen2 prefetch should use the singleton path");
+    .expect("prefetch without a connected peer should use the singleton path");
 
     let request_message = match buffered_swarm_actions.pop_front() {
         Some(SwarmAction::QueueKernelRequest {
@@ -4018,14 +4003,16 @@ fn fresh_outbound_request_id() -> request_response::OutboundRequestId {
     let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
         request_response::cbor::Behaviour::new(
             [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_gen1_protocol_version()),
+                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
                 request_response::ProtocolSupport::Full,
             )],
             request_response::Config::default(),
         );
     behaviour.send_request(
         &PeerId::random(),
-        NockchainRequest::Gossip {
+        NockchainRequest::AuthenticatedGossip {
+            pow: [0; 16],
+            nonce: 0,
             message: ByteBuf::from(vec![0xAB]),
         },
     )
@@ -4483,10 +4470,7 @@ fn tx_result_outcome_for_seed(seed: u64, payload_len: usize) -> RequestExecution
     };
     let envelope = response_envelope_from_result_message(&message)
         .expect("tx response envelope should decode");
-    RequestExecutionOutcome::Result {
-        response: NockchainResponse::Result { message },
-        envelope,
-    }
+    RequestExecutionOutcome::Result { envelope }
 }
 
 fn tx_result_outcome(item_id: u32, payload_len: usize) -> RequestExecutionOutcome {
@@ -4775,7 +4759,6 @@ fn run_recovery_enqueue_sample(
     let mut duplicate_requests = 0usize;
     let mut outbound_request_count = 0usize;
     let mut gen2_batch_request_count = 0usize;
-    let mut gen1_request_count = 0usize;
     let mut single_item_batch_count = 0usize;
     let mut outbound_items = Vec::new();
 
@@ -4801,14 +4784,9 @@ fn run_recovery_enqueue_sample(
             outbound_request_count += 1;
             let item_count = outbound_request_item_count(&request_context.request);
             outbound_items.push(item_count);
-            match request_context.generation {
-                ReqResGeneration::Gen1 => gen1_request_count += 1,
-                ReqResGeneration::Gen2 => {
-                    gen2_batch_request_count += 1;
-                    if item_count == 1 {
-                        single_item_batch_count += 1;
-                    }
-                }
+            gen2_batch_request_count += 1;
+            if item_count == 1 {
+                single_item_batch_count += 1;
             }
         }
     }
@@ -4824,7 +4802,6 @@ fn run_recovery_enqueue_sample(
         duplicate_requests,
         outbound_request_count,
         gen2_batch_request_count,
-        gen1_request_count,
         single_item_batch_count,
         min_outbound_items: outbound_items.first().copied().unwrap_or(0),
         p50_outbound_items: percentile_or_zero(&outbound_items, 0.50),
@@ -4960,7 +4937,6 @@ struct RecoveryTuningAccumulator {
     payload_fill_ratios: Vec<f64>,
     outbound_request_count: usize,
     gen2_batch_request_count: usize,
-    gen1_request_count: usize,
     single_item_batch_count: usize,
     last_flush_ms: u64,
 }
@@ -4975,7 +4951,6 @@ impl RecoveryTuningAccumulator {
             payload_fill_ratios: Vec::new(),
             outbound_request_count: 0,
             gen2_batch_request_count: 0,
-            gen1_request_count: 0,
             single_item_batch_count: 0,
             last_flush_ms: 0,
         }
@@ -4984,7 +4959,6 @@ impl RecoveryTuningAccumulator {
     fn record_flush(
         &mut self,
         reason: PendingBatchFlushReason,
-        generation: ReqResGeneration,
         item_count: usize,
         payload_bytes: usize,
         estimated_response_bytes: usize,
@@ -4998,14 +4972,9 @@ impl RecoveryTuningAccumulator {
             .or_insert(0) += 1;
         self.outbound_request_count += 1;
         self.outbound_items.push(item_count);
-        match generation {
-            ReqResGeneration::Gen1 => self.gen1_request_count += 1,
-            ReqResGeneration::Gen2 => {
-                self.gen2_batch_request_count += 1;
-                if item_count == 1 {
-                    self.single_item_batch_count += 1;
-                }
-            }
+        self.gen2_batch_request_count += 1;
+        if item_count == 1 {
+            self.single_item_batch_count += 1;
         }
         for enqueued_ms in enqueued_at_ms {
             self.added_delays_ms
@@ -5042,13 +5011,12 @@ fn flush_recovery_tuning_peer(
     let payload_bytes = pending_batch.payload_bytes;
     let estimated_response_bytes = pending_batch.estimated_response_bytes;
     let enqueued_at_ms = pending_enqueued_at_ms.remove(&peer).unwrap_or_default();
-    let request_context =
+    let _request_context =
         take_pending_batch_request(pending_gen2_batches, peer, local_peer, equix_builder)
             .expect("recovery tuning flush should build request")
             .expect("recovery tuning flush should have pending items");
     accumulator.record_flush(
-        reason, request_context.generation, item_count, payload_bytes, estimated_response_bytes,
-        limits, now_ms, enqueued_at_ms,
+        reason, item_count, payload_bytes, estimated_response_bytes, limits, now_ms, enqueued_at_ms,
     );
 }
 
@@ -5198,7 +5166,6 @@ fn run_recovery_tuning_sample(
         duplicate_requests,
         outbound_request_count: accumulator.outbound_request_count,
         gen2_batch_request_count: accumulator.gen2_batch_request_count,
-        gen1_request_count: accumulator.gen1_request_count,
         single_item_batch_count: accumulator.single_item_batch_count,
         flush_reason_histogram: accumulator.flush_reason_histogram,
         min_outbound_items: accumulator.outbound_items.first().copied().unwrap_or(0),
@@ -5293,7 +5260,6 @@ fn seed_connected_peer(state: &mut P2PState, peer: PeerId, connection_seed: usiz
             send_back_addr: remote_addr.clone(),
         },
     );
-    state.observe_peer_generation(peer, ReqResGeneration::Gen2);
 }
 
 async fn drain_swarm_followup_counts(
@@ -5398,14 +5364,12 @@ async fn run_tx_live_response_sample(
             request_id,
             OutboundRequestContext::with_attempt(
                 peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: wave as u64 + 1,
                     items: request_items.clone(),
                 },
                 0,
-                false,
             ),
         );
         run_driver_with_timeout(
@@ -5597,14 +5561,12 @@ async fn run_block_all_miss_response_sample(
             request_id,
             OutboundRequestContext::with_attempt(
                 peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: wave as u64 + 1,
                     items: request_items.clone(),
                 },
                 0,
-                false,
             ),
         );
         run_driver_with_timeout(
@@ -5722,14 +5684,12 @@ async fn run_block_batch_miss_response_sample(
             request_id,
             OutboundRequestContext::with_attempt(
                 peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: wave as u64 + 1,
                     items: request_items.clone(),
                 },
                 0,
-                false,
             ),
         );
         run_driver_with_timeout(
@@ -5911,8 +5871,6 @@ fn runtime_limits_from_config(config: &LibP2PConfig) -> ReqResRuntimeLimits {
         ip_bucket_connection_limit: config.ip_bucket_connection_limit,
         gossip_bucket_capacity: config.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: config.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: config.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: config.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: config.prefetch_window_max.max(1),
         gen2_batch_max_items: config.gen2_batch_max_items(),
         gen2_batch_max_bytes: config.gen2_batch_max_bytes(),
@@ -5922,67 +5880,6 @@ fn runtime_limits_from_config(config: &LibP2PConfig) -> ReqResRuntimeLimits {
     }
 }
 
-#[test]
-fn authenticated_outbound_gossip_requires_gen2_rollout_gates() {
-    let mut limits = runtime_limits_from_config(&LIBP2P_CONFIG);
-    limits.authenticated_gossip_send_enabled = true;
-    let gossip = NockchainRequest::Gossip {
-        message: ByteBuf::from(b"gossip".to_vec()),
-    };
-
-    assert!(should_authenticate_outbound_gossip(
-        &gossip,
-        limits,
-        true,
-        true,
-        ReqResGeneration::Gen2,
-    ));
-    assert!(!should_authenticate_outbound_gossip(
-        &gossip,
-        limits,
-        false,
-        true,
-        ReqResGeneration::Gen2,
-    ));
-    assert!(!should_authenticate_outbound_gossip(
-        &gossip,
-        limits,
-        true,
-        false,
-        ReqResGeneration::Gen2,
-    ));
-    assert!(!should_authenticate_outbound_gossip(
-        &gossip,
-        limits,
-        true,
-        true,
-        ReqResGeneration::Gen1,
-    ));
-
-    let mut disabled_limits = limits;
-    disabled_limits.authenticated_gossip_send_enabled = false;
-    assert!(!should_authenticate_outbound_gossip(
-        &gossip,
-        disabled_limits,
-        true,
-        true,
-        ReqResGeneration::Gen2,
-    ));
-
-    let authenticated = NockchainRequest::AuthenticatedGossip {
-        pow: [0; 16],
-        nonce: 0,
-        message: ByteBuf::from(b"gossip".to_vec()),
-    };
-    assert!(!should_authenticate_outbound_gossip(
-        &authenticated,
-        limits,
-        true,
-        true,
-        ReqResGeneration::Gen2,
-    ));
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_outbound_gossip_conversion_records_send_metric() {
     let transcript = DriverTranscript::default();
@@ -5990,14 +5887,9 @@ async fn authenticated_outbound_gossip_conversion_records_send_metric() {
         "scenario", "authenticated outbound gossip conversion should record a send metric",
     );
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
-        req_res_authenticated_gossip_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let mut requester = start_swarm(
@@ -6070,32 +5962,21 @@ async fn authenticated_outbound_gossip_conversion_records_send_metric() {
         metrics.clone(),
         LIBP2P_CONFIG.seen_tx_clear_interval,
     )));
-    let mut peer_gen2_inbound = BTreeMap::from([(responder_peer_id, true)]);
-    let mut pending_gen2_batches = BTreeMap::new();
     let mut requester_equix = equix::EquiXBuilder::new();
     let gossip_message = ByteBuf::from(jam_heard_tx_response(61_001, 32));
 
-    process_send_request_action(
+    process_send_gossip_action(
         responder_peer_id,
-        NockchainRequest::Gossip {
-            message: gossip_message.clone(),
-        },
-        None,
+        gossip_message.clone(),
         &mut requester,
         &driver_state,
         &metrics,
         &mut requester_equix,
-        &mut peer_gen2_inbound,
-        &mut pending_gen2_batches,
-        requester_config.req_res_gen2_send_enabled,
-        runtime_limits_from_config(&requester_config),
     )
     .await
-    .expect("authenticated outbound gossip conversion should send");
+    .expect("authenticated outbound gossip should send");
 
     assert_eq!(metrics.authenticated_gossip_sent.fetch_add(0), 1);
-    assert_eq!(metrics.legacy_gossip_received.fetch_add(0), 0);
-    assert!(pending_gen2_batches.is_empty());
 
     let (peer, message) = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -6149,125 +6030,15 @@ async fn authenticated_outbound_gossip_conversion_records_send_metric() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_gossip_compatibility_flag_controls_inbound_driver_path() {
-    let transcript = DriverTranscript::default();
-    let gossip_message = ByteBuf::from(jam_heard_tx_response(31_415, 32));
-
-    for accept_legacy in [true, false] {
-        transcript.record(
-            "scenario",
-            format!("legacy gossip inbound compatibility accept_legacy={accept_legacy}"),
-        );
-        let requester_config = LibP2PConfig {
-            req_res_gen2_accept_enabled: true,
-            req_res_gen2_send_enabled: true,
-            ..LibP2PConfig::default()
-        };
-        let responder_config = LibP2PConfig {
-            req_res_gen2_accept_enabled: true,
-            req_res_gen2_send_enabled: true,
-            req_res_legacy_gossip_accept_enabled: accept_legacy,
-            ..LibP2PConfig::default()
-        };
-        let mut requester = build_test_swarm(requester_config);
-        let mut responder = build_test_swarm(responder_config.clone());
-        let requester_peer_id = *requester.local_peer_id();
-        let responder_peer_id = *responder.local_peer_id();
-
-        let _requester_addr = wait_for_listen_addr(&mut requester, &transcript).await;
-        let responder_addr = wait_for_listen_addr(&mut responder, &transcript).await;
-        connect_test_swarms(&mut requester, &mut responder, &responder_addr, &transcript).await;
-
-        requester.behaviour_mut().request_response.send_request(
-            &responder_peer_id,
-            NockchainRequest::Gossip {
-                message: gossip_message.clone(),
-            },
-        );
-        let (peer, connection_id, message) =
-            recv_request_event(&mut requester, &mut responder, &transcript).await;
-        assert_eq!(peer, requester_peer_id);
-
-        let metrics = isolated_test_metrics();
-        let driver_state = Arc::new(Mutex::new(P2PState::new(
-            metrics.clone(),
-            LIBP2P_CONFIG.seen_tx_clear_interval,
-        )));
-        let scripted_traffic =
-            build_scripted_traffic_cop(transcript.clone(), Vec::new(), vec![PokeResult::Ack]).await;
-        let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
-        let mut responder_equix = equix::EquiXBuilder::new();
-
-        run_driver_with_timeout(
-            &transcript,
-            "driver should apply legacy gossip compatibility gate",
-            handle_request_response(
-                peer,
-                connection_id,
-                message,
-                swarm_tx,
-                &mut responder_equix,
-                responder_peer_id,
-                scripted_traffic.traffic.clone(),
-                metrics.clone(),
-                Arc::clone(&driver_state),
-                runtime_limits_from_config(&responder_config),
-                PeerExclusions::default(),
-            ),
-        )
-        .await
-        .expect("legacy gossip compatibility gate should not error");
-
-        if accept_legacy {
-            let response = match recv_swarm_action(&mut swarm_rx).await {
-                SwarmAction::SendResponse { channel, response } => {
-                    responder
-                        .behaviour_mut()
-                        .request_response
-                        .send_response(channel, response.clone())
-                        .expect("legacy gossip ack should send");
-                    response
-                }
-                other => panic!("expected legacy gossip SendResponse, got {other:?}"),
-            };
-            assert_eq!(response, NockchainResponse::Ack { acked: true });
-            let requester_response =
-                recv_response_event(&mut requester, &mut responder, &transcript).await;
-            assert_eq!(requester_response, NockchainResponse::Ack { acked: true });
-            assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 1);
-            assert_eq!(metrics.legacy_gossip_received.fetch_add(0), 1);
-            assert_eq!(metrics.legacy_gossip_compatibility_rejected.fetch_add(0), 0);
-            assert_eq!(metrics.authenticated_gossip_verified.fetch_add(0), 0);
-            assert_eq!(metrics.gossip_dropped.fetch_add(0), 0);
-        } else {
-            match tokio::time::timeout(Duration::from_millis(50), swarm_rx.recv()).await {
-                Ok(None) => {}
-                Ok(Some(other)) => panic!("legacy gossip should be dropped, got {other:?}"),
-                Err(_) => panic!("legacy gossip drop should close the action channel promptly"),
-            }
-            assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 0);
-            assert_eq!(metrics.legacy_gossip_received.fetch_add(0), 1);
-            assert_eq!(metrics.legacy_gossip_compatibility_rejected.fetch_add(0), 1);
-            assert_eq!(metrics.authenticated_gossip_verified.fetch_add(0), 0);
-            assert_eq!(metrics.gossip_dropped.fetch_add(0), 1);
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_authenticated_gossip_pow_is_rejected_before_kernel_work() {
     let transcript = DriverTranscript::default();
     transcript.record(
         "scenario", "malformed authenticated gossip proof should block peer before kernel work",
     );
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let mut requester = build_test_swarm(requester_config);
@@ -6342,28 +6113,20 @@ async fn malformed_authenticated_gossip_pow_is_rejected_before_kernel_work() {
     }
     assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 0);
     assert_eq!(metrics.local_peer_abuse_recorded.fetch_add(0), 1);
-    assert_eq!(metrics.legacy_gossip_received.fetch_add(0), 0);
-    assert_eq!(metrics.legacy_gossip_compatibility_rejected.fetch_add(0), 0);
     assert_eq!(metrics.authenticated_gossip_verified.fetch_add(0), 0);
     assert_eq!(metrics.gossip_dropped.fetch_add(0), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn authenticated_gossip_still_routes_when_legacy_gossip_is_disabled() {
+async fn authenticated_gossip_routes_to_kernel() {
     let transcript = DriverTranscript::default();
     transcript.record(
-        "scenario",
-        "authenticated gossip should route after legacy gossip compatibility is disabled",
+        "scenario", "authenticated gossip should route to the kernel",
     );
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
-        req_res_legacy_gossip_accept_enabled: false,
         ..LibP2PConfig::default()
     };
     let mut requester = build_test_swarm(requester_config);
@@ -6398,7 +6161,7 @@ async fn authenticated_gossip_still_routes_when_legacy_gossip_is_disabled() {
 
     run_driver_with_timeout(
         &transcript,
-        "driver should route authenticated gossip with legacy compatibility disabled",
+        "driver should route authenticated gossip",
         handle_request_response(
             peer,
             connection_id,
@@ -6414,7 +6177,7 @@ async fn authenticated_gossip_still_routes_when_legacy_gossip_is_disabled() {
         ),
     )
     .await
-    .expect("authenticated gossip should route after legacy compatibility closes");
+    .expect("authenticated gossip should route");
 
     let response = match recv_swarm_action(&mut swarm_rx).await {
         SwarmAction::SendResponse { channel, response } => {
@@ -6431,8 +6194,6 @@ async fn authenticated_gossip_still_routes_when_legacy_gossip_is_disabled() {
     let requester_response = recv_response_event(&mut requester, &mut responder, &transcript).await;
     assert_eq!(requester_response, NockchainResponse::Ack { acked: true });
     assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 1);
-    assert_eq!(metrics.legacy_gossip_received.fetch_add(0), 0);
-    assert_eq!(metrics.legacy_gossip_compatibility_rejected.fetch_add(0), 0);
     assert_eq!(metrics.authenticated_gossip_verified.fetch_add(0), 1);
     assert_eq!(metrics.gossip_dropped.fetch_add(0), 0);
     assert_eq!(metrics.local_peer_abuse_recorded.fetch_add(0), 0);
@@ -6523,14 +6284,12 @@ async fn run_checkpoint_prefetch_cost_sample(
         request_id,
         OutboundRequestContext::with_attempt(
             peer,
-            ReqResGeneration::Gen2,
             NockchainRequest::BatchRequest {
                 pow: [0; 16],
                 nonce: 1,
                 items: vec![request_item],
             },
             0,
-            false,
         ),
     );
 
@@ -6682,14 +6441,12 @@ async fn run_checkpoint_requester_cost_sample(
         request_id,
         OutboundRequestContext::with_attempt(
             peer,
-            ReqResGeneration::Gen2,
             NockchainRequest::BatchRequest {
                 pow: [0; 16],
                 nonce: 1,
                 items,
             },
             0,
-            false,
         ),
     );
     let checkpoint_app = start_checkpoint_app(chkjam_path).await;
@@ -6880,7 +6637,6 @@ async fn profile_checkpoint_requester_first_item(
 }
 
 async fn run_requester_response_workload(
-    generation: ReqResGeneration,
     item_count: usize,
     payload_len: usize,
     transcript: &DriverTranscript,
@@ -6906,166 +6662,82 @@ async fn run_requester_response_workload(
     let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
     let mut equix_builder = equix::EquiXBuilder::new();
     let rss_before_kib = current_rss_kib();
-    let mut rss_peak_kib = rss_before_kib;
     let started = Instant::now();
-    let mut response_bytes = 0usize;
 
-    match generation {
-        ReqResGeneration::Gen1 => {
-            for idx in 0..item_count {
-                let request_id = fresh_outbound_request_id();
-                state_arc.lock().await.record_outbound_request(
-                    request_id,
-                    OutboundRequestContext::with_attempt(
-                        peer,
-                        ReqResGeneration::Gen1,
-                        NockchainRequest::Request {
-                            pow: [0; 16],
-                            nonce: 1,
-                            message: ByteBuf::from(jam_raw_tx_request(60_000 + idx as u64)),
-                        },
-                        0,
-                        false,
-                    ),
-                );
-                let response = match tx_result_outcome_for_seed(60_000 + idx as u64, payload_len) {
-                    RequestExecutionOutcome::Result { response, .. } => response,
-                    other => panic!("unexpected gen1 response outcome: {other:?}"),
-                };
-                response_bytes += cbor4ii::serde::to_vec(Vec::new(), &response)
-                    .expect("gen1 requester workload response should encode")
-                    .len();
-                let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
-                run_driver_with_timeout(
-                    transcript,
-                    "resident-set singleton response processing",
-                    handle_request_response(
-                        peer,
-                        ConnectionId::new_unchecked(90 + idx),
-                        request_response::Message::Response {
-                            request_id,
-                            response,
-                        },
-                        swarm_tx,
-                        &mut equix_builder,
-                        local_peer,
-                        scripted_traffic.traffic.clone(),
-                        metrics.clone(),
-                        Arc::clone(&state_arc),
-                        runtime_limits_from_config(&LIBP2P_CONFIG),
-                        PeerExclusions::default(),
-                    ),
-                )
-                .await
-                .expect("resident-set gen1 response should process");
-                match tokio::time::timeout(Duration::from_millis(50), swarm_rx.recv()).await {
-                    Ok(None) => {}
-                    Ok(Some(other)) => panic!("unexpected follow-up swarm action: {other:?}"),
-                    Err(_) => {
-                        panic!("swarm action channel should close promptly for success path")
-                    }
-                }
-                rss_peak_kib = rss_peak_kib.max(current_rss_kib());
-            }
-        }
-        ReqResGeneration::Gen2 => {
-            let request_id = fresh_outbound_request_id();
-            let items = (0..item_count)
-                .map(|idx| BatchRequestItem {
-                    item_id: idx as u32 + 1,
-                    message: ByteBuf::from(jam_raw_tx_request(40_000 + idx as u64)),
-                })
-                .collect::<Vec<_>>();
-            state_arc.lock().await.record_outbound_request(
+    let request_id = fresh_outbound_request_id();
+    let items = (0..item_count)
+        .map(|idx| BatchRequestItem {
+            item_id: idx as u32 + 1,
+            message: ByteBuf::from(jam_raw_tx_request(40_000 + idx as u64)),
+        })
+        .collect::<Vec<_>>();
+    state_arc.lock().await.record_outbound_request(
+        request_id,
+        OutboundRequestContext::with_attempt(
+            peer,
+            NockchainRequest::BatchRequest {
+                pow: [0; 16],
+                nonce: 1,
+                items,
+            },
+            0,
+        ),
+    );
+    let results = (0..item_count)
+        .map(|idx| {
+            tx_result_outcome_for_seed(40_000 + idx as u64, payload_len)
+                .into_batch_result_item(idx as u32 + 1)
+        })
+        .collect::<Vec<_>>();
+    let response_bytes =
+        batch_result_encoded_bytes(&results).expect("resident-set response should encode");
+    run_driver_with_timeout(
+        transcript,
+        "resident-set batch response processing",
+        handle_request_response(
+            peer,
+            ConnectionId::new_unchecked(90 + item_count),
+            request_response::Message::Response {
                 request_id,
-                OutboundRequestContext::with_attempt(
-                    peer,
-                    ReqResGeneration::Gen2,
-                    NockchainRequest::BatchRequest {
-                        pow: [0; 16],
-                        nonce: 1,
-                        items: items.clone(),
-                    },
-                    0,
-                    false,
-                ),
-            );
-            let results = (0..item_count)
-                .map(|idx| {
-                    tx_result_outcome_for_seed(40_000 + idx as u64, payload_len)
-                        .into_batch_result_item(idx as u32 + 1)
-                })
-                .collect::<Vec<_>>();
-            response_bytes = batch_result_encoded_bytes(&results)
-                .expect("resident-set gen2 response should encode");
-            run_driver_with_timeout(
-                transcript,
-                "resident-set batch response processing",
-                handle_request_response(
-                    peer,
-                    ConnectionId::new_unchecked(90 + item_count),
-                    request_response::Message::Response {
-                        request_id,
-                        response: NockchainResponse::BatchResult { results },
-                    },
-                    swarm_tx,
-                    &mut equix_builder,
-                    local_peer,
-                    scripted_traffic.traffic.clone(),
-                    metrics,
-                    Arc::clone(&state_arc),
-                    runtime_limits_from_config(&LIBP2P_CONFIG),
-                    PeerExclusions::default(),
-                ),
-            )
-            .await
-            .expect("resident-set gen2 response should process");
-            match tokio::time::timeout(Duration::from_millis(50), swarm_rx.recv()).await {
-                Ok(None) => {}
-                Ok(Some(other)) => panic!("unexpected follow-up swarm action: {other:?}"),
-                Err(_) => {
-                    panic!("swarm action channel should close promptly for success path")
-                }
-            }
-            rss_peak_kib = rss_peak_kib.max(current_rss_kib());
-        }
+                response: NockchainResponse::BatchResult { results },
+            },
+            swarm_tx,
+            &mut equix_builder,
+            local_peer,
+            scripted_traffic.traffic.clone(),
+            metrics,
+            Arc::clone(&state_arc),
+            runtime_limits_from_config(&LIBP2P_CONFIG),
+            PeerExclusions::default(),
+        ),
+    )
+    .await
+    .expect("resident-set response should process");
+    match tokio::time::timeout(Duration::from_millis(50), swarm_rx.recv()).await {
+        Ok(None) => {}
+        Ok(Some(other)) => panic!("unexpected follow-up swarm action: {other:?}"),
+        Err(_) => panic!("swarm action channel should close promptly for success path"),
     }
 
     let elapsed = started.elapsed();
     let rss_after_kib = current_rss_kib();
+    let rss_peak_kib = rss_before_kib.max(current_rss_kib()).max(rss_after_kib);
     let poke_count = scripted_traffic.poke_count.load(Ordering::SeqCst);
     (
-        response_bytes,
-        elapsed,
-        poke_count,
-        rss_before_kib,
-        rss_after_kib,
-        rss_peak_kib.max(rss_after_kib),
+        response_bytes, elapsed, poke_count, rss_before_kib, rss_after_kib, rss_peak_kib,
     )
 }
 
 async fn run_two_peer_driver_latency_workload(
-    generation: ReqResGeneration,
     item_count: usize,
     payload_len: usize,
     transcript: &DriverTranscript,
 ) -> (usize, Duration, String, usize) {
-    let requester_config = match generation {
-        ReqResGeneration::Gen1 => LibP2PConfig {
-            req_res_gen2_accept_enabled: false,
-            req_res_gen2_send_enabled: false,
-            ..LibP2PConfig::default()
-        },
-        ReqResGeneration::Gen2 => LibP2PConfig {
-            req_res_gen2_accept_enabled: true,
-            req_res_gen2_send_enabled: true,
-            ..LibP2PConfig::default()
-        },
-    };
+    let requester_config = LibP2PConfig::default();
     let responder_config = requester_config.clone();
     let protocol = first_common_outbound_protocol(&requester_config, &responder_config)
         .unwrap_or_else(|| String::from("none"));
-    let mut requester = build_test_swarm(requester_config.clone());
+    let mut requester = build_test_swarm(requester_config);
     let mut responder = build_test_swarm(responder_config.clone());
     let requester_peer_id = *requester.local_peer_id();
     let responder_peer_id = *responder.local_peer_id();
@@ -7096,124 +6768,63 @@ async fn run_two_peer_driver_latency_workload(
     let mut request_builder = equix::EquiXBuilder::new();
     let mut responder_equix_builder = equix::EquiXBuilder::new();
     let started = Instant::now();
-    let mut response_bytes = 0usize;
 
-    match generation {
-        ReqResGeneration::Gen1 => {
-            for idx in 0..item_count {
-                let request_slab = jammed_request_slab(&jam_raw_tx_request(70_000 + idx as u64));
-                let request = NockchainRequest::new_request(
-                    &mut request_builder, &requester_peer_id, &responder_peer_id, &request_slab,
-                );
-                requester
-                    .behaviour_mut()
-                    .request_response
-                    .send_request(&responder_peer_id, request);
-                let (peer, connection_id, message) =
-                    recv_request_event(&mut requester, &mut responder, transcript).await;
-                let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
-                run_driver_with_timeout(
-                    transcript,
-                    "two-peer singleton latency response",
-                    handle_request_response(
-                        peer,
-                        connection_id,
-                        message,
-                        swarm_tx,
-                        &mut responder_equix_builder,
-                        responder_peer_id,
-                        scripted_traffic.traffic.clone(),
-                        metrics.clone(),
-                        Arc::clone(&state_arc),
-                        limits,
-                        PeerExclusions::default(),
-                    ),
-                )
-                .await
-                .expect("gen1 latency request should process");
-                let action = recv_swarm_action(&mut swarm_rx).await;
-                let response = match action {
-                    SwarmAction::SendResponse { channel, response } => {
-                        responder
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, response.clone())
-                            .expect("response should send");
-                        response
-                    }
-                    other => panic!("expected SendResponse, got {other:?}"),
-                };
-                response_bytes += cbor4ii::serde::to_vec(Vec::new(), &response)
-                    .expect("latency response should encode")
-                    .len();
-                let requester_response =
-                    recv_response_event(&mut requester, &mut responder, transcript).await;
-                assert!(matches!(
-                    requester_response,
-                    NockchainResponse::Result { .. }
-                ));
-            }
-        }
-        ReqResGeneration::Gen2 => {
-            let items = (0..item_count)
-                .map(|idx| BatchRequestItem {
-                    item_id: idx as u32 + 1,
-                    message: ByteBuf::from(jam_raw_tx_request(80_000 + idx as u64)),
-                })
-                .collect::<Vec<_>>();
-            let request = NockchainRequest::new_batch_request(
-                &mut request_builder, &requester_peer_id, &responder_peer_id, items,
-            )
-            .expect("batch request should build");
-            requester
+    let items = (0..item_count)
+        .map(|idx| BatchRequestItem {
+            item_id: idx as u32 + 1,
+            message: ByteBuf::from(jam_raw_tx_request(80_000 + idx as u64)),
+        })
+        .collect::<Vec<_>>();
+    let request = NockchainRequest::new_batch_request(
+        &mut request_builder, &requester_peer_id, &responder_peer_id, items,
+    )
+    .expect("batch request should build");
+    requester
+        .behaviour_mut()
+        .request_response
+        .send_request(&responder_peer_id, request);
+    let (peer, connection_id, message) =
+        recv_request_event(&mut requester, &mut responder, transcript).await;
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
+    run_driver_with_timeout(
+        transcript,
+        "two-peer batch latency response",
+        handle_request_response(
+            peer,
+            connection_id,
+            message,
+            swarm_tx,
+            &mut responder_equix_builder,
+            responder_peer_id,
+            scripted_traffic.traffic.clone(),
+            metrics,
+            Arc::clone(&state_arc),
+            limits,
+            PeerExclusions::default(),
+        ),
+    )
+    .await
+    .expect("latency batch request should process");
+    let action = recv_swarm_action(&mut swarm_rx).await;
+    let response = match action {
+        SwarmAction::SendResponse { channel, response } => {
+            responder
                 .behaviour_mut()
                 .request_response
-                .send_request(&responder_peer_id, request);
-            let (peer, connection_id, message) =
-                recv_request_event(&mut requester, &mut responder, transcript).await;
-            let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
-            run_driver_with_timeout(
-                transcript,
-                "two-peer batch latency response",
-                handle_request_response(
-                    peer,
-                    connection_id,
-                    message,
-                    swarm_tx,
-                    &mut responder_equix_builder,
-                    responder_peer_id,
-                    scripted_traffic.traffic.clone(),
-                    metrics,
-                    Arc::clone(&state_arc),
-                    limits,
-                    PeerExclusions::default(),
-                ),
-            )
-            .await
-            .expect("gen2 latency batch request should process");
-            let action = recv_swarm_action(&mut swarm_rx).await;
-            let response = match action {
-                SwarmAction::SendResponse { channel, response } => {
-                    responder
-                        .behaviour_mut()
-                        .request_response
-                        .send_response(channel, response.clone())
-                        .expect("response should send");
-                    response
-                }
-                other => panic!("expected SendResponse, got {other:?}"),
-            };
-            response_bytes = cbor4ii::serde::to_vec(Vec::new(), &response)
-                .expect("latency batch response should encode")
-                .len();
-            let requester_response =
-                recv_response_event(&mut requester, &mut responder, transcript).await;
-            let NockchainResponse::BatchResult { results } = requester_response else {
-                panic!("expected batch result response");
-            };
-            assert_eq!(results.len(), item_count);
+                .send_response(channel, response.clone())
+                .expect("response should send");
+            response
         }
-    }
+        other => panic!("expected SendResponse, got {other:?}"),
+    };
+    let response_bytes = cbor4ii::serde::to_vec(Vec::new(), &response)
+        .expect("latency batch response should encode")
+        .len();
+    let requester_response = recv_response_event(&mut requester, &mut responder, transcript).await;
+    let NockchainResponse::BatchResult { results } = requester_response else {
+        panic!("expected batch result response");
+    };
+    assert_eq!(results.len(), item_count);
 
     let elapsed = started.elapsed();
     let peek_count = scripted_traffic.peek_count.load(Ordering::SeqCst);
@@ -7223,72 +6834,6 @@ async fn run_two_peer_driver_latency_workload(
     );
     assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 0);
     (response_bytes, elapsed, protocol, peek_count)
-}
-
-fn benchmark_singleton_requests(
-    local_peer_id: &PeerId,
-    remote_peer_id: &PeerId,
-    messages: &[Vec<u8>],
-    iterations: usize,
-) -> (Duration, usize) {
-    let mut total_encoded_bytes = 0usize;
-    let started = Instant::now();
-    for _ in 0..iterations {
-        let mut equix_builder = equix::EquiXBuilder::new();
-        for message in messages {
-            let request_slab = jammed_request_slab(message);
-            let request = NockchainRequest::new_request(
-                &mut equix_builder, local_peer_id, remote_peer_id, &request_slab,
-            );
-            request
-                .verify_pow(&mut equix_builder, remote_peer_id, local_peer_id)
-                .expect("singleton pow verification should succeed");
-            total_encoded_bytes = total_encoded_bytes.saturating_add(
-                serde_cbor::to_vec(black_box(&request))
-                    .expect("encode")
-                    .len(),
-            );
-        }
-    }
-    (started.elapsed(), total_encoded_bytes)
-}
-
-fn benchmark_batch_request(
-    local_peer_id: &PeerId,
-    remote_peer_id: &PeerId,
-    messages: &[Vec<u8>],
-    iterations: usize,
-) -> (Duration, usize, usize) {
-    let mut total_encoded_bytes = 0usize;
-    let mut total_payload_bytes = 0usize;
-    let started = Instant::now();
-    for _ in 0..iterations {
-        let mut equix_builder = equix::EquiXBuilder::new();
-        let items = messages
-            .iter()
-            .enumerate()
-            .map(|(item_id, message)| BatchRequestItem {
-                item_id: item_id as u32,
-                message: ByteBuf::from(message.clone()),
-            })
-            .collect::<Vec<_>>();
-        let payload_bytes =
-            batch_request_payload_bytes(&items).expect("batch payload size should fit");
-        let request = NockchainRequest::new_batch_request(
-            &mut equix_builder, local_peer_id, remote_peer_id, items,
-        )
-        .expect("batch request should build");
-        request
-            .verify_pow(&mut equix_builder, remote_peer_id, local_peer_id)
-            .expect("batch pow verification should succeed");
-        total_payload_bytes = total_payload_bytes.saturating_add(payload_bytes);
-        total_encoded_bytes = total_encoded_bytes.saturating_add(
-            serde_cbor::to_vec(black_box(&request))
-                .expect("encode")
-                .len(),
-        );
-    }
-    (started.elapsed(), total_encoded_bytes, total_payload_bytes)
 }
 
 #[test]
@@ -7661,69 +7206,53 @@ fn test_request_to_scry_slab() {
 #[test]
 #[cfg_attr(miri, ignore)] // equix uses a foreign function so miri fails this tes
 fn test_equix_pow_verification() {
-    // Create EquiX builder - new() doesn't return Result
     let mut builder = equix::EquiXBuilder::new();
-
-    // Create test peer IDs
     let local_peer_id = PeerId::random();
     let remote_peer_id = PeerId::random();
-
-    // Create test message
     let message = ByteBuf::from(vec![1, 2, 3, 4, 5]);
 
-    // Create valid request with correct PoW
-    let valid_request =
-        NockchainRequest::new_request(&mut builder, &local_peer_id, &remote_peer_id, &{
-            let mut slab = NounSlab::new();
-            let message_noun = Atom::from_value(&mut slab, &message[..])
-                .expect("Failed to create message atom")
-                .as_noun();
-            slab.set_root(message_noun);
-            slab
-        });
-
-    // Verify the valid request
-    match &valid_request {
-        NockchainRequest::Request {
-            pow,
-            nonce,
-            message: _,
-        } => {
-            // Test successful verification
-            let result = valid_request.verify_pow(
-                &mut builder, &remote_peer_id, // Note: peers are swapped for verification
-                &local_peer_id,
-            );
-            assert!(result.is_ok(), "Valid PoW should verify successfully");
-
-            // Test failed verification with tampered nonce
-            let tampered_request = NockchainRequest::Request {
-                pow: *pow,
-                nonce: nonce + 1, // Tamper with the nonce
-                message: message.clone(),
-            };
-            let result = tampered_request.verify_pow(&mut builder, &remote_peer_id, &local_peer_id);
-            assert!(result.is_err(), "Tampered nonce should fail verification");
-
-            // Test failed verification with wrong peer order
-            let result = valid_request.verify_pow(
-                &mut builder, &local_peer_id, // Wrong order - not swapped
-                &remote_peer_id,
-            );
-            assert!(result.is_err(), "Wrong peer order should fail verification");
-        }
-        _ => panic!("Expected Request variant"),
-    }
-
-    // Test that gossip requests always verify successfully
-    let gossip_request = NockchainRequest::Gossip {
-        message: message.clone(),
+    let valid_request = NockchainRequest::new_batch_request(
+        &mut builder,
+        &local_peer_id,
+        &remote_peer_id,
+        vec![BatchRequestItem {
+            item_id: 0,
+            message: message.clone(),
+        }],
+    )
+    .expect("batch request proof should build");
+    let NockchainRequest::BatchRequest { pow, nonce, items } = &valid_request else {
+        panic!("expected BatchRequest");
     };
-    let result = gossip_request.verify_pow(&mut builder, &remote_peer_id, &local_peer_id);
+    valid_request
+        .verify_pow(&mut builder, &remote_peer_id, &local_peer_id)
+        .expect("valid batch request PoW should verify");
+
+    let tampered_request = NockchainRequest::BatchRequest {
+        pow: *pow,
+        nonce: nonce + 1,
+        items: items.clone(),
+    };
     assert!(
-        result.is_ok(),
-        "Gossip requests should always verify successfully"
+        tampered_request
+            .verify_pow(&mut builder, &remote_peer_id, &local_peer_id)
+            .is_err(),
+        "tampered nonce should fail verification"
     );
+    assert!(
+        valid_request
+            .verify_pow(&mut builder, &local_peer_id, &remote_peer_id)
+            .is_err(),
+        "wrong peer order should fail verification"
+    );
+
+    let gossip_request = NockchainRequest::authenticated_gossip_from_message(
+        &mut builder, &local_peer_id, &remote_peer_id, message,
+    )
+    .expect("authenticated gossip proof should build");
+    gossip_request
+        .verify_pow(&mut builder, &remote_peer_id, &local_peer_id)
+        .expect("authenticated gossip PoW should verify");
 }
 
 fn build_gossip_effect_with_tag(
@@ -8032,10 +7561,8 @@ fn test_bundle_request_batch_item_height_distinguishes_bundle_from_classic() {
     };
     let context = OutboundRequestContext {
         peer_id: PeerId::random(),
-        generation: ReqResGeneration::Gen2,
         request,
         retry_count: 0,
-        fallback_attempted: false,
         started_at: std::time::Instant::now(),
     };
 
@@ -8402,21 +7929,11 @@ async fn test_gossip_effect_current_version_forwards_payload_and_clears_caches()
 
     for expected_peer in peers {
         match swarm_rx.recv().await {
-            Some(SwarmAction::SendRequest {
-                peer_id,
-                request,
-                request_context,
-            }) => {
+            Some(SwarmAction::SendGossip { peer_id, message }) => {
                 assert_eq!(peer_id, expected_peer, "gossip should preserve peer order");
-                assert!(request_context.is_none());
-                assert_eq!(
-                    request,
-                    NockchainRequest::Gossip {
-                        message: expected_message.clone(),
-                    }
-                );
+                assert_eq!(message, expected_message);
             }
-            other => panic!("expected gossip SendRequest action, got {:?}", other),
+            other => panic!("expected gossip SendGossip action, got {:?}", other),
         }
     }
     assert!(
@@ -8500,21 +8017,11 @@ async fn unvalidated_future_block_does_not_suppress_outbound_gossip() {
             .await
             .expect("kernel gossip should fan out despite unvalidated deferred height");
         match action {
-            Some(SwarmAction::SendRequest {
-                peer_id,
-                request,
-                request_context,
-            }) => {
+            Some(SwarmAction::SendGossip { peer_id, message }) => {
                 assert_eq!(peer_id, expected_peer, "gossip should preserve peer order");
-                assert!(request_context.is_none());
-                assert_eq!(
-                    request,
-                    NockchainRequest::Gossip {
-                        message: expected_message,
-                    }
-                );
+                assert_eq!(message, expected_message);
             }
-            other => panic!("expected gossip SendRequest action, got {other:?}"),
+            other => panic!("expected gossip SendGossip action, got {other:?}"),
         }
     }
     assert!(
@@ -8558,22 +8065,12 @@ async fn test_buffered_gossip_effect_returns_without_waiting_on_swarm_queue() {
 
     for expected_peer in peers {
         match buffered_swarm_actions.pop_front() {
-            Some(SwarmAction::SendRequest {
-                peer_id,
-                request,
-                request_context,
-            }) => {
+            Some(SwarmAction::SendGossip { peer_id, message }) => {
                 assert_eq!(peer_id, expected_peer, "gossip should preserve peer order");
-                assert!(request_context.is_none());
-                assert_eq!(
-                    request,
-                    NockchainRequest::Gossip {
-                        message: expected_message.clone(),
-                    }
-                );
+                assert_eq!(message, expected_message);
             }
             other => panic!(
-                "expected buffered gossip SendRequest action, got {:?}",
+                "expected buffered gossip SendGossip action, got {:?}",
                 other
             ),
         }
@@ -9345,9 +8842,6 @@ async fn test_execute_batch_request_items_preserves_wire_order_and_mixed_outcome
                     7 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::NotFound),
                     3 => BatchItemExecutionOutcome::Failed(BatchErrorClass::Decode),
                     9 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::Result {
-                        response: NockchainResponse::Result {
-                            message: ByteBuf::from(vec![0xAA]),
-                        },
                         envelope: ResponseEnvelope::heard_tx(String::from("tx-9"), [0xAA]),
                     }),
                     _ => unreachable!("unexpected test item"),
@@ -10417,8 +9911,6 @@ fn test_validate_batch_request_top_level_limits_rejects_item_cap() {
         ip_bucket_connection_limit: LIBP2P_CONFIG.ip_bucket_connection_limit,
         gossip_bucket_capacity: LIBP2P_CONFIG.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: LIBP2P_CONFIG.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: LIBP2P_CONFIG.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: LIBP2P_CONFIG.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: LIBP2P_CONFIG.prefetch_window_max.max(1),
         gen2_batch_max_items: 2,
         gen2_batch_max_bytes: 1024,
@@ -10462,8 +9954,6 @@ fn test_validate_batch_request_top_level_limits_accepts_exact_item_cap() {
         ip_bucket_connection_limit: LIBP2P_CONFIG.ip_bucket_connection_limit,
         gossip_bucket_capacity: LIBP2P_CONFIG.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: LIBP2P_CONFIG.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: LIBP2P_CONFIG.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: LIBP2P_CONFIG.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: LIBP2P_CONFIG.prefetch_window_max.max(1),
         gen2_batch_max_items: 2,
         gen2_batch_max_bytes: 1024,
@@ -10496,8 +9986,6 @@ fn test_validate_batch_request_top_level_limits_rejects_byte_cap() {
         ip_bucket_connection_limit: LIBP2P_CONFIG.ip_bucket_connection_limit,
         gossip_bucket_capacity: LIBP2P_CONFIG.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: LIBP2P_CONFIG.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: LIBP2P_CONFIG.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: LIBP2P_CONFIG.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: LIBP2P_CONFIG.prefetch_window_max.max(1),
         gen2_batch_max_items: 8,
         gen2_batch_max_bytes: 15,
@@ -10549,8 +10037,6 @@ fn test_validate_batch_request_top_level_limits_accepts_exact_byte_cap() {
         ip_bucket_connection_limit: LIBP2P_CONFIG.ip_bucket_connection_limit,
         gossip_bucket_capacity: LIBP2P_CONFIG.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: LIBP2P_CONFIG.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: LIBP2P_CONFIG.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: LIBP2P_CONFIG.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: LIBP2P_CONFIG.prefetch_window_max.max(1),
         gen2_batch_max_items: 8,
         gen2_batch_max_bytes: exact_payload_bytes,
@@ -10577,8 +10063,6 @@ fn test_batch_request_item_too_large_uses_configured_limit() {
         ip_bucket_connection_limit: LIBP2P_CONFIG.ip_bucket_connection_limit,
         gossip_bucket_capacity: LIBP2P_CONFIG.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: LIBP2P_CONFIG.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: LIBP2P_CONFIG.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: LIBP2P_CONFIG.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: LIBP2P_CONFIG.prefetch_window_max.max(1),
         gen2_batch_max_items: 8,
         gen2_batch_max_bytes: 1024,
@@ -10604,8 +10088,6 @@ fn test_batch_request_item_too_large_accepts_exact_limit() {
         ip_bucket_connection_limit: LIBP2P_CONFIG.ip_bucket_connection_limit,
         gossip_bucket_capacity: LIBP2P_CONFIG.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: LIBP2P_CONFIG.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: LIBP2P_CONFIG.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: LIBP2P_CONFIG.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: LIBP2P_CONFIG.prefetch_window_max.max(1),
         gen2_batch_max_items: 8,
         gen2_batch_max_bytes: 1024,
@@ -10793,8 +10275,6 @@ fn test_pending_gen2_batch_activates_response_budget_for_large_responses() {
         ip_bucket_connection_limit: LIBP2P_CONFIG.ip_bucket_connection_limit,
         gossip_bucket_capacity: LIBP2P_CONFIG.gossip_bucket_capacity,
         gossip_bucket_refill_per_second: LIBP2P_CONFIG.gossip_bucket_refill_per_second,
-        authenticated_gossip_send_enabled: LIBP2P_CONFIG.req_res_authenticated_gossip_send_enabled,
-        legacy_gossip_accept_enabled: LIBP2P_CONFIG.req_res_legacy_gossip_accept_enabled,
         block_range_max_len: LIBP2P_CONFIG.prefetch_window_max.max(1),
         gen2_batch_max_items: 128,
         gen2_batch_max_bytes: 1_048_576,
@@ -10926,11 +10406,13 @@ async fn test_suppress_duplicate_active_outbound_request_blocks_exact_inflight_r
         request_id,
         OutboundRequestContext::new(
             peer_id,
-            ReqResGeneration::Gen1,
-            NockchainRequest::Request {
+            NockchainRequest::BatchRequest {
                 pow: [0; 16],
                 nonce: 0,
-                message: ByteBuf::from(request_message.clone()),
+                items: vec![BatchRequestItem {
+                    item_id: 0,
+                    message: ByteBuf::from(request_message.clone()),
+                }],
             },
         ),
     );
@@ -10982,7 +10464,7 @@ async fn test_suppress_duplicate_active_outbound_request_blocks_exact_inflight_r
 }
 
 #[test]
-fn test_take_pending_batch_request_demotes_single_block_to_gen1_request() {
+fn test_take_pending_batch_request_keeps_single_block_on_gen2() {
     let peer_id = PeerId::random();
     let local_peer_id = PeerId::random();
     let mut equix_builder = equix::EquiXBuilder::new();
@@ -11005,12 +10487,12 @@ fn test_take_pending_batch_request_demotes_single_block_to_gen1_request() {
     .expect("flush should succeed")
     .expect("pending batch should produce a request");
 
-    assert_eq!(flushed.generation, ReqResGeneration::Gen1);
-    let NockchainRequest::Request { message, .. } = flushed.request else {
-        panic!("singleton block flush should demote to a gen1 Request");
+    let NockchainRequest::BatchRequest { items, .. } = flushed.request else {
+        panic!("singleton block flush should stay a gen2 BatchRequest");
     };
+    assert_eq!(items.len(), 1);
     assert!(matches!(
-        decode_request_item_message(&message),
+        decode_request_item_message(&items[0].message),
         Ok(NockchainDataRequest::BlockByHeight(42))
     ));
     assert!(
@@ -11048,7 +10530,6 @@ fn test_take_pending_batch_request_keeps_multi_block_batch_on_gen2() {
     .expect("flush should succeed")
     .expect("pending batch should produce a request");
 
-    assert_eq!(flushed.generation, ReqResGeneration::Gen2);
     let NockchainRequest::BatchRequest { items, .. } = flushed.request else {
         panic!("multi-block flush should stay as a gen2 BatchRequest");
     };
@@ -11083,95 +10564,11 @@ fn test_checkpoint_requester_replay_counts_cover_curve_and_near_cap_tail() {
 }
 
 #[test]
-fn test_should_batch_request_respects_item_and_batch_limits() {
-    let peer_id = PeerId::random();
-    let request_context = OutboundRequestContext::new(
-        peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 0,
-            message: ByteBuf::from(jam_raw_tx_request(11)),
-        },
-    );
-    let block_request_context = OutboundRequestContext::new(
-        peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 0,
-            message: ByteBuf::from(jam_block_by_height_request(22)),
-        },
-    );
-
-    // gen2 send enabled, peer supports gen2, within limits
-    assert!(should_batch_request(&request_context, true, true, 128, 256));
-    // item too large
-    assert!(!should_batch_request(&request_context, true, true, 8, 256));
-    // batch too large
-    assert!(!should_batch_request(&request_context, true, true, 128, 8));
-    // gen2 send disabled
-    assert!(!should_batch_request(
-        &request_context, false, true, 128, 256
-    ));
-    // peer does not support gen2
-    assert!(!should_batch_request(
-        &request_context, true, false, 128, 256
-    ));
-    // block-by-height requests can join gen2 batches when the bounded response budget is active
-    assert!(should_batch_request(
-        &block_request_context, true, true, 128, 256
-    ));
-}
-
-#[test]
-fn test_outbound_request_generation_respects_peer_support_for_singletons() {
-    let tx_request = NockchainRequest::Request {
-        pow: [0; 16],
-        nonce: 0,
-        message: ByteBuf::from(jam_raw_tx_request(5)),
-    };
-    let block_request = NockchainRequest::Request {
-        pow: [0; 16],
-        nonce: 0,
-        message: ByteBuf::from(jam_block_by_height_request(7)),
-    };
-    let gossip = NockchainRequest::Gossip {
-        message: ByteBuf::from(vec![0xCD; 8]),
-    };
-    let batch = NockchainRequest::BatchRequest {
-        pow: [0; 16],
-        nonce: 0,
-        items: vec![BatchRequestItem {
-            item_id: 1,
-            message: ByteBuf::from(vec![0xEF; 8]),
-        }],
-    };
-
-    assert_eq!(
-        outbound_request_generation(&tx_request, true, true),
-        ReqResGeneration::Gen2
-    );
-    assert_eq!(
-        outbound_request_generation(&tx_request, true, false),
-        ReqResGeneration::Gen1
-    );
-    assert_eq!(
-        outbound_request_generation(&tx_request, false, true),
-        ReqResGeneration::Gen1
-    );
-    assert_eq!(
-        outbound_request_generation(&block_request, true, true),
-        ReqResGeneration::Gen2
-    );
-    assert_eq!(
-        outbound_request_generation(&gossip, true, false),
-        ReqResGeneration::Gen1
-    );
-    assert_eq!(
-        outbound_request_generation(&batch, true, false),
-        ReqResGeneration::Gen2
-    );
+fn test_request_message_batch_limits() {
+    let request_message = jam_raw_tx_request(11);
+    assert!(request_message_can_join_batch(&request_message, 128, 256));
+    assert!(!request_message_can_join_batch(&request_message, 8, 256));
+    assert!(!request_message_can_join_batch(&request_message, 128, 8));
 }
 
 #[test]
@@ -11188,7 +10585,6 @@ fn test_build_retry_request_contexts_splits_batches_after_repeated_failures() {
     let mut equix_builder = equix::EquiXBuilder::new();
     let request_context = OutboundRequestContext::with_attempt(
         remote_peer_id,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 5,
@@ -11212,7 +10608,6 @@ fn test_build_retry_request_contexts_splits_batches_after_repeated_failures() {
             ],
         },
         1,
-        false,
     );
 
     let retry_contexts =
@@ -11238,18 +10633,18 @@ fn test_build_retry_request_contexts_honors_retry_budget_and_item_filter() {
     let mut equix_builder = equix::EquiXBuilder::new();
     let exhausted = OutboundRequestContext::with_attempt(
         remote_peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
+        NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 0,
-            message: ByteBuf::from(jam_block_by_height_request(1)),
+            items: vec![BatchRequestItem {
+                item_id: 0,
+                message: ByteBuf::from(jam_block_by_height_request(1)),
+            }],
         },
         GEN2_RETRY_MAX_ATTEMPTS,
-        false,
     );
     let filtered = OutboundRequestContext::with_attempt(
         remote_peer_id,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -11265,7 +10660,6 @@ fn test_build_retry_request_contexts_honors_retry_budget_and_item_filter() {
             ],
         },
         0,
-        false,
     );
     let retry_item_ids = BTreeSet::from([20]);
 
@@ -11299,15 +10693,16 @@ fn test_build_retry_request_contexts_drops_range_request_same_peer_retry() {
     let mut equix_builder = equix::EquiXBuilder::new();
     let request_context = OutboundRequestContext::with_attempt(
         remote_peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
+        NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 0,
-            message: block_range_with_txs_request_message(100, 8)
-                .expect("range request should encode"),
+            items: vec![BatchRequestItem {
+                item_id: 0,
+                message: block_range_with_txs_request_message(100, 8)
+                    .expect("range request should encode"),
+            }],
         },
         0,
-        false,
     );
 
     let retry_contexts =
@@ -11318,150 +10713,6 @@ fn test_build_retry_request_contexts_drops_range_request_same_peer_retry() {
         retry_contexts.is_empty(),
         "range failures must re-enter peer selection rather than preserve the failed peer"
     );
-}
-
-#[test]
-fn test_build_unsupported_protocol_fallback_contexts_decomposes_batch_to_gen1_requests() {
-    let local_peer_id = PeerId::random();
-    let remote_peer_id = PeerId::random();
-    let mut equix_builder = equix::EquiXBuilder::new();
-    let request_context = OutboundRequestContext::with_attempt(
-        remote_peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::BatchRequest {
-            pow: [0; 16],
-            nonce: 9,
-            items: vec![
-                BatchRequestItem {
-                    item_id: 1,
-                    message: ByteBuf::from(jam_block_by_height_request(11)),
-                },
-                BatchRequestItem {
-                    item_id: 2,
-                    message: ByteBuf::from(jam_block_by_height_request(22)),
-                },
-            ],
-        },
-        0,
-        false,
-    );
-
-    let fallback_contexts = build_unsupported_protocol_fallback_contexts(
-        &request_context, &local_peer_id, &mut equix_builder,
-    )
-    .expect("fallback decomposition should succeed");
-
-    assert_eq!(fallback_contexts.len(), 2);
-    let mut fallback_heights = Vec::new();
-    for fallback_context in &fallback_contexts {
-        assert_eq!(fallback_context.peer_id, remote_peer_id);
-        assert_eq!(fallback_context.generation, ReqResGeneration::Gen1);
-        assert_eq!(fallback_context.retry_count, 1);
-        assert!(fallback_context.fallback_attempted);
-        let message = match &fallback_context.request {
-            NockchainRequest::Request { message, .. } => message,
-            _ => panic!("expected fallback singleton request"),
-        };
-        let data_request =
-            decode_request_item_message(message).expect("fallback request should decode");
-        let NockchainDataRequest::BlockByHeight(height) = data_request else {
-            panic!("expected fallback block-by-height request");
-        };
-        fallback_heights.push(height);
-        fallback_context
-            .request
-            .verify_pow(&mut equix_builder, &remote_peer_id, &local_peer_id)
-            .expect("fallback request PoW should verify");
-    }
-    assert_eq!(
-        fallback_heights,
-        vec![11, 22],
-        "fallback requests must preserve original batch wire order"
-    );
-}
-
-#[test]
-fn test_build_unsupported_protocol_fallback_contexts_rebuilds_singleton_requests_as_gen1() {
-    let local_peer_id = PeerId::random();
-    let remote_peer_id = PeerId::random();
-    let mut equix_builder = equix::EquiXBuilder::new();
-    let request_context = OutboundRequestContext::with_attempt(
-        remote_peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 0,
-            message: ByteBuf::from(jam_raw_tx_request(8)),
-        },
-        0,
-        false,
-    );
-
-    let fallback_contexts = build_unsupported_protocol_fallback_contexts(
-        &request_context, &local_peer_id, &mut equix_builder,
-    )
-    .expect("singleton fallback should succeed");
-
-    assert_eq!(fallback_contexts.len(), 1);
-    let fallback_context = &fallback_contexts[0];
-    assert_eq!(fallback_context.peer_id, remote_peer_id);
-    assert_eq!(fallback_context.generation, ReqResGeneration::Gen1);
-    assert_eq!(fallback_context.retry_count, 1);
-    assert!(fallback_context.fallback_attempted);
-
-    let message = match &fallback_context.request {
-        NockchainRequest::Request { message, .. } => message,
-        other => panic!("expected fallback singleton request, got {other:?}"),
-    };
-    let data_request =
-        decode_request_item_message(message).expect("fallback request should decode");
-    let NockchainDataRequest::RawTransactionById(tx_id, _) = data_request else {
-        panic!("expected fallback raw transaction request");
-    };
-    assert!(!tx_id.is_empty());
-    fallback_context
-        .request
-        .verify_pow(&mut equix_builder, &remote_peer_id, &local_peer_id)
-        .expect("fallback request PoW should verify");
-}
-
-#[test]
-fn test_build_unsupported_protocol_fallback_contexts_skips_repeated_or_gossip_fallbacks() {
-    let local_peer_id = PeerId::random();
-    let remote_peer_id = PeerId::random();
-    let mut equix_builder = equix::EquiXBuilder::new();
-
-    let already_fallback = OutboundRequestContext::with_attempt(
-        remote_peer_id,
-        ReqResGeneration::Gen1,
-        NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 0,
-            message: ByteBuf::from(jam_block_by_height_request(7)),
-        },
-        1,
-        true,
-    );
-    let gossip = OutboundRequestContext::with_attempt(
-        remote_peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Gossip {
-            message: ByteBuf::from(jam_block_by_height_request(8)),
-        },
-        0,
-        false,
-    );
-
-    assert!(build_unsupported_protocol_fallback_contexts(
-        &already_fallback, &local_peer_id, &mut equix_builder,
-    )
-    .expect("already-fallback case should not error")
-    .is_empty());
-    assert!(build_unsupported_protocol_fallback_contexts(
-        &gossip, &local_peer_id, &mut equix_builder,
-    )
-    .expect("gossip case should not error")
-    .is_empty());
 }
 
 #[test]
@@ -11545,88 +10796,11 @@ fn test_record_batch_result_item_errors_counts_each_error_class() {
 }
 
 #[test]
-fn test_record_req_res_fallback_increments_metric() {
-    let metrics = Arc::new(
-        NockchainP2PMetrics::register(gnort::global_metrics_registry())
-            .expect("Could not register metrics"),
-    );
-
-    record_req_res_fallback(&metrics, 0);
-    record_req_res_fallback(&metrics, 3);
-
-    assert_eq!(metrics.req_res_fallback_total.fetch_add(0), 3);
-}
-
-#[test]
-fn test_record_block_by_height_gen1_routed_increments_only_for_exclusion() {
-    let metrics = Arc::new(
-        NockchainP2PMetrics::register(gnort::global_metrics_registry())
-            .expect("Could not register metrics"),
-    );
-
-    let block_request = NockchainRequest::Request {
-        pow: [0; 16],
-        nonce: 0,
-        message: ByteBuf::from(jam_block_by_height_request(7)),
-    };
-    let tx_request = NockchainRequest::Request {
-        pow: [0; 16],
-        nonce: 0,
-        message: ByteBuf::from(jam_raw_tx_request(5)),
-    };
-
-    // BlockByHeight with gen2 enabled + peer supports gen2 -> should increment
-    record_block_by_height_gen1_routed(
-        &metrics,
-        ReqResGeneration::Gen1,
-        true,
-        true,
-        &block_request,
-    );
-    assert_eq!(metrics.req_res_block_by_height_gen1_routed.fetch_add(0), 1);
-
-    // Non-block request on gen1 with gen2 enabled -> should NOT increment
-    record_block_by_height_gen1_routed(&metrics, ReqResGeneration::Gen1, true, true, &tx_request);
-    assert_eq!(metrics.req_res_block_by_height_gen1_routed.fetch_add(0), 1);
-
-    // BlockByHeight on gen1 but gen2 send disabled -> should NOT increment
-    record_block_by_height_gen1_routed(
-        &metrics,
-        ReqResGeneration::Gen1,
-        false,
-        true,
-        &block_request,
-    );
-    assert_eq!(metrics.req_res_block_by_height_gen1_routed.fetch_add(0), 1);
-
-    // BlockByHeight on gen1 but peer does not support gen2 -> should NOT increment
-    record_block_by_height_gen1_routed(
-        &metrics,
-        ReqResGeneration::Gen1,
-        true,
-        false,
-        &block_request,
-    );
-    assert_eq!(metrics.req_res_block_by_height_gen1_routed.fetch_add(0), 1);
-
-    // BlockByHeight on gen2 -> should NOT increment (impossible in practice but guards logic)
-    record_block_by_height_gen1_routed(
-        &metrics,
-        ReqResGeneration::Gen2,
-        true,
-        true,
-        &block_request,
-    );
-    assert_eq!(metrics.req_res_block_by_height_gen1_routed.fetch_add(0), 1);
-}
-
-#[test]
 fn test_log_outbound_failure_tracks_gen2_timeout_metrics() {
     let metrics = isolated_test_metrics();
     let peer_id = PeerId::random();
     let request_context = OutboundRequestContext::with_attempt(
         peer_id,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 0,
@@ -11636,7 +10810,6 @@ fn test_log_outbound_failure_tracks_gen2_timeout_metrics() {
             }],
         },
         1,
-        false,
     );
 
     log_outbound_failure(
@@ -11653,68 +10826,6 @@ fn test_log_outbound_failure_tracks_gen2_timeout_metrics() {
     assert_eq!(metrics.gen1_outbound_failures.fetch_add(0), 0);
 }
 
-#[test]
-fn test_log_outbound_failure_tracks_gen1_timeout_metrics() {
-    let metrics = isolated_test_metrics();
-    let peer_id = PeerId::random();
-    let request_context = OutboundRequestContext::with_attempt(
-        peer_id,
-        ReqResGeneration::Gen1,
-        NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 0,
-            message: ByteBuf::from(jam_block_by_height_request(7)),
-        },
-        1,
-        false,
-    );
-
-    log_outbound_failure(
-        peer_id,
-        fresh_outbound_request_id(),
-        request_response::OutboundFailure::Timeout,
-        Some(&request_context),
-        metrics.clone(),
-    );
-
-    assert_eq!(metrics.request_failed.fetch_add(0), 1);
-    assert_eq!(metrics.gen1_outbound_failures.fetch_add(0), 1);
-    assert_eq!(metrics.gen1_outbound_timeouts.fetch_add(0), 1);
-    assert_eq!(metrics.gen2_outbound_failures.fetch_add(0), 0);
-    assert_eq!(metrics.gen2_outbound_timeouts.fetch_add(0), 0);
-}
-
-#[test]
-fn test_log_outbound_failure_tracks_gen1_non_timeout_metrics() {
-    let metrics = isolated_test_metrics();
-    let peer_id = PeerId::random();
-    let request_context = OutboundRequestContext::with_attempt(
-        peer_id,
-        ReqResGeneration::Gen1,
-        NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 0,
-            message: ByteBuf::from(jam_block_by_height_request(9)),
-        },
-        1,
-        false,
-    );
-
-    log_outbound_failure(
-        peer_id,
-        fresh_outbound_request_id(),
-        request_response::OutboundFailure::ConnectionClosed,
-        Some(&request_context),
-        metrics.clone(),
-    );
-
-    assert_eq!(metrics.request_failed.fetch_add(0), 1);
-    assert_eq!(metrics.gen1_outbound_failures.fetch_add(0), 1);
-    assert_eq!(metrics.gen1_outbound_timeouts.fetch_add(0), 0);
-    assert_eq!(metrics.gen2_outbound_failures.fetch_add(0), 0);
-    assert_eq!(metrics.gen2_outbound_timeouts.fetch_add(0), 0);
-}
-
 #[tokio::test]
 async fn test_queue_retry_requests_tracks_scheduled_total() {
     let metrics = isolated_test_metrics();
@@ -11722,14 +10833,15 @@ async fn test_queue_retry_requests_tracks_scheduled_total() {
     let peer_id = PeerId::random();
     let requests = vec![OutboundRequestContext::with_attempt(
         peer_id,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
+        NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 0,
-            message: ByteBuf::from(jam_block_by_height_request(1)),
+            items: vec![BatchRequestItem {
+                item_id: 0,
+                message: ByteBuf::from(jam_block_by_height_request(1)),
+            }],
         },
         1,
-        false,
     )];
 
     queue_retry_requests(&swarm_tx, &metrics, requests, Duration::from_millis(25))
@@ -11905,13 +11017,9 @@ async fn req_res_driver_outbound_gen2_batch_send_updates_send_counters() {
     );
 
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let mut requester = start_swarm(
@@ -12005,7 +11113,7 @@ async fn req_res_driver_outbound_gen2_batch_send_updates_send_counters() {
         &mut requester,
         &state_arc,
         &metrics,
-        OutboundRequestContext::new(responder_peer_id, ReqResGeneration::Gen2, request),
+        OutboundRequestContext::new(responder_peer_id, request),
     )
     .await;
 
@@ -12065,13 +11173,9 @@ async fn req_res_driver_inbound_gen2_batch_request_updates_receive_counters() {
     );
 
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let limits = runtime_limits_from_config(&responder_config);
@@ -12180,128 +11284,6 @@ async fn req_res_driver_inbound_gen2_batch_request_updates_receive_counters() {
     assert_eq!(metrics.gen2_batch_items_sent.fetch_add(0), 0);
     assert_eq!(scripted_traffic.peek_count.load(Ordering::SeqCst), 2);
     assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-#[ignore = "benchmark harness, run explicitly with -- --ignored --nocapture"]
-fn req_res_gen2_transport_report() {
-    let local_peer_id = PeerId::random();
-    let remote_peer_id = PeerId::random();
-    let iterations = 8usize;
-    let workloads = [
-        // -- existing --
-        (
-            "block-burst-32",
-            (0..32)
-                .map(|height| jam_block_by_height_request(height + 1))
-                .collect::<Vec<_>>(),
-        ),
-        (
-            "mixed-block-tx-128",
-            (0..128)
-                .map(|idx| {
-                    if idx % 2 == 0 {
-                        jam_block_by_height_request(idx as u64 + 1)
-                    } else {
-                        jam_raw_tx_request(idx as u64 + 1000)
-                    }
-                })
-                .collect::<Vec<_>>(),
-        ),
-        // -- new: pure tx at max batch depth --
-        (
-            "tx-burst-128",
-            (0..128)
-                .map(|seed| jam_raw_tx_request(seed + 3000))
-                .collect::<Vec<_>>(),
-        ),
-        // -- new: pure blocks at max batch depth --
-        (
-            "block-burst-128",
-            (0..128)
-                .map(|height| jam_block_by_height_request(height + 1))
-                .collect::<Vec<_>>(),
-        ),
-        // -- new: realistic sync ratio (8 blocks + 120 txs per block) --
-        (
-            "sync-ratio-128",
-            (0..128)
-                .map(|idx| {
-                    if idx < 8 {
-                        jam_block_by_height_request(idx as u64 + 500)
-                    } else {
-                        jam_raw_tx_request(idx as u64 + 5000)
-                    }
-                })
-                .collect::<Vec<_>>(),
-        ),
-        // -- new: single-item batch (measures batching overhead tax) --
-        ("single-item-1", vec![jam_raw_tx_request(9001)]),
-    ];
-
-    // -- crossover sweep: find the item count where gen2 beats gen1 --
-    let crossover_counts = [1usize, 2, 4, 8, 16, 32, 64, 128];
-
-    println!("req-res gen2 transport benchmark");
-    println!(
-        "config: iterations={} batch_max_items={} batch_max_bytes={} item_max_bytes={}",
-        iterations,
-        LIBP2P_CONFIG.gen2_batch_max_items(),
-        LIBP2P_CONFIG.gen2_batch_max_bytes(),
-        LIBP2P_CONFIG.gen2_item_max_bytes(),
-    );
-    println!(
-        "{:<22} {:>10} {:>14} {:>14} {:>12} {:>12}",
-        "workload", "items", "gen1_ms", "gen2_ms", "bytes_ratio", "payload_fit"
-    );
-
-    for (label, messages) in workloads {
-        let (gen1_elapsed, gen1_bytes) =
-            benchmark_singleton_requests(&local_peer_id, &remote_peer_id, &messages, iterations);
-        let (gen2_elapsed, gen2_bytes, batch_payload_bytes) =
-            benchmark_batch_request(&local_peer_id, &remote_peer_id, &messages, iterations);
-        let bytes_ratio = gen2_bytes as f64 / gen1_bytes as f64;
-        let payload_fit = batch_payload_bytes <= LIBP2P_CONFIG.gen2_batch_max_bytes();
-
-        println!(
-            "{:<22} {:>10} {:>14.3} {:>14.3} {:>12.3} {:>12}",
-            label,
-            messages.len(),
-            gen1_elapsed.as_secs_f64() * 1_000.0,
-            gen2_elapsed.as_secs_f64() * 1_000.0,
-            bytes_ratio,
-            payload_fit,
-        );
-        assert!(
-            payload_fit,
-            "benchmark workload must fit current batch byte cap"
-        );
-    }
-
-    println!();
-    println!("gen2 crossover analysis (tx-only, mixed-block-tx)");
-    println!(
-        "{:<22} {:>10} {:>14} {:>14} {:>12}",
-        "workload", "items", "gen1_ms", "gen2_ms", "speedup"
-    );
-    for count in crossover_counts {
-        let tx_messages: Vec<Vec<u8>> = (0..count)
-            .map(|seed| jam_raw_tx_request(seed as u64 + 7000))
-            .collect();
-        let (gen1_elapsed, _) =
-            benchmark_singleton_requests(&local_peer_id, &remote_peer_id, &tx_messages, iterations);
-        let (gen2_elapsed, _, _) =
-            benchmark_batch_request(&local_peer_id, &remote_peer_id, &tx_messages, iterations);
-        let speedup = gen1_elapsed.as_secs_f64() / gen2_elapsed.as_secs_f64();
-        println!(
-            "{:<22} {:>10} {:>14.3} {:>14.3} {:>12.1}x",
-            format!("crossover-tx-{count}"),
-            count,
-            gen1_elapsed.as_secs_f64() * 1_000.0,
-            gen2_elapsed.as_secs_f64() * 1_000.0,
-            speedup,
-        );
-    }
 }
 
 #[test]
@@ -12871,14 +11853,12 @@ async fn req_res_gen2_requester_cost_report() {
             request_id,
             OutboundRequestContext::with_attempt(
                 peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 1,
                     items: items.clone(),
                 },
                 0,
-                false,
             ),
         );
         let results = (0..item_count)
@@ -12994,14 +11974,12 @@ async fn req_res_gen2_requester_cost_report() {
             request_id,
             OutboundRequestContext::with_attempt(
                 peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 1,
                     items: items.clone(),
                 },
                 0,
-                false,
             ),
         );
         // Variable payload: item N gets (128 + N * 30) bytes, range around 128B..3968B
@@ -13205,7 +12183,7 @@ async fn req_res_gen2_recovery_path_report() {
     println!();
     println!("enqueue-side recovery bursts");
     println!(
-        "{:<24} {:<22} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "{:<24} {:<22} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
         "workload",
         "request_mix",
         "stages",
@@ -13214,14 +12192,13 @@ async fn req_res_gen2_recovery_path_report() {
         "dup",
         "out",
         "gen2",
-        "gen1",
         "1item",
         "p50",
         "avg"
     );
     for sample in &enqueue_samples {
         println!(
-            "{:<24} {:<22} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8.2}",
+            "{:<24} {:<22} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8.2}",
             sample.label,
             sample.request_mix,
             sample.stage_count,
@@ -13230,7 +12207,6 @@ async fn req_res_gen2_recovery_path_report() {
             sample.duplicate_requests,
             sample.outbound_request_count,
             sample.gen2_batch_request_count,
-            sample.gen1_request_count,
             sample.single_item_batch_count,
             sample.p50_outbound_items,
             sample.average_outbound_items
@@ -13702,40 +12678,12 @@ async fn measure_checkpoint_range_scry(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "rollout harness, run explicitly with -- --ignored --nocapture"]
+#[ignore = "performance harness, run explicitly with -- --ignored --nocapture"]
 async fn req_res_gen2_resident_set_report() {
     let workloads = [
-        (
-            "gen1-singleton-32-large",
-            ReqResGeneration::Gen1,
-            32usize,
-            2048usize,
-        ),
-        (
-            "gen2-batch-32-large",
-            ReqResGeneration::Gen2,
-            32usize,
-            2048usize,
-        ),
-        (
-            "gen1-singleton-128-large",
-            ReqResGeneration::Gen1,
-            128usize,
-            2048usize,
-        ),
-        (
-            "gen2-batch-128-large",
-            ReqResGeneration::Gen2,
-            128usize,
-            2048usize,
-        ),
-        // -- new: near-cap payloads to stress RSS under heavy batches --
-        (
-            "gen2-batch-128-near-cap",
-            ReqResGeneration::Gen2,
-            128usize,
-            6144usize,
-        ),
+        ("batch-32-large", 32usize, 2048usize),
+        ("batch-128-large", 128usize, 2048usize),
+        ("batch-128-near-cap", 128usize, 6144usize),
     ];
     let mut samples = Vec::with_capacity(workloads.len());
 
@@ -13760,16 +12708,14 @@ async fn req_res_gen2_resident_set_report() {
         "rss_delta"
     );
 
-    for (label, generation, item_count, payload_len) in workloads {
+    for (label, item_count, payload_len) in workloads {
         let transcript = DriverTranscript::default();
         transcript.record(
-                "scenario",
-                format!(
-                    "resident-set report {label} generation={generation:?} items={item_count} payload_len={payload_len}"
-                ),
-            );
+            "scenario",
+            format!("resident-set report {label} items={item_count} payload_len={payload_len}"),
+        );
         let (response_bytes, elapsed, poke_count, rss_before_kib, rss_after_kib, rss_peak_kib) =
-            run_requester_response_workload(generation, item_count, payload_len, &transcript).await;
+            run_requester_response_workload(item_count, payload_len, &transcript).await;
         let total_ms = elapsed.as_secs_f64() * 1_000.0;
         let per_item_us = elapsed.as_micros() as f64 / item_count as f64;
         let rss_delta_kib = rss_peak_kib.saturating_sub(rss_before_kib);
@@ -13777,10 +12723,7 @@ async fn req_res_gen2_resident_set_report() {
         println!(
             "{:<26} {:<8} {:>8} {:>10} {:>14} {:>12.3} {:>12.3} {:>10} {:>10} {:>10} {:>10}",
             label,
-            match generation {
-                ReqResGeneration::Gen1 => "gen1",
-                ReqResGeneration::Gen2 => "gen2",
-            },
+            "gen2",
             item_count,
             payload_len,
             response_bytes,
@@ -13799,10 +12742,7 @@ async fn req_res_gen2_resident_set_report() {
         samples.push(ResidentSetSample {
             label: label.to_string(),
             topology: String::from("single-process requester-path"),
-            generation: match generation {
-                ReqResGeneration::Gen1 => String::from("gen1"),
-                ReqResGeneration::Gen2 => String::from("gen2"),
-            },
+            generation: String::from("gen2"),
             request_mix: String::from("raw-tx-only"),
             item_count,
             payload_len,
@@ -13866,38 +12806,13 @@ fn test_create_response_result_from_payload_matches_wrapped_scry_response() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "rollout harness, run explicitly with -- --ignored --nocapture"]
+#[ignore = "performance harness, run explicitly with -- --ignored --nocapture"]
 async fn req_res_gen2_two_peer_latency_report() {
     let workloads = [
-        (
-            "gen1-singleton-32",
-            ReqResGeneration::Gen1,
-            32usize,
-            512usize,
-        ),
-        ("gen2-batch-32", ReqResGeneration::Gen2, 32usize, 512usize),
-        (
-            "gen1-singleton-128-large",
-            ReqResGeneration::Gen1,
-            128usize,
-            2048usize,
-        ),
-        (
-            "gen2-batch-128-large",
-            ReqResGeneration::Gen2,
-            128usize,
-            2048usize,
-        ),
-        // -- new: near-cap payloads (128 x 6KB, around 768KB response) --
-        (
-            "gen2-batch-128-near-cap",
-            ReqResGeneration::Gen2,
-            128usize,
-            6144usize,
-        ),
-        // -- new: small batch for overhead measurement --
-        ("gen1-singleton-4", ReqResGeneration::Gen1, 4usize, 512usize),
-        ("gen2-batch-4", ReqResGeneration::Gen2, 4usize, 512usize),
+        ("batch-32", 32usize, 512usize),
+        ("batch-128-large", 128usize, 2048usize),
+        ("batch-128-near-cap", 128usize, 6144usize),
+        ("batch-4", 4usize, 512usize),
     ];
     let mut samples = Vec::with_capacity(workloads.len());
 
@@ -13914,42 +12829,26 @@ async fn req_res_gen2_two_peer_latency_report() {
         "protocol"
     );
 
-    for (label, generation, item_count, payload_len) in workloads {
+    for (label, item_count, payload_len) in workloads {
         let transcript = DriverTranscript::default();
         transcript.record(
-                "scenario",
-                format!(
-                    "two-peer latency report {label} generation={generation:?} items={item_count} payload_len={payload_len}"
-                ),
-            );
+            "scenario",
+            format!("two-peer latency report {label} items={item_count} payload_len={payload_len}"),
+        );
         let (response_bytes, elapsed, protocol, peek_count) =
-            run_two_peer_driver_latency_workload(generation, item_count, payload_len, &transcript)
-                .await;
+            run_two_peer_driver_latency_workload(item_count, payload_len, &transcript).await;
         let total_ms = elapsed.as_secs_f64() * 1_000.0;
         let per_item_ms = total_ms / item_count as f64;
 
         println!(
             "{:<24} {:<8} {:>8} {:>12} {:>14} {:>12.3} {:>12.3} {:<24}",
-            label,
-            match generation {
-                ReqResGeneration::Gen1 => "gen1",
-                ReqResGeneration::Gen2 => "gen2",
-            },
-            item_count,
-            payload_len,
-            response_bytes,
-            total_ms,
-            per_item_ms,
-            protocol
+            label, "gen2", item_count, payload_len, response_bytes, total_ms, per_item_ms, protocol
         );
 
         samples.push(TwoPeerLatencySample {
             label: label.to_string(),
             topology: String::from("two-peer driver-path"),
-            generation: match generation {
-                ReqResGeneration::Gen1 => String::from("gen1"),
-                ReqResGeneration::Gen2 => String::from("gen2"),
-            },
+            generation: String::from("gen2"),
             request_mix: String::from("raw-tx-only"),
             item_count,
             payload_len,
@@ -13969,8 +12868,6 @@ async fn req_res_gen2_two_peer_latency_report() {
         samples: samples.clone(),
     });
 
-    // RTT projection: show what the numbers mean at real-world latencies.
-    // gen1 pays one round-trip per item; gen2 pays one round-trip per batch.
     let rtts_ms = [10.0, 50.0, 100.0, 200.0];
     println!();
     println!("RTT projection (estimated wall-clock at real-world latencies)");
@@ -13979,23 +12876,15 @@ async fn req_res_gen2_two_peer_latency_report() {
         "workload", "gen", "items", "rtt_10ms", "rtt_50ms", "rtt_100ms", "rtt_200ms"
     );
     for sample in &samples {
-        let item_count = sample.item_count;
-        let processing_ms = sample.total_ms;
         let projected: Vec<String> = rtts_ms
             .iter()
-            .map(|rtt| {
-                let rtt_cost = match sample.generation.as_str() {
-                    "gen1" => *rtt * item_count as f64, // one RTT per request
-                    _ => *rtt,                          // one RTT per batch
-                };
-                format!("{:>10.0}ms", processing_ms + rtt_cost)
-            })
+            .map(|rtt| format!("{:>10.0}ms", sample.total_ms + rtt))
             .collect();
         println!(
             "{:<24} {:<8} {:>8} {}",
             sample.label,
             sample.generation,
-            item_count,
+            sample.item_count,
             projected.join(" ")
         );
     }
@@ -14036,8 +12925,6 @@ async fn req_res_gen2_kernel_sensitivity_report() {
                 ),
             );
         let requester_config = LibP2PConfig {
-            req_res_gen2_accept_enabled: true,
-            req_res_gen2_send_enabled: true,
             ..LibP2PConfig::default()
         };
         let responder_config = requester_config.clone();
@@ -14216,7 +13103,6 @@ fn test_batch_request_item_ids_extracts_correlation_keys() {
     let peer_id = PeerId::random();
     let request_context = OutboundRequestContext::with_attempt(
         peer_id,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -14232,7 +13118,6 @@ fn test_batch_request_item_ids_extracts_correlation_keys() {
             ],
         },
         0,
-        false,
     );
 
     let item_ids = batch_request_item_ids(Some(&request_context)).expect("expected batch item ids");
@@ -14315,15 +13200,9 @@ async fn test_execute_batch_request_items_preserves_tail_contract_on_overflow() 
                 observed_order.lock().unwrap().push(item_id);
                 match item_id {
                     1 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::Result {
-                        response: NockchainResponse::Result {
-                            message: first_envelope.message.clone(),
-                        },
                         envelope: first_envelope,
                     }),
                     2 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::Result {
-                        response: NockchainResponse::Result {
-                            message: second_envelope.message.clone(),
-                        },
                         envelope: second_envelope,
                     }),
                     3 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::NotFound),
@@ -14391,9 +13270,6 @@ async fn test_execute_batch_request_items_marks_oversize_current_item_too_large(
                 observed_order.lock().unwrap().push(item_id);
                 match item_id {
                     1 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::Result {
-                        response: NockchainResponse::Result {
-                            message: large_envelope.message.clone(),
-                        },
                         envelope: large_envelope,
                     }),
                     2 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::NotFound),
@@ -14480,9 +13356,6 @@ async fn test_execute_batch_request_items_stops_before_executing_estimated_tail(
                 observed_order.lock().unwrap().push(item_id);
                 match item_id {
                     1 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::Result {
-                        response: NockchainResponse::Result {
-                            message: head_envelope.message.clone(),
-                        },
                         envelope: head_envelope,
                     }),
                     2 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::NotFound),
@@ -14627,13 +13500,9 @@ async fn req_res_driver_responder_fit_stops_before_executing_tail_item() {
         .max(item3_message.len());
 
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         gen2_batch_max_bytes: limit,
         gen2_item_max_bytes: request_item_max_bytes,
         ..LibP2PConfig::default()
@@ -14771,14 +13640,10 @@ async fn req_res_driver_wholesale_inbound_backpressure_reject_recovers_on_same_c
     let transcript = DriverTranscript::default();
 
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         request_response_timeout_secs: 1,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         request_response_timeout_secs: 1,
         gen2_max_inflight_per_peer: 1,
         ..LibP2PConfig::default()
@@ -14986,14 +13851,10 @@ async fn req_res_driver_rejects_replayed_inbound_batch_before_execution() {
     let transcript = DriverTranscript::default();
 
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         request_response_timeout_secs: 1,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         request_response_timeout_secs: 1,
         ..LibP2PConfig::default()
     };
@@ -15126,14 +13987,10 @@ async fn req_res_driver_releases_inbound_slot_after_admitted_request_error() {
     );
 
     let requester_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         request_response_timeout_secs: 1,
         ..LibP2PConfig::default()
     };
     let responder_config = LibP2PConfig {
-        req_res_gen2_accept_enabled: true,
-        req_res_gen2_send_enabled: true,
         request_response_timeout_secs: 1,
         gen2_max_inflight_per_peer: 1,
         ..LibP2PConfig::default()
@@ -15158,14 +14015,18 @@ async fn req_res_driver_releases_inbound_slot_after_admitted_request_error() {
     let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
     let mut responder_equix = equix::EquiXBuilder::new();
 
-    let mut malformed_slab = NounSlab::new();
+    let mut malformed_slab: NounSlab = NounSlab::new();
     malformed_slab.set_root(D(0));
-    let malformed_request = NockchainRequest::new_request(
+    let malformed_request = NockchainRequest::new_batch_request(
         &mut equix::EquiXBuilder::new(),
         &requester_peer_id,
         &responder_peer_id,
-        &malformed_slab,
-    );
+        vec![BatchRequestItem {
+            item_id: 1,
+            message: ByteBuf::from(malformed_slab.jam().as_ref().to_vec()),
+        }],
+    )
+    .expect("malformed item should still fit an authenticated batch");
     requester
         .behaviour_mut()
         .request_response
@@ -15175,7 +14036,7 @@ async fn req_res_driver_releases_inbound_slot_after_admitted_request_error() {
         recv_request_event(&mut requester, &mut responder, &transcript).await;
     assert_eq!(peer, requester_peer_id);
 
-    let result = run_driver_with_timeout(
+    run_driver_with_timeout(
         &transcript,
         "driver should release inbound slot after admitted decode error",
         handle_request_response(
@@ -15192,11 +14053,8 @@ async fn req_res_driver_releases_inbound_slot_after_admitted_request_error() {
             PeerExclusions::default(),
         ),
     )
-    .await;
-    assert!(
-        result.is_err(),
-        "malformed admitted request should return a decode error"
-    );
+    .await
+    .expect("malformed batch item should produce an item-level error response");
 
     assert_eq!(
         state_arc
@@ -15209,9 +14067,17 @@ async fn req_res_driver_releases_inbound_slot_after_admitted_request_error() {
     assert_eq!(scripted_traffic.peek_count.load(Ordering::SeqCst), 0);
     assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 0);
 
-    match tokio::time::timeout(Duration::from_millis(50), swarm_rx.recv()).await {
-        Err(_) | Ok(None) => {}
-        Ok(Some(other)) => panic!("expected no swarm action for malformed request, got {other:?}"),
+    match recv_swarm_action(&mut swarm_rx).await {
+        SwarmAction::SendResponse {
+            response: NockchainResponse::BatchResult { results },
+            ..
+        } => {
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].item_id, 1);
+            assert_eq!(results[0].status, BatchResultStatus::Error);
+            assert_eq!(results[0].error, Some(BatchErrorClass::Decode));
+        }
+        other => panic!("expected batch decode-error response, got {other:?}"),
     }
 }
 
@@ -15235,7 +14101,6 @@ async fn req_res_driver_retry_requeues_only_retryable_and_missing_batch_items() 
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -15255,7 +14120,6 @@ async fn req_res_driver_retry_requeues_only_retryable_and_missing_batch_items() 
             ],
         },
         0,
-        false,
     );
     state_arc
         .lock()
@@ -15361,7 +14225,6 @@ async fn req_res_driver_bundle_too_large_error_queues_classic_fallback() {
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -15372,7 +14235,6 @@ async fn req_res_driver_bundle_too_large_error_queues_classic_fallback() {
             }],
         },
         0,
-        false,
     );
     state_arc
         .lock()
@@ -15456,7 +14318,6 @@ async fn req_res_driver_invalid_range_response_queues_classic_fallback() {
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -15467,7 +14328,6 @@ async fn req_res_driver_invalid_range_response_queues_classic_fallback() {
             }],
         },
         0,
-        false,
     );
     state_arc
         .lock()
@@ -15543,210 +14403,6 @@ async fn req_res_driver_invalid_range_response_queues_classic_fallback() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn req_res_driver_unsupported_protocol_fallback_replays_batch_items_in_order() {
-    let metrics = isolated_test_metrics();
-    let state_arc = Arc::new(Mutex::new(P2PState::with_peer_stats_registry(
-        metrics.clone(),
-        LIBP2P_CONFIG.seen_tx_clear_interval,
-        Arc::new(PeerStatsRegistry::default()),
-    )));
-    let peer = PeerId::random();
-    let local_peer = PeerId::random();
-    let request_id = fresh_outbound_request_id();
-    let request_context = OutboundRequestContext::with_attempt(
-        peer,
-        ReqResGeneration::Gen2,
-        NockchainRequest::BatchRequest {
-            pow: [0; 16],
-            nonce: 1,
-            items: vec![
-                BatchRequestItem {
-                    item_id: 1,
-                    message: ByteBuf::from(jam_block_by_height_request(11)),
-                },
-                BatchRequestItem {
-                    item_id: 2,
-                    message: ByteBuf::from(jam_block_by_height_request(22)),
-                },
-                BatchRequestItem {
-                    item_id: 3,
-                    message: ByteBuf::from(jam_block_by_height_request(33)),
-                },
-            ],
-        },
-        0,
-        false,
-    );
-    {
-        let mut state_guard = state_arc.lock().await;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
-        state_guard.record_outbound_request(request_id, request_context);
-    }
-
-    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
-    let mut equix_builder = equix::EquiXBuilder::new();
-
-    handle_outbound_request_failure(
-        &swarm_tx,
-        Arc::clone(&state_arc),
-        metrics.clone(),
-        local_peer,
-        &mut equix_builder,
-        PeerExclusions::default(),
-        peer,
-        request_id,
-        request_response::OutboundFailure::UnsupportedProtocols,
-    )
-    .await;
-
-    let mut fallback_heights = Vec::new();
-    for expected_height in [11, 22, 33] {
-        match recv_swarm_action(&mut swarm_rx).await {
-            SwarmAction::SendRequest {
-                peer_id,
-                request,
-                request_context,
-            } => {
-                assert_eq!(peer_id, peer);
-                let fallback_context =
-                    request_context.expect("fallback queue should retain request context");
-                assert_eq!(fallback_context.peer_id, peer);
-                assert_eq!(fallback_context.generation, ReqResGeneration::Gen1);
-                assert_eq!(fallback_context.retry_count, 1);
-                assert!(fallback_context.fallback_attempted);
-
-                request
-                    .verify_pow(&mut equix_builder, &peer, &local_peer)
-                    .expect("fallback request PoW should verify");
-
-                let message = match request {
-                    NockchainRequest::Request { message, .. } => message,
-                    other => panic!("expected fallback singleton request, got {other:?}"),
-                };
-                let data_request =
-                    decode_request_item_message(&message).expect("fallback request should decode");
-                let NockchainDataRequest::BlockByHeight(height) = data_request else {
-                    panic!("expected fallback block-by-height request");
-                };
-                assert_eq!(height, expected_height);
-                fallback_heights.push(height);
-            }
-            other => panic!("expected SendRequest fallback action, got {other:?}"),
-        }
-    }
-
-    assert!(
-        swarm_rx.try_recv().is_err(),
-        "unsupported-protocol fallback should only queue one singleton request per batch item"
-    );
-    assert_eq!(
-        fallback_heights,
-        vec![11, 22, 33],
-        "live fallback queue must preserve original batch order"
-    );
-    assert_eq!(metrics.req_res_fallback_total.fetch_add(0), 3);
-    assert!(
-        state_arc
-            .lock()
-            .await
-            .outbound_request_context(request_id)
-            .is_none(),
-        "unsupported-protocol failure should clear retained outbound context"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn req_res_driver_unsupported_protocol_fallback_replays_singleton_request() {
-    let metrics = isolated_test_metrics();
-    let state_arc = Arc::new(Mutex::new(P2PState::with_peer_stats_registry(
-        metrics.clone(),
-        LIBP2P_CONFIG.seen_tx_clear_interval,
-        Arc::new(PeerStatsRegistry::default()),
-    )));
-    let peer = PeerId::random();
-    let local_peer = PeerId::random();
-    let request_id = fresh_outbound_request_id();
-    let request_context = OutboundRequestContext::with_attempt(
-        peer,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
-            pow: [0; 16],
-            nonce: 1,
-            message: ByteBuf::from(jam_raw_tx_request(44)),
-        },
-        0,
-        false,
-    );
-    {
-        let mut state_guard = state_arc.lock().await;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
-        state_guard.record_outbound_request(request_id, request_context);
-    }
-
-    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
-    let mut equix_builder = equix::EquiXBuilder::new();
-
-    handle_outbound_request_failure(
-        &swarm_tx,
-        Arc::clone(&state_arc),
-        metrics.clone(),
-        local_peer,
-        &mut equix_builder,
-        PeerExclusions::default(),
-        peer,
-        request_id,
-        request_response::OutboundFailure::UnsupportedProtocols,
-    )
-    .await;
-
-    match recv_swarm_action(&mut swarm_rx).await {
-        SwarmAction::SendRequest {
-            peer_id,
-            request,
-            request_context,
-        } => {
-            assert_eq!(peer_id, peer);
-            let fallback_context =
-                request_context.expect("fallback queue should retain request context");
-            assert_eq!(fallback_context.peer_id, peer);
-            assert_eq!(fallback_context.generation, ReqResGeneration::Gen1);
-            assert_eq!(fallback_context.retry_count, 1);
-            assert!(fallback_context.fallback_attempted);
-
-            request
-                .verify_pow(&mut equix_builder, &peer, &local_peer)
-                .expect("fallback request PoW should verify");
-
-            let message = match request {
-                NockchainRequest::Request { message, .. } => message,
-                other => panic!("expected fallback singleton request, got {other:?}"),
-            };
-            let data_request =
-                decode_request_item_message(&message).expect("fallback request should decode");
-            let NockchainDataRequest::RawTransactionById(tx_id, _) = data_request else {
-                panic!("expected fallback raw transaction request");
-            };
-            assert!(!tx_id.is_empty());
-        }
-        other => panic!("expected SendRequest fallback action, got {other:?}"),
-    }
-
-    assert!(
-        swarm_rx.try_recv().is_err(),
-        "singleton unsupported-protocol fallback should only queue one request"
-    );
-    assert_eq!(metrics.req_res_fallback_total.fetch_add(0), 1);
-    assert!(
-        state_arc
-            .lock()
-            .await
-            .outbound_request_context(request_id)
-            .is_none(),
-        "unsupported-protocol failure should clear retained outbound context"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn req_res_driver_timeout_retries_batch_request_and_clears_context() {
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::with_peer_stats_registry(
@@ -15759,7 +14415,6 @@ async fn req_res_driver_timeout_retries_batch_request_and_clears_context() {
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -15779,11 +14434,9 @@ async fn req_res_driver_timeout_retries_batch_request_and_clears_context() {
             ],
         },
         0,
-        false,
     );
     {
         let mut state_guard = state_arc.lock().await;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.record_outbound_request(request_id, request_context);
     }
 
@@ -15814,9 +14467,7 @@ async fn req_res_driver_timeout_retries_batch_request_and_clears_context() {
             );
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].peer_id, peer);
-            assert_eq!(requests[0].generation, ReqResGeneration::Gen2);
             assert_eq!(requests[0].retry_count, 1);
-            assert!(!requests[0].fallback_attempted);
             requests[0]
                 .request
                 .verify_pow(&mut equix_builder, &peer, &local_peer)
@@ -15860,7 +14511,6 @@ async fn buffered_outbound_failure_queues_retry_without_waiting_on_swarm_queue()
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -15876,11 +14526,9 @@ async fn buffered_outbound_failure_queues_retry_without_waiting_on_swarm_queue()
             ],
         },
         0,
-        false,
     );
     {
         let mut state_guard = state_arc.lock().await;
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.record_outbound_request(request_id, request_context);
     }
 
@@ -15908,9 +14556,7 @@ async fn buffered_outbound_failure_queues_retry_without_waiting_on_swarm_queue()
         Some(SwarmAction::RetryRequests { requests, .. }) => {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].peer_id, peer);
-            assert_eq!(requests[0].generation, ReqResGeneration::Gen2);
             assert_eq!(requests[0].retry_count, 1);
-            assert!(!requests[0].fallback_attempted);
         }
         other => panic!("expected buffered RetryRequests action, got {:?}", other),
     }
@@ -15947,14 +14593,15 @@ async fn req_res_driver_timeout_updates_peer_stats_snapshot() {
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
+        NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
-            message: ByteBuf::from(jam_raw_tx_request(44)),
+            items: vec![BatchRequestItem {
+                item_id: 0,
+                message: ByteBuf::from(jam_raw_tx_request(44)),
+            }],
         },
         0,
-        false,
     );
     {
         let mut state_guard = state_arc.lock().await;
@@ -15967,7 +14614,6 @@ async fn req_res_driver_timeout_updates_peer_stats_snapshot() {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.record_outbound_request(request_id, request_context);
     }
 
@@ -15991,13 +14637,13 @@ async fn req_res_driver_timeout_updates_peer_stats_snapshot() {
         SwarmAction::RetryRequests { requests, .. } => {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].peer_id, peer);
-            assert_eq!(requests[0].generation, ReqResGeneration::Gen2);
             assert_eq!(requests[0].retry_count, 1);
             match &requests[0].request {
-                NockchainRequest::Request { message, .. } => {
-                    assert_eq!(message.as_ref(), jam_raw_tx_request(44).as_slice());
+                NockchainRequest::BatchRequest { items, .. } => {
+                    assert_eq!(items.len(), 1);
+                    assert_eq!(items[0].message.as_ref(), jam_raw_tx_request(44).as_slice());
                 }
-                other => panic!("expected singleton retry request, got {other:?}"),
+                other => panic!("expected singleton batch retry request, got {other:?}"),
             }
         }
         other => panic!("expected RetryRequests, got {other:?}"),
@@ -16052,11 +14698,13 @@ async fn req_res_driver_single_response_updates_peer_stats_snapshot() {
     let request_id = fresh_outbound_request_id();
     let mut request_context = OutboundRequestContext::new(
         peer,
-        ReqResGeneration::Gen2,
-        NockchainRequest::Request {
+        NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 0,
-            message: ByteBuf::from(jam_raw_tx_request(80_001)),
+            items: vec![BatchRequestItem {
+                item_id: 0,
+                message: ByteBuf::from(jam_raw_tx_request(80_001)),
+            }],
         },
     );
     request_context.started_at = Instant::now() - Duration::from_millis(25);
@@ -16072,13 +14720,11 @@ async fn req_res_driver_single_response_updates_peer_stats_snapshot() {
                 send_back_addr: remote_addr.clone(),
             },
         );
-        state_guard.observe_peer_generation(peer, ReqResGeneration::Gen2);
         state_guard.record_outbound_request(request_id, request_context);
     }
 
-    let response = match tx_result_outcome(1, 16) {
-        RequestExecutionOutcome::Result { response, .. } => response,
-        other => panic!("expected singleton response outcome, got {other:?}"),
+    let response = NockchainResponse::BatchResult {
+        results: vec![tx_result_outcome(1, 16).into_batch_result_item(0)],
     };
     let response_bytes =
         req_res_message_encoded_bytes(&response).expect("response bytes should encode");
@@ -16150,7 +14796,6 @@ async fn req_res_driver_terminal_batch_ack_and_not_found_clear_context_without_r
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -16166,7 +14811,6 @@ async fn req_res_driver_terminal_batch_ack_and_not_found_clear_context_without_r
             ],
         },
         0,
-        false,
     );
     state_arc
         .lock()
@@ -16241,104 +14885,6 @@ async fn req_res_driver_terminal_batch_ack_and_not_found_clear_context_without_r
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn req_res_driver_block_by_height_ack_queues_alternate_peer_retry() {
-    let metrics = isolated_test_metrics();
-    let state_arc = Arc::new(Mutex::new(P2PState::new(
-        metrics.clone(),
-        LIBP2P_CONFIG.seen_tx_clear_interval,
-    )));
-    let local_peer = PeerId::random();
-    let connection_id = ConnectionId::new_unchecked(21);
-    let peers = (0..10).map(|_| PeerId::random()).collect::<Vec<_>>();
-    let mut canonical_peers = peers.clone();
-    canonical_peers.sort_unstable_by_key(|peer| peer.to_base58());
-    let initial_peers = canonical_peers.iter().take(8).copied().collect::<Vec<_>>();
-    let source_peer = canonical_peers[0];
-    let expected_retry_peer = canonical_peers[8];
-    let request_message = ByteBuf::from(jam_block_by_height_request(10030));
-    let request_id = fresh_outbound_request_id();
-
-    {
-        let mut state_guard = state_arc.lock().await;
-        for (index, peer_id) in peers.iter().copied().enumerate() {
-            let remote_addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", 4800 + index)
-                .parse()
-                .expect("valid remote addr");
-            let local_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", 5800 + index)
-                .parse()
-                .expect("valid local addr");
-            state_guard.track_connection(
-                ConnectionId::new_unchecked(100 + index),
-                peer_id,
-                &remote_addr,
-                libp2p::core::ConnectedPoint::Listener {
-                    local_addr,
-                    send_back_addr: remote_addr.clone(),
-                },
-            );
-        }
-        state_guard.track_block_height_attempted_peers(10030, initial_peers.iter().copied());
-        state_guard.record_outbound_request(
-            request_id,
-            OutboundRequestContext::with_attempt(
-                source_peer,
-                ReqResGeneration::Gen1,
-                NockchainRequest::Request {
-                    pow: [0; 16],
-                    nonce: 1,
-                    message: request_message.clone(),
-                },
-                0,
-                false,
-            ),
-        );
-    }
-
-    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
-    let mut equix_builder = equix::EquiXBuilder::new();
-    let scripted_traffic =
-        build_scripted_traffic_cop(DriverTranscript::default(), Vec::new(), Vec::new()).await;
-
-    handle_request_response(
-        source_peer,
-        connection_id,
-        request_response::Message::Response {
-            request_id,
-            response: NockchainResponse::Ack { acked: true },
-        },
-        swarm_tx,
-        &mut equix_builder,
-        local_peer,
-        scripted_traffic.traffic,
-        metrics,
-        state_arc.clone(),
-        runtime_limits_from_config(&LIBP2P_CONFIG),
-        PeerExclusions::default(),
-    )
-    .await
-    .expect("block-by-height ack should be handled");
-
-    match recv_swarm_action(&mut swarm_rx).await {
-        SwarmAction::QueueKernelRequest {
-            peer_id,
-            request_message: queued_message,
-        } => {
-            assert_eq!(peer_id, expected_retry_peer);
-            assert_eq!(queued_message, request_message);
-        }
-        other => panic!("expected alternate QueueKernelRequest retry, got {other:?}"),
-    }
-    assert!(
-        state_arc
-            .lock()
-            .await
-            .get_block_height_attempted_peers(10030)
-            .contains(&expected_retry_peer),
-        "alternate peer retry should be recorded as attempted"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn req_res_driver_block_by_height_timeout_queues_alternate_peer_retry() {
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::new(
@@ -16378,14 +14924,15 @@ async fn req_res_driver_block_by_height_timeout_queues_alternate_peer_retry() {
             request_id,
             OutboundRequestContext::with_attempt(
                 source_peer,
-                ReqResGeneration::Gen1,
-                NockchainRequest::Request {
+                NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 1,
-                    message: request_message.clone(),
+                    items: vec![BatchRequestItem {
+                        item_id: 0,
+                        message: request_message.clone(),
+                    }],
                 },
                 0,
-                false,
             ),
         );
     }
@@ -16431,89 +14978,6 @@ async fn req_res_driver_block_by_height_timeout_queues_alternate_peer_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn req_res_driver_block_by_height_ack_recycles_attempts_when_no_alternate_peer_exists() {
-    let metrics = isolated_test_metrics();
-    let state_arc = Arc::new(Mutex::new(P2PState::new(
-        metrics.clone(),
-        LIBP2P_CONFIG.seen_tx_clear_interval,
-    )));
-    let local_peer = PeerId::random();
-    let connection_id = ConnectionId::new_unchecked(121);
-    let source_peer = PeerId::random();
-    let request_message = ByteBuf::from(jam_block_by_height_request(10030));
-    let request_id = fresh_outbound_request_id();
-
-    {
-        let mut state_guard = state_arc.lock().await;
-        let remote_addr: Multiaddr = "/ip4/127.0.0.1/tcp/4801"
-            .parse()
-            .expect("valid remote addr");
-        let local_addr: Multiaddr = "/ip4/0.0.0.0/tcp/5801".parse().expect("valid local addr");
-        state_guard.track_connection(
-            ConnectionId::new_unchecked(301),
-            source_peer,
-            &remote_addr,
-            libp2p::core::ConnectedPoint::Listener {
-                local_addr,
-                send_back_addr: remote_addr.clone(),
-            },
-        );
-        state_guard.track_block_height_attempted_peers(10030, [source_peer]);
-        state_guard.record_outbound_request(
-            request_id,
-            OutboundRequestContext::with_attempt(
-                source_peer,
-                ReqResGeneration::Gen1,
-                NockchainRequest::Request {
-                    pow: [0; 16],
-                    nonce: 1,
-                    message: request_message,
-                },
-                0,
-                false,
-            ),
-        );
-    }
-
-    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
-    let mut equix_builder = equix::EquiXBuilder::new();
-    let scripted_traffic =
-        build_scripted_traffic_cop(DriverTranscript::default(), Vec::new(), Vec::new()).await;
-
-    handle_request_response(
-        source_peer,
-        connection_id,
-        request_response::Message::Response {
-            request_id,
-            response: NockchainResponse::Ack { acked: true },
-        },
-        swarm_tx,
-        &mut equix_builder,
-        local_peer,
-        scripted_traffic.traffic,
-        metrics,
-        state_arc.clone(),
-        runtime_limits_from_config(&LIBP2P_CONFIG),
-        PeerExclusions::default(),
-    )
-    .await
-    .expect("single-peer block-by-height ack should recycle attempts");
-
-    assert!(
-        swarm_rx.try_recv().is_err(),
-        "single-peer ack should recycle state without immediate self-retry"
-    );
-    assert!(
-        state_arc
-            .lock()
-            .await
-            .get_block_height_attempted_peers(10030)
-            .is_empty(),
-        "single-peer ack should clear exhausted attempt state",
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn req_res_driver_batch_block_timeout_queues_alternate_peer_retry() {
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::new(
@@ -16553,7 +15017,6 @@ async fn req_res_driver_batch_block_timeout_queues_alternate_peer_retry() {
             request_id,
             OutboundRequestContext::with_attempt(
                 source_peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 1,
@@ -16569,7 +15032,6 @@ async fn req_res_driver_batch_block_timeout_queues_alternate_peer_retry() {
                     ],
                 },
                 0,
-                false,
             ),
         );
     }
@@ -16676,7 +15138,6 @@ async fn req_res_driver_batch_block_not_found_queues_alternate_peer_retry() {
             request_id,
             OutboundRequestContext::with_attempt(
                 source_peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 1,
@@ -16692,7 +15153,6 @@ async fn req_res_driver_batch_block_not_found_queues_alternate_peer_retry() {
                     ],
                 },
                 0,
-                false,
             ),
         );
     }
@@ -16790,7 +15250,6 @@ async fn req_res_driver_batch_block_not_found_recycles_attempts_when_no_alternat
             request_id,
             OutboundRequestContext::with_attempt(
                 source_peer,
-                ReqResGeneration::Gen2,
                 NockchainRequest::BatchRequest {
                     pow: [0; 16],
                     nonce: 1,
@@ -16800,7 +15259,6 @@ async fn req_res_driver_batch_block_not_found_recycles_attempts_when_no_alternat
                     }],
                 },
                 0,
-                false,
             ),
         );
     }
@@ -16871,7 +15329,6 @@ async fn req_res_driver_retry_respects_bounded_backoff_and_split_batches() {
     let request_id = fresh_outbound_request_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
-        ReqResGeneration::Gen2,
         NockchainRequest::BatchRequest {
             pow: [0; 16],
             nonce: 1,
@@ -16895,7 +15352,6 @@ async fn req_res_driver_retry_respects_bounded_backoff_and_split_batches() {
             ],
         },
         1,
-        false,
     );
     state_arc
         .lock()

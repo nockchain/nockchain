@@ -14,8 +14,8 @@ use crate::driver::{
 };
 use crate::ip_block::PeerExclusions;
 use crate::messages::{
-    block_by_height_message, decode_request_item_message, BatchResultItem, BatchResultStatus,
-    EnvelopeKind, NockchainDataRequest, NockchainFact, NockchainResponse, ResponseEnvelope,
+    block_by_height_message, BatchResultItem, BatchResultStatus, EnvelopeKind,
+    NockchainDataRequest, NockchainFact, NockchainRequest, NockchainResponse, ResponseEnvelope,
 };
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::P2PState;
@@ -63,11 +63,9 @@ pub(super) async fn handle_outbound_response(
         debug!(
             peer = %peer,
             request_id = %request_id,
-            generation = ?request_context.generation,
             request_shape = outbound_request_shape(&request_context.request),
             batch_items = batch_request_item_count(&request_context.request),
             retry_count = request_context.retry_count,
-            fallback_attempted = request_context.fallback_attempted,
             response_bytes,
             response_items = response_item_count,
             response_failures = response_failure_count,
@@ -120,177 +118,60 @@ pub(super) async fn handle_outbound_response(
                     return Err(err);
                 }
 
-                match response {
-                    NockchainResponse::Result { message } => {
-                        trace!("handle_request_response: Response result received");
-                        let decode_started = Instant::now();
-                        let response = match response_fact_from_result_message(&message) {
-                            Ok(response) => response,
-                            Err(err) => {
-                                record_response_validation_abuse(
-                                    &swarm_tx,
-                                    &driver_state,
-                                    &metrics,
-                                    &peer_exclusions,
-                                    peer,
-                                )
-                                .await?;
-                                if let Some(request_context) = request_context.as_ref() {
-                                    if let Err(retry_err) = schedule_request_context_retry(
-                                        &swarm_tx,
-                                        &metrics,
-                                        request_context,
-                                        &local_peer_id,
-                                        equix_builder,
-                                        None,
-                                    )
-                                    .await
-                                    {
-                                        warn!(
-                                            peer = %peer,
-                                            request_id = %request_id,
-                                            error = %retry_err,
-                                            "Failed to schedule retry after malformed single response"
-                                        );
-                                    }
-                                }
-                                return Err(err);
-                            }
-                        };
-                        if let Some(data_request) =
-                            data_request_single_request(request_context.as_ref())
+                let response_shape_valid = matches!(
+                    (
+                        request_context.as_ref().map(|context| &context.request),
+                        &response,
+                    ),
+                    (
+                        Some(NockchainRequest::BatchRequest { .. }),
+                        NockchainResponse::BatchResult { .. },
+                    ) | (
+                        Some(NockchainRequest::AuthenticatedGossip { .. }),
+                        NockchainResponse::Ack { .. },
+                    )
+                );
+                if !response_shape_valid {
+                    record_response_validation_abuse(
+                        &swarm_tx,
+                        &driver_state,
+                        &metrics,
+                        &peer_exclusions,
+                        peer,
+                    )
+                    .await?;
+                    if let Some(request_context) = request_context.as_ref() {
+                        if let Err(retry_err) = schedule_request_context_retry(
+                            &swarm_tx,
+                            &metrics,
+                            request_context,
+                            &local_peer_id,
+                            equix_builder,
+                            None,
+                        )
+                        .await
                         {
-                            if let Err(err) =
-                                validate_response_fact_for_request(&data_request, &response)
-                            {
-                                record_response_validation_abuse(
-                                    &swarm_tx,
-                                    &driver_state,
-                                    &metrics,
-                                    &peer_exclusions,
-                                    peer,
-                                )
-                                .await?;
-                                if let Some(request_context) = request_context.as_ref() {
-                                    if let Err(retry_err) = schedule_request_context_retry(
-                                        &swarm_tx,
-                                        &metrics,
-                                        request_context,
-                                        &local_peer_id,
-                                        equix_builder,
-                                        None,
-                                    )
-                                    .await
-                                    {
-                                        warn!(
-                                            peer = %peer,
-                                            request_id = %request_id,
-                                            error = %retry_err,
-                                            "Failed to schedule retry after mismatched single response"
-                                        );
-                                    }
-                                }
-                                return Err(err);
-                            }
-                        }
-                        let decode_elapsed = decode_started.elapsed();
-                        if let NockchainFact::HeardBlock(block_id, fact_poke) = &response {
-                            info!(
-                                target: "nockchain::kernel_timing",
+                            warn!(
                                 peer = %peer,
                                 request_id = %request_id,
-                                item_id = "",
-                                block_id = %block_id,
-                                block_height = ?heard_block_height_from_fact_poke(fact_poke).ok(),
-                                decode_ms = decode_elapsed.as_secs_f64() * 1_000.0,
-                                "Decoded req-res response fact"
+                                error = %retry_err,
+                                "Failed to schedule retry after an unexpected response shape"
                             );
                         }
-                        trace!(
-                            peer = %peer,
-                            request_id = %request_id,
-                            requested_block_height = ?request_context
-                                .as_ref()
-                                .and_then(|context| block_height_single_request(&context.request)),
-                            response = %response_fact_trace_summary(&response),
-                            "Decoded single req-res response fact"
-                        );
-                        match route_response_fact(
-                            peer,
-                            response,
-                            &traffic,
-                            &metrics,
-                            &driver_state,
-                            &swarm_tx,
-                        )
-                            .await
-                        {
-                            Ok(()) => {
-                                if let Some(request_context) = request_context.as_ref() {
-                                    if let Some((height, _)) =
-                                        block_height_single_request_message(&request_context.request)
-                                    {
-                                        trace!(
-                                            peer = %peer,
-                                            request_id = %request_id,
-                                            height,
-                                            "Clearing block-height attempted peers after successful single response"
-                                        );
-                                        driver_state
-                                            .lock()
-                                            .await
-                                            .clear_block_height_attempted_peers(height);
-                                    }
-                                }
-                            }
-                            Err(NockAppError::MPSCFullError(_)) => {
-                                if let Some(request_context) = request_context.as_ref() {
-                                    if let Err(retry_err) = schedule_request_context_retry(
-                                        &swarm_tx,
-                                        &metrics,
-                                        request_context,
-                                        &local_peer_id,
-                                        equix_builder,
-                                        None,
-                                    )
-                                    .await
-                                    {
-                                        warn!(
-                                            peer = %peer,
-                                            request_id = %request_id,
-                                            error = %retry_err,
-                                            "Failed to schedule retry after single response backpressure"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(err) => return Err(err),
-                        }
                     }
+                    return Err(NockAppError::OtherError(String::from(
+                        "unexpected response shape for gen2 request",
+                    )));
+                }
+
+                match response {
+                    NockchainResponse::Result { .. } => unreachable!(
+                        "internal single-item results cannot pass gen2 response-shape validation"
+                    ),
                     NockchainResponse::Ack { acked } => {
                         trace!("Received acknowledgement from peer {}", peer);
                         if !acked {
                             warn!("Peer {} did not acknowledge the response", peer);
-                        }
-                        if let Some(request_context) = request_context.as_ref() {
-                            if let Some((height, request_message)) =
-                                block_height_single_request_message(&request_context.request)
-                            {
-                                let queued_retry = queue_block_height_retry_to_alternate_peer(
-                                    &swarm_tx,
-                                    &driver_state,
-                                    height,
-                                    request_message,
-                                )
-                                .await?;
-                                trace!(
-                                    peer = %peer,
-                                    request_id = %request_id,
-                                    height,
-                                    queued_retry,
-                                    "Handled block-by-height ack as not-found"
-                                );
-                            }
                         }
                     }
                     NockchainResponse::BatchResult { results } => {
@@ -964,15 +845,6 @@ fn batch_result_item_response_bytes(item_id: u32, envelope: &ResponseEnvelope) -
             response_envelope_encoded_bytes(envelope)
         }
     }
-}
-
-fn data_request_single_request(
-    request_context: Option<&OutboundRequestContext>,
-) -> Option<NockchainDataRequest> {
-    let NockchainRequest::Request { message, .. } = &request_context?.request else {
-        return None;
-    };
-    decode_request_item_message(message).ok()
 }
 
 async fn record_response_validation_abuse(

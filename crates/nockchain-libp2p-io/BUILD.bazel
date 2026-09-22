@@ -31,12 +31,10 @@ rust_test(
     name = "nockchain_libp2p_io_unit_tests",
     size = "small",
     compile_data = [
-        "//crates/nockchain-libp2p-io/testdata:req_res_gen1_cbor_vectors.json",
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
     ],
     crate = ":nockchain-libp2p-io",
     data = [
-        "//crates/nockchain-libp2p-io/testdata:req_res_gen1_cbor_vectors.json",
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
     ],
     deps = [
@@ -55,12 +53,10 @@ rust_test_with_miri(
     name = "nockchain_libp2p_io_unit_tests_miri",
     size = "small",
     compile_data = [
-        "//crates/nockchain-libp2p-io/testdata:req_res_gen1_cbor_vectors.json",
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
     ],
     crate = ":nockchain-libp2p-io",
     data = [
-        "//crates/nockchain-libp2p-io/testdata:req_res_gen1_cbor_vectors.json",
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
     ],
     deps = [

@@ -16,26 +16,17 @@ use crate::messages::{
     NockchainRequest, NockchainResponse, ResponseEnvelope,
 };
 use crate::metrics::NockchainP2PMetrics;
-use crate::p2p_state::{P2PState, ReqResGeneration};
+use crate::p2p_state::P2PState;
 use crate::tip5_util::TIP5_BASE58_MAX_CHARS;
 use crate::traffic_cop;
 
 #[derive(Debug)]
 pub(crate) enum RequestExecutionOutcome {
-    Result {
-        response: NockchainResponse,
-        envelope: ResponseEnvelope,
-    },
+    Result { envelope: ResponseEnvelope },
     NotFound,
 }
-impl RequestExecutionOutcome {
-    pub(crate) fn into_single_response(self) -> NockchainResponse {
-        match self {
-            Self::Result { response, .. } => response,
-            Self::NotFound => NockchainResponse::Ack { acked: true },
-        }
-    }
 
+impl RequestExecutionOutcome {
     pub(crate) fn into_batch_result_item(self, item_id: u32) -> BatchResultItem {
         match self {
             Self::Result { envelope, .. } => BatchResultItem {
@@ -143,8 +134,6 @@ pub(crate) struct ReqResRuntimeLimits {
     pub(crate) ip_bucket_connection_limit: usize,
     pub(crate) gossip_bucket_capacity: u32,
     pub(crate) gossip_bucket_refill_per_second: u32,
-    pub(crate) authenticated_gossip_send_enabled: bool,
-    pub(crate) legacy_gossip_accept_enabled: bool,
     pub(crate) block_range_max_len: u8,
     pub(crate) gen2_batch_max_items: usize,
     pub(crate) gen2_batch_max_bytes: usize,
@@ -435,43 +424,9 @@ pub(crate) const GEN2_RETRY_MAX_ATTEMPTS: u8 = 3;
 pub(crate) const GEN2_RETRY_BASE_DELAY_MS: u64 = 100;
 pub(crate) const GEN2_RETRY_MAX_DELAY_MS: u64 = 2_000;
 pub(crate) const GEN2_RETRY_MAX_JITTER_MS: u64 = 50;
-pub(crate) fn outbound_request_generation(
-    request: &NockchainRequest,
-    req_res_gen2_send_enabled: bool,
-    peer_supports_gen2: bool,
-) -> ReqResGeneration {
-    match request {
-        NockchainRequest::BatchRequest { .. } => ReqResGeneration::Gen2,
-        NockchainRequest::Request { .. }
-        | NockchainRequest::Gossip { .. }
-        | NockchainRequest::AuthenticatedGossip { .. } => {
-            if req_res_gen2_send_enabled && peer_supports_gen2 {
-                ReqResGeneration::Gen2
-            } else {
-                ReqResGeneration::Gen1
-            }
-        }
-    }
-}
-
-pub(crate) fn should_authenticate_outbound_gossip(
-    request: &NockchainRequest,
-    req_res_limits: ReqResRuntimeLimits,
-    req_res_gen2_send_enabled: bool,
-    peer_supports_gen2: bool,
-    generation: ReqResGeneration,
-) -> bool {
-    req_res_limits.authenticated_gossip_send_enabled
-        && req_res_gen2_send_enabled
-        && peer_supports_gen2
-        && generation == ReqResGeneration::Gen2
-        && matches!(request, NockchainRequest::Gossip { .. })
-}
 
 pub(crate) fn outbound_request_shape(request: &NockchainRequest) -> &'static str {
     match request {
-        NockchainRequest::Request { .. } => "request",
-        NockchainRequest::Gossip { .. } => "gossip",
         NockchainRequest::AuthenticatedGossip { .. } => "authenticated-gossip",
         NockchainRequest::BatchRequest { .. } => "batch-request",
     }
@@ -479,30 +434,17 @@ pub(crate) fn outbound_request_shape(request: &NockchainRequest) -> &'static str
 pub(crate) fn batch_request_item_count(request: &NockchainRequest) -> Option<usize> {
     match request {
         NockchainRequest::BatchRequest { items, .. } => Some(items.len()),
-        NockchainRequest::Request { .. }
-        | NockchainRequest::Gossip { .. }
-        | NockchainRequest::AuthenticatedGossip { .. } => None,
+        NockchainRequest::AuthenticatedGossip { .. } => None,
     }
 }
 
-pub(crate) fn increment_outbound_generation_failure_metrics(
+pub(crate) fn increment_outbound_failure_metrics(
     metrics: &NockchainP2PMetrics,
-    generation: ReqResGeneration,
     error: &request_response::OutboundFailure,
 ) {
-    match generation {
-        ReqResGeneration::Gen1 => {
-            metrics.gen1_outbound_failures.increment();
-            if matches!(error, request_response::OutboundFailure::Timeout) {
-                metrics.gen1_outbound_timeouts.increment();
-            }
-        }
-        ReqResGeneration::Gen2 => {
-            metrics.gen2_outbound_failures.increment();
-            if matches!(error, request_response::OutboundFailure::Timeout) {
-                metrics.gen2_outbound_timeouts.increment();
-            }
-        }
+    metrics.gen2_outbound_failures.increment();
+    if matches!(error, request_response::OutboundFailure::Timeout) {
+        metrics.gen2_outbound_timeouts.increment();
     }
 }
 pub(crate) fn increment_batch_item_error_metric(
@@ -544,29 +486,6 @@ pub(crate) fn count_batch_result_item_failures(results: &[BatchResultItem]) -> u
         .iter()
         .filter(|result| result.status == BatchResultStatus::Error)
         .count() as u64
-}
-
-pub(crate) fn record_req_res_fallback(metrics: &NockchainP2PMetrics, fallback_count: usize) {
-    if fallback_count > 0 {
-        metrics.req_res_fallback_total.fetch_add(fallback_count);
-    }
-}
-/// Record when a `BlockByHeight` request still ends up on gen1 even though
-/// gen2 send is enabled and the peer supports gen2.
-pub(crate) fn record_block_by_height_gen1_routed(
-    metrics: &NockchainP2PMetrics,
-    generation: ReqResGeneration,
-    req_res_gen2_send_enabled: bool,
-    peer_supports_gen2: bool,
-    request: &NockchainRequest,
-) {
-    if generation == ReqResGeneration::Gen1
-        && req_res_gen2_send_enabled
-        && peer_supports_gen2
-        && request_is_block_by_height(request)
-    {
-        metrics.req_res_block_by_height_gen1_routed.increment();
-    }
 }
 
 pub(crate) const fn queue_saturation_decision(path: QueueSaturationPath) -> &'static str {
@@ -725,8 +644,6 @@ pub(crate) fn batch_request_block_heights_csv(items: &[BatchRequestItem]) -> Str
 
 pub(crate) fn outbound_request_keys_csv(request: &NockchainRequest) -> String {
     match request {
-        NockchainRequest::Request { message, .. } => pending_gen2_batch_request_key(message),
-        NockchainRequest::Gossip { .. } => String::from("gossip"),
         NockchainRequest::AuthenticatedGossip { .. } => String::from("authenticated-gossip"),
         NockchainRequest::BatchRequest { items, .. } => batch_request_keys_csv(items),
     }
@@ -734,12 +651,7 @@ pub(crate) fn outbound_request_keys_csv(request: &NockchainRequest) -> String {
 
 pub(crate) fn outbound_request_block_heights_csv(request: &NockchainRequest) -> String {
     match request {
-        NockchainRequest::Request { message, .. } => request_message_block_height(message)
-            .map(|height| height.to_string())
-            .unwrap_or_default(),
-        NockchainRequest::Gossip { .. } | NockchainRequest::AuthenticatedGossip { .. } => {
-            String::new()
-        }
+        NockchainRequest::AuthenticatedGossip { .. } => String::new(),
         NockchainRequest::BatchRequest { items, .. } => batch_request_block_heights_csv(items),
     }
 }

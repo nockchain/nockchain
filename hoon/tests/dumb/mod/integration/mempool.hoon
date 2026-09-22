@@ -11,39 +11,8 @@
   ==
 ::  v1 mempool context validation tests
 ++  test-v1-mempool-accept-valid
-  =+  [nockchain genesis]=init-nockchain:h
-  =^  pages  nockchain
-    (add-n-pages-integration:h genesis 2 nockchain)
-  =/  page-v1=page:t  (snag 1 pages)
-  =/  bal  ~(get-cur-balance k-by:h nockchain)
-  =/  coin=nnote:t
-    (get-coinbase-from-balance:v1:h page-v1 bal)
-  =/  pks=(list schnorr-pubkey:t)
-    ~(tap z-in:zoon pubkeys.p:default-keys-1:h)
-  =/  m=@  (lent pks)
-  =/  [root=hash:t sc=spend-condition:v1:t *]
-    (make-coinbase-lock:v1:h m pks)
-  =/  fee=coins:t  0
-  =/  sed=seed:v1:t
-    (make-seed:v1:h root (sub assets.coin fee) (hash:nnote:t coin))
-  =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
-  =/  sp1=spend-1:v1:t
-    %*  .  *spend-1:v1:t
-      witness  *witness:v1:t
-      seeds    seds
-      fee  fee
-    ==
-  =/  sig-h=hash:t  (sig-hash:spend-1:v1:t sp1)
-  =/  pk=schnorr-pubkey:t  (snag 0 pks)
-  =/  wit=witness:t
-    (make-pkh-witness:v1:h root sc sig-h ~[[s:default-keys-1:h pk]])
-  =/  sp1=spend-1:v1:t  sp1(witness wit)
-  =/  nam=nname:t  ~(name get:nnote:t coin)
-  =/  sps=spends:v1:t  (~(put z-by:zoon *spends:v1:t) nam [%1 sp1])
-  =/  raw=raw-tx:t  (new:raw-tx:v1:t sps)
+  =+  [nockchain raw]=(setup-v1-spendable-tx 256)
   =/  =cause:h  [%fact %0 %heard-tx raw]
-  ~&  [%v1-mempool-accept-valid-raw-tx raw]
-  ~&  [%v1-mempool-accept-valid-cause cause]
   =^  effs=(list effect:h)  nockchain
     (pok:h cause nockchain)
   =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
@@ -52,6 +21,82 @@
   !>  :*  (~(has-excluded k-by:h nockchain) tx-id)
           (~(has-bnb-raw-tx k-by:h nockchain) tx-id)
           (~(has-raw-tx k-by:h nockchain) tx-id)
+      ==
+:::
+++  test-v1-mempool-reject-under-minimum-fee
+  =+  [nockchain raw]=(setup-v1-spendable-tx 0)
+  =/  =cause:h  [%fact %0 %heard-tx raw]
+  =^  effs=(list effect:h)  nockchain
+    (pok:h cause nockchain)
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
+  %+  expect-eq
+    !>([%.y %.y %.y])
+  !>  :*  !(~(has-excluded k-by:h nockchain) tx-id)
+          !(~(has-raw-tx k-by:h nockchain) tx-id)
+          !(~(has z-in:zoon (filter-heard-tx-effects:h effs)) raw)
+      ==
+
+:::
+:::  +test-v0-mempool-reject-tx-at-cutoff: when the next candidate is at the
+:::  v1 cutover, v0 txs can no longer be mined, so admission must discard them
+:::  instead of retaining and re-gossiping permanently unmineable transactions.
+++  test-v0-mempool-reject-tx-at-cutoff
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 1 nockchain)
+  =/  page-v0=page:t  (snag 0 pages)
+  =/  coin=coinbase:t  (new:v0:coinbase:t page-v0 p:default-keys-1:h)
+  ?>  ?=(^ -.coin)
+  =/  raw=raw-tx:t
+    %-  from-inputs:v0:raw-tx:t
+    %-  new:v0:inputs:t
+    %:  simple-from-note:new:v0:input:t
+        p:default-keys-2:h
+        coin
+        s:default-keys-1:h
+    ==
+  ::  sanity: the raw-tx is v0-shaped. The current tip is v1-phase - 1, so
+  ::  its only candidate height is exactly v1-phase and rejects v0 txs.
+  ?>  ?=(^ -.raw)
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
+  =^  effs=(list effect:h)  nockchain
+    (pok:h [%fact %0 %heard-tx raw] nockchain)
+  %+  expect-eq
+    !>([%.y %.y %.y])
+  !>  :*  !(~(has-excluded k-by:h nockchain) tx-id)
+          !(~(has-raw-tx k-by:h nockchain) tx-id)
+          !(~(has z-in:zoon (filter-heard-tx-effects:h effs)) raw)
+      ==
+:::
+:::  +test-v0-mempool-accepts-pre-cutoff: before the v1 cutover, v0 txs are
+:::  minable and admission must still accept them.
+++  test-v0-mempool-accepts-pre-cutoff
+  =+  h-v0=~(. helpers bc-max-block-size-medium-v0-provable:helpers)
+  =+  t-v0=~(. txe bc-max-block-size-medium-v0-provable:helpers)
+  =+  [nockchain genesis]=init-nockchain:h-v0
+  =^  pages  nockchain
+    (add-n-pages-integration:h-v0 genesis 2 nockchain)
+  =/  page-v0=page:t-v0  (snag 0 pages)
+  =/  coin=coinbase:t-v0  (new:v0:coinbase:t-v0 page-v0 p:default-keys-1:h-v0)
+  ?>  ?=(^ -.coin)
+  =/  raw=raw-tx:t-v0
+    %-  from-inputs:v0:raw-tx:t-v0
+    %-  new:v0:inputs:t-v0
+    %:  simple-from-note:new:v0:input:t-v0
+        p:default-keys-2:h-v0
+        coin
+        s:default-keys-1:h-v0
+    ==
+  ::  sanity: the raw-tx is v0-shaped; v1 never activates in this config,
+  ::  so the chain is before the cutover and v0 txs are minable
+  ?>  ?=(^ -.raw)
+  =/  tx-id=tx-id:t-v0  ~(id get:raw-tx:t-v0 raw)
+  =^  effs=(list effect:h-v0)  nockchain
+    (pok:h-v0 [%fact %0 %heard-tx raw] nockchain)
+  %+  expect-eq
+    !>([%.y %.y])
+  !>  :*  (~(has-excluded k-by:h-v0 nockchain) tx-id)
+          (~(has-raw-tx k-by:h-v0 nockchain) tx-id)
       ==
 ::
 ++  test-v1-mempool-reject-gifts-fee-mismatch
@@ -66,8 +111,10 @@
   =/  pk=schnorr-pubkey:t  (snag 0 pks)
   =/  [root=hash:t * *]
     (make-pkh-lock:v1:h 1 ~[pk])
-  =/  fee=coins:t  0
-  =/  bad-gift=coins:t  (sub assets.coin 1)
+  ::  fee must clear the admission fee floor so this test exercises the
+  ::  gifts/fee conservation check, not the fee floor itself
+  =/  fee=coins:t  256
+  =/  bad-gift=coins:t  (sub (sub assets.coin fee) 1)
   =/  sed=seed:v1:t
     (make-seed:v1:h root bad-gift (hash:nnote:t coin))
   =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
@@ -98,7 +145,9 @@
   =/  m=@  (lent pks)
   =/  [root=hash:t sc=spend-condition:v1:t *]
     (make-coinbase-lock:v1:h m pks)
-  =/  fee=coins:t  0
+  ::  fee clears the admission fee floor so this test exercises the
+  ::  missing-signature rejection, not the fee floor itself
+  =/  fee=coins:t  256
   =/  sed=seed:v1:t
     (make-seed:v1:h root (sub assets.coin fee) (hash:nnote:t coin))
   =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
@@ -140,7 +189,9 @@
   =/  m=@  (lent pks)
   =/  [root=hash:t sc=spend-condition:v1:t *]
     (make-coinbase-lock:v1:h m pks)
-  =/  fee=coins:t  0
+  ::  fee clears the admission fee floor so this test exercises the
+  ::  wrong-key rejection, not the fee floor itself
+  =/  fee=coins:t  256
   =/  sed=seed:v1:t
     (make-seed:v1:h root (sub assets.coin fee) (hash:nnote:t coin))
   =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
@@ -182,7 +233,9 @@
   =/  m=@  (lent pks)
   =/  [root=hash:t-tim sc=spend-condition:v1:t-tim *]
     (make-coinbase-lock:v1:h-tim m pks)
-  =/  fee=coins:t-tim  0
+  ::  fee clears the admission fee floor so this test exercises the
+  ::  timelock rejection, not the fee floor itself
+  =/  fee=coins:t-tim  256
   =/  sed=seed:v1:t-tim
     (make-seed:v1:h-tim root (sub assets.coin fee) (hash:nnote:t-tim coin))
   =/  seds=seeds:v1:t-tim  (~(put z-in:zoon *seeds:v1:t-tim) sed)
@@ -251,6 +304,7 @@
 :::  +setup-v1-spendable-tx: a valid v1 tx spending the coinbase of a 2-block
 :::  chain, plus the kernel that chain lives in.
 ++  setup-v1-spendable-tx
+  |=  fee=coins:t
   ^-  [_nockchain:h raw-tx:t]
   =+  [nockchain genesis]=init-nockchain:h
   =^  pages  nockchain
@@ -264,7 +318,6 @@
   =/  m=@  (lent pks)
   =/  [root=hash:t sc=spend-condition:v1:t *]
     (make-coinbase-lock:v1:h m pks)
-  =/  fee=coins:t  0
   =/  sed=seed:v1:t
     (make-seed:v1:h root (sub assets.coin fee) (hash:nnote:t coin))
   =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
@@ -286,7 +339,7 @@
 :::  Operator re-submission over grpc (`nockchain-wallet send-tx`) of an
 :::  already-held tx re-gossips immediately.
 ++  test-v1-mempool-grpc-resend-re-gossips
-  =+  [nockchain raw]=setup-v1-spendable-tx
+  =+  [nockchain raw]=(setup-v1-spendable-tx 256)
   =/  =cause:h  [%fact %0 %heard-tx raw]
   =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
   ::  first submission: a new tx, so it is accepted and gossiped
@@ -307,7 +360,7 @@
 ::
 :::  Peer-origin duplicates do not re-gossip. This terminates gossip loops.
 ++  test-v1-mempool-peer-resend-does-not-re-gossip
-  =+  [nockchain raw]=setup-v1-spendable-tx
+  =+  [nockchain raw]=(setup-v1-spendable-tx 256)
   =/  =cause:h  [%fact %0 %heard-tx raw]
   =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
   ::  first time we hear it from a peer: new tx, accepted and gossiped onward
@@ -326,7 +379,7 @@
 
 ::::  Chain progress, not every timer tick, re-announces retained mempool txs.
 ++  test-v1-mempool-new-heaviest-regossips-retained-tx
-  =+  [nockchain raw]=setup-v1-spendable-tx
+  =+  [nockchain raw]=(setup-v1-spendable-tx 256)
   =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
   =^  effs-1=(list effect:h)  nockchain
     (pok:h [%fact %0 %heard-tx raw] nockchain)

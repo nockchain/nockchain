@@ -244,7 +244,7 @@ pub fn jet_mul(context: &mut Context, subject: Noun) -> Result {
 
     if let (Ok(a), Ok(b)) = (a.as_direct(), b.as_direct()) {
         let res = a.data() as u128 * b.data() as u128;
-        if res < DIRECT_MAX as u128 {
+        if res <= DIRECT_MAX as u128 {
             Ok(Atom::new(stack, res as u64).as_noun())
         } else {
             Ok(unsafe {
@@ -767,6 +767,56 @@ mod tests {
             ubig!(0x3fffffffffffffff0000000000000001),
         );
         assert_common_jet(c, jet_mul, &[atom_24, atom_24], ubig!(0x479bf4b7ef89));
+
+        let sam = T(&mut c.stack, &[D(7), D(1_317_624_576_693_539_401)]);
+        assert_jet(c, jet_mul, sam, D(DIRECT_MAX));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_mul_direct_boundary_paths() {
+        // direct x direct representation boundaries of jet_mul
+        let c = &mut init_context();
+        // res == u64::MAX: 16-byte branch, trims to 1-word indirect
+        let sam = T(&mut c.stack, &[D(3), D(6_148_914_691_236_517_205)]);
+        assert_jet_ubig(c, jet_mul, sam, ubig!(18_446_744_073_709_551_615));
+        // res == u64::MAX + 2: true 2-word indirect
+        let sam = T(&mut c.stack, &[D(3), D(6_148_914_691_236_517_206)]);
+        assert_jet_ubig(c, jet_mul, sam, ubig!(18_446_744_073_709_551_618));
+        // res == DIRECT_MAX + 7: 8-byte indirect, value > DIRECT_MAX
+        let sam = T(&mut c.stack, &[D(7), D(1_317_624_576_693_539_402)]);
+        assert_jet_ubig(c, jet_mul, sam, ubig!(9_223_372_036_854_775_814));
+        // res just under DIRECT_MAX: stays direct
+        let sam = T(&mut c.stack, &[D(7), D(1_317_624_576_693_539_400)]);
+        assert_jet(c, jet_mul, sam, D(9_223_372_036_854_775_800));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_mul_large_stack_scratch_allocation() {
+        let c = &mut init_context();
+        let lhs = (ubig!(1) << (40 * 64 - 1)) + ubig!(1);
+        let rhs = (ubig!(1) << (80 * 64 - 1)) + ubig!(1);
+        let expected = &lhs * &rhs;
+        let lhs = A(&mut c.stack, &lhs);
+        let rhs = A(&mut c.stack, &rhs);
+
+        assert_nary_jet_ubig(c, jet_mul, &[lhs, rhs], expected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_div_large_stack_scratch_allocation() {
+        let c = &mut init_context();
+        // 160 x 80 words forces divide-and-conquer scratch
+        // (smaller_len = 40 > mul::MAX_LEN_SIMPLE = 24).
+        let lhs = (ubig!(1) << (160 * 64 - 1)) + (ubig!(1) << (80 * 64)) + ubig!(123);
+        let rhs = (ubig!(1) << (80 * 64 - 1)) + ubig!(3);
+        let expected = &lhs / &rhs;
+        let lhs = A(&mut c.stack, &lhs);
+        let rhs = A(&mut c.stack, &rhs);
+
+        assert_nary_jet_ubig(c, jet_div, &[lhs, rhs], expected);
     }
 
     #[test]

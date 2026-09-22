@@ -172,9 +172,14 @@ fn cue_bitslice_with_mode(
                                     cell.as_noun()
                                 };
                                 *dest_ptr = cell_noun;
-                                let mut backref_atom =
-                                    Atom::new(stack, (cursor - 2) as u64).as_noun();
-                                backref_map.insert(stack, &mut backref_atom, *dest_ptr);
+                                // The cell's back-reference id becomes resolvable
+                                // only once both children have decoded (the
+                                // BackRef entry below inserts it then), matching
+                                // the Hoon `++cue` reference semantics. Inserting
+                                // here would let a child reference its own
+                                // still-incomplete parent, producing a cyclic
+                                // noun that every later traversal assumes
+                                // cannot exist.
                                 *(stack.push()) = CueStackEntry::BackRef(
                                     cursor as u64 - 2,
                                     dest_ptr as *const Noun,
@@ -288,8 +293,11 @@ pub fn cue_into_stack_pointer_form(stack: &mut NockStack, buffer: Atom) -> Resul
                             // 10 tag: cell - always use stack-pointer form
                             let (cell, cell_mem_ptr) = Cell::new_raw_mut(stack);
                             *dest_ptr = cell.as_noun();
-                            let mut backref_atom = Atom::new(stack, (cursor - 2) as u64).as_noun();
-                            backref_map.insert(stack, &mut backref_atom, *dest_ptr);
+                            // Register the cell's back-reference id only after
+                            // its children decode (the BackRef entry below) —
+                            // matching the Hoon `++cue` reference semantics so
+                            // a child cannot reference its own incomplete
+                            // parent (a cyclic noun).
                             *(stack.push()) =
                                 CueStackEntry::BackRef(cursor as u64 - 2, dest_ptr as *const Noun);
                             *(stack.push()) =
@@ -326,6 +334,9 @@ fn get_size(cursor: &mut usize, buffer: &BitSlice<u64, Lsb0>) -> Result<usize, E
     let bitsize = buff_at_cursor
         .first_one()
         .ok_or(Deterministic(Exit, D(0)))?;
+    if bitsize > usize::BITS as usize {
+        return Err(Deterministic(Exit, D(0)));
+    }
     if bitsize == 0 {
         *cursor += 1;
         Ok(0)
@@ -333,6 +344,9 @@ fn get_size(cursor: &mut usize, buffer: &BitSlice<u64, Lsb0>) -> Result<usize, E
         let mut size: u64 = 0;
         *cursor += bitsize + 1;
         let size_bits = next_up_to_n_bits(cursor, buffer, bitsize - 1);
+        if size_bits.len() != bitsize - 1 {
+            return Err(Deterministic(Exit, D(0)));
+        }
         BitSlice::from_element_mut(&mut size)[0..bitsize - 1].copy_from_bitslice(size_bits);
         Ok((size as usize) + (1 << (bitsize - 1)))
     }
@@ -376,6 +390,13 @@ fn rub_atom_internal(
     space: &NounSpace,
 ) -> Result<Atom, Error> {
     let size = get_size(cursor, buffer)?;
+    // A declared size wider than the remaining input can only be a
+    // truncated or hostile buffer. Reject before the indirect-atom
+    // allocation below, which would otherwise request attacker-sized
+    // words on the NockStack (an out-of-memory panic).
+    if size > buffer.len().saturating_sub(*cursor) {
+        return Err(Deterministic(Exit, D(0)));
+    }
     let bits = next_up_to_n_bits(cursor, buffer, size);
     if size == 0 {
         unsafe { Ok(DirectAtom::new_unchecked(0).as_atom()) }
@@ -405,6 +426,12 @@ fn rub_backref(cursor: &mut usize, buffer: &BitSlice<u64, Lsb0>) -> Result<u64, 
     if size == 0 {
         Ok(0)
     } else if size <= 64 {
+        // Reject a truncated value region before slicing; otherwise the
+        // range `*cursor..*cursor + size` panics when it runs past the
+        // end of the buffer.
+        if size > buffer.len().saturating_sub(*cursor) {
+            return Err(Deterministic(Exit, D(0)));
+        }
         // TODO: Size <= 64, so we can fit the backref in a direct atom?
         let mut backref: u64 = 0;
         BitSlice::from_element_mut(&mut backref)[0..size]
@@ -607,6 +634,7 @@ fn mat(
 mod tests {
 
     use std::mem::size_of;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     use rand::prelude::*;
 
@@ -889,6 +917,59 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    fn test_cue_rejects_oversized_size_prefix() {
+        use crate::ext::AtomExt;
+
+        let mut stack = setup_stack();
+        let mut payload = [0; 18];
+        payload[8] = 0x04;
+        let jammed = Atom::from_bytes(&mut stack, &payload);
+
+        assert!(cue(&mut stack, jammed).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_cue_rejects_declared_atom_wider_than_buffer_without_allocating() {
+        use crate::ext::AtomExt;
+
+        // Atom tag (0), then a size prefix declaring 2^63-1 bits (63
+        // zero bits, delimiter, 62 one bits) in an 18-byte payload.
+        // Before the remaining-input bound this reached
+        // `IndirectAtom::new_raw_mut_bitslice` with 2^57 words and
+        // panicked with a NockStack out-of-memory.
+        let mut stack = setup_stack();
+        let mut payload = [0u8; 18];
+        payload[8..15].fill(0xFF);
+        payload[15] = 0x3F;
+        let jammed = Atom::from_bytes(&mut stack, &payload);
+
+        let result = catch_unwind(AssertUnwindSafe(|| cue(&mut stack, jammed)));
+        assert!(result.is_ok(), "cue must not panic on a huge declared atom");
+        assert!(result.expect("catch_unwind result").is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_cue_rejects_truncated_backref_value_without_panicking() {
+        use crate::ext::AtomExt;
+
+        // Backref tag (11), then a size prefix declaring 63 bits (6
+        // zero bits, delimiter, 5 one bits) with only 55 bits left in
+        // the 64-bit word. Before the remaining-input bound the
+        // value-region slice `*cursor..*cursor + size` panicked with
+        // an out-of-range range.
+        let mut stack = setup_stack();
+        let payload = [0x03u8, 0x3F, 0, 0, 0, 0, 0, 0];
+        let jammed = Atom::from_bytes(&mut stack, &payload);
+
+        let result = catch_unwind(AssertUnwindSafe(|| cue(&mut stack, jammed)));
+        assert!(result.is_ok(), "cue must not panic on a truncated backref");
+        assert!(result.expect("catch_unwind result").is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_cue_into_offset_invalid_input() {
         let mut stack = setup_stack();
         let invalid_atom = Atom::new(&mut stack, 0b11); // Invalid tag
@@ -917,6 +998,7 @@ mod tests {
             original.mass(&space) as f64 / 1024.0
         );
         let jammed = jam(&mut stack, original);
+
         println!(
             "Jammed size: {:.2} KB",
             jammed.as_noun().mass(&space) as f64 / 1024.0
@@ -932,6 +1014,32 @@ mod tests {
         println!("Cued size: {:.2} KB", cued.mass(&space) as f64 / 1024.0);
 
         assert_noun_eq(&mut stack, cued, original);
+    }
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn cue_rejects_self_referencing_backref() {
+        use crate::ext::AtomExt;
+
+        // GHSA-vv3m-g96f-73r4: `0x5D` = bits `1 0 1 1 1 0 1` — a cell whose
+        // first child is a back-reference addressing the cell itself. The
+        // Hoon `++cue` registers a cell's back-reference id only after both
+        // children decode, so this is a deterministic reject there; the jet
+        // must match instead of producing a cyclic noun that later jams or
+        // traversals cannot handle.
+        let mut stack = setup_stack();
+        let jammed = Atom::from_bytes(&mut stack, &[0x5D]);
+
+        assert!(
+            cue(&mut stack, jammed).is_err(),
+            "a self-referencing backref must be rejected, not decoded cyclically"
+        );
+
+        let mut stack = setup_stack();
+        let jammed = Atom::from_bytes(&mut stack, &[0x5D]);
+        assert!(
+            cue_into_stack_pointer_form(&mut stack, jammed).is_err(),
+            "stack-pointer-form cue must reject the same self-reference"
+        );
     }
 
     #[test]
