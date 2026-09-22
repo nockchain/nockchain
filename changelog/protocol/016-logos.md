@@ -434,12 +434,16 @@ values are rejected.
 
 ### Data Migration
 
-Kernel state advances to `kernel-state-11`; its `derived-state-11` stores
-branch-local `puzzle-asert-states`. A state-10 load upgrades only before AI
-activation (or at genesis), when that lineage is empty and deterministic; a
-post-activation state-10 load resets consensus state because its missing fork
-lineage cannot be reconstructed. `blockchain-constants` keeps the v1 10-slot
-layout, whose Rust encode/decode round-trip is regression-pinned.
+Kernel state advances to `kernel-state-12`; its `consensus-state-12` adds
+`block-versions`, and its `derived-state-12` stores branch-local
+`puzzle-asert-states`. Valid state-11 loads adopt this schema without reapplying
+Zoe's activation guard. Older states first pass through the
+[Zoe migration checks](./015-zoe.md#data-migration): an accepted state-10 tip must
+precede both Zoe and AI-PoW activation and have the required timestamp caches.
+Unsafe migration aborts load and preserves the checkpoint for explicit operator
+recovery; it does not reset consensus state or automatically resynchronize.
+`blockchain-constants` keeps the v1 10-slot layout, whose Rust encode/decode
+round-trip is regression-pinned.
 
 ### Steps
 
