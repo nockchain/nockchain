@@ -110,10 +110,14 @@ jobs:
             - Cargo.lock
             - .bazelversion
 
+      # Match setup-bazel's absolute path for cache compatibility.
+      - name: Locate Bazel action cache
+        run: echo "BAZEL_DISK_CACHE=$HOME/.cache/bazel-disk" >> "$GITHUB_ENV"
+
       - name: Restore Bazel action cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/bazel-disk
+          path: ${{ env.BAZEL_DISK_CACHE }}
           key: bazel-action-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion') }}-${{ github.sha }}
           restore-keys: |
             bazel-action-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion') }}-
@@ -121,7 +125,7 @@ jobs:
             setup-bazel-1-${{ runner.os == 'macOS' && 'darwin' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}-disk-${{ matrix.legacy_cache }}-
 
       - name: Configure Bazel action cache
-        run: printf '\nbuild --disk_cache=%s/.cache/bazel-disk\n' "$HOME" >> "$HOME/.bazelrc"
+        run: printf '\nbuild --disk_cache=%s\n' "$BAZEL_DISK_CACHE" >> "$HOME/.bazelrc"
 
       - name: Install manifest tools
         run: |

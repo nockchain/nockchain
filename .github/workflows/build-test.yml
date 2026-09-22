@@ -30,19 +30,24 @@ jobs:
             - Cargo.lock
             - .bazelversion
 
+      # Use the same absolute path as setup-bazel so its prior caches can seed
+      # this cache; the path is part of GitHub's cache format version.
+      - name: Locate Bazel action cache
+        run: echo "BAZEL_DISK_CACHE=$HOME/.cache/bazel-disk" >> "$GITHUB_ENV"
+
       # Refresh the action cache on every revision, including source-only changes.
       # setup-bazel's BUILD-file key otherwise keeps restoring an old snapshot.
       - name: Restore Bazel action cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/bazel-disk
+          path: ${{ env.BAZEL_DISK_CACHE }}
           key: bazel-action-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion') }}-${{ github.sha }}
           restore-keys: |
             bazel-action-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion') }}-
             setup-bazel-1-linux-x64-disk-build-test-
 
       - name: Configure Bazel action cache
-        run: printf '\nbuild --disk_cache=%s/.cache/bazel-disk\n' "$HOME" >> "$HOME/.bazelrc"
+        run: printf '\nbuild --disk_cache=%s\n' "$BAZEL_DISK_CACHE" >> "$HOME/.bazelrc"
 
       - name: Build release binaries and run unit tests
         run: |
