@@ -812,14 +812,12 @@ fn req_res_generation_logged(
 
 fn req_res_generation_label(generation: ReqResGenerationExpectation) -> &'static str {
     match generation {
-        ReqResGenerationExpectation::Gen1 => "gen1",
         ReqResGenerationExpectation::Gen2 => "gen2",
     }
 }
 
 fn req_res_generation_log_value(generation: ReqResGenerationExpectation) -> &'static str {
     match generation {
-        ReqResGenerationExpectation::Gen1 => "Gen1",
         ReqResGenerationExpectation::Gen2 => "Gen2",
     }
 }
@@ -1970,7 +1968,7 @@ mod tests {
         crate::runner::seed_run_state(
             &mut state,
             &run_dir,
-            Path::new("tests/e2e/scenarios/nous_testnet_gen2_send.yaml"),
+            Path::new("tests/e2e/scenarios/nous_gen2_enabled.yaml"),
         )
         .expect("seed run state");
 
@@ -1987,7 +1985,7 @@ mod tests {
             state.vars.get("SCENARIO_PATH"),
             Some(
                 &repo_root
-                    .join("tests/e2e/scenarios/nous_testnet_gen2_send.yaml")
+                    .join("tests/e2e/scenarios/nous_gen2_enabled.yaml")
                     .display()
                     .to_string()
             )
@@ -2400,15 +2398,10 @@ Note Information
     #[test]
     fn req_res_generation_logged_matches_completed_exchange_line() {
         let logs = "\
-[INFO  nockchain_libp2p_io::driver] Nous req-res exchange completed peer=peer-a request_id=1 generation=Gen1 request_shape=\"request\"\n\
-[INFO  nockchain_libp2p_io::driver] Nous req-res outbound request sent peer=peer-b request_id=2 generation=Gen2 request_shape=\"batch-request\"\n";
+[INFO  nockchain_network::driver] Nous req-res exchange completed peer=peer-a request_id=1 generation=Gen2 request_shape=\"batch-request\"\n\
+[INFO  nockchain_network::driver] Nous req-res outbound request sent peer=peer-b request_id=2 generation=Gen2 request_shape=\"batch-request\"\n";
 
         assert!(crate::runner::req_res_generation_logged(
-            logs,
-            "peer-a",
-            ReqResGenerationExpectation::Gen1
-        ));
-        assert!(!crate::runner::req_res_generation_logged(
             logs,
             "peer-a",
             ReqResGenerationExpectation::Gen2
@@ -2423,15 +2416,10 @@ Note Information
     #[test]
     fn req_res_generation_logged_matches_ansi_styled_completed_exchange_line() {
         let logs = "\
-\u{1b}[32mI\u{1b}[0m \u{1b}[38;5;246m(15:52:58)\u{1b}[0m \u{1b}[3;90mdriver\u{1b}[0m: \0Nous req-res exchange completed peer=peer-a request_id=1 generation=Gen1 request_shape=\"request\"\n\
+\u{1b}[32mI\u{1b}[0m \u{1b}[38;5;246m(15:52:58)\u{1b}[0m \u{1b}[3;90mdriver\u{1b}[0m: \0Nous req-res exchange completed peer=peer-a request_id=1 generation=Gen2 request_shape=\"batch-request\"\n\
 \u{1b}[32mI\u{1b}[0m \u{1b}[38;5;246m(15:52:58)\u{1b}[0m \u{1b}[3;90mdriver\u{1b}[0m: Nous req-res outbound request sent peer=peer-b request_id=2 generation=Gen2 request_shape=\"batch-request\"\n";
 
         assert!(crate::runner::req_res_generation_logged(
-            logs,
-            "peer-a",
-            ReqResGenerationExpectation::Gen1
-        ));
-        assert!(!crate::runner::req_res_generation_logged(
             logs,
             "peer-a",
             ReqResGenerationExpectation::Gen2
@@ -2448,13 +2436,13 @@ Note Information
         let assert = Assert::ReqResGeneration {
             node: "node-b".to_string(),
             peer: "node-a".to_string(),
-            generation: ReqResGenerationExpectation::Gen1,
+            generation: ReqResGenerationExpectation::Gen2,
             timeout_ms: Some(30_000),
         };
 
         assert_eq!(
             crate::runner::assert_type_name(&assert),
-            "req_res_generation:node-b->node-a:gen1"
+            "req_res_generation:node-b->node-a:gen2"
         );
     }
 }

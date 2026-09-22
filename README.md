@@ -123,7 +123,7 @@ wallets and applications              external miners
 | Vision and Compute Networks | [Nockchain](vision/nockchain-eli5.md), [ZK Compute Network](vision/zk-compute-network-eli5.md), [AI Compute Network](vision/ai-compute-network-eli5.md) |
 | Node and runtime | [`crates/nockchain`](crates/nockchain/), [`crates/nockapp`](crates/nockapp/), [`crates/nockvm`](crates/nockvm/) |
 | Consensus and kernels | [`hoon/apps/dumbnet`](hoon/apps/dumbnet/), [`changelog/protocol`](changelog/protocol/) |
-| Networking and APIs | [`crates/nockchain-libp2p-io`](crates/nockchain-libp2p-io/), [`crates/nockapp-grpc`](crates/nockapp-grpc/), [`crates/nockchain-api`](crates/nockchain-api/) |
+| Networking and APIs | [`crates/nockchain-network`](crates/nockchain-network/), [`crates/nockapp-grpc`](crates/nockapp-grpc/), [`crates/nockchain-api`](crates/nockchain-api/) |
 | Core types and math | [`crates/nockchain-types`](crates/nockchain-types/), [`crates/nockchain-math`](crates/nockchain-math/) |
 | Wallets and transactions | [`crates/nockchain-wallet`](crates/nockchain-wallet/), [`crates/wallet-tx-builder`](crates/wallet-tx-builder/) |
 | ZK-PoW mining | [`crates/zk-pow-miner`](crates/zk-pow-miner/), [`crates/nockchain-mining-common`](crates/nockchain-mining-common/) |
@@ -426,10 +426,10 @@ RUST_LOG=info nockchain
 RUST_LOG=error nockchain
 
 # Show specific module logs (e.g. only p2p events)
-RUST_LOG=nockchain_libp2p_io=info nockchain
+RUST_LOG=nockchain_network=info nockchain
 
 # Multiple modules with different levels
-RUST_LOG=nockchain_libp2p_io=info,nockchain=warn nockchain
+RUST_LOG=nockchain_network=info,nockchain=warn nockchain
 ```
 
 Common log levels from most to least verbose:

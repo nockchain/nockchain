@@ -22,7 +22,7 @@ rust_library(
     deps = [
         "//crates/nockapp",
         "//crates/nockapp-grpc-proto:nockapp-grpc",
-        "//crates/nockchain-libp2p-io",
+        "//crates/nockchain-network",
         "//crates/nockchain-math",
         "//crates/nockchain-types",
         "//crates/nockvm/rust/ibig",

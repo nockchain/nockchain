@@ -216,7 +216,7 @@ BRIDGE_DEPS = [
     "//crates/kernels/bridge:kernels-open-bridge",
     "//crates/nockapp",
     "//crates/nockapp-grpc",
-    "//crates/nockchain-libp2p-io",
+    "//crates/nockchain-network",
     "//crates/nockchain-math",
     "//crates/nockchain-types",
     "//crates/nockvm/rust/ibig",

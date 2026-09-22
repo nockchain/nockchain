@@ -1,0 +1,6 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "README.md",
+    "req_res_gen2_cbor_vectors.json",
+])

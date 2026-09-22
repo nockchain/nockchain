@@ -8,7 +8,7 @@ RUN apt-get update \
 
 COPY target/release/nockchain /usr/local/bin/nockchain
 
-ENV RUST_LOG=info,nockchain=info,nockchain_libp2p_io=info,libp2p=info,libp2p_quic=info
+ENV RUST_LOG=info,nockchain=info,nockchain_network=info,libp2p=info,libp2p_quic=info,iroh=info
 ENV MINIMAL_LOG_FORMAT=true
 
 ENTRYPOINT ["/usr/local/bin/nockchain"]
