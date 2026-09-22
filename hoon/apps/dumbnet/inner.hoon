@@ -53,9 +53,11 @@
     =.  c.k
       ~>  %slog.[0 'load: [4/5] check-and-repair: validating consensus state']
       ~>  %bout  check-and-repair:con
-    =.  c.k
+    =/  repaired=[consensus-state:dk derived-state:dk]
       ~>  %slog.[0 'load: [5/5] repair-orphaned-claims: releasing txs stranded by past reorgs']
       ~>  %bout  repair-orphaned-claims:con
+    =.  c.k  -.repaired
+    =.  d.k  +.repaired
     ~|  %v1-phase-must-be-lte-zk-asert-phase
     ?>  (lte v1-phase.constants.k phase.zk-asert.constants.k)
     ::  The ZK re-pin and the introduction of the AI ASERT are the same event.
@@ -158,8 +160,8 @@
               before-ai
           ==
         upgraded
-      ~>  %slog.[1 'load: State requires reset before version-11 migration']
-      (reset-consensus-state-11 upgraded)
+      ~|  'load: Version-10 state cannot be migrated safely; preserving checkpoint and refusing to boot'
+      !!
     ::
     ++  upgrade-pre-ai-constants
       |=  old=blockchain-constants-v1-pre-ai:dk
@@ -587,34 +589,6 @@
       ?.  u.mainnet
         arg
       arg(constants *blockchain-constants:t)
-    ::
-    ++  reset-consensus-state
-      |=  arg=kernel-state:dk
-      ^-  kernel-state:dk
-      =|  nk=kernel-state:dk
-      ::  Preserve mining options, boot metadata, and custom-network constants;
-      ::  otherwise drop consensus state so genesis intake can resume safely.
-      =.  mining.m.nk  mining.m.arg
-      =.  shares.m.nk  shares.m.arg
-      =.  v0-shares.m.nk  v0-shares.m.arg
-      =.  init.a.nk  init.a.arg
-      =.  btc-data.c.nk  btc-data.c.arg
-      =.  genesis-seal.c.nk  genesis-seal.c.arg
-      =.  constants.nk  constants.arg
-      nk
-    ::
-    ++  reset-consensus-state-11
-      |=  arg=kernel-state-11:dk
-      ^-  kernel-state-11:dk
-      =|  nk=kernel-state-11:dk
-      =.  mining.m.nk  mining.m.arg
-      =.  shares.m.nk  shares.m.arg
-      =.  v0-shares.m.nk  v0-shares.m.arg
-      =.  init.a.nk  init.a.arg
-      =.  btc-data.c.nk  btc-data.c.arg
-      =.  genesis-seal.c.nk  genesis-seal.c.arg
-      =.  constants.nk  constants.arg
-      nk
     ::
     ::  Candidate construction on load has no wall clock. The accepted parent
     ::  median timestamp supplies the seed that the next event refreshes.

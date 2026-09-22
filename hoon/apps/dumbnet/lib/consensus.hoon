@@ -1408,9 +1408,11 @@
 ::    with `got`, so any retained block naming a deleted one crashes the kernel
 ::    as soon as a child of it arrives.
 ::
-:::    All seven maps or none. A partial delete of .balance alone would not crash:
+::    All per-block maps or none. A partial delete of .balance alone would not crash:
 ::    +validate-page-with-txs reads balance[parent] with `get`, so the block's
 ::    children validate against an empty utxo set and are silently rejected.
+::    Logos added .block-versions to consensus state and .puzzle-asert-states to
+::    derived state, so this arm returns both state components.
 ::
 ::    Requires the claims already released (+release-orphan-claims): a block-id
 ::    left in .blocks-needed-by strands its tx (+apt: %txs-fell-through-cracks),
@@ -1418,19 +1420,34 @@
 ++  delete-orphan-blocks
   ~/  %delete-orphan-blocks
   |=  orphans=(list block-id:t)
-  ^-  consensus-state:dk
-  %+  roll  orphans
-  |=  [=block-id:t con=_c]
-  =.  c  con
-  =.  blocks.c          (~(del h-by blocks.c) block-id)
-  =.  balance.c         (~(del h-by balance.c) block-id)
-  =.  txs.c             (~(del h-by txs.c) block-id)
-  =.  min-timestamps.c  (~(del h-by min-timestamps.c) block-id)
-  =.  asert-anchor-min-timestamps.c
-    (delete-asert-anchor-min-timestamps block-id asert-anchor-min-timestamps.c)
-  =.  epoch-start.c     (~(del h-by epoch-start.c) block-id)
-  =.  targets.c         (~(del h-by targets.c) block-id)
-  c
+  ^-  [consensus-state:dk derived-state:dk]
+  =.  c
+    %+  roll  orphans
+    |=  [=block-id:t con=_c]
+    =.  c  con
+    =.  blocks.c          (~(del h-by blocks.c) block-id)
+    =.  balance.c         (~(del h-by balance.c) block-id)
+    =.  txs.c             (~(del h-by txs.c) block-id)
+    =.  min-timestamps.c  (~(del h-by min-timestamps.c) block-id)
+    =.  asert-anchor-min-timestamps.c
+      (delete-asert-anchor-min-timestamps block-id asert-anchor-min-timestamps.c)
+    =.  epoch-start.c     (~(del h-by epoch-start.c) block-id)
+    =.  targets.c         (~(del h-by targets.c) block-id)
+    c
+  ::  Older boots deleted orphan blocks without deleting these two maps. Those
+  ::  IDs no longer appear in .orphans, so retain metadata only for blocks that
+  ::  still exist after deletion. Preserve the values for every retained block.
+  =.  block-versions.c
+    %-  ~(rep h-by block-versions.c)
+    |=  [[=block-id:t version=proof-version:sp] versions=_block-versions.c]
+    ?:  (~(has h-by blocks.c) block-id)  versions
+    (~(del h-by versions) block-id)
+  =.  puzzle-asert-states.d
+    %-  ~(rep h-by puzzle-asert-states.d)
+    |=  [[=block-id:t state=puzzle-asert-state:dk] states=_puzzle-asert-states.d]
+    ?:  (~(has h-by blocks.c) block-id)  states
+    (~(del h-by states) block-id)
+  [c d]
 ::
 ::  +repair-orphaned-claims: BOOT-ONLY. Release the claims of every block that is
 ::  not on the heaviest chain, then delete those blocks.
@@ -1443,18 +1460,19 @@
 ::    Released txs land in excluded-txs, where the next +garbage-collect applies
 ::    the spent-input check and drops any the canonical chain has since spent.
 ::
-::    Two passes over the size of the chain: the ancestry walk, then the .blocks
-::    scan. Boot-only for that reason -- an event must never pay for the size of
+::    Walks the ancestry, scans .blocks, and sweeps the two proof/puzzle metadata
+::    maps. Boot-only for that reason -- an event must never pay for the size of
 ::    the chain.
 ++  repair-orphaned-claims
-  ^-  consensus-state:dk
-  ::  no chain yet, so nothing can be orphaned. Tested with `=(~ ...)` rather
+  ^-  [consensus-state:dk derived-state:dk]
+  ::  Without a chain, only metadata for missing blocks can need cleanup.
+  ::  Tested with `=(~ ...)` rather
   ::  than `?~`: `?~` would narrow .c's type to one whose heaviest-block is known
   ::  non-null, and the roll below seeds its accumulator from `_c` -- so the full
   ::  consensus-state that +release-orphan-claims returns would no longer nest.
   ?:  =(~ heaviest-block.c)
-    ~>  %slog.[0 'repair-orphaned-claims: no heaviest block yet, nothing to repair']
-    c
+    ~>  %slog.[0 'repair-orphaned-claims: no heaviest block yet, checking block metadata']
+    (delete-orphan-blocks ~)
   ::  the release and the delete must classify against one set: a block deleted
   ::  without its claims released strands those txs (+apt:
   ::  %txs-fell-through-cracks).
