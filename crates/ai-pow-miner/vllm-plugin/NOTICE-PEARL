@@ -1,0 +1,14 @@
+Pearl vLLM mining plugin provenance
+
+Source: https://github.com/pearl-research-labs/pearl
+Source path: miner/vllm-miner
+Source revision: 7df83305ede0256770c89d7f8bf7918f83427c82
+Copyright: 2025-2026 Pearl Research Labs
+
+The upstream package metadata declares the vLLM plugin under the MIT License.
+The upstream repository root carries an ISC notice for Pearl Research Labs code.
+Both notices are reproduced in LICENSE-PEARL-MIT and LICENSE-PEARL-ISC.
+
+This copy contains Nockchain-specific modifications for the typed inference-mining
+gRPC control plane, mining-first scheduling notifications, and Nockchain block
+handoff. The upstream repository is not modified by this copy.
