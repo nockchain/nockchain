@@ -21,11 +21,17 @@ def _jam_resource_set_probe(_os, _inputs_size):
     and finish in ~1-2s; a small footprint lets Bazel run them in parallel."""
     return {"memory": 2048, "cpu": 1}
 
-def _jam_resource_set_for(ctx):
+def _jam_resource_set_light(_os, _inputs_size):
+    """Measured dumb, miner, and wallet jams peak under 1.1GB RSS."""
+    return {"memory": 2048, "cpu": 1}
+
+def _jam_resource_set_for(ctx, allow_light = False):
     if ctx.attr.deps_dir:
         return _jam_resource_set_probe
     if ctx.attr.arbitrary:
         return _jam_resource_set_arbitrary
+    if allow_light and ctx.attr.light_memory:
+        return _jam_resource_set_light
     return _jam_resource_set
 
 def _hoon_jam_impl(ctx):
@@ -106,7 +112,7 @@ def _hoon_jam_impl(ctx):
         progress_message = "Building JAM file from %s" % src.path,
         mnemonic = "HoonCompile",
         use_default_shell_env = False,
-        resource_set = _jam_resource_set_for(ctx),
+        resource_set = _jam_resource_set_for(ctx, allow_light = True),
     )
 
     return [DefaultInfo(files = depset([output]))]
@@ -138,6 +144,10 @@ hoon_jam = rule(
             doc = "Explicit dependency directory (created empty in the " +
                   "sandbox); overrides the src-derived hoon tree",
         ),
+        "light_memory": attr.bool(
+            default = False,
+            doc = "Use the measured 2GB scheduler footprint for lightweight jams",
+        ),
         "_hoonc": attr.label(
             default = Label("//crates/hoonc:hoonc_bin"),
             executable = True,
@@ -155,6 +165,7 @@ def hoon_library(
         arbitrary = False,
         output = False,
         deps_dir = "",
+        light_memory = False,
         visibility = None):
     """Builds a JAM file from a Hoon source file.
 
@@ -165,6 +176,7 @@ def hoon_library(
         arbitrary: Whether to use --arbitrary flag
         output: Pass an explicit `--output out.jam` to hoonc (needed for
             arbitrary builds, whose default output name is not `out.jam`)
+        light_memory: Allow overlap of measured low-memory jam builds
         visibility: Target visibility
     """
     jam_name = name + ".jam"
@@ -177,6 +189,7 @@ def hoon_library(
         arbitrary = arbitrary,
         output = output,
         deps_dir = deps_dir,
+        light_memory = light_memory,
         visibility = ["//visibility:private"],
     )
 

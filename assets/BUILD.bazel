@@ -70,6 +70,7 @@ hoon_library(
     # jam_filename = "dumb",
     src = "//hoon/apps/dumbnet:outer.hoon",
     arbitrary = False,
+    light_memory = True,
     deps = [
         "//hoon/apps/dumbnet:inner.hoon",
         "//hoon/apps/dumbnet:miner.hoon",
@@ -124,6 +125,7 @@ hoon_library(
     # jam_filename = "wal",
     src = "//hoon/apps/wallet:wallet.hoon",
     arbitrary = False,
+    light_memory = True,
     deps = [
         "//hoon/apps/bridge:types.hoon",
         "//hoon/apps/dumbnet:miner.hoon",
@@ -145,6 +147,7 @@ hoon_library(
     # jam_filename = "miner",
     src = "//hoon/apps/dumbnet:miner.hoon",
     arbitrary = False,
+    light_memory = True,
     deps = [
         "//hoon/apps/dumbnet/lib:asert.hoon",
         "//hoon/common:files",
