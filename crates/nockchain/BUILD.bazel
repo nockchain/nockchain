@@ -37,6 +37,7 @@ rust_library(
     # Enable stamping
     stamp = 1,
     deps = [
+        "//crates/ai-pow-jets",
         "//crates/chaff",
         # Remove the build script dependency
         "//crates/hoonc:hoonc_lib",

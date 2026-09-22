@@ -1,15 +1,11 @@
 name: Release Binaries and Generate Manifests
 
 on:
-  # Binary creation disabled for now: the workflow no longer runs on push/PR/tag.
-  # Re-enable by uncommenting the triggers below. workflow_dispatch keeps it
-  # available to run manually in the meantime.
+  # Binary creation remains manual via workflow_dispatch.
   workflow_dispatch:
   # push:
   #   branches: ["master", "nightly"]
   #   tags: ["v*"]
-  # pull_request:
-  #   branches: ["master", "nightly"]
 
 jobs:
   build:
@@ -19,13 +15,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            use_zigbuild: false
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            use_zigbuild: true
           - os: macos-latest
             target: aarch64-apple-darwin
-            use_zigbuild: false
     permissions:
       contents: write  # Required for action-gh-release
     steps:
@@ -98,170 +91,42 @@ jobs:
           echo "nockchain_version=$NOCKCHAIN_VERSION" >> $GITHUB_OUTPUT
           echo "Extracted versions: hoon=$HOON_VERSION, hoonc=$HOONC_VERSION, nockup=$NOCKUP_VERSION, nockchain=$NOCKCHAIN_VERSION"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
         with:
-          targets: ${{ matrix.target }}
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: release-${{ matrix.target }}
 
-      - name: Install Zig and cargo-zigbuild
-        if: matrix.use_zigbuild
+      - name: Install manifest tools
         run: |
-          # Install Zig
-          wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-          tar -xf zig-linux-x86_64-0.13.0.tar.xz
-          sudo mv zig-linux-x86_64-0.13.0 /usr/local/zig
-          sudo ln -s /usr/local/zig/zig /usr/local/bin/zig
-          zig version
-          
-          # Install cargo-zigbuild
-          cargo install --locked cargo-zigbuild
-
-          # Add target
-          rustup target add ${{ matrix.target }}
-
-      - name: Install Protocol Buffers compiler (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Install Protocol Buffers compiler (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
-
-      - name: Cache Rust dependencies
-        uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Install required tools for manifest generation
-        run: |
-          # Install blake3 hash tool from pre-built binaries
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            wget -q https://github.com/BLAKE3-team/BLAKE3/releases/download/1.5.0/b3sum_linux_x64_bin -O b3sum
-            chmod +x b3sum
-            sudo mv b3sum /usr/local/bin/
             sudo apt-get update
-            sudo apt-get install -y jq
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            sudo apt-get install -y b3sum jq
+          else
             brew install b3sum jq
           fi
 
-      - name: Install cross-compilation dependencies
-        if: matrix.use_zigbuild
+      # Bazel builds the kernel jams as declared dependencies of the binaries.
+      # Native ARM runners replace cargo-zigbuild's cross-compilation path.
+      - name: Build release binaries with Bazel
         run: |
-          # Install perl (needed for OpenSSL build)
-          sudo apt-get update
-          sudo apt-get install -y perl
+          bazel build \
+            //crates/hoon:hoon \
+            //crates/hoonc:hoonc_bin \
+            //crates/nockup:nockup \
+            //crates/nockchain:nockchain \
+            //crates/nockchain-wallet:nockchain-wallet
 
-      # Stage 1a: Build native hoonc for .jam generation (cross-compile only)
-      - name: Build hoonc-native (for .jam generation)
-        if: matrix.use_zigbuild == true
+      - name: Stage release binaries
         run: |
-          echo "Building native x86_64 hoonc for .jam generation..."
-          cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked
-          # Save it with a different name
-          cp target/release/hoonc target/release/hoonc-native
-          file target/release/hoonc-native
-
-      # Stage 1b: Build hoon (all platforms)
-      - name: Build hoon
-        env:
-          CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
-          CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
-          AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
-        run: |
-          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin hoon --manifest-path crates/hoon/Cargo.toml --locked --target ${{ matrix.target }}
-            file target/${{ matrix.target }}/release/hoon
-          else
-            cargo build --release --bin hoon --manifest-path crates/hoon/Cargo.toml --locked
-            file target/release/hoon
-          fi
-
-      # Stage 1c: Build hoonc for target platform
-      - name: Build hoonc (target)
-        env:
-          CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
-          CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
-          AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
-        run: |
-          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked --target ${{ matrix.target }}
-            file target/${{ matrix.target }}/release/hoonc
-          else
-            cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked
-            file target/release/hoonc
-          fi
-
-      # Stage 2: Generate .jam files using native hoonc
-      - name: Generate .jam assets
-        run: |
-          # Use the appropriate hoonc for .jam generation
-          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            # Cross-compile: use native hoonc
-            HOONC_PATH="target/release/hoonc-native"
-            echo "Using native hoonc for .jam generation: $HOONC_PATH"
-          else
-            # Native build: use regular hoonc
-            HOONC_PATH="target/release/hoonc"
-            echo "Using regular hoonc for .jam generation: $HOONC_PATH"
-          fi
-          
-          # Make hoonc available in PATH
-          export PATH="$(dirname $(readlink -f $HOONC_PATH)):$PATH"
-          
-          # Verify hoonc works
-          hoonc --version
-          
-          # Generate .jam files using Makefile
-          mkdir -p assets hoon
-          make assets/dumb.jam assets/miner.jam assets/wal.jam assets/peek.jam
-          
-          # Verify they were created
-          ls -lah assets/*.jam
-
-      - name: Build nockup (Stage 3 - independent)
-        env:
-          CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
-          CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
-          AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
-        run: |
-          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockup --manifest-path crates/nockup/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
-            file target/${{ matrix.target }}/release/nockup
-          else
-            cargo build --release --bin nockup --manifest-path crates/nockup/Cargo.toml --locked
-            file target/release/nockup
-          fi
-
-      - name: Build nockchain (Stage 3 - needs .jam files)
-        env:
-          CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
-          CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
-          AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
-        run: |
-          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --target ${{ matrix.target }}
-            file target/${{ matrix.target }}/release/nockchain
-          else
-            cargo build --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --locked
-            file target/release/nockchain
-          fi
-
-      - name: Build nockchain-wallet
-        env:
-          CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
-          CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
-          AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
-        run: |
-          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --target ${{ matrix.target }}
-            file target/${{ matrix.target }}/release/nockchain-wallet
-          else
-            cargo build --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --locked
-            file target/release/nockchain-wallet
-          fi
+          mkdir -p target/release
+          cp -L bazel-bin/crates/hoon/hoon target/release/hoon
+          cp -L bazel-bin/crates/hoonc/hoonc_bin target/release/hoonc
+          cp -L bazel-bin/crates/nockup/nockup target/release/nockup
+          cp -L bazel-bin/crates/nockchain/nockchain target/release/nockchain
+          cp -L bazel-bin/crates/nockchain-wallet/nockchain-wallet target/release/nockchain-wallet
+          file target/release/{hoon,hoonc,nockup,nockchain,nockchain-wallet}
 
       - name: Set up GPG
         if: runner.os == 'Linux' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
@@ -289,13 +154,8 @@ jobs:
             exit 0
           fi
           
-          # Determine binary directory based on build method
-          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            BINARY_DIR="target/${{ matrix.target }}/release"
-          else
-            BINARY_DIR="target/release"
-          fi
-          
+          BINARY_DIR="target/release"
+
           # Package each binary: sign it, then include both binary and .asc in tarball
           for binary in hoon hoonc nockup nockchain nockchain-wallet; do
             if [ -f "$BINARY_DIR/$binary" ]; then

@@ -1,0 +1,41 @@
+name: Build and test (Bazel)
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bazel-build-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: build-test
+
+      - name: Build release binaries and run unit tests
+        run: |
+          bazel test \
+            //crates/hoon:hoon \
+            //crates/hoonc:hoonc_bin \
+            //crates/nockup:nockup \
+            //crates/nockchain:nockchain \
+            //crates/nockchain-wallet:nockchain-wallet \
+            //crates/nockvm/rust/nockvm:nockvm_unit_tests \
+            //crates/hoonc:hoonc_unit_tests \
+            //crates/nockchain:nockchain_unit_tests \
+            //crates/nockchain-wallet:nockchain-wallet_unit_tests
