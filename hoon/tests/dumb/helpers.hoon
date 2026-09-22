@@ -1236,7 +1236,7 @@
   ::  +repair-orphans: the one-time repair +load runs on boot
   ++  repair-orphans
     |=  c=consensus-state
-    ^-  consensus-state
+    ^-  [consensus-state derived-state]
     ~(repair-orphaned-claims dcon c der bc)
   ::
   ::  +boot-with: run the kernel's REAL +load over a given consensus state, the

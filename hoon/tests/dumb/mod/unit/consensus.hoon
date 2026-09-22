@@ -71,13 +71,19 @@
   =/  stale-id=block-id:t  ~(digest get:page:t stale-page)
   =.  blocks.c.state
     (~(put h-by blocks.c.state) stale-id (to-local-page:page:t stale-page))
+  =.  block-versions.c.state
+    (~(put h-by block-versions.c.state) stale-id %2)
+  =.  puzzle-asert-states.d.state
+    (~(put h-by puzzle-asert-states.d.state) stale-id *puzzle-asert-state)
   =/  loaded=kernel-state  (load:inner:dumb state)
   %+  expect-eq
-    !>([%.y %.y 2 %.n %.y])
+    !>([%.y %.y 2 %.n %.n %.n %.y])
   !>  :*  =(heaviest-block.c.state heaviest-block.c.loaded)
           (~(has h-by blocks.c.loaded) tip-id)
           ~(wyt h-by blocks.c.loaded)
           (~(has h-by blocks.c.loaded) stale-id)
+          (~(has h-by block-versions.c.loaded) stale-id)
+          (~(has h-by puzzle-asert-states.d.loaded) stale-id)
           =(genesis-seal.c.state genesis-seal.c.loaded)
       ==
 ::
@@ -91,11 +97,43 @@
 ::
 ++  test-load-refuses-invalid-canonical-zoe-page-without-reset
   =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
   =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
   =/  state=kernel-state  (zoe-load-state [%.y `stale-v2])
+  =/  activation-id=block-id:t  (need heaviest-block.c.state)
+  =/  tip-page=page:v1:t
+    %*  .  *page:v1:t
+      height  +(proof-version-3-start:dcon)
+      parent  activation-id
+      pow     (some v3)
+    ==
+  =.  tip-page  tip-page(digest (compute-digest:page:t tip-page))
+  =/  tip-id=block-id:t  ~(digest get:page:t tip-page)
+  =.  blocks.c.state
+    (~(put h-by blocks.c.state) tip-id (to-local-page:page:t tip-page))
+  =.  heaviest-block.c.state  `tip-id
+  =.  heaviest-chain.d.state
+    (~(put z-by heaviest-chain.d.state) +(proof-version-3-start:dcon) tip-id)
   %+  expect-fail
     |.((load:inner:dumb state))
-  `"preserving state and refusing to boot"
+  `"Invalid Zoe activation page"
+::
+++  test-load-refuses-unsafe-version-10-migration-without-reset
+  =/  legacy-page=page:v1:t
+    %*  .  *page:v1:t
+      height  proof-version-3-start:dcon
+    ==
+  =.  legacy-page  legacy-page(digest (compute-digest:page:t legacy-page))
+  =/  legacy-id=block-id:t  ~(digest get:page:t legacy-page)
+  =/  legacy=kernel-state-10
+    %*  .  *kernel-state-10
+      blocks.c
+        (~(put h-by *(h-map block-id:t local-page:t)) legacy-id (to-local-page:page:t legacy-page))
+      heaviest-block.c  `legacy-id
+    ==
+  %+  expect-fail
+    |.((load:inner:dumb legacy))
+  `"Version-10 state cannot be migrated safely"
 ::
 ++  test-garbage-collect-after-genesis
   =/  con=consensus-state  initial-consensus-state:h

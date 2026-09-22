@@ -1408,9 +1408,11 @@
 ::    with `got`, so any retained block naming a deleted one crashes the kernel
 ::    as soon as a child of it arrives.
 ::
-:::    All seven maps or none. A partial delete of .balance alone would not crash:
+::    All per-block maps or none. A partial delete of .balance alone would not crash:
 ::    +validate-page-with-txs reads balance[parent] with `get`, so the block's
 ::    children validate against an empty utxo set and are silently rejected.
+::    Logos added .block-versions to consensus state and .puzzle-asert-states to
+::    derived state, so this arm returns both state components.
 ::
 ::    Requires the claims already released (+release-orphan-claims): a block-id
 ::    left in .blocks-needed-by strands its tx (+apt: %txs-fell-through-cracks),
@@ -1418,19 +1420,28 @@
 ++  delete-orphan-blocks
   ~/  %delete-orphan-blocks
   |=  orphans=(list block-id:t)
-  ^-  consensus-state:dk
-  %+  roll  orphans
-  |=  [=block-id:t con=_c]
-  =.  c  con
-  =.  blocks.c          (~(del h-by blocks.c) block-id)
-  =.  balance.c         (~(del h-by balance.c) block-id)
-  =.  txs.c             (~(del h-by txs.c) block-id)
-  =.  min-timestamps.c  (~(del h-by min-timestamps.c) block-id)
-  =.  asert-anchor-min-timestamps.c
-    (delete-asert-anchor-min-timestamps block-id asert-anchor-min-timestamps.c)
-  =.  epoch-start.c     (~(del h-by epoch-start.c) block-id)
-  =.  targets.c         (~(del h-by targets.c) block-id)
-  c
+  ^-  [consensus-state:dk derived-state:dk]
+  =/  cleaned-c=consensus-state:dk
+    %+  roll  orphans
+    |=  [=block-id:t con=_c]
+    =.  c  con
+    =.  blocks.c          (~(del h-by blocks.c) block-id)
+    =.  balance.c         (~(del h-by balance.c) block-id)
+    =.  txs.c             (~(del h-by txs.c) block-id)
+    =.  min-timestamps.c  (~(del h-by min-timestamps.c) block-id)
+    =.  asert-anchor-min-timestamps.c
+      (delete-asert-anchor-min-timestamps block-id asert-anchor-min-timestamps.c)
+    =.  epoch-start.c     (~(del h-by epoch-start.c) block-id)
+    =.  targets.c         (~(del h-by targets.c) block-id)
+    =.  block-versions.c  (~(del h-by block-versions.c) block-id)
+    c
+  =/  cleaned-d=derived-state:dk
+    %+  roll  orphans
+    |=  [=block-id:t der=_d]
+    =.  d  der
+    =.  puzzle-asert-states.d  (~(del h-by puzzle-asert-states.d) block-id)
+    d
+  [cleaned-c cleaned-d]
 ::
 ::  +repair-orphaned-claims: BOOT-ONLY. Release the claims of every block that is
 ::  not on the heaviest chain, then delete those blocks.
@@ -1447,14 +1458,14 @@
 ::    scan. Boot-only for that reason -- an event must never pay for the size of
 ::    the chain.
 ++  repair-orphaned-claims
-  ^-  consensus-state:dk
+  ^-  [consensus-state:dk derived-state:dk]
   ::  no chain yet, so nothing can be orphaned. Tested with `=(~ ...)` rather
   ::  than `?~`: `?~` would narrow .c's type to one whose heaviest-block is known
   ::  non-null, and the roll below seeds its accumulator from `_c` -- so the full
   ::  consensus-state that +release-orphan-claims returns would no longer nest.
   ?:  =(~ heaviest-block.c)
     ~>  %slog.[0 'repair-orphaned-claims: no heaviest block yet, nothing to repair']
-    c
+    [c d]
   ::  the release and the delete must classify against one set: a block deleted
   ::  without its claims released strands those txs (+apt:
   ::  %txs-fell-through-cracks).
