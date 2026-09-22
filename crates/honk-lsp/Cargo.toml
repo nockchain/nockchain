@@ -1,0 +1,36 @@
+[package]
+name = "honk-lsp"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "honk-lsp"
+path = "src/bin/honk-lsp.rs"
+
+[[bench]]
+name = "lsp_performance"
+harness = false
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+crossbeam-channel = { workspace = true }
+honk = { workspace = true }
+honk-service = { workspace = true }
+lsp-server = { workspace = true }
+lsp-types = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "ansi"] }
+url = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
