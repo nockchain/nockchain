@@ -7,7 +7,7 @@ exclude = ["pearl", "crates/ai-pow-miner-cuda"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.15"
+version = "0.1.17"
 edition = "2021"
 
 # Lints enforced workspace-wide so `cargo`/`cargo clippy`/rust-analyzer flag these

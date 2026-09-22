@@ -1,6 +1,6 @@
 [package]
 name = "ai-pow-miner-cuda"
-version = "0.1.15"
+version.workspace = true
 edition = "2021"
 description = "CUDA search backend and standalone AI-PoW miner."
 publish = false
@@ -8,6 +8,8 @@ publish = false
 # This package is excluded from Nockchain's root workspace so normal Rust
 # builds never resolve CUDA toolchain or driver dependencies.
 [workspace]
+[workspace.package]
+version = "0.1.17"
 
 [[bin]]
 name = "ai-pow-mine-cuda"

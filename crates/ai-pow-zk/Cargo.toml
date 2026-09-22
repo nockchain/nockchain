@@ -2,7 +2,7 @@
 name = "ai-pow-zk"
 # Experimental: the public API surface, AIR layout, and proof byte format
 # are all subject to change while the circuit is being designed.
-version = "0.1.0-experimental"
+version.workspace = true
 edition.workspace = true
 description = "EXPERIMENTAL — Plonky3 SNARK circuit for the ai-pow tiling matmul puzzle."
 publish = false

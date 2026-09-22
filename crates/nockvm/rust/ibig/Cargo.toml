@@ -1,6 +1,6 @@
 [package]
 name = "ibig"
-version = "0.3.6"
+version.workspace = true
 authors = ["Tomek Czajka <tczajka@gmail.com>"]
 edition = "2021"
 rust-version = "1.87.0"

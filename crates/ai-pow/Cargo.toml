@@ -1,6 +1,6 @@
 [package]
 name = "ai-pow"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Pearl-style INT8 matrix-multiplication proof-of-useful-work puzzle for Nockchain."
 publish = false

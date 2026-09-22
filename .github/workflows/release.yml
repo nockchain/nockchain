@@ -59,17 +59,13 @@ jobs:
       - name: Extract Cargo versions
         id: cargo-versions
         run: |
-          # Get workspace version - simpler approach
+          # Read the shared workspace package version.
           HOON_VERSION=$(sed -n '/\[workspace.package\]/,/\[/p' Cargo.toml | grep '^version' | cut -d'"' -f2)
           
-          # Get hoonc version
-          HOONC_VERSION=$(grep '^version' crates/hoonc/Cargo.toml | cut -d'"' -f2)
-          
-          # Get nockup version  
-          NOCKUP_VERSION=$(grep '^version' crates/nockup/Cargo.toml | cut -d'"' -f2)
-          
-          # Get nockchain version
-          NOCKCHAIN_VERSION=$(grep '^version' crates/nockchain/Cargo.toml | cut -d'"' -f2)
+          # All released crates inherit the workspace version.
+          HOONC_VERSION="${HOON_VERSION}"
+          NOCKUP_VERSION="${HOON_VERSION}"
+          NOCKCHAIN_VERSION="${HOON_VERSION}"
           
           # For nightly, append date
           if [[ "${{ steps.channel.outputs.channel }}" == "nightly" ]]; then
