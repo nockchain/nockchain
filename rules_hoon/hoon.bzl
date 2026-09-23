@@ -228,19 +228,18 @@ def _honk_jam_impl(ctx):
         hoon_dir = "/".join(src_dir_parts[:2])
 
     cache_state = ctx.files.cache_state if ctx.attr.cache_state else []
+    cache_delta = ctx.actions.declare_directory(ctx.label.name + "_cache_delta") if ctx.attr.emit_cache_delta else None
+    use_cache = bool(cache_state) or cache_delta != None
 
     honk_args = []
     env_vars = ""
     if ctx.attr.arbitrary:
         honk_args.append("--arbitrary")
-    if cache_state:
-        # Seeded incremental compile. The pre-primed cache enters the sandbox
-        # as ordinary declared inputs; the action copies it somewhere writable
-        # and points --cache-dir at the copy, so honk reuses every product
-        # whose key still matches and recompiles only the changed closure.
-        # --new must NOT be passed here: it means "fresh cache", disabling
-        # reads. Writes land in the scratch copy and die with the sandbox —
-        # seeding is one-directional; reprime to pick up new products.
+    if use_cache:
+        # The cache is a declared input when already seeded. Honk writes into
+        # a private copy and reuses matching products. --new must not be passed:
+        # it means "fresh cache" and disables reads. Native kernel targets also
+        # export new cache objects so a later bazel run can persist them.
         honk_args.append("--cache-dir \"$scratch_dir/cache\"")
     elif not ctx.attr.arbitrary:
         # No seeded cache: --new is a no-op without --cache-dir, kept for
@@ -252,18 +251,19 @@ def _honk_jam_impl(ctx):
         env_vars = " HONK_NATIVE_PARITY=1"
 
     cmd = []
-    cmd.append("set -e")
+    cmd.append("set -euo pipefail")
     cmd.append("scratch_dir={}".format(scratch_dir))
     cmd.append("rm -rf \"$scratch_dir\"")
     cmd.append("mkdir -p \"$scratch_dir/home\" \"$scratch_dir/tmp\"")
     cmd.append("trap 'rm -rf \"$scratch_dir\"' EXIT")
-    if cache_state:
+    if use_cache:
         # Sandbox inputs are read-only; honk needs directory-write to add
-        # packs and metadata, so it gets a chmod'd copy in scratch.
+        # packs and metadata, so it gets a writable copy in scratch.
         cmd.append("mkdir -p \"$scratch_dir/cache\"")
-        cmd.append(
-            "if [ -d {0} ]; then cp -R {0}/. \"$scratch_dir/cache\" && chmod -R u+w \"$scratch_dir/cache\"; fi".format(ctx.attr.cache_root),
-        )
+        if cache_state:
+            cmd.append(
+                "if [ -d {0} ]; then cp -R {0}/. \"$scratch_dir/cache\" && chmod -R u+w \"$scratch_dir/cache\"; fi".format(ctx.attr.cache_root),
+            )
     if ctx.attr.deps_dir:
         cmd.append("mkdir -p {}".format(hoon_dir))
     home_dir = "$scratch_dir/home" if ctx.attr.deps_dir else hoon_dir
@@ -278,9 +278,26 @@ def _honk_jam_impl(ctx):
         hoon_dir,
     ))
 
+    if cache_delta:
+        # Bazel sandboxes cannot update their source inputs. Export only new
+        # or repaired cache objects, rather than the entire seeded snapshot,
+        # so an explicit `bazel run //assets/native:save_honk_cache` can merge
+        # them into the next build's declared cache inputs without recompiling.
+        cmd.append('delta_dir="{}"'.format(cache_delta.path))
+        cmd.append('seed_dir="{}"'.format(ctx.attr.cache_root))
+        cmd.append('mkdir -p "$delta_dir"')
+        cmd.append('find "$scratch_dir/cache" -type f | while IFS= read -r cache_file; do')
+        cmd.append('  relative="${cache_file#"$scratch_dir/cache/"}"')
+        cmd.append('  seed_file="$seed_dir/$relative"')
+        cmd.append('  if [ ! -f "$seed_file" ] || ! cmp -s "$cache_file" "$seed_file"; then')
+        cmd.append('    mkdir -p "$delta_dir/$(dirname "$relative")"')
+        cmd.append('    cp "$cache_file" "$delta_dir/$relative"')
+        cmd.append('  fi')
+        cmd.append('done')
+
     ctx.actions.run_shell(
         inputs = [src, prelude] + deps + cache_state,
-        outputs = [output],
+        outputs = [output] + ([cache_delta] if cache_delta else []),
         tools = [ctx.executable._honk],
         command = "\n".join(cmd),
         progress_message = "Building native JAM file from %s" % src.path,
@@ -289,7 +306,10 @@ def _honk_jam_impl(ctx):
         resource_set = _jam_resource_set_for(ctx),
     )
 
-    return [DefaultInfo(files = depset([output]))]
+    providers = [DefaultInfo(files = depset([output]))]
+    if cache_delta:
+        providers.append(OutputGroupInfo(cache_delta = depset([cache_delta])))
+    return providers
 
 honk_jam = rule(
     implementation = _honk_jam_impl,
@@ -341,6 +361,11 @@ honk_jam = rule(
             doc = "Workspace-relative directory the cache_state files " +
                   "live under.",
         ),
+        "emit_cache_delta": attr.bool(
+            default = False,
+            doc = "Export newly compiled cache objects as a separate output " +
+                  "group for explicit persistence between Bazel builds.",
+        ),
         "_honk": attr.label(
             default = Label("//crates/honk:honk"),
             executable = True,
@@ -358,6 +383,8 @@ def honk_library(
         native_parity = False,
         deps_dir = "",
         cache_state = None,
+        emit_cache_delta = False,
+        tags = [],
         visibility = None):
     """honk twin of `hoon_library`: builds `<name>.jam` natively with honk."""
     jam_name = name + ".jam"
@@ -371,11 +398,14 @@ def honk_library(
         native_parity = native_parity,
         deps_dir = deps_dir,
         cache_state = cache_state,
+        emit_cache_delta = emit_cache_delta,
+        tags = tags,
         visibility = ["//visibility:private"],
     )
 
     native.filegroup(
         name = name,
         srcs = [":" + name + "_compile"],
+        tags = tags,
         visibility = visibility,
     )

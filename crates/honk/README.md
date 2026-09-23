@@ -177,6 +177,14 @@ cache miss and is repaired by the successful build. The compiler does not
 persist `Ut`'s semantic memo tables because those depend on mutable compilation
 state and are not safe across builds.
 
+For Bazel's six kernel targets, `just bazel build-assets-honk` keeps the fast
+read-only cache path. `just bazel build-assets-honk-cached` builds the
+cache-producing targets and merges their new objects into the gitignored
+`.honk-cache/` for the next invocation. The equivalent Bazel target is
+`bazel run //assets/native:save_honk_cache`; a plain `bazel build` never writes
+to the source tree. The cached targets export only new or repaired objects, so
+an incremental build does not store another full copy of the seed.
+
 Inspect or age out the cache with:
 
 ```bash

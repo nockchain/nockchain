@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "compile_bench.sh",
     "kernel_parity_test.sh",
+    "save_honk_cache.sh",
 ])
 
 # One entry per kernel: src + the hoon dependency tree it compiles against.
@@ -114,6 +115,42 @@ KERNELS = {
     )
     for kernel in KERNELS
 ]
+
+# Optional cache-producing twins keep the ordinary //assets/native:kernels
+# path fast when no seed exists. Their JAMs are identical; their actions also
+# export newly compiled cache objects in a separate output group.
+[
+    honk_library(
+        name = "{}_native_cached".format(kernel),
+        src = KERNELS[kernel][0],
+        deps = KERNELS[kernel][1],
+        cache_state = "//:honk_build_cache",
+        emit_cache_delta = True,
+        tags = ["manual"],
+    )
+    for kernel in KERNELS
+]
+
+filegroup(
+    name = "cached_kernels",
+    srcs = ["{}_native_cached".format(kernel) for kernel in KERNELS],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "cache_deltas",
+    srcs = ["{}_native_cached_compile".format(kernel) for kernel in KERNELS],
+    output_group = "cache_delta",
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "save_honk_cache",
+    srcs = ["save_honk_cache.sh"],
+    args = [kernel for kernel in KERNELS],
+    data = [":cache_deltas"],
+    tags = ["manual"],
+)
 
 # All six honk-built kernels in one Bazel invocation — the parallel twin of
 # //assets:kernels. The jam actions carry resource_set memory hints, so Bazel

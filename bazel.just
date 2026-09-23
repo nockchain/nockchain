@@ -35,11 +35,9 @@ build-assets:
     cp -f bazel-bin/assets/roswell.jam assets/roswell.jam
     chmod u+w assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
 
-# honk twin of build-assets: build all six kernels with honk INSIDE Bazel
-# (parallel, resource-scheduled — the Bazel equivalent of the cargo-side
-# `just build-kernel-assets-honk`) and copy into the same assets/<kernel>.jam
-# consumer paths. Byte-identical to build-assets output; the per-kernel
-# strict-cmp parity gates (//assets/native:kernel_parity_test) guarantee it.
+# honk twin of build-assets: compile all six kernels in parallel inside Bazel
+# and copy the jams into the same assets/<kernel>.jam consumer paths. This is
+# the fastest cold path. The strict-cmp parity gates verify byte identity.
 build-assets-honk:
     bazel build //assets/native:kernels
     mkdir -p assets
@@ -51,12 +49,22 @@ build-assets-honk:
     cp -f bazel-bin/assets/native/roswell_native.jam assets/roswell.jam
     chmod u+w assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
 
+# Build the cache-producing twins and save their new products for subsequent
+# incremental builds. Cache export costs extra on a cold build but avoids a
+# second compilation solely to prime `.honk-cache/`.
+build-assets-honk-cached:
+    bazel run //assets/native:save_honk_cache
+    mkdir -p assets
+    for kernel in bridge dumb miner peek roswell wal; do cp -f "bazel-bin/assets/native/${kernel}_native_cached.jam" "assets/${kernel}.jam"; done
+    chmod u+w assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
+
 # Prime the incremental honk cache consumed by //assets/native honk targets.
 # Must use the Bazel-built honk — cache keys embed a per-build compiler
 # fingerprint, so a cargo-built honk's cache never hits under Bazel — and
 # must run from the workspace root so key paths match the sandbox layout.
-# The jams are throwaway; .honk-cache/ is the product. Reprime after
-# compiler or source changes to keep warm starts warm (a stale cache is
+# This remains useful for manual priming. `build-assets-honk-cached` also saves
+# the new cache objects from its Bazel actions without a second compilation.
+# Reprime after a compiler change to keep warm starts warm (a stale cache is
 # never wrong, just cold).
 prime-honk-cache:
     bazel build //crates/honk:honk
