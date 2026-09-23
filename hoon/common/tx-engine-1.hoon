@@ -620,16 +620,10 @@
   +$  form  (z-map @tas *)
   ++  based
     |=  =form
-    |^
-      ^-  ?
-      %-  ~(rep z-by form)
-      |=  [[k=@tas v=*] a=?]
-      ?&(a (^based k) (based-noun v))
-    ++  based-noun
-      |=  n=*
-      ?^  n  ?&($(n -.n) $(n +.n))
-      (^based n)
-    --  ::  based:note-data
+    ^-  ?
+    %-  ~(rep z-by form)
+    |=  [[k=@tas v=*] a=?]
+    ?&(a (^based k) (based-noun v))
   ++  hashable
     |=  =form
     ^-  hashable:tip5
@@ -1601,7 +1595,6 @@
   ++  based
     |=  =form
     ^-  ?
-    |^
     ?&  (based:lock-merkle-proof lmp.form)
         (based:pkh-signature pkh.form)
         ::  hax preimage *values* are hashed into the witness (and thus the tx
@@ -1612,11 +1605,6 @@
         |=  [[k=^hash v=*] a=?]
         ?&(a (based:^hash k) (based-noun v))
     ==
-    ++  based-noun
-      |=  n=*
-      ?^  n  ?&($(n -.n) $(n +.n))
-      (^based n)
-    --
   ::
   ++  hashable
     |=  =form

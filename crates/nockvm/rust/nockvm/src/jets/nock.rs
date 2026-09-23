@@ -431,6 +431,8 @@ pub mod util {
 
 #[cfg(test)]
 mod tests {
+    use nockvm_macros::tas;
+
     use super::*;
     use crate::jets::util::test::{assert_jet, init_context};
     use crate::mem::NockStack;
@@ -461,6 +463,45 @@ mod tests {
         let samp = T(stack, &[nock, scry]);
         let rest = T(stack, &[D(0), D(53)]);
         assert_jet(context, jet_mink, samp, rest);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn test_mink_malformed_scry_response_is_deterministic_exit() {
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+        let reff = D(7);
+        let path = D(13);
+
+        let malformed_response = T(stack, &[D(0), D(0)]);
+        let handler_formula = T(stack, &[D(1), malformed_response]);
+        let handler = T(stack, &[handler_formula, D(0), D(0)]);
+        let reff_formula = T(stack, &[D(1), reff]);
+        let path_formula = T(stack, &[D(1), path]);
+        let form = T(stack, &[D(12), reff_formula, path_formula]);
+        let nock = T(stack, &[D(0), form]);
+        let sample = T(stack, &[nock, handler]);
+        let hunk = T(stack, &[D(tas!(b"hunk")), reff, path]);
+        let trace = T(stack, &[hunk, D(0)]);
+        let expected = T(stack, &[D(2), trace]);
+        assert_jet(context, jet_mink, sample, expected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn test_mink_nonzero_atom_scry_response_is_deterministic_exit() {
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+
+        let handler_formula = T(stack, &[D(1), D(1)]);
+        let handler = T(stack, &[handler_formula, D(0), D(0)]);
+        let reff_formula = T(stack, &[D(1), D(7)]);
+        let path_formula = T(stack, &[D(1), D(13)]);
+        let form = T(stack, &[D(12), reff_formula, path_formula]);
+        let nock = T(stack, &[D(0), form]);
+        let sample = T(stack, &[nock, handler]);
+        let expected = T(stack, &[D(2), D(0)]);
+        assert_jet(context, jet_mink, sample, expected);
     }
 
     // FIXME: This test is failing because (we believe that) the stack traces are formatted differently.

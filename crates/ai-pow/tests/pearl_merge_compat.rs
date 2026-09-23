@@ -1081,7 +1081,8 @@ fn pearl_attempt_is_not_the_native_explicit_nonce_path() {
         &params_tag(&params),
         native.s_a(),
         params.num_tiles(),
-    ) as usize;
+    )
+    .expect("validated params have a nonzero tile count") as usize;
     assert!(native_selected < pearl.tile_digests.len());
     assert_eq!(
         pearl.tile_digests.len(),

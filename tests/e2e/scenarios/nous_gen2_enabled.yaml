@@ -1,10 +1,7 @@
-# Nous rollout scenario: gen2 send enabled on both peers
+# Nous gen2 baseline scenario
 #
-# Verifies that two nodes with req_res_gen2_send_enabled=true can sync and
-# produce blocks. This exercises the steady-state enabled/enabled pairing.
-#
-# Generation matrix cell: new(enabled) <-> new(enabled)
-# Expected behavior: head convergence with gen2 send enabled on both nodes.
+# Verifies that two nodes using the mandatory gen2 protocol can sync and
+# produce blocks.
 
 name: "nous_gen2_enabled"
 seed: 21
@@ -20,9 +17,6 @@ nodes:
     fakenet_log_difficulty: 1
     fakenet_v1_phase: 3
     no_default_peers: true
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
   - id: "node-b"
     binary: "${NOCKCHAIN_BIN_NEW}"
@@ -35,9 +29,6 @@ nodes:
     peer_from:
       - node: "node-a"
         listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
-    env:
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
-      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
 
 steps:
   - action: start_nodes

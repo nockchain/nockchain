@@ -452,8 +452,7 @@ impl<T: NounDecode> NounDecode for Vec<T> {
         if let Ok(atom) = current.as_atom() {
             match atom.as_u64() {
                 Ok(0) => (),
-                // _ => return Err(NounDecodeError::Custom("Invalid list termination".into())),
-                _ => panic!("failure"),
+                _ => return Err(NounDecodeError::Custom("Invalid list termination".into())),
             }
         } else {
             return Err(NounDecodeError::ExpectedAtom);
@@ -1165,6 +1164,42 @@ impl<T: NounEncode, const N: usize> NounEncode for [T; N] {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod vec_terminator_tests {
+    use nockvm::jets::util::test::init_context;
+
+    use super::*;
+
+    /// A Hoon list terminated by a non-zero atom is malformed; the decoder
+    /// must return an error instead of panicking.
+    #[test]
+    fn non_zero_list_terminator_is_an_error_not_a_panic() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let space = stack.noun_space();
+
+        // [1 [2 5]] — a list whose tail terminates in atom 5, not 0.
+        let inner = T(stack, &[D(2), D(5)]);
+        let root = T(stack, &[D(1), inner]);
+
+        let decoded: Result<Vec<u64>, _> = NounDecode::from_noun(&root, &space);
+        let err = decoded.expect_err("non-zero terminator must be rejected");
+        assert!(matches!(err, NounDecodeError::Custom(_)));
+    }
+
+    #[test]
+    fn well_formed_list_still_decodes() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let space = stack.noun_space();
+
+        let list = vec![1u64, 2, 3];
+        let noun = list.to_noun(stack);
+        let decoded: Vec<u64> = NounDecode::from_noun(&noun, &space).expect("valid list decodes");
+        assert_eq!(decoded, list);
     }
 }
 

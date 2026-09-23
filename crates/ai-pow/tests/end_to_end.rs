@@ -129,7 +129,8 @@ fn raw_s_a_hash_target_hit_is_not_a_valid_pow_attempt() {
             ctx.params_tag(),
             ctx.s_a(),
             params.num_tiles(),
-        ) as usize;
+        )
+        .expect("validated params have a nonzero tile count") as usize;
         let state = ctx.tile_state(found_idx).expect("attempt tile in range");
         let raw_s_a_hash = state.keyed_hash(ctx.s_a());
         let pow_key_hash = state.keyed_hash(&ctx.pow_key());

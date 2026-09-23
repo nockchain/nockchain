@@ -86,21 +86,48 @@
 ::  target computation ran first and walked ancestry looking for the anchor
 ::  height, which doesn't exist in a pre-anchor chain, crashing on a missing
 ::  got key.
+::
+::  the fixture is a v1 candidate (coinbase version %1, consistent with the
+::  faked post-v1-phase height) because validation order moved after the fix
+::  landed: +coinbase-version-valid-at-height now rejects before the height
+::  guard, and the original v0 fixture tripped it first
+::  (%coinbase-version-height-mismatch instead of %page-height-invalid).
+::  building the child as v1 lets every earlier check pass so the height
+::  guard itself is what fires — which is the fix-2 property under test.
 ++  test-fix2-fake-post-asert-height-returns-height-invalid
   =/  bc   bc-fix
   =/  con  (initial-consensus-state-custom:h bc)
   ::  genesis is the only block in state; it is the known parent.
   =/  genesis=page:t
     (to-page:local-page:t (~(got h-by blocks.con) (need heaviest-block.con)))
-  ::  honest child of genesis (height 1, epoch-counter 1, timestamp 600)
-  =/  honest=page:t  (make-empty-page:h genesis)
-  ::  overwrite height with a fake post-ASERT value and recompute the digest
+  ::  v1 child of genesis: shares from the default key, genesis target, mock
+  ::  pow, honest timestamp; claims a fake post-ASERT height.
+  =/  =shares:t  (sig-to-shares:v1:h p:default-keys-1:h 1)
   =/  fake-height  phase.zk-asert.bc
   =/  faked=page:t
+    ::  +new-candidate always builds a v1 cell, but its return type is the
+    ::  v0|v1 fork, so each face update goes through the cell/atom guard
+    ::  (the established idiom) instead of a static v1 cast.
     =/  p
-      ?^  -.honest
-        honest(height fake-height)
-      honest(height fake-height)
+      %-  new-candidate:page:t
+      :*  genesis
+          *@da
+          ~(target get:page:t genesis)
+          shares
+          phase.zk-asert.bc
+      ==
+    =/  p
+      ?^  -.p
+        p(height fake-height)
+        p(height fake-height)
+    =/  p
+      ?^  -.p
+        p(timestamp (add ~(timestamp get:page:t genesis) 600))
+        p(timestamp (add ~(timestamp get:page:t genesis) 600))
+    =/  p
+      ?^  -.p
+        p(pow mock-pow:h)
+        p(pow mock-pow:h)
     =/  d  (compute-digest:page:t p)
     ?^  -.p  p(digest d)
     p(digest d)

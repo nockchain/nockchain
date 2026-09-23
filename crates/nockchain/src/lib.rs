@@ -225,6 +225,44 @@ fn load_keypair(keypair_path: &Path, force_old: bool) -> Result<Keypair, Box<dyn
     }
 }
 
+/// Cap on the operator-supplied allowed-peers file, checked before the file
+/// is read, so a misdirected multi-gigabyte file cannot exhaust memory at
+/// startup.
+const MAX_ALLOWED_PEERS_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+fn load_allowed_peers(
+    path: &Path,
+) -> Result<allow_block_list::Behaviour<allow_block_list::AllowedPeers>, Box<dyn Error>> {
+    load_allowed_peers_with_cap(path, MAX_ALLOWED_PEERS_FILE_BYTES)
+}
+
+fn load_allowed_peers_with_cap(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<allow_block_list::Behaviour<allow_block_list::AllowedPeers>, Box<dyn Error>> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "allowed peers file {} is too large ({} bytes; cap {max_bytes})",
+            path.display(),
+            metadata.len()
+        )
+        .into());
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let mut allow_behavior =
+        allow_block_list::Behaviour::<allow_block_list::AllowedPeers>::default();
+    for line in contents.lines() {
+        let peer_id_bytes = bs58::decode(line)
+            .into_vec()
+            .map_err(|e| format!("invalid peer ID line {line:?} in allowed peers file: {e}"))?;
+        let peer_id = PeerId::from_bytes(&peer_id_bytes)
+            .map_err(|_| format!("invalid peer ID line {line:?} in allowed peers file"))?;
+        allow_behavior.allow_peer(peer_id);
+    }
+    Ok(allow_behavior)
+}
+
 #[instrument(skip(kernel_jam, hot_state))]
 pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     cli: config::NockchainCli,
@@ -256,24 +294,11 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     let persist_identity = !cli.new_peer_id;
     let keypair = { load_keypair(identity_path.as_path(), persist_identity)? };
     info!("allowed_peers_path: {:?}", cli.allowed_peers_path);
-    let allowed = cli.allowed_peers_path.as_ref().map(|path| {
-        let contents = fs::read_to_string(path).expect("failed to read allowed peers file: {}");
-        let peer_ids: Vec<PeerId> = contents
-            .lines()
-            .map(|line| {
-                let peer_id_bytes = bs58::decode(line)
-                    .into_vec()
-                    .expect("failed to decode peer ID bytes from base58");
-                PeerId::from_bytes(&peer_id_bytes).expect("failed to decode peer ID from bytes")
-            })
-            .collect();
-        let mut allow_behavior =
-            allow_block_list::Behaviour::<allow_block_list::AllowedPeers>::default();
-        for peer_id in peer_ids {
-            allow_behavior.allow_peer(peer_id);
-        }
-        allow_behavior
-    });
+    let allowed = cli
+        .allowed_peers_path
+        .as_ref()
+        .map(|path| load_allowed_peers(Path::new(path)))
+        .transpose()?;
 
     let bind_multiaddrs = cli
         .bind
@@ -310,19 +335,15 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             cli.max_established_per_peer
                 .or(Some(libp2p_config.max_established_connections_per_peer)),
         );
-    let memory_limits = if cli.max_system_memory_bytes.is_some()
-        && cli.max_system_memory_fraction.is_some()
-    {
-        panic!( "Must provide neither or one of --max-system-memory_bytes or --max-system-memory_percentage" )
+    // (Conflicting --max-system-memory-bytes and
+    // --max-system-memory-fraction are rejected by `NockchainCli::validate`.)
+    let memory_limits = if let Some(max_bytes) = cli.max_system_memory_bytes {
+        Some(memory_connection_limits::Behaviour::with_max_bytes(
+            max_bytes,
+        ))
     } else {
-        if let Some(max_bytes) = cli.max_system_memory_bytes {
-            Some(memory_connection_limits::Behaviour::with_max_bytes(
-                max_bytes,
-            ))
-        } else {
-            cli.max_system_memory_fraction
-                .map(memory_connection_limits::Behaviour::with_max_percentage)
-        }
+        cli.max_system_memory_fraction
+            .map(memory_connection_limits::Behaviour::with_max_percentage)
     };
 
     // Full backbone pool. The libp2p driver dials a rotating round-robin window
@@ -402,7 +423,7 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             if mainnet_flag.is_atom() {
                 Some(unsafe { mainnet_flag.raw_equals(&YES) })
             } else {
-                panic!("Invalid mainnet flag")
+                return Err("invalid mainnet flag in kernel state".into());
             }
         } else {
             None
@@ -414,16 +435,14 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         let tag = make_tas(&mut peek_slab, "genesis-seal-set").as_noun();
         let peek_noun = T(&mut peek_slab, &[tag, D(0)]);
         peek_slab.set_root(peek_noun);
-        if let Some(peek_res) = nockapp.peek_handle(peek_slab).await? {
-            let genesis_seal = unsafe { peek_res.root() };
-            if genesis_seal.is_atom() {
-                unsafe { genesis_seal.raw_equals(&YES) }
-            } else {
-                panic!("Invalid genesis seal")
-            }
-        } else {
-            panic!("Genesis seal peak failed")
+        let Some(peek_res) = nockapp.peek_handle(peek_slab).await? else {
+            return Err("genesis seal peek failed: kernel state may be missing or corrupt".into());
+        };
+        let genesis_seal = unsafe { peek_res.root() };
+        if !genesis_seal.is_atom() {
+            return Err("invalid genesis seal in kernel state".into());
         }
+        unsafe { genesis_seal.raw_equals(&YES) }
     };
 
     let born_init_tx = if cli.fakenet {
@@ -698,4 +717,59 @@ fn welcome() {
     //];
 
     //print_version_info(&mut stdout, &info);
+}
+
+#[cfg(test)]
+mod allowed_peers_tests {
+    use std::io::Write;
+
+    use super::{load_allowed_peers_with_cap, MAX_ALLOWED_PEERS_FILE_BYTES};
+
+    fn temp_file(contents: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "nockchain-allowed-peers-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = std::fs::File::create(&path).expect("create temp file");
+        file.write_all(contents).expect("write temp file");
+        path
+    }
+
+    #[test]
+    fn load_allowed_peers_rejects_oversized_file_before_reading() {
+        let path = temp_file(b"12D3KooWnot_a_real_peer_id_0000000000000000");
+        // A cap below the file size must reject without reading the file.
+        let err = match load_allowed_peers_with_cap(&path, 8) {
+            Ok(_) => panic!("oversized allowed peers file must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("too large"));
+        std::fs::remove_file(&path).ok();
+
+        // The production cap accepts this small file.
+        let path = temp_file(
+            libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id()
+                .to_base58()
+                .as_bytes(),
+        );
+        assert!(load_allowed_peers_with_cap(&path, MAX_ALLOWED_PEERS_FILE_BYTES).is_ok());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_allowed_peers_rejects_malformed_lines_without_panicking() {
+        let path = temp_file(b"this is not a base58 peer id");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            load_allowed_peers_with_cap(&path, MAX_ALLOWED_PEERS_FILE_BYTES)
+        }));
+        assert!(result.is_ok(), "malformed line must not panic");
+        assert!(result.expect("no panic").is_err());
+        std::fs::remove_file(&path).ok();
+    }
 }

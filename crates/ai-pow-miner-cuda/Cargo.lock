@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "ai-pow"
-version = "0.1.0"
+version = "0.1.17"
 dependencies = [
  "ai-pow-zk",
  "bincode",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "ai-pow-miner"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "ai-pow",
  "ai-pow-zk",
@@ -78,6 +78,7 @@ dependencies = [
  "nockvm",
  "nockvm_macros",
  "num_cpus",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -89,17 +90,12 @@ dependencies = [
 
 [[package]]
 name = "ai-pow-miner-cuda"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "ai-pow",
  "ai-pow-miner",
  "anyhow",
- "blake3",
  "clap",
- "cuda-core",
- "cuda-device",
- "cuda-host",
- "cuda-macros",
  "tokio",
  "tokio-util",
  "tracing",
@@ -107,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "ai-pow-zk"
-version = "0.1.0-experimental"
+version = "0.1.17"
 dependencies = [
  "bincode",
  "blake3",
@@ -1456,26 +1452,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bindgen"
-version = "0.71.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
-dependencies = [
- "bitflags 2.13.1",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash",
- "shlex 1.3.0",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1726,16 +1702,7 @@ dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex 2.0.1",
-]
-
-[[package]]
-name = "cexpr"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
-dependencies = [
- "nom",
+ "shlex",
 ]
 
 [[package]]
@@ -1783,17 +1750,6 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.7",
  "inout",
-]
-
-[[package]]
-name = "clang-sys"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
-dependencies = [
- "glob",
- "libc",
- "libloading",
 ]
 
 [[package]]
@@ -2068,15 +2024,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
-name = "crc32fast"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2236,69 +2183,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
 dependencies = [
  "cipher",
-]
-
-[[package]]
-name = "cuda-artifact-finalizer"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "libnvvm-sys",
- "nvjitlink-sys",
- "sha2",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "cuda-bindings"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "bindgen",
-]
-
-[[package]]
-name = "cuda-core"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "anyhow",
- "cuda-bindings",
- "cuda-macros",
- "half",
- "oxide-artifacts",
-]
-
-[[package]]
-name = "cuda-device"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "cuda-macros",
-]
-
-[[package]]
-name = "cuda-host"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "cuda-artifact-finalizer",
- "cuda-core",
- "cuda-macros",
- "half",
- "sha2",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "cuda-macros"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "proc-macro2",
- "quote",
- "reserved-oxide-symbols",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -3335,17 +3219,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "half"
-version = "2.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
-dependencies = [
- "cfg-if",
- "crunchy",
- "zerocopy",
-]
-
-[[package]]
 name = "hash32"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3700,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "ibig"
-version = "0.3.6"
+version = "0.1.17"
 dependencies = [
  "cfg-if",
  "num-traits",
@@ -4224,29 +4097,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
-
-[[package]]
-name = "libnvvm-sys"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "libloading",
- "thiserror 2.0.19",
-]
 
 [[package]]
 name = "libp2p"
@@ -4928,7 +4782,7 @@ dependencies = [
 
 [[package]]
 name = "murmur3"
-version = "0.5.2"
+version = "0.1.17"
 
 [[package]]
 name = "netlink-packet-core"
@@ -4999,7 +4853,7 @@ checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 
 [[package]]
 name = "nockapp"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5059,7 +4913,7 @@ dependencies = [
 
 [[package]]
 name = "nockapp-grpc"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5100,7 +4954,7 @@ dependencies = [
 
 [[package]]
 name = "nockapp-grpc-proto"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "glob",
@@ -5121,7 +4975,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-libp2p-io"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "async-trait",
  "bs58",
@@ -5152,7 +5006,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-math"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "argon2",
  "arrayref",
@@ -5175,7 +5029,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-mining-common"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "bytes",
  "futures",
@@ -5191,7 +5045,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-types"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "alloy",
  "anyhow",
@@ -5213,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "nockvm"
-version = "0.1.0"
+version = "0.1.17"
 dependencies = [
  "autotools",
  "bincode",
@@ -5243,7 +5097,7 @@ dependencies = [
 
 [[package]]
 name = "nockvm_crypto"
-version = "0.1.0"
+version = "0.1.17"
 dependencies = [
  "aes",
  "aes-siv",
@@ -5257,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "nockvm_macros"
-version = "0.1.0"
+version = "0.1.17"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -5299,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "noun-serde"
-version = "0.1.0"
+version = "0.1.17"
 dependencies = [
  "bytes",
  "ibig",
@@ -5311,7 +5165,7 @@ dependencies = [
 
 [[package]]
 name = "noun-serde-derive"
-version = "0.1.0"
+version = "0.1.17"
 dependencies = [
  "nockvm",
  "proc-macro2",
@@ -5416,15 +5270,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nvjitlink-sys"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "libloading",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "nybbles"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5436,18 +5281,6 @@ dependencies = [
  "ruint",
  "serde",
  "smallvec",
-]
-
-[[package]]
-name = "object"
-version = "0.36.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
-dependencies = [
- "crc32fast",
- "hashbrown 0.15.5",
- "indexmap 2.14.0",
- "memchr",
 ]
 
 [[package]]
@@ -5567,14 +5400,6 @@ checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
  "dlv-list",
  "hashbrown 0.14.5",
-]
-
-[[package]]
-name = "oxide-artifacts"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-dependencies = [
- "object",
 ]
 
 [[package]]
@@ -7252,11 +7077,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "reserved-oxide-symbols"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=0810ba95ff9dcf1ca379b779d3ebe33a8899b15d#0810ba95ff9dcf1ca379b779d3ebe33a8899b15d"
-
-[[package]]
 name = "resolv-conf"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7919,12 +7739,6 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
-
-[[package]]
-name = "shlex"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shlex"

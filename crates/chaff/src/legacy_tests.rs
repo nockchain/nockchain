@@ -297,6 +297,56 @@ mod tests {
     }
 
     #[test]
+    fn chaff_rejects_exabyte_atom_declaration_without_allocating() {
+        // GHSA-7hhm-wxwr-9mg4: `zeros == 64` passes the `> MAX_USIZE_BITS`
+        // guard, `size_low == 0` yields `bit_count == 2^63`, and the
+        // pre-allocation `vec![0u8; (bit_count + 7) >> 3]` requests ~1 EB
+        // before `read_bits_to_bytes` ever bounds-checks. Must be rejected
+        // up front instead of aborting the process.
+        let mut slab: NounSlab<Chaff> = NounSlab::new();
+        let mut writer = BitWriter::new();
+        writer.write_bit(false); // atom tag
+        writer.write_zeros(usize::BITS as usize); // zeros == MAX_USIZE_BITS
+        writer.write_bit(true); // unary delimiter
+        writer.write_zeros(usize::BITS as usize - 1); // size_low == 0
+        let jammed = writer.into_bytes();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slab.cue_into(jammed)));
+        assert!(
+            result.is_ok(),
+            "cue must not abort on a 2^63-bit atom declaration"
+        );
+        assert!(matches!(
+            result.expect("catch_unwind should succeed"),
+            Err(CueError::TruncatedBuffer)
+        ));
+    }
+
+    #[test]
+    fn chaff_rejects_max_size_low_atom_declaration_without_allocating() {
+        // GHSA-3697-qw8x-6j63: zeros == 63 with size_low == 2^62-1 declares
+        // bit_count == 2^63-1, again ~1 EB of `vec![0u8; ...]` before the
+        // truncation check. Must be rejected before allocating.
+        let mut slab: NounSlab<Chaff> = NounSlab::new();
+        let mut writer = BitWriter::new();
+        writer.write_bit(false); // atom tag
+        writer.write_zeros(usize::BITS as usize - 1); // 63 zeros
+        writer.write_bit(true); // unary delimiter
+        writer.write_bits_from_value(usize::MAX >> 2, usize::BITS as usize - 2); // 62 ones
+        let jammed = writer.into_bytes();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slab.cue_into(jammed)));
+        assert!(
+            result.is_ok(),
+            "cue must not abort on a 2^63-1-bit atom declaration"
+        );
+        assert!(matches!(
+            result.expect("catch_unwind should succeed"),
+            Err(CueError::TruncatedBuffer)
+        ));
+    }
+
+    #[test]
     fn chaff_rejects_zero_atom_bad_encoding() {
         let mut slab: NounSlab<Chaff> = NounSlab::new();
         let mut writer = BitWriter::new();

@@ -1,3 +1,4 @@
+use nockvm::jets::util::BAIL_FAIL;
 use nockvm::jets::JetErr;
 use nockvm::noun::{Noun, NounAllocator, NounSpace};
 use noun_serde::{NounDecode, NounEncode};
@@ -206,7 +207,7 @@ pub fn hash_noun_varlen_digest<A: NounAllocator>(
 ) -> Result<[u64; 5], JetErr> {
     let mut leaf_vec = Vec::new();
     let mut dyck_vec = Vec::new();
-    dfs_dyck_recursive(n, &mut leaf_vec, &mut dyck_vec, space)?;
+    dfs_dyck(n, &mut leaf_vec, &mut dyck_vec, space)?;
 
     let mut input = Vec::with_capacity(1 + leaf_vec.len() + dyck_vec.len());
     input.push(leaf_vec.len() as u64);
@@ -227,22 +228,52 @@ pub fn hash_belts_list<A: NounAllocator>(
     Ok(res)
 }
 
-fn dfs_dyck_recursive(
-    current: Noun,
+/// Pre-order dyck walk over a noun: `0` on entering a cell, `1` after its
+/// head subtree, leaf atoms collected in encounter order.
+///
+/// Iterative and budget-bounded: network-decoded nouns can be arbitrarily
+/// deep and structurally shared (a jam DAG of `k` physical nodes implies a
+/// logical tree of up to `2^k`), so the walk must neither recurse on the
+/// worker thread's stack nor expand an unbounded logical tree — the digest
+/// is defined over the logical tree, so an oversized expansion is an error
+/// rather than a truncated hash.
+const DYCK_WALK_MAX_NODES: usize = 1 << 20;
+
+fn dfs_dyck(
+    root: Noun,
     leaf_vec: &mut Vec<u64>,
     dyck_vec: &mut Vec<u64>,
     space: &NounSpace,
 ) -> Result<(), JetErr> {
-    if current.is_atom() {
-        leaf_vec.push(current.in_space(space).as_atom()?.as_u64()?);
-    } else {
-        let current_cell = current.in_space(space).as_cell()?;
-        dyck_vec.push(0);
-        dfs_dyck_recursive(current_cell.head().noun(), leaf_vec, dyck_vec, space)?;
-        dyck_vec.push(1);
-        dfs_dyck_recursive(current_cell.tail().noun(), leaf_vec, dyck_vec, space)?;
+    enum Task {
+        Walk(Noun),
+        CloseHead,
     }
 
+    let mut work = vec![Task::Walk(root)];
+    let mut count = 0usize;
+    while let Some(task) = work.pop() {
+        count += 1;
+        if count > DYCK_WALK_MAX_NODES {
+            return Err(BAIL_FAIL);
+        }
+        match task {
+            Task::Walk(current) => {
+                if current.is_atom() {
+                    leaf_vec.push(current.in_space(space).as_atom()?.as_u64()?);
+                } else {
+                    let current_cell = current.in_space(space).as_cell()?;
+                    dyck_vec.push(0);
+                    // LIFO: head subtree fully walks, then its closing `1`,
+                    // then the tail — the same order the recursion produced.
+                    work.push(Task::Walk(current_cell.tail().noun()));
+                    work.push(Task::CloseHead);
+                    work.push(Task::Walk(current_cell.head().noun()));
+                }
+            }
+            Task::CloseHead => dyck_vec.push(1),
+        }
+    }
     Ok(())
 }
 
@@ -301,6 +332,60 @@ mod tests {
                 5511165615113400862, 11490077061305916457,
             ]
         );
+    }
+
+    #[test]
+    fn hash_noun_varlen_digest_walks_deep_chains_iteratively() {
+        // GHSA-xjmj-ppvv-9hfj (latent crash component): a deep spine noun
+        // (reachable via crafted gossip before validation) must digest
+        // without overflowing the hashing thread's stack. Walk order is
+        // pinned by `hash_noun_varlen_digest_uses_public_shape_encoding`.
+        let depth = 200_000;
+        let digest = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+                let mut noun = D(0);
+                for i in 0..depth {
+                    noun = T(&mut stack, &[D(1 + (i % 63)), noun]);
+                }
+                let space = stack.noun_space();
+                let mut arena = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+                hash_noun_varlen_digest(&mut arena, noun, &space)
+                    .expect("deep chain digests iteratively")
+            })
+            .expect("spawn worker thread")
+            .join()
+            .expect("hash walk must not overflow the stack");
+        assert_ne!(digest, [0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hash_noun_varlen_digest_rejects_dag_bomb_expansion() {
+        // GHSA-g3rv-687v-p7h9: a shared DAG `a_k = [a_(k-1) a_(k-1)]` of a
+        // few dozen physical nodes implies a 2^k-node logical tree. The
+        // digest is defined over the logical expansion, so the walk is
+        // budget-bounded and errors instead of expanding unboundedly.
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+        let mut noun = D(0);
+        for _ in 0..30 {
+            let cell = nockvm::noun::Cell::new(&mut stack, noun, noun);
+            noun = cell.as_noun();
+        }
+        let space = stack.noun_space();
+        let mut arena = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
+        assert!(
+            hash_noun_varlen_digest(&mut arena, noun, &space).is_err(),
+            "a 2^30-node logical expansion must be rejected at the budget"
+        );
+
+        // A small shared DAG still digests fine.
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
+        let shared = T(&mut stack, &[D(7), D(7)]);
+        let noun = T(&mut stack, &[shared, shared]);
+        let space = stack.noun_space();
+        let mut arena = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
+        assert!(hash_noun_varlen_digest(&mut arena, noun, &space).is_ok());
     }
 
     #[test]

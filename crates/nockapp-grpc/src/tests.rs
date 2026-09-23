@@ -17,6 +17,44 @@ mod tests {
     }
 
     #[test]
+    fn grpc_wire_source_is_owned_not_leaked() {
+        // GHSA-h4f8-7h38-9jr2: the client-supplied wire source is owned by
+        // the WireRepr and freed with it — the previous per-request
+        // `Box::leak` let any client permanently claim node memory.
+        use nockapp::wire::WireRepr;
+
+        use crate::pb::common::v1::wire_tag::Value;
+        use crate::pb::common::v1::{Wire, WireTag};
+        use crate::wire_conversion::grpc_wire_to_nockapp;
+
+        let wire_with_source = |source: &str| Wire {
+            source: source.to_string(),
+            version: 1,
+            tags: vec![WireTag {
+                value: Some(Value::Text("poke".to_string())),
+            }],
+        };
+
+        let big_source = "x".repeat(1 << 20);
+        let wire = wire_with_source(&big_source);
+        let repr = grpc_wire_to_nockapp(&wire).expect("converts");
+        assert_eq!(repr.source.as_ref(), big_source);
+        drop(repr);
+
+        for _ in 0..100 {
+            let wire = wire_with_source("zk-pow-miner");
+            let repr = grpc_wire_to_nockapp(&wire).expect("converts");
+            assert_eq!(repr.source.as_ref(), "zk-pow-miner");
+        }
+
+        // Driver-style construction still borrows 'static literals.
+        let repr = WireRepr::new("sys", 1, vec![]);
+        assert_eq!(repr.source.as_ref(), "sys");
+
+        assert!(grpc_wire_to_nockapp(&wire_with_source("")).is_err());
+    }
+
+    #[test]
     fn test_error_codes() {
         use crate::pb::common::v1::ErrorCode;
 

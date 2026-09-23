@@ -290,6 +290,29 @@
     (~(validate-page-with-txs dcon con der bc-pre-activation-v1) pag)
   (expect-eq !>(%.y) !>(?=(%.y -.r)))
 ::
+::  A coinbase variant from the wrong side of v1-phase must be rejected by
+::  validation, before the state-mutating +accept-page invariant can crash.
+++  test-coinbase-variant-height-mismatch-rejects
+  =/  con  (initial-consensus-state-custom:h-pre bc-pre-activation-v1)
+  =/  v1-before-phase=page:v1:t-pre
+    %*  .  *page:v1:t-pre
+      parent  default-genesis-id:h-pre
+      height  1
+    ==
+  =/  v0-at-phase=page:v0:t-pre
+    %*  .  *page:v0:t-pre
+      parent  default-genesis-id:h-pre
+      height  2
+    ==
+  =/  early=(reason tx-acc:t-pre)
+    (~(validate-page-with-txs dcon con der bc-pre-activation-v1) v1-before-phase)
+  =/  late=(reason tx-acc:t-pre)
+    (~(validate-page-with-txs dcon con der bc-pre-activation-v1) v0-at-phase)
+  ;:  weld
+    (expect-eq !>(%coinbase-version-height-mismatch) !>((rejection-reason early)))
+    (expect-eq !>(%coinbase-version-height-mismatch) !>((rejection-reason late)))
+  ==
+::
 ::  +test-fund-split-post-cap-zero-emission-no-fund-slot: closes the gap
 ::    flagged in docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #2. After
 ::    `tail-end` the schedule emits zero subsidy, so the expected fund

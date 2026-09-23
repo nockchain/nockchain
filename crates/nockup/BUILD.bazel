@@ -16,12 +16,16 @@ exports_files([
 ])
 
 # Cargo's build.rs sets FULL_VERSION from CARGO_PKG_VERSION. Derive both from
-# the package manifest so the Bazel binary reports the same release version.
+# the package manifest (or its inherited workspace version) for Bazel too.
 genrule(
     name = "package_version_env",
-    srcs = ["Cargo.toml"],
+    srcs = ["Cargo.toml", "//:Cargo.toml"],
     outs = ["package_version.env"],
-    cmd = "version=$$(sed -nE 's/^version[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\\1/p' $(SRCS) | head -n 1); " +
+    cmd = "version=$$(sed -nE 's/^version[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\\1/p' $(location Cargo.toml) | head -n 1); " +
+          "if [ -z \"$$version\" ] && grep -Eq '^version[.]workspace[[:space:]]*=[[:space:]]*true' $(location Cargo.toml); then " +
+          "version=$$(sed -n '/\\[workspace.package\\]/,/\\[/p' $(location //:Cargo.toml) | " +
+          "sed -nE 's/^version[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\\1/p' | head -n 1); " +
+          "fi; " +
           "test -n \"$$version\"; " +
           "printf 'FULL_VERSION=%s\\nCARGO_PKG_VERSION=%s\\n' \"$$version\" \"$$version\" > $@",
 )

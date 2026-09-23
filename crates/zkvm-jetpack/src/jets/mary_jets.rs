@@ -35,6 +35,16 @@ pub fn mary_swag_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetEr
         debug!("cannot convert mary arg to mary");
         return Err(BAIL_FAIL);
     };
+    // `i` and `j` are attacker-controlled row indices; bound the swag
+    // window to the decoded mary before slicing `dat` and sizing the
+    // result allocation.
+    let Some(end) = i.checked_add(j).filter(|end| *end <= mary.len as usize) else {
+        debug!(
+            "swag window [{i}, {i}+{j}) exceeds mary length {}",
+            mary.len
+        );
+        return Err(BAIL_FAIL);
+    };
 
     let (res, res_poly): (IndirectAtom, MarySliceMut) =
         new_handle_mut_mary(&mut context.stack, mary.step as usize, j);
@@ -42,7 +52,7 @@ pub fn mary_swag_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetEr
 
     res_poly
         .dat
-        .copy_from_slice(&mary.dat[(i * step)..(i + j) * step]);
+        .copy_from_slice(&mary.dat[(i * step)..(end * step)]);
 
     let res_cell = finalize_mary(&mut context.stack, step, j, res);
     Ok(res_cell)
@@ -80,7 +90,7 @@ pub fn mary_weld_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetEr
         debug!("mary1 or mary2 is not an fpoly");
         return Err(BAIL_FAIL);
     };
-    let res_len = mary1.len + mary2.len;
+    let res_len = mary1.len.checked_add(mary2.len).ok_or(BAIL_FAIL)?;
     let (res, res_poly): (IndirectAtom, MarySliceMut) =
         new_handle_mut_mary(&mut context.stack, step as usize, res_len as usize);
 
@@ -107,7 +117,7 @@ pub fn mary_weld_step_jet(context: &mut Context, subject: Noun) -> Result<Noun, 
         return Err(BAIL_FAIL);
     }
 
-    let res_step = mary1.step + mary2.step;
+    let res_step = mary1.step.checked_add(mary2.step).ok_or(BAIL_FAIL)?;
     let res_len = mary1.len;
     let (res, res_poly): (IndirectAtom, MarySliceMut) =
         new_handle_mut_mary(&mut context.stack, res_step as usize, res_len as usize);
@@ -132,7 +142,7 @@ pub fn mary_zero_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun
     };
 
     let n_32 = n_atom.as_u64()? as u32;
-    let res_len = mary.len + n_32;
+    let res_len = mary.len.checked_add(n_32).ok_or(BAIL_FAIL)?;
     let (res, res_poly): (IndirectAtom, MarySliceMut) =
         new_handle_mut_mary(&mut context.stack, mary.step as usize, res_len as usize);
 
@@ -194,7 +204,7 @@ pub fn lift_elt_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr
 
         let count = init_bpoly_arg_list.count();
         let (res, res_poly): (IndirectAtom, &mut [Belt]) = new_handle_mut_slice(stack, Some(count));
-        init_bpoly(init_bpoly_arg_list, res_poly, &space);
+        init_bpoly(init_bpoly_arg_list, res_poly, &space)?;
 
         let res_cell = finalize_poly(stack, Some(res_poly.len()), res);
         Ok(res_cell.in_space(&space).as_cell()?.tail().noun())
@@ -215,7 +225,7 @@ pub fn fet_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let lent_v = lent(v, &space)? as u64;
 
-    if ((lent_v == 1) && (step == 1)) || (lent_v == (step + 1)) && levy_based(v, &space) {
+    if ((lent_v == 1) && (step == 1)) || (lent_v == (step + 1)) && levy_based(v, &space)? {
         Ok(YES)
     } else {
         Ok(NO)
@@ -225,7 +235,7 @@ pub fn fet_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 pub fn transpose_bpolys_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let space = context.stack.noun_space();
     let sam = slot(subject, 6, &space)?;
-    let bpolys = MarySlice::try_from(sam, &space).expect("cannot convert bpolys arg");
+    let bpolys = MarySlice::try_from(sam, &space).map_err(|_| BAIL_FAIL)?;
     transpose_bpolys(context, bpolys)
 }
 
@@ -577,5 +587,16 @@ mod tests {
         let expected = finalize_poly(&mut context.stack, Some(3), res);
 
         assert_noun_eq(&mut context.stack, got, expected);
+    }
+
+    /// Wire nouns are attacker-supplied: a malformed mary argument must be
+    /// an error, never a panic.
+    #[test]
+    fn transpose_bpolys_jet_malformed_mary_returns_error() {
+        let mut context = init_context();
+        let sam = D(5);
+        let subject = T(&mut context.stack, &[D(0), sam, D(0)]);
+
+        assert!(transpose_bpolys_jet(&mut context, subject).is_err());
     }
 }

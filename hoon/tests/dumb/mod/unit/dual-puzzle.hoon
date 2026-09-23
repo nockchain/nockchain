@@ -414,6 +414,77 @@
   =/  state  (~(got h-by puzzle-asert-states.der.built) tip-bid)
   %+  expect-eq  !>([2 3])  !>([ai-count.state zk-count.state])
 ::
+::  walks the production consensus promotion route for a post-activation
+::  AI-PoW block (GHSA-g3g3-q33c-6fwh).
+::
+::    A block whose transactions arrive late takes the pending route:
+::    +heard-block admits it via +validate-page-without-txs,
+::    +add-pending-block parks it in `.pending-blocks`, and when the
+::    transaction arrives +accept-page promotes it through
+::    +accept-pending-block. The promoted block must carry the same `%4`
+::    proof-version entry the direct +accept-block path writes. Before the
+::    fix the promotion route omitted the write, so +block-id-to-proof-version
+::    fell back to the height-derived legacy ZK version and misclassified
+::    the block. The final control asserts +block-compute-work reads the
+::    certificate artifact directly, so fork-choice heaviness stays AI-priced
+::    either way.
+++  test-pending-ai-block-promotion-records-proof-version
+  ^-  tang
+  =/  pt  ~(. txe bc-dual-post:helpers)
+  ::  Height-3 chain accepted through the DIRECT path (block-versions
+  ::  populated; the height-2 AI block carries its `%4` entry).
+  =/  built  (build-typed-chain:hp ~[%zk %ai %zk])
+  ::  Height-4 post-activation AI page whose transaction has NOT arrived yet.
+  =/  ai-page=page:t  (make-ai-pow-page:hp tip.built con.built der.built)
+  ::  A transaction id the page carries but whose raw tx is absent.
+  =/  late-tx-id=tx-id:t  *hash:t
+  =.  ai-page
+    ?^  -.ai-page
+      ai-page(tx-ids (~(put z-in tx-ids.ai-page) late-tx-id))
+      ai-page(tx-ids (~(put z-in tx-ids.ai-page) late-tx-id))
+  =.  ai-page
+    ?^  -.ai-page
+      ai-page(digest (compute-digest:page:pt ai-page))
+      ai-page(digest (compute-digest:page:pt ai-page))
+  =/  bid=block-id:t  ~(digest get:page:pt ai-page)
+  ::  heard-block step 1: header validation passes without the raw tx.
+  =/  header-ok=?  -:(~(validate-page-without-txs dcon con.built der.built bc-dual-post:helpers) ai-page ~(timestamp get:page:pt ai-page))
+  ?>  header-ok
+  ::  heard-block step 2: the missing transaction parks the block in pending.
+  =/  [missing=(list tx-id:t) pending=consensus-state]
+    (~(add-pending-block dcon con.built der.built bc-dual-post:helpers) ai-page)
+  ?>  (lte 1 (lent missing))
+  ?>  (~(has h-by pending-blocks.pending) bid)
+  ::  The transaction arrives: +accept-page routes the still-pending block
+  ::  through +accept-pending-block, the production promotion route.
+  =/  promoted=consensus-state
+    (~(accept-page dcon pending der.built bc-dual-post:helpers) ai-page *tx-acc:t *@da)
+  ?>  (~(has h-by blocks.promoted) bid)
+  ?>  ?!  (~(has h-by pending-blocks.promoted) bid)
+  ::  Setup guard: the DIRECT path recorded `%4` for its height-2 AI block,
+  ::  so +accept-block's conditional write is the only thing the promotion
+  ::  route lacks. If this fails the fixture is wrong, not the consensus.
+  =/  direct-ai-bid=block-id:t  (~(got z-by heaviest-chain.der.built) 2)
+  ?>  ?=([~ %4] (~(get h-by block-versions.con.built) direct-ai-bid))
+  =/  pv=proof-version:sp
+    (~(block-id-to-proof-version dcon promoted der.built bc-dual-post:helpers) bid)
+  =/  aw=@
+    (merge:bignum (~(block-compute-work dcon promoted der.built bc-dual-post:helpers) ai-page))
+  ;:  weld
+    ::  the invariant: the promoted block carries the same `%4` entry the
+    ::  direct path writes (this fails on the unfixed promotion route).
+    %+  expect-eq  !>(%.y)
+    !>(?=([~ %4] (~(get h-by block-versions.promoted) bid)))
+    ::  consequence: +block-id-to-proof-version identifies the promoted
+    ::  block as `%4` rather than the legacy height-derived ZK version.
+    %+  expect-eq  !>(%4)
+    !>(pv)
+    ::  control: fork choice reads the certificate artifact directly, so
+    ::  heaviness stays AI-priced even while the entry was missing.
+    %+  expect-eq  !>(aw)
+    !>((merge:bignum (ai-pow-work:page:pt ~(height get:page:pt ai-page) ~(target get:page:pt ai-page))))
+  ==
+
 ::  RETARGETING — AI difficulty tracks the AI subchain, not global height.
 ::  Two chains share the same AI subchain (one AI block on genesis); chain B
 ::  interleaves a ZK block. The next AI block's ASERT target must be IDENTICAL

@@ -3,7 +3,6 @@
 This directory holds machine-readable CBOR conformance vectors for the libp2p request-response transport.
 
 Current fixture:
-- `req_res_gen1_cbor_vectors.json`
 - `req_res_gen2_cbor_vectors.json`
 
 ## Fixture goals
@@ -34,14 +33,11 @@ Top-level fields:
 ## Validation
 
 Vectors are executed by tests in:
-- `open/crates/nockchain-libp2p-io/src/cbor_tests.rs`
+- `crates/nockchain-libp2p-io/src/cbor_tests.rs`
 
 Current entry points:
-- `test_gen1_cbor_vector_schema_version`
-- `test_gen1_request_cbor_vectors_roundtrip`
-- `test_gen1_response_cbor_vectors_roundtrip`
-- `test_gen1_invalid_cbor_vectors_fail_decode`
 - `test_gen2_cbor_vector_schema_version`
 - `test_gen2_request_cbor_vectors_roundtrip`
 - `test_gen2_response_cbor_vectors_roundtrip`
 - `test_gen2_invalid_cbor_vectors_fail_decode`
+- `test_legacy_gossip_request_fails_decode`

@@ -1118,6 +1118,12 @@
     =/  witness-fee=coins  (div (mul witness-word-count effective-base-fee) witness-divisor)
     =/  word-fee=coins  (add seed-fee witness-fee)
     (max word-fee min-fee.data)
+  ++  meets-min-fee
+    |=  [sps=form page-num=page-number]
+    ^-  ?
+    =/  required=coins  (calculate-min-fee [sps page-num])
+    =/  paid=coins  (roll-fees sps)
+    (gte paid required)
   --
 ::
 ++  spend-v1
@@ -1391,9 +1397,7 @@
       [balance.form spends.raw1 height.form max-size.data bythos-phase]
     ?.  ?=(%.y -.validate-result)  validate-result
     ::  check fee covers word count
-    =/  min-fee=coins  (calculate-min-fee:spends [spends.raw1 height.form])
-    =/  paid-fee=coins  (roll-fees:spends spends.raw1)
-    ?.  (gte paid-fee min-fee)
+    ?.  (meets-min-fee:spends [spends.raw1 height.form])
       [%.n %v1-insufficient-fee]
     ::  add outputs to balance
     =/  add-result  (add-outputs outputs.tx1)

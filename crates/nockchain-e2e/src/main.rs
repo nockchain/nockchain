@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser, Subcommand};
-use nockchain_e2e::{peer_speedup, runner, sizing};
+use nockchain_e2e::{runner, sizing};
 use nockchain_types::tx_engine::common::Hash;
 
 #[derive(Parser, Debug)]
@@ -63,16 +63,6 @@ enum Command {
         gen2_batch_max_bytes: u64,
         #[arg(long, default_value_t = 131_072)]
         gen2_item_max_bytes: u64,
-    },
-    AssertPeerSpeedup {
-        #[arg(long = "server", required = true)]
-        servers: Vec<String>,
-        #[arg(long, default_value_t = 5_000)]
-        sample_interval_ms: u64,
-        #[arg(long, default_value_t = 1.10)]
-        min_speedup_ratio: f64,
-        #[arg(long)]
-        json_out: Option<PathBuf>,
     },
     WaitForPublicHeight {
         #[arg(long)]
@@ -216,21 +206,6 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
-            Ok(())
-        }
-        Command::AssertPeerSpeedup {
-            servers,
-            sample_interval_ms,
-            min_speedup_ratio,
-            json_out,
-        } => {
-            peer_speedup::assert_peer_speedup(peer_speedup::AssertPeerSpeedupOptions {
-                servers,
-                sample_interval: Duration::from_millis(sample_interval_ms),
-                min_speedup_ratio,
-                json_out,
-            })
-            .await?;
             Ok(())
         }
         Command::WaitForPublicHeight {

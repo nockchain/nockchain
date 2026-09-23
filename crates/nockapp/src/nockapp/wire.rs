@@ -18,13 +18,13 @@ pub trait Wire: Sized {
 
 /// Converts a wire to a Noun by allocating it on the kernel's stack.
 pub(crate) fn wire_to_noun<A: NounAllocator>(stack: &mut A, wire: &WireRepr) -> Noun {
-    let source_atom = make_tas(stack, wire.source);
+    let source_atom = make_tas(stack, &wire.source);
     let version_atom: Noun = D(wire.version);
     if wire.tags.is_empty() {
         T(stack, &[source_atom.as_noun(), version_atom, D(0)])
     } else {
         let mut wire_noun = Vec::with_capacity(wire.tags.len() + 3);
-        wire_noun.push(make_tas(stack, wire.source).as_noun());
+        wire_noun.push(make_tas(stack, &wire.source).as_noun());
         wire_noun.push(D(wire.version));
         for tag in &wire.tags {
             wire_noun.push(tag.as_noun(stack));
@@ -91,22 +91,30 @@ impl From<&str> for WireTag {
 /// WireRepr is intended to make the default scenario (no custom tags beyond source and version) not allocate on the heap up-front.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireRepr {
-    pub source: &'static str,
+    pub source: std::borrow::Cow<'static, str>,
     pub version: u64,
     pub tags: Vec<WireTag>,
 }
 
 impl WireRepr {
-    pub fn new(source: &'static str, version: u64, tags: Vec<WireTag>) -> Self {
+    /// The source is owned: driver-supplied sources borrow `'static` string
+    /// constants, while transports fed by untrusted clients (the private
+    /// gRPC wire conversion) own their per-request strings so they are
+    /// freed with the wire instead of living for the rest of the process.
+    pub fn new(
+        source: impl Into<std::borrow::Cow<'static, str>>,
+        version: u64,
+        tags: Vec<WireTag>,
+    ) -> Self {
         WireRepr {
-            source,
+            source: source.into(),
             version,
             tags,
         }
     }
-    pub fn no_tags(source: &'static str, version: u64) -> Self {
+    pub fn no_tags(source: impl Into<std::borrow::Cow<'static, str>>, version: u64) -> Self {
         WireRepr {
-            source,
+            source: source.into(),
             version,
             tags: Vec::new(),
         }

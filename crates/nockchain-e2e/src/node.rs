@@ -1795,7 +1795,7 @@ mod tests {
         manager
             .set_node_env(
                 "node-a",
-                String::from("NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED"),
+                String::from("NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED"),
                 String::from("true"),
             )
             .expect("set env should succeed");
@@ -1807,7 +1807,7 @@ mod tests {
                 entry
                     .spec
                     .env
-                    .get("NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED")
+                    .get("NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED")
             })
             .map(String::as_str);
         assert_eq!(stored, Some("true"));

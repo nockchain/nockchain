@@ -11,12 +11,10 @@ pub fn grpc_wire_to_nockapp(wire: &Wire) -> Result<WireRepr> {
                 "Wire source cannot be empty".to_string(),
             ))
         }
-        s => {
-            // Convert to static str - in practice, we'd need a registry of known sources
-            // For now, we'll leak the string to get a 'static lifetime
-            // TODO: Use a proper source registry
-            Box::leak(s.to_string().into_boxed_str())
-        }
+        // The client-supplied source is OWNED by the wire and freed with it.
+        // The previous per-request `Box::leak` let any client permanently
+        // claim node memory (a 4 MiB request leaked ~4 MiB forever).
+        s => s.to_string(),
     };
 
     let mut tags = Vec::new();

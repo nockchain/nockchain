@@ -4,10 +4,11 @@ use alloc::alloc::Layout;
 use core::marker::PhantomData;
 use core::{mem, slice};
 
-/// Chunk of memory directly allocated from the global allocator.
+/// Chunk of scratch memory.
 pub(crate) struct MemoryAllocation {
     layout: Layout,
     start: *mut u8,
+    deallocate: bool,
 }
 
 pub trait Stack: Sized {
@@ -50,7 +51,11 @@ impl MemoryAllocation {
             ptr
         };
 
-        MemoryAllocation { layout, start }
+        MemoryAllocation {
+            layout,
+            start,
+            deallocate: false,
+        }
     }
 
     /// Allocate memory.
@@ -69,7 +74,11 @@ impl MemoryAllocation {
             ptr
         };
 
-        MemoryAllocation { layout, start }
+        MemoryAllocation {
+            layout,
+            start,
+            deallocate: true,
+        }
     }
 
     /// Get memory.
@@ -85,8 +94,8 @@ impl MemoryAllocation {
 
 impl Drop for MemoryAllocation {
     fn drop(&mut self) {
-        if self.layout.size() != 0 {
-            // Safe because the memory was allocated with the same layout.
+        if self.deallocate && self.layout.size() != 0 {
+            // Safe because globally allocated memory uses the same layout here.
             unsafe { alloc::alloc::dealloc(self.start, self.layout) };
         }
     }

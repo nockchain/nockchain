@@ -1528,29 +1528,6 @@
       |=  [wir=wire now=@da raw=raw-tx:t eny=@]
       ^-  [(list effect:dk) kernel-state:dk]
       ~>  %slog.[0 'heard-tx: Received raw transaction']
-      =/  id-b58  (to-b58:hash:t ~(id get:raw-tx:t raw))
-      ~>  %slog.[0 (cat 3 'heard-tx: Raw transaction id: ' id-b58)]
-      ::
-      ::  check if we already have raw-tx
-      ?:  (has-raw-tx:con ~(id get:raw-tx:t raw))
-        ::  Duplicate txs are never re-added to the mempool. Peer-origin
-        ::  duplicates emit only %seen; echoing them would create gossip loops.
-        ::  Local grpc duplicates are operator re-submissions and are gossiped
-        ::  immediately. New-heaviest events also announce retained txs, but
-        ::  wallet resends should not wait for block progress.
-        =/  re-gossip=?  (local-tx-submission wir)
-        =/  log-message
-          %^  cat  3
-            ?:  re-gossip
-              'heard-tx: Transaction id already seen, re-broadcasting: '
-            'heard-tx: Transaction id already seen: '
-          id-b58
-        ~>  %slog.[1 log-message]
-        =/  seen=(list effect:dk)
-          [%seen %tx ~(id get:raw-tx:t raw)]~
-        :_  k
-        ?.  re-gossip  seen
-        [[%gossip %0 %heard-tx raw] seen]
       ::
       ::  check if the raw-tx contents are in base field
       ?.  (based:raw-tx:t raw)
@@ -1576,17 +1553,64 @@
       ::  check tx-id. this is faster than calling validate:raw-tx (which also checks the id)
       ::  so we do it first
       =/  computed-id=hash:t  (compute-id:raw-tx:t raw)
-      ?.  =(computed-id ~(id get:raw-tx:t raw))
+      =/  claimed-id=hash:t  ~(id get:raw-tx:t raw)
+      ?.  =(computed-id claimed-id)
         =/  log-message
           ;:  (cury cat 3)
             'heard-tx: Invalid transaction id: '
-            id-b58
+            (to-b58:hash:t claimed-id)
             ', expected: '
             (to-b58:hash:t computed-id)
           ==
         ~>  %slog.[1 log-message]
         :_  k
         [(liar-effect wir %tx-id-invalid)]~
+      =/  id-b58  (to-b58:hash:t computed-id)
+      ~>  %slog.[0 (cat 3 'heard-tx: Raw transaction id: ' id-b58)]
+      ::
+      ::  check if we already have raw-tx
+      ?:  (has-raw-tx:con computed-id)
+        ::  Duplicate txs are never re-added to the mempool. Peer-origin
+        ::  duplicates emit only %seen; echoing them would create gossip loops.
+        ::  Local grpc duplicates are operator re-submissions and are gossiped
+        ::  immediately. New-heaviest events also announce retained txs, but
+        ::  wallet resends should not wait for block progress.
+        =/  re-gossip=?  (local-tx-submission wir)
+        =/  log-message
+          %^  cat  3
+            ?:  re-gossip
+              'heard-tx: Transaction id already seen, re-broadcasting: '
+            'heard-tx: Transaction id already seen: '
+          id-b58
+        ~>  %slog.[1 log-message]
+        =/  seen=(list effect:dk)
+          [%seen %tx computed-id]~
+        :_  k
+        ?.  re-gossip  seen
+        [[%gossip %0 %heard-tx raw] seen]
+      ::
+      ::  v0 transactions are unmineable when the next candidate height is
+      ::  at/after the v1 cutover (tx-acc rejects them with
+      ::  %v0-tx-after-cutoff). Discard them on receipt so they cannot lock
+      ::  inputs or be re-gossipped forever.
+      =/  v0-valid=?
+        ?^  -.raw
+          (lth +(get-cur-height:con) v1-phase.constants.k)
+        %.y
+      ?.  v0-valid
+        ~>  %slog.[1 'heard-tx: v0 transaction cannot be mined at next height, discarding']
+        `k
+      ::
+      ::  reject v1 transactions that cannot pass the same minimum-fee gate
+      ::  used at block inclusion. Retaining them would lock their inputs and
+      ::  repeatedly re-gossip transactions that can never be mined.
+      =/  fee-valid=?
+        ?^  -.raw
+          %.y
+        (meets-min-fee:spends:t [spends.raw get-cur-height:con])
+      ?.  fee-valid
+        ~>  %slog.[1 'heard-tx: Transaction fee below minimum, discarding']
+        `k
       ::
       ::  check if raw-tx is part of a pending block
       ::
@@ -2083,11 +2107,11 @@
         =/  pkh=(unit hash:t)
           (mole |.((from-b58:hash:t v1.command)))
         ?~  pk
-          ~>  %slog.[1 'do-set-mining-key: Invalid mining pubkey, exiting']
-          [[%exit 1]~ k]
+          ~>  %slog.[1 'do-set-mining-key: Invalid mining pubkey, rejected']
+          !!
         ?~  pkh
-          ~>  %slog.[1 'do-set-mining-key: Invalid mining pubkey, exiting']
-          [[%exit 1]~ k]
+          ~>  %slog.[1 'do-set-mining-key: Invalid mining pubkey, rejected']
+          !!
         =/  =sig:t  (new:sig:t u.pk)
         =.  m.k  (set-v0-shares:min [sig 100]~)
         =.  m.k  (set-shares:min [u.pkh 100]~)
@@ -2097,15 +2121,15 @@
         ^-  [(list effect:dk) kernel-state:dk]
         ?>  ?=([%set-mining-key-advanced *] command)
         ?:  (gth (lent v0.command) 2)
-        ~>  %slog.[1 'do-set-mining-key-advanced: Coinbase split for more than two sigs not yet supported, exiting']
-          [[%exit 1]~ k]
+          ~>  %slog.[1 'do-set-mining-key-advanced: Coinbase split for more than two sigs not yet supported, rejected']
+          !!
         ?:  (gth (lent v1.command) 2)
-        ~>  %slog.[1 'do-set-mining-key-advanced: Coinbase split for more than two public-key hashes not yet supported, exiting']
-          [[%exit 1]~ k]
+          ~>  %slog.[1 'do-set-mining-key-advanced: Coinbase split for more than two public-key hashes not yet supported, rejected']
+          !!
         ::  Mining needs a recipient in either reward era; empty share maps are invalid.
         ?:  ?&(?=(~ v0.command) ?=(~ v1.command))
-          ~>  %slog.[1 'do-set-mining-key-advanced: No keys provided, exiting.']
-          [[%exit 1]~ k]
+          ~>  %slog.[1 'do-set-mining-key-advanced: No keys provided, rejected.']
+          !!
         ::
         =/  [v0-shares=(list [sig:t @]) crash=?]
           %+  roll  `(list [@ @ (list @t)])`v0.command
@@ -2118,8 +2142,8 @@
             ((slog p.r) [~ %&])
           [[[p.r s] shares] crash]
         ?:  crash
-          ~>  %slog.[1 'do-set-mining-key-advanced: Invalid public keys provided, exiting']
-          [[%exit 1]~ k]
+          ~>  %slog.[1 'do-set-mining-key-advanced: Invalid public keys provided, rejected']
+          !!
         =/  [shares=(list [hash:t @]) crash=?]
           %+  roll  `(list [@ @t])`v1.command
           |=  $:  [s=@ h=@t]
@@ -2131,8 +2155,8 @@
             ((slog p.r) [~ %&])
           [[[p.r s] shares] crash]
         ?:  crash
-          ~>  %slog.[1 'do-set-mining-key-advanced: Invalid public keys provided, exiting']
-          [[%exit 1]~ k]
+          ~>  %slog.[1 'do-set-mining-key-advanced: Invalid public keys provided, rejected']
+          !!
         =?  m.k  ?=(^ v0-shares)  (set-v0-shares:min v0-shares)
         =?  m.k  ?=(^ shares)     (set-shares:min shares)
         `k

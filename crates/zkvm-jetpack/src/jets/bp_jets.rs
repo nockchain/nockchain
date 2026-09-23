@@ -312,17 +312,24 @@ pub fn init_bpoly_jet(context: &mut Context, subject: Noun) -> Result {
     let list_belt = HoonList::try_from(poly, &space)?.into_iter();
     let count = list_belt.count();
     let (res, res_poly): (IndirectAtom, &mut [Belt]) = new_handle_mut_slice(stack, Some(count));
-    init_bpoly(list_belt, res_poly, &space);
+    init_bpoly(list_belt, res_poly, &space)?;
 
     let res_cell = finalize_poly(stack, Some(res_poly.len()), res);
     Ok(res_cell)
 }
 
-pub fn init_bpoly(list_belt: HoonList<'_>, res_poly: &mut [Belt], space: &NounSpace) {
+/// Proof nouns are attacker-supplied: a list element that is not a belt
+/// must be an error, never a panic.
+pub fn init_bpoly(
+    list_belt: HoonList<'_>,
+    res_poly: &mut [Belt],
+    space: &NounSpace,
+) -> std::result::Result<(), JetErr> {
     for (i, belt_noun) in list_belt.enumerate() {
-        let belt = belt_noun.as_belt(space).expect("error at as_belt");
+        let belt = belt_noun.as_belt(space)?;
         res_poly[i] = belt;
     }
+    Ok(())
 }
 
 //-------------------------------------------------------------------------
@@ -332,16 +339,16 @@ pub fn bp_is_zero_jet(_context: &mut Context, subject: Noun) -> Result {
     let space = _context.stack.noun_space();
     let p = slot(subject, 6, &space)?;
 
-    if bp_is_zero(p, &space) {
+    if bp_is_zero(p, &space)? {
         Ok(YES)
     } else {
         Ok(NO)
     }
 }
 
-pub fn bp_is_zero(p: Noun, space: &NounSpace) -> bool {
-    let p_slice = BPolySlice::try_from(p, space).expect("invalid p");
-    p_slice.is_zero()
+pub fn bp_is_zero(p: Noun, space: &NounSpace) -> std::result::Result<bool, JetErr> {
+    let p_slice = BPolySlice::try_from(p, space)?;
+    Ok(p_slice.is_zero())
 }
 
 pub fn get_bpoly_fields(
@@ -413,4 +420,34 @@ pub fn bpdvr_jet(context: &mut Context, subject: Noun) -> Result {
     let res_cell_r = finalize_poly(&mut context.stack, Some(r_final_len as usize), r_cell);
 
     Ok(Cell::new(&mut context.stack, res_cell_q, res_cell_r).as_noun())
+}
+
+#[cfg(test)]
+mod malformed_input_tests {
+    use nockchain_math::belt::Belt;
+    use nockchain_math::structs::HoonList;
+    use nockvm::mem::NockStack;
+    use nockvm::noun::{D, T};
+
+    use super::{bp_is_zero, init_bpoly};
+
+    /// Wire nouns are attacker-supplied: malformed input must be an error,
+    /// never a panic (the serf thread resumes panics, killing the node).
+    #[test]
+    fn bp_is_zero_malformed_poly_returns_error() {
+        let stack = NockStack::new(1 << 20, 0);
+        let space = stack.noun_space();
+        assert!(bp_is_zero(D(5), &space).is_err());
+    }
+
+    #[test]
+    fn init_bpoly_non_belt_element_returns_error() {
+        let mut stack = NockStack::new(1 << 20, 0);
+        let space = stack.noun_space();
+        let cell_elt = T(&mut stack, &[D(1), D(2)]);
+        let list = T(&mut stack, &[cell_elt, D(0)]);
+        let hoon_list = HoonList::try_from(list, &space).expect("list should parse");
+        let mut res_poly: [Belt; 1] = [Belt(0)];
+        assert!(init_bpoly(hoon_list, &mut res_poly, &space).is_err());
+    }
 }

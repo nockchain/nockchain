@@ -76,6 +76,7 @@ use ai_pow_zk::{
 use crate::fiat_shamir::{
     attempt_tile_index, block_state, canonical_noise_seeds_from_matrix_commitments,
     canonical_noise_seeds_moe_from_public_routing, commitment_key, pow_key_for_nonce,
+    FiatShamirError,
 };
 use crate::params::{MatmulParams, ParamError};
 use crate::pearl_compat::{
@@ -880,7 +881,8 @@ fn expected_attempt_found_idx(
     let (s_a, _) = canonical_noise_seeds_from_matrix_commitments(
         &kappa, &commitments.h_a_chunk, &commitments.h_b_chunk, params.m, params.n,
     );
-    let idx = attempt_tile_index(&state, &tag, &s_a, params.num_tiles());
+    let idx = attempt_tile_index(&state, &tag, &s_a, params.num_tiles())
+        .map_err(BridgeError::FiatShamir)?;
     u32::try_from(idx).map_err(|_| BridgeError::FoundIdxOutOfRange {
         found_idx: u32::MAX,
         num_tiles: params.num_tiles(),
@@ -1013,6 +1015,8 @@ pub enum BridgeError {
     /// `expected_layer0_rows`. Production callers go through the
     /// chain-pinned params and pass cleanly.
     InvalidParams(ParamError),
+    /// Fiat-Shamir challenge parameters were invalid.
+    FiatShamir(FiatShamirError),
     /// `prove_and_verify_for_block`: `found_idx` is past the tile
     /// count for these params (previously this was an `expect("found_idx
     /// must be a valid tile index for these params")` panic).
@@ -1067,6 +1071,7 @@ impl core::fmt::Display for BridgeError {
                 "BlockContext attempt nonce does not match supplied nonce"
             ),
             BridgeError::InvalidParams(e) => write!(f, "invalid params: {e}"),
+            BridgeError::FiatShamir(e) => write!(f, "Fiat-Shamir challenge: {e}"),
             BridgeError::FoundIdxOutOfRange {
                 found_idx,
                 num_tiles,
@@ -8498,7 +8503,7 @@ mod tests {
         let u4 = a4.rem_euclid(256); // canonical u8 of the committed byte
         let u5 = a5.rem_euclid(256);
         assert!(
-            a4 - 1 >= -64 && a5 - 1 >= -64 && u5 >= 1,
+            a4 > -64 && a5 > -64 && u5 >= 1,
             "seed lacks headroom at cols 4,5: a4={a4} a5={a5}"
         );
 

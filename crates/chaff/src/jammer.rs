@@ -148,6 +148,13 @@ impl Chaff {
                 0
             };
             let bit_count = (1usize << (zeros - 1)) | size_low;
+            // Reject a declared atom wider than the remaining input before
+            // allocating: `read_bits_to_bytes` would refuse it anyway, and
+            // the `vec![0u8; (bit_count + 7) >> 3]` below would request an
+            // attacker-sized allocation (up to ~1 EB) first.
+            if bit_count > reader.bits_remaining() {
+                return Err(CueError::TruncatedBuffer);
+            }
             if bit_count < 64 {
                 let value = reader
                     .read_bits_to_usize(bit_count)

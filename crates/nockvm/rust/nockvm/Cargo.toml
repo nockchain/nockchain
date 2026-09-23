@@ -1,6 +1,6 @@
 [package]
 name = "nockvm"
-version = "0.1.0"
+version.workspace = true
 authors = ["Edward Amsden <edward@tlon.io>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"

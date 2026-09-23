@@ -1,3 +1,4 @@
+use nockvm::jets::util::BAIL_FAIL;
 use nockvm::jets::JetErr;
 use num_traits::Pow;
 
@@ -23,7 +24,7 @@ fn mpeval_mega_felt(
     chals: &[Belt],
     dyns: &[Belt],
     com_map: Option<&ProofMap<usize, Felt>>,
-) -> Felt {
+) -> Result<Felt, JetErr> {
     use crate::form::proof::ConstraintMegaTyp::*;
 
     let mut acc = Felt::zero();
@@ -33,23 +34,21 @@ fn mpeval_mega_felt(
         }
         let mut acc_inner = Felt::one();
         for encoded in (*megas).iter() {
-            let mega = crate::form::proof::Mega::try_from(encoded)
-                .expect("valid verifier constraint term");
+            let mega = crate::form::proof::Mega::try_from(encoded).map_err(|_| BAIL_FAIL)?;
             let value = match mega.typ {
-                VAR => args[mega.idx],
-                RND => Felt::lift(chals[mega.idx]),
-                DYN => Felt::lift(dyns[mega.idx]),
+                VAR => *args.get(mega.idx).ok_or(BAIL_FAIL)?,
+                RND => Felt::lift(*chals.get(mega.idx).ok_or(BAIL_FAIL)?),
+                DYN => Felt::lift(*dyns.get(mega.idx).ok_or(BAIL_FAIL)?),
                 CON => continue,
                 COM => *com_map
-                    .expect("composition dependencies are available")
-                    .get(&mega.idx)
-                    .expect("composition dependency exists"),
+                    .and_then(|map| map.get(&mega.idx))
+                    .ok_or(BAIL_FAIL)?,
             };
             acc_inner = acc_inner * value.pow(mega.exp as usize);
         }
         acc = acc + (Felt::lift(*coefficient) * acc_inner);
     }
-    acc
+    Ok(acc)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -68,91 +67,80 @@ pub fn eval_composition_poly_with_degrees(
     let boundary_zerofier = finv_(&fsub_(deep_challenge, &Felt::one()));
 
     let mut acc = Felt::zero();
-    let mut eval_offset = 0;
+    let mut eval_offset = 0usize;
 
-    for (i, &height) in heights.iter().enumerate() {
-        let width = table_full_widths[i] as usize;
+    if heights.len() != table_full_widths.len() {
+        return Err(BAIL_FAIL);
+    }
+    for (i, (&height, &declared_width)) in heights.iter().zip(table_full_widths).enumerate() {
+        let width = usize::try_from(declared_width).map_err(|_| BAIL_FAIL)?;
         let omicron = Felt::lift(Belt(height).ordered_root()?);
         let last_row = fsub_(deep_challenge, &finv_(&omicron));
         let terminal_zerofier = finv_(&last_row);
 
-        let weights = weights_map
-            .get(i)
-            .expect("weights_map should have entry for table index");
-        let constraints = processed_degrees
-            .constraints
-            .get(&i)
-            .expect("constraints should have entry for table index");
-        let counts = counts_map
-            .0
-            .get(&i)
-            .expect("counts_map should have entry for table index");
-        let dyns = &dyn_list[i];
+        let weights = weights_map.get(i).ok_or(BAIL_FAIL)?;
+        let constraints = processed_degrees.constraints.get(&i).ok_or(BAIL_FAIL)?;
+        let counts = counts_map.0.get(&i).ok_or(BAIL_FAIL)?;
+        let dyns = dyn_list.get(i).ok_or(BAIL_FAIL)?;
 
         let row_zerofier = finv_(&fsub_(&fpow_(deep_challenge, height), &Felt::one()));
 
         let transition_zerofier = fmul_(&last_row, &row_zerofier);
 
-        let current_evals = &trace_evaluations.0[eval_offset..eval_offset + 2 * width];
-        eval_offset += 2 * width;
-
+        let two_width = width.checked_mul(2).ok_or(BAIL_FAIL)?;
+        let eval_end = eval_offset.checked_add(two_width).ok_or(BAIL_FAIL)?;
+        let current_evals = trace_evaluations
+            .0
+            .get(eval_offset..eval_end)
+            .ok_or(BAIL_FAIL)?;
+        eval_offset = eval_end;
+        let boundary_weights = weights
+            .get(0..counts.boundary.checked_mul(2).ok_or(BAIL_FAIL)?)
+            .ok_or(BAIL_FAIL)?;
         let boundary_eval = evaluate_constraints(
-            &constraints.boundary,
-            dyns,
-            current_evals,
-            &weights[0..2 * counts.boundary],
-            challenges.0,
-            &processed_degrees.fri_degree_bound,
-            deep_challenge,
+            &constraints.boundary, dyns, current_evals, boundary_weights, challenges.0,
+            &processed_degrees.fri_degree_bound, deep_challenge,
         )?;
         acc = fadd_(&acc, &fmul_(&boundary_zerofier, &boundary_eval));
 
-        let row_start = 2 * counts.boundary;
+        let row_start = counts.boundary.checked_mul(2).ok_or(BAIL_FAIL)?;
+        let row_end = row_start
+            .checked_add(counts.row.checked_mul(2).ok_or(BAIL_FAIL)?)
+            .ok_or(BAIL_FAIL)?;
+        let row_weights = weights.get(row_start..row_end).ok_or(BAIL_FAIL)?;
         let row_eval = evaluate_constraints(
-            &constraints.row,
-            dyns,
-            current_evals,
-            &weights[row_start..row_start + 2 * counts.row],
-            challenges.0,
-            &processed_degrees.fri_degree_bound,
-            deep_challenge,
+            &constraints.row, dyns, current_evals, row_weights, challenges.0,
+            &processed_degrees.fri_degree_bound, deep_challenge,
         )?;
         acc = fadd_(&acc, &fmul_(&row_zerofier, &row_eval));
 
-        let trans_start = row_start + 2 * counts.row;
+        let trans_start = row_end;
+        let trans_end = trans_start
+            .checked_add(counts.transition.checked_mul(2).ok_or(BAIL_FAIL)?)
+            .ok_or(BAIL_FAIL)?;
+        let trans_weights = weights.get(trans_start..trans_end).ok_or(BAIL_FAIL)?;
         let trans_eval = evaluate_constraints(
-            &constraints.transition,
-            dyns,
-            current_evals,
-            &weights[trans_start..trans_start + 2 * counts.transition],
-            challenges.0,
-            &processed_degrees.fri_degree_bound,
-            deep_challenge,
+            &constraints.transition, dyns, current_evals, trans_weights, challenges.0,
+            &processed_degrees.fri_degree_bound, deep_challenge,
         )?;
         acc = fadd_(&acc, &fmul_(&transition_zerofier, &trans_eval));
 
-        let term_start = trans_start + 2 * counts.transition;
+        let term_start = trans_end;
+        let term_end = term_start
+            .checked_add(counts.terminal.checked_mul(2).ok_or(BAIL_FAIL)?)
+            .ok_or(BAIL_FAIL)?;
+        let term_weights = weights.get(term_start..term_end).ok_or(BAIL_FAIL)?;
         let term_eval = evaluate_constraints(
-            &constraints.terminal,
-            dyns,
-            current_evals,
-            &weights[term_start..term_start + 2 * counts.terminal],
-            challenges.0,
-            &processed_degrees.fri_degree_bound,
-            deep_challenge,
+            &constraints.terminal, dyns, current_evals, term_weights, challenges.0,
+            &processed_degrees.fri_degree_bound, deep_challenge,
         )?;
         acc = fadd_(&acc, &fmul_(&terminal_zerofier, &term_eval));
 
         if is_extra {
-            let extra_start = term_start + 2 * counts.terminal;
+            let extra_weights = weights.get(term_end..).ok_or(BAIL_FAIL)?;
             let extra_eval = evaluate_constraints(
-                &constraints.extra,
-                dyns,
-                current_evals,
-                &weights[extra_start..],
-                challenges.0,
-                &processed_degrees.fri_degree_bound,
-                deep_challenge,
+                &constraints.extra, dyns, current_evals, extra_weights, challenges.0,
+                &processed_degrees.fri_degree_bound, deep_challenge,
             )?;
             acc = fadd_(&acc, &fmul_(&row_zerofier, &extra_eval));
         }
@@ -174,10 +162,10 @@ fn evaluate_constraints(
     let mut idx = 0;
 
     for constraint in constraints {
-        let evaled = mpeval_ultra_felt(constraint.poly, evals, challenges, dyns.0);
+        let evaled = mpeval_ultra_felt(constraint.poly, evals, challenges, dyns.0)?;
         for (deg, eval) in constraint.degrees.iter().zip(evaled.iter()) {
-            let alpha = Felt::lift(weights[2 * idx]);
-            let beta = Felt::lift(weights[2 * idx + 1]);
+            let alpha = Felt::lift(*weights.get(2 * idx).ok_or(BAIL_FAIL)?);
+            let beta = Felt::lift(*weights.get(2 * idx + 1).ok_or(BAIL_FAIL)?);
 
             let degree_factor = fpow_(deep_challenge, fri_degree_bound - deg);
             let weight_factor = fadd_(&beta, &fmul_(&alpha, &degree_factor));
@@ -195,13 +183,15 @@ pub fn mpeval_ultra_felt(
     args: &[Felt],
     chals: &[Belt],
     dyns: &[Belt],
-) -> Vec<Felt> {
+) -> Result<Vec<Felt>, JetErr> {
     match mp {
-        MPUltraSlice::Mega(mp_mega) => vec![mpeval_mega_felt(&mp_mega.0, args, chals, dyns, None)],
+        MPUltraSlice::Mega(mp_mega) => {
+            Ok(vec![mpeval_mega_felt(&mp_mega.0, args, chals, dyns, None)?])
+        }
         MPUltraSlice::Comp(mp_comp) => {
             let mut deps: ProofMap<usize, Felt> = ProofMap::new();
             for (i, dep) in mp_comp.dep.iter().enumerate() {
-                let res = mpeval_mega_felt(&dep.0, args, chals, dyns, None);
+                let res = mpeval_mega_felt(&dep.0, args, chals, dyns, None)?;
                 deps.insert(i, res);
             }
 
@@ -236,56 +226,63 @@ pub fn evaluate_deep(
     let mut num = 0usize;
     let mut total_full_width = 0usize;
 
-    for (i, &height) in heights.iter().enumerate() {
-        let full_width = full_widths[i] as usize;
+    if heights.len() != full_widths.len() {
+        return Err(BAIL_FAIL);
+    }
+    for (&height, &declared_width) in heights.iter().zip(full_widths) {
+        let full_width = usize::try_from(declared_width).map_err(|_| BAIL_FAIL)?;
         let omicron = Felt::lift(Belt(height).ordered_root()?);
 
-        let current_trace_elems = &trace_elems[total_full_width..(total_full_width + full_width)];
+        let end = total_full_width
+            .checked_add(full_width)
+            .filter(|end| *end <= trace_elems.len())
+            .ok_or(BAIL_FAIL)?;
+        let current_trace_elems = &trace_elems[total_full_width..end];
 
         let denom = fsub_(&omega_pow, deep_challenge);
         (acc, num) = process_belt(
             current_trace_elems, trace_evaluations.0, weights.0, full_width, num, &denom, &acc,
-        );
+        )?;
 
         let denom = fsub_(&omega_pow, &fmul_(deep_challenge, &omicron));
         (acc, num) = process_belt(
             current_trace_elems, trace_evaluations.0, weights.0, full_width, num, &denom, &acc,
-        );
+        )?;
 
-        total_full_width += full_width;
+        total_full_width = end;
     }
 
     total_full_width = 0;
-    for (i, &height) in heights.iter().enumerate() {
-        let full_width = full_widths[i] as usize;
+    for (&height, &declared_width) in heights.iter().zip(full_widths) {
+        let full_width = usize::try_from(declared_width).map_err(|_| BAIL_FAIL)?;
         let omicron = Felt::lift(Belt(height).ordered_root()?);
 
-        let current_trace_elems = &trace_elems[total_full_width..(total_full_width + full_width)];
+        let end = total_full_width
+            .checked_add(full_width)
+            .filter(|end| *end <= trace_elems.len())
+            .ok_or(BAIL_FAIL)?;
+        let current_trace_elems = &trace_elems[total_full_width..end];
 
         let denom = fsub_(&omega_pow, new_comp_eval);
         (acc, num) = process_belt(
             current_trace_elems, trace_evaluations.0, weights.0, full_width, num, &denom, &acc,
-        );
+        )?;
 
         let denom = fsub_(&omega_pow, &fmul_(new_comp_eval, &omicron));
         (acc, num) = process_belt(
             current_trace_elems, trace_evaluations.0, weights.0, full_width, num, &denom, &acc,
-        );
+        )?;
 
-        total_full_width += full_width;
+        total_full_width = end;
     }
 
     let denom = fsub_(&omega_pow, &fpow_(deep_challenge, num_comp_pieces));
 
+    let comp_width = usize::try_from(num_comp_pieces).map_err(|_| BAIL_FAIL)?;
+    let comp_weights = weights.0.get(num..).ok_or(BAIL_FAIL)?;
     (acc, _) = process_belt(
-        comp_elems,
-        comp_evaluations.0,
-        &weights.0[num..],
-        num_comp_pieces as usize,
-        0,
-        &denom,
-        &acc,
-    );
+        comp_elems, comp_evaluations.0, comp_weights, comp_width, 0, &denom, &acc,
+    )?;
 
     Ok(acc)
 }
@@ -328,7 +325,6 @@ pub fn evaluate_trace_degree_normalization(
     }
     Some(acc)
 }
-
 fn process_belt(
     elems: &[Belt],
     evals: &[Felt],
@@ -337,15 +333,15 @@ fn process_belt(
     start_num: usize,
     denom: &Felt,
     acc_start: &Felt,
-) -> (Felt, usize) {
+) -> Result<(Felt, usize), JetErr> {
     let mut acc = *acc_start;
     let mut num = start_num;
     let denom_inv = finv_(denom);
 
-    for elem in &elems[..width] {
+    for elem in elems.iter().take(width) {
         let elem_val = Felt::lift(*elem);
-        let eval_val = evals[num];
-        let weight_val = weights[num];
+        let eval_val = *evals.get(num).ok_or(BAIL_FAIL)?;
+        let weight_val = *weights.get(num).ok_or(BAIL_FAIL)?;
 
         let diff = fsub_(&elem_val, &eval_val);
         let term = fmul_(&fmul_(&diff, &denom_inv), &weight_val);
@@ -354,7 +350,7 @@ fn process_belt(
         num += 1;
     }
 
-    (acc, num)
+    Ok((acc, num))
 }
 
 #[cfg(test)]

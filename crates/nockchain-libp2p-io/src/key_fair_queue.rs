@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::mpsc;
 
@@ -38,6 +38,21 @@ pub fn channel_with_limits<K: Eq + Hash, V>(
 struct QueueState<K, V> {
     values: HashMap<K, VecDeque<V>>,
     total_len: usize,
+}
+
+fn lock_queue_state<K, V>(state: &Mutex<QueueState<K, V>>) -> MutexGuard<'_, QueueState<K, V>> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            guard.total_len = guard
+                .values
+                .values()
+                .fold(0usize, |total, queue| total.saturating_add(queue.len()));
+            state.clear_poison();
+            guard
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -83,10 +98,7 @@ impl<K> From<mpsc::error::SendError<K>> for Error<K> {
 impl<K: Eq + Hash + Clone, V> Sender<K, V> {
     pub fn send(&self, key: K, value: V) -> Result<(), Error<K>> {
         let should_schedule = {
-            let mut enqueued = self
-                .enqueued
-                .lock()
-                .expect("key_fair_queue sender lock should not be poisoned");
+            let mut enqueued = lock_queue_state(&self.enqueued);
             if enqueued.total_len >= self.limits.max_total {
                 return Err(Error::Full);
             }
@@ -110,34 +122,31 @@ impl<K: Eq + Hash + Clone, V> Sender<K, V> {
 
 impl<K: Eq + Hash + Clone, V> Receiver<K, V> {
     pub async fn recv(&mut self) -> Option<(K, V)> {
-        let key = self.key_receiver.recv().await?;
-        let (value, has_more) = {
-            let mut enqueued = self
-                .enqueued
-                .lock()
-                .expect("key_fair_queue receiver lock should not be poisoned");
-            let queue = enqueued
-                .values
-                .get_mut(&key)
-                .expect("Key from queue should be in map");
-            let value = queue
-                .pop_front()
-                .expect("Key from queue should have a pending value");
-            let has_more = !queue.is_empty();
-            if !has_more {
-                enqueued.values.remove(&key);
+        loop {
+            let key = self.key_receiver.recv().await?;
+            let (value, has_more) = {
+                let mut enqueued = lock_queue_state(&self.enqueued);
+                let Some(queue) = enqueued.values.get_mut(&key) else {
+                    continue;
+                };
+                let Some(value) = queue.pop_front() else {
+                    enqueued.values.remove(&key);
+                    continue;
+                };
+                let has_more = !queue.is_empty();
+                if !has_more {
+                    enqueued.values.remove(&key);
+                }
+                enqueued.total_len = enqueued.total_len.saturating_sub(1);
+                (value, has_more)
+            };
+
+            if has_more {
+                let _ = self.key_sender.send(key.clone());
             }
-            enqueued.total_len = enqueued.total_len.saturating_sub(1);
-            (value, has_more)
-        };
 
-        if has_more {
-            self.key_sender
-                .send(key.clone())
-                .expect("Receiver should be alive when requeueing a pending key");
+            return Some((key, value));
         }
-
-        Some((key, value))
     }
 }
 
@@ -167,6 +176,22 @@ mod tests {
         assert_eq!(receiver.recv().await, Some((1, 10)));
         assert_eq!(receiver.recv().await, Some((2, 20)));
         assert_eq!(receiver.recv().await, Some((1, 11)));
+    }
+
+    #[tokio::test]
+    async fn recovers_after_queue_state_lock_is_poisoned() {
+        let (sender, mut receiver) = channel::<u8, u8>();
+        let state = sender.enqueued.clone();
+        let poisoner = std::thread::spawn(move || {
+            let _guard = state.lock().expect("fresh lock should be available");
+            panic!("poison queue state");
+        });
+        assert!(poisoner.join().is_err());
+
+        sender
+            .send(7, 11)
+            .expect("poisoned queue state should recover");
+        assert_eq!(receiver.recv().await, Some((7, 11)));
     }
 
     #[tokio::test]

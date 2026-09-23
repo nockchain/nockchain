@@ -143,12 +143,17 @@ struct IpHistory {
 }
 
 #[derive(Debug, Default)]
+struct IpEvidence {
+    events: VecDeque<PeerHealthEvent>,
+}
+
+#[derive(Debug, Default)]
 struct ExclusionState {
     ips: HashMap<IpAddr, IpExclusion>,
     addresses: HashMap<AddressKey, AddressExclusion>,
     peers: HashMap<PeerId, PeerPenalty>,
-    events: VecDeque<PeerHealthEvent>,
     ip_history: HashMap<IpAddr, IpHistory>,
+    evidence_by_ip: HashMap<IpAddr, IpEvidence>,
 }
 
 fn read_state(lock: &RwLock<ExclusionState>) -> RwLockReadGuard<'_, ExclusionState> {
@@ -279,7 +284,6 @@ impl PeerExclusions {
                 at: now,
                 kind: EvidenceKind::WrongPeerId,
             },
-            now,
             &self.config,
         );
         let address_cooldown = insert_address_cooldown(
@@ -289,6 +293,7 @@ impl PeerExclusions {
             self.config.address_cooldown(),
             ExclusionReason::WrongPeerId,
             now,
+            &self.config,
         );
 
         let ip_exclusion = if wrong_peer_threshold_met(&state, key.ip, now, &self.config) {
@@ -342,7 +347,6 @@ impl PeerExclusions {
                 at: now,
                 kind: EvidenceKind::PeerMisbehavior,
             },
-            now,
             &self.config,
         );
         let address_cooldown = insert_address_cooldown(
@@ -352,6 +356,7 @@ impl PeerExclusions {
             self.config.address_cooldown(),
             ExclusionReason::PeerMisbehavior,
             now,
+            &self.config,
         );
 
         let ip_exclusion = if peer_threshold_met(
@@ -445,12 +450,18 @@ impl PeerExclusions {
                 at: now,
                 kind,
             },
-            now,
             &self.config,
         );
 
-        let address_cooldown =
-            insert_address_cooldown(&mut state, key, address.clone(), address_ttl, reason, now);
+        let address_cooldown = insert_address_cooldown(
+            &mut state,
+            key,
+            address.clone(),
+            address_ttl,
+            reason,
+            now,
+            &self.config,
+        );
 
         ExclusionOutcome {
             address_cooldown,
@@ -481,16 +492,17 @@ impl PeerExclusions {
         let mut state = write_state(&self.inner);
         prune_state(&mut state, now, &self.config);
 
-        let mut remaining_events = VecDeque::with_capacity(state.events.len());
-        let mut removed = 0usize;
-        while let Some(event) = state.events.pop_front() {
-            if event.ip == ip && removed < 2 {
-                removed += 1;
-                continue;
+        let remove_evidence_entry = state.evidence_by_ip.get_mut(&ip).is_some_and(|evidence| {
+            for _ in 0..2 {
+                if evidence.events.pop_front().is_none() {
+                    break;
+                }
             }
-            remaining_events.push_back(event);
+            evidence.events.is_empty()
+        });
+        if remove_evidence_entry {
+            state.evidence_by_ip.remove(&ip);
         }
-        state.events = remaining_events;
     }
 
     pub(crate) fn record_peer_request_failure(&self, peer_id: PeerId) -> bool {
@@ -501,6 +513,11 @@ impl PeerExclusions {
         let expires_at = now + self.config.request_peer_cooldown();
         let mut state = write_state(&self.inner);
         prune_state(&mut state, now, &self.config);
+        if !state.peers.contains_key(&peer_id)
+            && state.peers.len() >= self.config.max_exclusion_entries
+        {
+            return false;
+        }
         let was_active = state
             .peers
             .get(&peer_id)
@@ -577,7 +594,6 @@ impl PeerExclusions {
                 at: now,
                 kind: EvidenceKind::KadCardinality,
             },
-            now,
             &self.config,
         );
 
@@ -631,20 +647,18 @@ fn prune_state(
     let peer_before = state.peers.len();
     state.peers.retain(|_, entry| entry.expires_at > now);
 
-    while state
-        .events
-        .front()
-        .is_some_and(|event| event.at + config.event_history() < now)
-    {
-        state.events.pop_front();
-    }
-    while state.events.len() > config.max_exclusion_entries {
-        state.events.pop_front();
-    }
-
     state
         .ip_history
         .retain(|_, history| history.last_excluded_at + config.ip_exclusion_history() >= now);
+
+    for evidence in state.evidence_by_ip.values_mut() {
+        evidence
+            .events
+            .retain(|event| event.at + config.evidence_window() >= now);
+    }
+    state
+        .evidence_by_ip
+        .retain(|_, evidence| !evidence.events.is_empty());
 
     ExpireOutcome {
         ips: ip_before.saturating_sub(state.ips.len()),
@@ -653,14 +667,26 @@ fn prune_state(
     }
 }
 
-fn push_event(
-    state: &mut ExclusionState,
-    event: PeerHealthEvent,
-    now: Instant,
-    config: &PeerExclusionConfig,
-) {
-    state.events.push_back(event);
-    prune_state(state, now, config);
+fn push_event(state: &mut ExclusionState, event: PeerHealthEvent, config: &PeerExclusionConfig) {
+    let evidence_cap = config
+        .wrong_peer_id_ip_threshold
+        .saturating_mul(5)
+        .max(16)
+        .min(config.max_exclusion_entries.max(1));
+    let ip = event.ip;
+    if let Some(evidence) = state.evidence_by_ip.get_mut(&ip) {
+        evidence.events.push_back(event);
+        while evidence.events.len() > evidence_cap {
+            evidence.events.pop_front();
+        }
+    } else if state.evidence_by_ip.len() < config.max_exclusion_entries {
+        state.evidence_by_ip.insert(
+            ip,
+            IpEvidence {
+                events: VecDeque::from([event]),
+            },
+        );
+    }
 }
 
 fn insert_address_cooldown(
@@ -670,7 +696,12 @@ fn insert_address_cooldown(
     ttl: Duration,
     reason: ExclusionReason,
     now: Instant,
+    config: &PeerExclusionConfig,
 ) -> Option<AddressCooldownOutcome> {
+    if !state.addresses.contains_key(&key) && state.addresses.len() >= config.max_exclusion_entries
+    {
+        return None;
+    }
     let expires_at = now + ttl;
     match state.addresses.get_mut(&key) {
         Some(existing) if existing.expires_at >= expires_at => {
@@ -714,6 +745,12 @@ fn insert_ip_exclusion(
     now: Instant,
     config: &PeerExclusionConfig,
 ) -> Option<IpExclusionOutcome> {
+    if (!state.ips.contains_key(&ip) && state.ips.len() >= config.max_exclusion_entries)
+        || (!state.ip_history.contains_key(&ip)
+            && state.ip_history.len() >= config.max_exclusion_entries)
+    {
+        return None;
+    }
     let history = state.ip_history.entry(ip).or_insert(IpHistory {
         last_excluded_at: now,
         exclusion_count: 0,
@@ -780,12 +817,17 @@ fn peer_threshold_met(
     now: Instant,
     config: &PeerExclusionConfig,
 ) -> bool {
+    let Some(evidence) = state.evidence_by_ip.get(&ip) else {
+        return false;
+    };
     let mut peers = HashSet::new();
     let mut obtained_peers = HashSet::new();
     let mut ports = HashSet::new();
-    for event in state.events.iter().filter(|event| {
-        event.ip == ip && event.kind == kind && event.at + config.evidence_window() >= now
-    }) {
+    for event in evidence
+        .events
+        .iter()
+        .filter(|event| event.kind == kind && event.at + config.evidence_window() >= now)
+    {
         if let Some(peer) = event.expected_peer {
             peers.insert(peer);
         }
@@ -816,17 +858,18 @@ fn has_recent_failure(
     now: Instant,
     config: &PeerExclusionConfig,
 ) -> bool {
-    state.events.iter().any(|event| {
-        event.ip == ip
-            && event.at + config.evidence_window() >= now
-            && matches!(
-                event.kind,
-                EvidenceKind::WrongPeerId
-                    | EvidenceKind::PeerMisbehavior
-                    | EvidenceKind::DialFailure
-                    | EvidenceKind::PermissionDenied
-                    | EvidenceKind::PingFailure
-            )
+    state.evidence_by_ip.get(&ip).is_some_and(|evidence| {
+        evidence.events.iter().any(|event| {
+            event.at + config.evidence_window() >= now
+                && matches!(
+                    event.kind,
+                    EvidenceKind::WrongPeerId
+                        | EvidenceKind::PeerMisbehavior
+                        | EvidenceKind::DialFailure
+                        | EvidenceKind::PermissionDenied
+                        | EvidenceKind::PingFailure
+                )
+        })
     })
 }
 
@@ -1294,6 +1337,62 @@ mod tests {
             Some(ExclusionReason::RepeatedPeerMisbehavior)
         );
         assert!(exclusions.is_ip_excluded_at(&IpAddr::V4(ip), now + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn rotating_ips_cannot_grow_exclusion_state_past_cap() {
+        let cap = 8;
+        let exclusions = PeerExclusions::new(PeerExclusionConfig {
+            max_exclusion_entries: cap,
+            ..config()
+        });
+        let now = Instant::now();
+
+        for host in 1..=32 {
+            let ip = Ipv4Addr::new(203, 0, 113, host);
+            for strike in 0..3 {
+                exclusions.record_peer_misbehavior_at(
+                    &quic_addr(ip, 4_000 + strike),
+                    PeerId::random(),
+                    now,
+                );
+            }
+            exclusions.record_peer_request_failure(PeerId::random());
+        }
+
+        let state = read_state(&exclusions.inner);
+        assert!(state.ips.len() <= cap);
+        assert!(state.ip_history.len() <= cap);
+        assert!(state.addresses.len() <= cap);
+        assert!(state.peers.len() <= cap);
+        assert!(state.evidence_by_ip.len() <= cap);
+    }
+
+    #[test]
+    fn unrelated_evidence_cannot_evict_existing_ip_strikes() {
+        let cap = 8;
+        let exclusions = PeerExclusions::new(PeerExclusionConfig {
+            max_exclusion_entries: cap,
+            ..config()
+        });
+        let now = Instant::now();
+        let victim = Ipv4Addr::new(198, 51, 100, 1);
+
+        for port in [4_001, 4_002] {
+            exclusions.record_peer_misbehavior_at(&quic_addr(victim, port), PeerId::random(), now);
+        }
+        for host in 2..=32 {
+            exclusions.record_peer_misbehavior_at(
+                &quic_addr(Ipv4Addr::new(198, 51, 100, host), 5_000),
+                PeerId::random(),
+                now,
+            );
+        }
+
+        let outcome =
+            exclusions.record_peer_misbehavior_at(&quic_addr(victim, 4_003), PeerId::random(), now);
+        assert!(outcome.ip_exclusion.is_some());
+        assert!(exclusions.is_ip_excluded_at(&IpAddr::V4(victim), now));
     }
 
     #[test]

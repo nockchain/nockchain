@@ -532,24 +532,27 @@ pub fn verifier_setup_seed_cache_path(data_dir: &std::path::Path) -> std::path::
     ))
 }
 
-fn write_seed_cache_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), SetupError> {
+fn write_file_atomically_with_commit(
+    path: &std::path::Path,
+    bytes: &[u8],
+    artifact: &str,
+    commit: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<(), SetupError> {
     let parent = path.parent().ok_or_else(|| {
         SetupError(format!(
-            "verifier-setup cache has no parent: {}",
+            "{artifact} has no parent directory: {}",
             path.display()
         ))
     })?;
-    std::fs::create_dir_all(parent).map_err(err("create verifier-setup cache dir"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| SetupError(format!("create {artifact} directory: {e:?}")))?;
 
-    let file_name = path.file_name().ok_or_else(|| {
-        SetupError(format!(
-            "verifier-setup cache has no file name: {}",
-            path.display()
-        ))
-    })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| SetupError(format!("{artifact} has no file name: {}", path.display())))?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(err("read verifier-setup cache clock"))?
+        .map_err(|e| SetupError(format!("read {artifact} clock: {e:?}")))?
         .as_nanos();
     let mut temp_name = file_name.to_os_string();
     temp_name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
@@ -560,18 +563,36 @@ fn write_seed_cache_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(
             .write(true)
             .create_new(true)
             .open(&temp_path)
-            .map_err(err("create temporary verifier-setup cache"))?;
+            .map_err(|e| SetupError(format!("create temporary {artifact}: {e:?}")))?;
         file.write_all(bytes)
-            .map_err(err("write temporary verifier-setup cache"))?;
+            .map_err(|e| SetupError(format!("write temporary {artifact}: {e:?}")))?;
         file.sync_all()
-            .map_err(err("sync temporary verifier-setup cache"))?;
-        std::fs::rename(&temp_path, path).map_err(err("replace verifier-setup cache"))?;
+            .map_err(|e| SetupError(format!("sync temporary {artifact}: {e:?}")))?;
+        drop(file);
+        commit(&temp_path, path).map_err(|e| SetupError(format!("commit {artifact}: {e:?}")))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| SetupError(format!("sync {artifact} directory: {e:?}")))?;
         Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp_path);
     }
     result
+}
+
+fn write_file_atomically(
+    path: &std::path::Path,
+    bytes: &[u8],
+    artifact: &str,
+) -> Result<(), SetupError> {
+    write_file_atomically_with_commit(path, bytes, artifact, |temporary, destination| {
+        std::fs::rename(temporary, destination)
+    })
+}
+
+fn write_seed_cache_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), SetupError> {
+    write_file_atomically(path, bytes, "verifier-setup cache")
 }
 
 /// Serialize a seed table to `path` with a versioned, checksummed envelope. The
@@ -838,22 +859,35 @@ fn context_checksum_path(context_path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(p)
 }
 
-/// Serialize one built verifier setup to `path` for disk paging, and write a sidecar
-/// BLAKE3 of the file bytes (re-checked on every page-in to catch on-disk bit-rot).
-/// Returns the checksum.
+/// Serialize one built verifier setup to a synced temporary file and atomically
+/// rename it into place. Its checksum sidecar is replaced separately after the
+/// context commit; a missing sidecar is recoverable because page-in always hashes
+/// the context bytes.
 fn write_verifier_context_file(
     setup: &AiPowVerifierSetup,
     path: &std::path::Path,
 ) -> Result<[u8; 32], SetupError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(err("create verifier-context dir"))?;
-    }
     let bytes = bincode::serde::encode_to_vec(setup, bincode::config::standard())
         .map_err(err("serialize verifier context"))?;
     let checksum = *blake3::hash(&bytes).as_bytes();
-    std::fs::write(path, bytes).map_err(err("write verifier context file"))?;
-    std::fs::write(context_checksum_path(path), checksum)
-        .map_err(err("write verifier context checksum"))?;
+    let sidecar = context_checksum_path(path);
+    match std::fs::remove_file(&sidecar) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(SetupError(format!(
+                "remove stale verifier context checksum: {error:?}"
+            )));
+        }
+    }
+    write_file_atomically(path, &bytes, "verifier context file")?;
+    if let Err(error) = write_file_atomically(&sidecar, &checksum, "verifier context checksum") {
+        tracing::warn!(
+            path = %sidecar.display(),
+            error = %error,
+            "Verifier context committed without checksum sidecar; it will be rebuilt on load",
+        );
+    }
     Ok(checksum)
 }
 
@@ -870,8 +904,8 @@ fn context_file_checksum(path: &std::path::Path) -> Result<[u8; 32], SetupError>
     }
     let file = std::fs::read(path).map_err(err("read verifier context for checksum"))?;
     let checksum = *blake3::hash(&file).as_bytes();
-    // Best-effort sidecar write (ignore failure: page_in will recompute if absent).
-    let _ = std::fs::write(&sidecar, checksum);
+    // Best-effort atomic sidecar write (page-in recomputes when it is absent).
+    let _ = write_file_atomically(&sidecar, &checksum, "verifier context checksum");
     Ok(checksum)
 }
 
@@ -1153,4 +1187,36 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
         }
     }
     by_bucket.into_values().collect()
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::write_file_atomically_with_commit;
+
+    #[test]
+    fn failed_atomic_commit_preserves_existing_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let destination = directory.path().join("verifier-context.bin");
+        std::fs::write(&destination, b"complete-old-context").expect("seed destination");
+
+        let error = write_file_atomically_with_commit(
+            &destination,
+            b"complete-new-context",
+            "test verifier context",
+            |temporary, _| {
+                assert_eq!(
+                    std::fs::read(temporary).expect("temporary context should be readable"),
+                    b"complete-new-context"
+                );
+                Err(std::io::Error::other("simulated interruption"))
+            },
+        )
+        .expect_err("interrupted commit must fail");
+
+        assert!(error.to_string().contains("simulated interruption"));
+        assert_eq!(
+            std::fs::read(&destination).expect("old context should remain readable"),
+            b"complete-old-context"
+        );
+    }
 }

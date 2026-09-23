@@ -445,12 +445,7 @@ pub(crate) fn batch_request_item_ids(
         Some(NockchainRequest::BatchRequest { items, .. }) => {
             Some(items.iter().map(|item| item.item_id).collect())
         }
-        Some(
-            NockchainRequest::Request { .. }
-            | NockchainRequest::Gossip { .. }
-            | NockchainRequest::AuthenticatedGossip { .. },
-        )
-        | None => None,
+        Some(NockchainRequest::AuthenticatedGossip { .. }) | None => None,
     }
 }
 

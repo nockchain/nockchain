@@ -1,6 +1,6 @@
 [package]
 name = "nockup"
-version = "1.0.0"
+version.workspace = true
 edition = "2021"
 authors = [""]
 description = "A developer support framework for NockApp development"

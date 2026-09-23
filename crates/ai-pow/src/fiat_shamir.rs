@@ -27,12 +27,23 @@
 use std::collections::HashSet;
 
 use blake3::Hasher;
+use thiserror::Error;
 
 const CTX_TRANSCRIPT: &str = "ai-pow v3 transcript";
 const CTX_INDICES: &str = "ai-pow v3 challenge-indices";
 const CTX_POW_KEY: &str = "ai-pow v3 pow-key";
 const CTX_CHALLENGE: &str = "ai-pow v3 challenge-seed";
 const CTX_ATTEMPT_TILE: &str = "ai-pow v3 attempt-tile";
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum FiatShamirError {
+    #[error("num_tiles must be greater than zero")]
+    ZeroNumTiles,
+    #[error("challenge range must be greater than zero")]
+    ZeroRange,
+    #[error("challenge count {count} exceeds range {range}")]
+    CountExceedsRange { count: u32, range: u64 },
+}
 
 /// Build the per-block `state` byte string fed to the prover and verifier.
 pub fn block_state(block_commitment: &[u8], nonce: &[u8]) -> Vec<u8> {
@@ -213,6 +224,14 @@ pub fn challenge_seed(state: &[u8], comm_m: &[u8; 32], params_tag: &[u8; 32]) ->
     *hasher.finalize().as_bytes()
 }
 
+fn challenge_xof(seed: &[u8; 32], count: u32, range: u64) -> blake3::OutputReader {
+    let mut hasher = Hasher::new_derive_key(CTX_INDICES);
+    hasher.update(seed);
+    hasher.update(&count.to_le_bytes());
+    hasher.update(&range.to_le_bytes());
+    hasher.finalize_xof()
+}
+
 /// Derive the single jackpot tile index for one nonce-bound attempt.
 ///
 /// This removes `found_idx` as miner-selected search space and prevents
@@ -225,15 +244,20 @@ pub fn attempt_tile_index(
     params_tag: &[u8; 32],
     s_a: &[u8; 32],
     num_tiles: u64,
-) -> u64 {
-    assert!(num_tiles > 0, "num_tiles must be > 0");
+) -> Result<u64, FiatShamirError> {
+    if num_tiles == 0 {
+        return Err(FiatShamirError::ZeroNumTiles);
+    }
     let mut hasher = Hasher::new_derive_key(CTX_ATTEMPT_TILE);
     hasher.update(&(state.len() as u64).to_le_bytes());
     hasher.update(state);
     hasher.update(params_tag);
     hasher.update(s_a);
     let seed = *hasher.finalize().as_bytes();
-    challenge_indices(&seed, 1, num_tiles)[0]
+    let mut xof = challenge_xof(&seed, 1, num_tiles);
+    let mut buf = [0u8; 8];
+    xof.fill(&mut buf);
+    Ok(u64::from_le_bytes(buf) % num_tiles)
 }
 
 /// Generic transcript hash: returns 32 bytes for an arbitrary list of byte
@@ -252,14 +276,18 @@ pub fn transcript(label: &str, parts: &[&[u8]]) -> [u8; 32] {
 /// Derive `count` distinct indices in `0..range` from `seed`. Sampling is
 /// without-replacement over a streamed XOF with rejection-and-set.
 /// Determinism: same `(seed, count, range)` always yields the same vector.
-pub fn challenge_indices(seed: &[u8; 32], count: u32, range: u64) -> Vec<u64> {
-    assert!(range > 0, "range must be > 0");
-    assert!(u64::from(count) <= range, "count must be <= range");
-    let mut hasher = Hasher::new_derive_key(CTX_INDICES);
-    hasher.update(seed);
-    hasher.update(&count.to_le_bytes());
-    hasher.update(&range.to_le_bytes());
-    let mut xof = hasher.finalize_xof();
+pub fn challenge_indices(
+    seed: &[u8; 32],
+    count: u32,
+    range: u64,
+) -> Result<Vec<u64>, FiatShamirError> {
+    if range == 0 {
+        return Err(FiatShamirError::ZeroRange);
+    }
+    if u64::from(count) > range {
+        return Err(FiatShamirError::CountExceedsRange { count, range });
+    }
+    let mut xof = challenge_xof(seed, count, range);
 
     // Tracks taken indices in a `HashSet`: `O(count)` memory
     // regardless of `range` (= `num_tiles`, bounded only by
@@ -276,7 +304,7 @@ pub fn challenge_indices(seed: &[u8; 32], count: u32, range: u64) -> Vec<u64> {
             chosen.push(idx);
         }
     }
-    chosen
+    Ok(chosen)
 }
 
 #[cfg(test)]
@@ -451,18 +479,30 @@ mod tests {
     fn attempt_tile_index_is_deterministic_bounded_and_attempt_bound() {
         let tag = [9u8; 32];
         let s_a = [11u8; 32];
-        let idx = attempt_tile_index(b"attempt-a", &tag, &s_a, 17);
+        let idx = attempt_tile_index(b"attempt-a", &tag, &s_a, 17).expect("valid tile count");
         assert!(idx < 17);
-        assert_eq!(idx, attempt_tile_index(b"attempt-a", &tag, &s_a, 17));
-        assert_ne!(idx, attempt_tile_index(b"attempt-b", &tag, &s_a, 17));
-        assert_ne!(idx, attempt_tile_index(b"attempt-a", &[10u8; 32], &s_a, 17));
-        assert_ne!(idx, attempt_tile_index(b"attempt-a", &tag, &[12u8; 32], 17));
+        assert_eq!(
+            idx,
+            attempt_tile_index(b"attempt-a", &tag, &s_a, 17).expect("valid tile count")
+        );
+        assert_ne!(
+            idx,
+            attempt_tile_index(b"attempt-b", &tag, &s_a, 17).expect("valid tile count")
+        );
+        assert_ne!(
+            idx,
+            attempt_tile_index(b"attempt-a", &[10u8; 32], &s_a, 17).expect("valid tile count")
+        );
+        assert_ne!(
+            idx,
+            attempt_tile_index(b"attempt-a", &tag, &[12u8; 32], 17).expect("valid tile count")
+        );
     }
 
     #[test]
     fn indices_unique_and_in_range() {
         let seed = [1u8; 32];
-        let idx = challenge_indices(&seed, 16, 64);
+        let idx = challenge_indices(&seed, 16, 64).expect("valid challenge bounds");
         assert_eq!(idx.len(), 16);
         for &i in &idx {
             assert!(i < 64);
@@ -478,12 +518,29 @@ mod tests {
         let s1 = [1u8; 32];
         let s2 = [2u8; 32];
         assert_eq!(
-            challenge_indices(&s1, 16, 64),
-            challenge_indices(&s1, 16, 64)
+            challenge_indices(&s1, 16, 64).expect("valid challenge bounds"),
+            challenge_indices(&s1, 16, 64).expect("valid challenge bounds")
         );
         assert_ne!(
-            challenge_indices(&s1, 16, 64),
-            challenge_indices(&s2, 16, 64)
+            challenge_indices(&s1, 16, 64).expect("valid challenge bounds"),
+            challenge_indices(&s2, 16, 64).expect("valid challenge bounds")
+        );
+    }
+
+    #[test]
+    fn invalid_challenge_bounds_return_errors() {
+        let seed = [1u8; 32];
+        assert_eq!(
+            attempt_tile_index(b"attempt", &[2u8; 32], &[3u8; 32], 0),
+            Err(FiatShamirError::ZeroNumTiles)
+        );
+        assert_eq!(
+            challenge_indices(&seed, 0, 0),
+            Err(FiatShamirError::ZeroRange)
+        );
+        assert_eq!(
+            challenge_indices(&seed, 2, 1),
+            Err(FiatShamirError::CountExceedsRange { count: 2, range: 1 })
         );
     }
 
