@@ -20,6 +20,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Bazel's action cache only restores exact compile actions. Honk's
+      # content-addressed products also accelerate changed Hoon sources.
+      - name: Restore Honk Nockasm cache
+        uses: actions/cache@v4
+        with:
+          path: .honk-cache
+          key: honk-nockasm-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: |
+            honk-nockasm-v1-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Set up Bazel
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
@@ -52,6 +62,7 @@ jobs:
       - name: Build release binaries and run unit tests
         run: |
           bazel test \
+            --define=kernel_compiler=honk \
             //crates/hoon:hoon \
             //crates/hoonc:hoonc_bin \
             //crates/nockup:nockup \
@@ -61,3 +72,6 @@ jobs:
             //crates/hoonc:hoonc_unit_tests \
             //crates/nockchain:nockchain_unit_tests \
             //crates/nockchain-wallet:nockchain-wallet_unit_tests
+
+      - name: Save Honk Nockasm products
+        run: bazel run --define=kernel_compiler=honk //assets/native:save_honk_cache_ci

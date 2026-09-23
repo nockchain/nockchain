@@ -13,11 +13,11 @@ rust_library(
     srcs = ["src/lib.rs"],
     aliases = aliases(),
     compile_data = [
-        "//assets:roswell",
+        "//assets:roswell_selected",
     ],
     crate_name = "kernels_roswell",
     edition = "2021",
     rustc_env = {
-        "KERNEL_JAM_PATH": "$(location //assets:roswell)",
+        "KERNEL_JAM_PATH": "$(location //assets:roswell_selected)",
     },
 )

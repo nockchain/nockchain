@@ -127,6 +127,14 @@ jobs:
       - name: Configure Bazel action cache
         run: printf '\nbuild --disk_cache=%s\n' "$BAZEL_DISK_CACHE" >> "$HOME/.bazelrc"
 
+      - name: Restore Honk Nockasm cache
+        uses: actions/cache@v4
+        with:
+          path: .honk-cache
+          key: honk-nockasm-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: |
+            honk-nockasm-v1-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install manifest tools
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
@@ -141,11 +149,15 @@ jobs:
       - name: Build release binaries with Bazel
         run: |
           bazel build \
+            --define=kernel_compiler=honk \
             //crates/hoon:hoon \
             //crates/hoonc:hoonc_bin \
             //crates/nockup:nockup \
             //crates/nockchain:nockchain \
             //crates/nockchain-wallet:nockchain-wallet
+
+      - name: Save Honk Nockasm products
+        run: bazel run --define=kernel_compiler=honk //assets/native:save_honk_cache_ci
 
       - name: Stage release binaries
         run: |

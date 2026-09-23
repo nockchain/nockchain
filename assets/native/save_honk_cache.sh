@@ -4,7 +4,6 @@
 set -euo pipefail
 
 workspace="${BUILD_WORKSPACE_DIRECTORY:?run this target with bazel run}"
-cache="$workspace/.honk-cache"
 saved=0
 if [[ "$#" -eq 0 ]]; then
   echo "no kernel cache deltas were requested" >&2
@@ -12,6 +11,7 @@ if [[ "$#" -eq 0 ]]; then
 fi
 
 for kernel in "$@"; do
+  cache="$workspace/.honk-cache/$kernel"
   delta="$workspace/bazel-bin/assets/native/${kernel}_native_cached_compile_cache_delta"
   if [[ ! -d "$delta" ]]; then
     echo "missing honk cache delta: $delta" >&2
@@ -31,4 +31,4 @@ for kernel in "$@"; do
   done < <(find "$delta" -type f -print0)
 done
 
-echo "Saved $saved honk cache objects to $cache"
+echo "Saved $saved honk cache objects under $workspace/.honk-cache"

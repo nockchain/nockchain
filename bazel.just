@@ -58,7 +58,7 @@ build-assets-honk-cached:
     for kernel in bridge dumb miner peek roswell wal; do cp -f "bazel-bin/assets/native/${kernel}_native_cached.jam" "assets/${kernel}.jam"; done
     chmod u+w assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
 
-# Prime the incremental honk cache consumed by //assets/native honk targets.
+# Prime the per-kernel incremental honk caches consumed by //assets/native.
 # Must use the Bazel-built honk — cache keys embed a per-build compiler
 # fingerprint, so a cargo-built honk's cache never hits under Bazel — and
 # must run from the workspace root so key paths match the sandbox layout.
@@ -69,12 +69,12 @@ build-assets-honk-cached:
 prime-honk-cache:
     bazel build //crates/honk:honk
     rm -rf /tmp/honk-prime && mkdir -p /tmp/honk-prime
-    bazel-bin/crates/honk/honk --cache-dir .honk-cache --output /tmp/honk-prime/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
-    bazel-bin/crates/honk/honk --cache-dir .honk-cache --output /tmp/honk-prime/wal.jam --prelude hoon/common/hoon.hoon hoon/apps/wallet/wallet.hoon hoon
-    bazel-bin/crates/honk/honk --cache-dir .honk-cache --output /tmp/honk-prime/miner.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/miner.hoon hoon
-    bazel-bin/crates/honk/honk --cache-dir .honk-cache --output /tmp/honk-prime/peek.jam --prelude hoon/common/hoon.hoon hoon/apps/peek/peek.hoon hoon
-    bazel-bin/crates/honk/honk --cache-dir .honk-cache --output /tmp/honk-prime/bridge.jam --prelude hoon/common/hoon.hoon hoon/apps/bridge/bridge.hoon hoon
-    bazel-bin/crates/honk/honk --cache-dir .honk-cache --output /tmp/honk-prime/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon
+    bazel-bin/crates/honk/honk --cache-dir .honk-cache/dumb --output /tmp/honk-prime/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
+    bazel-bin/crates/honk/honk --cache-dir .honk-cache/wal --output /tmp/honk-prime/wal.jam --prelude hoon/common/hoon.hoon hoon/apps/wallet/wallet.hoon hoon
+    bazel-bin/crates/honk/honk --cache-dir .honk-cache/miner --output /tmp/honk-prime/miner.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/miner.hoon hoon
+    bazel-bin/crates/honk/honk --cache-dir .honk-cache/peek --output /tmp/honk-prime/peek.jam --prelude hoon/common/hoon.hoon hoon/apps/peek/peek.hoon hoon
+    bazel-bin/crates/honk/honk --cache-dir .honk-cache/bridge --output /tmp/honk-prime/bridge.jam --prelude hoon/common/hoon.hoon hoon/apps/bridge/bridge.hoon hoon
+    bazel-bin/crates/honk/honk --cache-dir .honk-cache/roswell --output /tmp/honk-prime/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon
     rm -rf /tmp/honk-prime
 
 # Compile every kernel natively with the Bazel-built honk into assets/native/.

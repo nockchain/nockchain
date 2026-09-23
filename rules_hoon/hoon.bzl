@@ -346,7 +346,7 @@ honk_jam = rule(
         "cache_state": attr.label(
             allow_files = True,
             doc = "Pre-primed honk build cache (a filegroup globbing " +
-                  "cache_root, e.g. //:honk_build_cache). When non-empty " +
+                  "cache_root, e.g. //:honk_build_cache_dumb). When non-empty " +
                   "the action seeds a writable copy and passes --cache-dir, " +
                   "reusing every product whose key still matches. Prime " +
                   "with the Bazel-built honk (`just bazel " +
@@ -383,6 +383,7 @@ def honk_library(
         native_parity = False,
         deps_dir = "",
         cache_state = None,
+        cache_root = ".honk-cache",
         emit_cache_delta = False,
         tags = [],
         visibility = None):
@@ -398,6 +399,7 @@ def honk_library(
         native_parity = native_parity,
         deps_dir = deps_dir,
         cache_state = cache_state,
+        cache_root = cache_root,
         emit_cache_delta = emit_cache_delta,
         tags = tags,
         visibility = ["//visibility:private"],

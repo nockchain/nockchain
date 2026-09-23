@@ -179,11 +179,22 @@ state and are not safe across builds.
 
 For Bazel's six kernel targets, `just bazel build-assets-honk` keeps the fast
 read-only cache path. `just bazel build-assets-honk-cached` builds the
-cache-producing targets and merges their new objects into the gitignored
-`.honk-cache/` for the next invocation. The equivalent Bazel target is
+cache-producing targets and merges their new objects into gitignored
+`.honk-cache/<kernel>/` directories for the next invocation. Each kernel
+declares only its own cache as a Bazel input, so saving a peek object does not
+invalidate an otherwise unchanged wallet build. The equivalent Bazel target is
 `bazel run //assets/native:save_honk_cache`; a plain `bazel build` never writes
 to the source tree. The cached targets export only new or repaired objects, so
 an incremental build does not store another full copy of the seed.
+Earlier flat `.honk-cache/v1` snapshots are not inputs to the sharded rules;
+run the cached build once to populate the new layout.
+
+The ordinary Rust binary targets use hoonc kernel JAMs by default. CI and
+release select byte-identical Honk JAMs with
+`--define=kernel_compiler=honk`; the hoonc targets remain the explicit
+reference for strict parity tests. GitHub Actions restores the Nockasm cache
+per runner architecture and saves the dumb, miner, and wallet products used
+by those binaries through `//assets/native:save_honk_cache_ci`.
 
 Inspect or age out the cache with:
 

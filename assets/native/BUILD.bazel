@@ -107,11 +107,10 @@ KERNELS = {
     honk_library(
         name = "{}_native".format(kernel),
         src = KERNELS[kernel][0],
+        cache_root = ".honk-cache/{}".format(kernel),
+        # A kernel's own cache is an input only to its compile action.
+        cache_state = "//:honk_build_cache_{}".format(kernel),
         deps = KERNELS[kernel][1],
-        # Optional pre-primed incremental cache; empty until
-        # `just bazel prime-honk-cache` populates .honk-cache/, and the
-        # compile is simply cold when it is. See //:honk_build_cache.
-        cache_state = "//:honk_build_cache",
     )
     for kernel in KERNELS
 ]
@@ -123,10 +122,11 @@ KERNELS = {
     honk_library(
         name = "{}_native_cached".format(kernel),
         src = KERNELS[kernel][0],
-        deps = KERNELS[kernel][1],
-        cache_state = "//:honk_build_cache",
+        cache_root = ".honk-cache/{}".format(kernel),
+        cache_state = "//:honk_build_cache_{}".format(kernel),
         emit_cache_delta = True,
         tags = ["manual"],
+        deps = KERNELS[kernel][1],
     )
     for kernel in KERNELS
 ]
@@ -149,6 +149,31 @@ sh_binary(
     srcs = ["save_honk_cache.sh"],
     args = [kernel for kernel in KERNELS],
     data = [":cache_deltas"],
+    tags = ["manual"],
+)
+
+# The release binaries currently embed only dumb, miner, and wallet. Saving
+# just those deltas avoids compiling the other three kernels in routine CI.
+filegroup(
+    name = "ci_cache_deltas",
+    srcs = ["{}_native_cached_compile".format(kernel) for kernel in [
+        "dumb",
+        "miner",
+        "wal",
+    ]],
+    output_group = "cache_delta",
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "save_honk_cache_ci",
+    srcs = ["save_honk_cache.sh"],
+    args = [
+        "dumb",
+        "miner",
+        "wal",
+    ],
+    data = [":ci_cache_deltas"],
     tags = ["manual"],
 )
 
