@@ -24,6 +24,12 @@ Relevant implementation area:
 
 - `crates/hatch/src/utils.rs`
 
+## Import header
+
+hoonc's `+pile-rule` reads a file's whole import header (`/?`, `/-`, `/+`, `/=`, `/*`, `/#`, including comments inside and between directives and `,` lists that continue onto later lines) before `++vest` parses the body. No spot covers an import line, and the body carries a single `%dbug` that starts at the body.
+
+hatch skips the header with the same grammar (`import_directive` in `crates/hatch/src/runes/fas.rs`), and `wrap_hoon_with_trace` drops the extra `%dbug` that the `/` branch would otherwise wrap around the body. honk resolves imports with the same parser (`parse_import_header`), so the imports honk compiles and the text hatch skips cannot disagree.
+
 ## Test expectations
 
 For parser changes that affect compiler parity, run parser unit tests in release mode and at least one byte-for-byte compiler artifact parity target:
@@ -31,4 +37,10 @@ For parser changes that affect compiler parity, run parser unit tests in release
 ```bash
 cargo test --release -p hatch --lib
 bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+```
+
+For changes to import handling, also run the import-header pairings, which compile entries with real dependency leaves:
+
+```bash
+bazel test //crates/honk/test-assets:import_parity_test
 ```

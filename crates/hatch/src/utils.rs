@@ -3244,6 +3244,11 @@ pub fn gap<'src>() -> impl Parser<'src, &'src str, (), Err<'src>> {
         .labelled("Gap")
 }
 
+/// Hoon's `gaw`: any run of spaces, newlines and comments, possibly empty.
+pub fn gaw<'src>() -> impl Parser<'src, &'src str, (), Err<'src>> {
+    choice((vul(), gah())).repeated().ignored()
+}
+
 pub fn list_term_hoon<'src>(
     hoon: impl ParserExt<'src, Hoon>,
 ) -> impl Parser<'src, &'src str, Vec<(String, Hoon)>, Err<'src>> {
@@ -11509,6 +11514,24 @@ fn unanchor_spot_start(spot: &mut Spot, linemap: &LineMap) {
     spot.q.p = (new_line as u64, new_col as u64);
 }
 
+/// Second bytes of the `/`-directive (import) runes a file may open with:
+/// `/-` sur, `/+` lib, `/=` path, `/*` marked file, `/#` dat, `/?` kelvin pin
+/// and `/%`. hoonc's `+pile-rule` consumes all of them before the body reaches
+/// `++vest`, so none of them can start a spot.
+pub const IMPORT_RUNE_TAILS: &str = "-+=*#?%";
+
+/// Whether `line`, after leading indentation, opens with an import rune.
+pub fn line_starts_with_import_rune(line: &[u8]) -> bool {
+    let cursor = line
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(line.len());
+    line.get(cursor) == Some(&b'/')
+        && line
+            .get(cursor + 1)
+            .is_some_and(|tail| IMPORT_RUNE_TAILS.as_bytes().contains(tail))
+}
+
 pub fn wrap_hoon_with_trace(
     wer: Path,
     linemap: Arc<LineMap>,
@@ -11538,16 +11561,7 @@ pub fn wrap_hoon_with_trace(
                     if end > start && bytes[end - 1] == b'\n' {
                         end -= 1;
                     }
-                    let line = &bytes[start..end];
-                    let mut cursor = 0;
-                    while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') {
-                        cursor += 1;
-                    }
-                    matches!(
-                        line.get(cursor),
-                        Some(b'/')
-                            if matches!(line.get(cursor + 1), Some(b'=') | Some(b'*') | Some(b'#'))
-                    )
+                    line_starts_with_import_rune(&bytes[start..end])
                 } else {
                     false
                 }

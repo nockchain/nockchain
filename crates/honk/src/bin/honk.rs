@@ -983,7 +983,7 @@ fn native_cache_namespace(
     let mut hash = blake3::Hasher::new();
     // Bump whenever native compilation semantics or the serialized cache
     // payload changes. Source/dependency contents are Merkle-hashed separately.
-    hash.update(b"honk-native-cache-compiler-abi-2026-08-07-1\0");
+    hash.update(b"honk-native-cache-compiler-abi-2026-09-22-1\0");
     hash.update(env!("CARGO_PKG_VERSION").as_bytes());
     hash.update(env!("HONK_NATIVE_COMPILER_FINGERPRINT").as_bytes());
     hash.update(&[u8::from(cli.dbug), u8::from(cli.vet)]);
@@ -2348,8 +2348,12 @@ impl<'a> NativeBuildContext<'a> {
                 ScopeMode::Standard,
             )?)
         })?;
+        // hoonc's `+compile` kicks every Hoon leaf under /dat at build time
+        // and keeps the evaluated vase (`|.(vaz)`) instead of the deferred
+        // `+swet` trap, so its imports need values too.
+        let dat_leaf = is_dat_leaf(path, &self.directory) && !has_native_value_override(path);
         let mut imported_vases = Vec::new();
-        let imports_need_eval = evaluate_value || needs_subject;
+        let imports_need_eval = evaluate_value || needs_subject || dat_leaf;
         for import in imports {
             let imported = match import.kind {
                 NativeImportKind::Hoon => self.compile_path(&import.path, imports_need_eval)?,
@@ -2371,7 +2375,7 @@ impl<'a> NativeBuildContext<'a> {
             )
         })?;
         let override_value = native_value_override(&mut self.eval_context, path, &self.directory)?;
-        let subject_trap = if override_value.is_none() {
+        let subject_trap = if override_value.is_none() && !dat_leaf {
             Some(self.subject_trap(&imported_vases)?)
         } else {
             None
@@ -2379,25 +2383,35 @@ impl<'a> NativeBuildContext<'a> {
         // hoonc vets every file it compiles (`vet=&` is the ++ut door default
         // in hoonc.hoon's build chain), not just the entry — align.
         let vet = self.entry_vet;
-        let (ty, formula, vase_trap) = match override_value {
+        let (ty, formula, vase_trap, leaf_value) = match override_value {
             Some(value) => {
                 let (ty, formula) = trace_timed(format!("minting {label}"), || {
                     self.mint_with_subject_type_vet(subject_ty, &expr, vet)
                 })?;
                 let vase_trap = self.eval_vase_trap(ty, value)?;
-                (ty, formula, vase_trap)
+                (ty, formula, vase_trap, Some(value))
+            }
+            None if dat_leaf => {
+                let (ty, formula) = trace_timed(format!("minting {label}"), || {
+                    self.mint_with_subject_type_vet(subject_ty, &expr, vet)
+                })?;
+                self.reset_eval_memo_if_needed(path);
+                let value = self.eval_formula_with_subject(&imported_vases, formula, &label)?;
+                let vase_trap = self.eval_vase_trap(ty, value)?;
+                (ty, formula, vase_trap, Some(value))
             }
             None => {
                 let subject_trap = subject_trap.expect("subject trap should be present");
-                trace_timed(format!("swetting {label}"), || {
+                let (ty, formula, vase_trap) = trace_timed(format!("swetting {label}"), || {
                     self.native_swet_vase_trap(subject_ty, subject_trap, &expr, vet)
-                })?
+                })?;
+                (ty, formula, vase_trap, None)
             }
         };
         if keep_product {
             let mut standard_jam = None;
             let eval_value = if evaluate_value {
-                match override_value {
+                match leaf_value {
                     Some(value) => {
                         standard_jam = Some(self.jam_standard_gate_value(value, path)?);
                         None
@@ -2422,7 +2436,7 @@ impl<'a> NativeBuildContext<'a> {
             };
             Ok(NativeCompileOutput::Product(product))
         } else {
-            let vase = if let Some(eval_value) = override_value {
+            let vase = if let Some(eval_value) = leaf_value {
                 let eval_space = self.eval_context.stack.noun_space();
                 let eval_value =
                     copy_noun_to_allocator(&mut *self.ut.slab, eval_value, &eval_space);
@@ -3297,12 +3311,24 @@ const CONSTRAINTS_0_1_JAM_B3: &str =
 const CONSTRAINTS_2_JAM_B3: &str =
     "613afc7a8ff5b22dbe59edd99c9bbd4bcede474b5dec8596c3d8c907f89bac7f";
 
+fn has_native_value_override(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon")
+}
+
+/// hoonc's `+is-dat`: whether a Hoon leaf's dependency-tree path starts with
+/// /dat.
+fn is_dat_leaf(path: &Path, deps_dir: &Path) -> bool {
+    build_import_wer(path, deps_dir)
+        .first()
+        .is_some_and(|head| head == "dat")
+}
+
 fn native_value_override(
     context: &mut Context,
     path: &Path,
     directory: &Path,
 ) -> Result<Option<Noun>> {
-    if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
+    if has_native_value_override(path) {
         if softed_constraints_pins_match(path, directory)? {
             return Ok(Some(softed_constraints_value(context, directory)?));
         }

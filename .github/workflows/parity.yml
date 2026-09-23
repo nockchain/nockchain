@@ -13,19 +13,22 @@ name: Compiler parity
 # memory footprint (rules_hoon/hoon.bzl resource_set) so Bazel does not
 # co-schedule both compiles of a pair on a 16GB runner.
 
-# Keep this expensive workflow scoped to Honk changes. The workflow path is
-# included so changes to the gate exercise the gate itself.
+# Keep this expensive workflow scoped to Honk changes, which include its hatch
+# parser: parser spots and import handling are artifact data. The workflow
+# path is included so changes to the gate exercise the gate itself.
 
 on:
   push:
     branches: ["master", "nightly"]
     paths:
       - "crates/honk/**"
+      - "crates/hatch/**"
       - ".github/workflows/parity.yml"
   pull_request:
     branches: ["master", "nightly"]
     paths:
       - "crates/honk/**"
+      - "crates/hatch/**"
       - ".github/workflows/parity.yml"
 
 permissions:
@@ -73,6 +76,9 @@ jobs:
 
       - name: Test type-checking parity probes (hoonc vs honk, strict cmp)
         run: bazel test //crates/honk/test-assets/type-probes:all_parity_test
+
+      - name: Test import-header parity fixtures (hoonc vs honk, strict cmp)
+        run: bazel test //crates/honk/test-assets:import_parity_test
 
   hoon-138-parity:
     # The honk native self-mint peaks ~14GB RSS; ubuntu-latest (16GB) is
