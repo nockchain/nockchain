@@ -157,6 +157,15 @@ jobs:
           cp -L bazel-bin/crates/nockchain-wallet/nockchain-wallet target/release/nockchain-wallet
           file target/release/{hoon,hoonc,nockup,nockchain,nockchain-wallet}
 
+      - name: Verify nockup release version
+        run: |
+          actual=$(target/release/nockup --version)
+          expected="nockup ${{ steps.cargo-versions.outputs.nockup_version }}"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Expected $expected, got $actual"
+            exit 1
+          fi
+
       - name: Set up GPG
         if: runner.os == 'Linux' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
         run: |

@@ -15,6 +15,17 @@ exports_files([
     "templates/repl/Cargo.toml",
 ])
 
+# Cargo's build.rs sets FULL_VERSION from CARGO_PKG_VERSION. Derive both from
+# the package manifest so the Bazel binary reports the same release version.
+genrule(
+    name = "package_version_env",
+    srcs = ["Cargo.toml"],
+    outs = ["package_version.env"],
+    cmd = "version=$$(sed -nE 's/^version[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\\1/p' $(SRCS) | head -n 1); " +
+          "test -n \"$$version\"; " +
+          "printf 'FULL_VERSION=%s\\nCARGO_PKG_VERSION=%s\\n' \"$$version\" \"$$version\" > $@",
+)
+
 # Library target for nockup
 rust_library(
     name = "nockup_lib",
@@ -29,10 +40,7 @@ rust_library(
         "templates/**/*",
     ]),
     edition = "2021",
-    rustc_env = {
-        "FULL_VERSION": "0.4.0",
-        "CARGO_PKG_VERSION": "0.4.0",
-    },
+    rustc_env_files = [":package_version_env"],
     deps = all_crate_deps(),
 )
 
@@ -46,11 +54,7 @@ rust_binary(
         "templates/**/*",
     ]),
     edition = "2021",
-    # Keep the version used by the CLI without volatile build metadata.
-    rustc_env = {
-        "FULL_VERSION": "0.4.0",
-        "CARGO_PKG_VERSION": "0.4.0",
-    },
+    rustc_env_files = [":package_version_env"],
     deps = all_crate_deps() + [":nockup_lib"],
 )
 
