@@ -90,7 +90,7 @@ impl<'a> Ut<'a> {
             // sut and dox are interned, so pointer equality is structural equality.
             if NRc::ptr_eq(entry_sut, sut)
                 && NRc::ptr_eq(entry_dox, dox)
-                && (unsafe { entry_hoon.as_raw() } == unsafe { hoon_noun.as_raw() }
+                && (unsafe { entry_hoon.raw_equals(&hoon_noun) }
                     || noun_eq(*entry_hoon, hoon_noun, &space)?)
             {
                 return Ok(true);

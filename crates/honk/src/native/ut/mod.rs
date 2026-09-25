@@ -2451,17 +2451,13 @@ impl<'a> Ut<'a> {
         let Some(entries) = self.hold_repo_fan_leg_ids.get(&key) else {
             return Ok(None);
         };
-        let inner_raw = NounIdentity::of(inner);
-        let hoon_raw = NounIdentity::of(hoon);
         for entry in entries.iter().rev() {
             let inner_match = unsafe { entry.inner.raw_equals(&inner) }
-                || NounIdentity::of(entry.inner) == inner_raw
                 || noun_eq(entry.inner, inner, &self.slab.noun_space())?;
             if !inner_match {
                 continue;
             }
             let hoon_match = unsafe { entry.hoon.raw_equals(&hoon) }
-                || NounIdentity::of(entry.hoon) == hoon_raw
                 || noun_eq(entry.hoon, hoon, &self.slab.noun_space())?;
             if hoon_match {
                 self.hold_repo_fan_leg_raw_ids.insert(raw_key, entry.id);
@@ -2526,11 +2522,9 @@ impl<'a> Ut<'a> {
         let Some(entries) = self.hold_repo_fan_leg_id_by_hold_mug.get(&hold_mug) else {
             return Ok(None);
         };
-        let hold_raw = NounIdentity::of(hold);
         let mut matched = None;
         for entry in entries.iter().rev() {
             let hold_match = unsafe { entry.hold.raw_equals(&hold) }
-                || NounIdentity::of(entry.hold) == hold_raw
                 || noun_eq(entry.hold, hold, &self.slab.noun_space())?;
             if hold_match {
                 matched = Some(entry.id);
@@ -2538,7 +2532,7 @@ impl<'a> Ut<'a> {
             }
         }
         if let Some(id) = matched {
-            self.hold_repo_fan_leg_id_by_hold_raw_store(hold_raw, id);
+            self.hold_repo_fan_leg_id_by_hold_raw_store(NounIdentity::of(hold), id);
             return Ok(Some(id));
         }
         Ok(None)
@@ -2568,10 +2562,8 @@ impl<'a> Ut<'a> {
             .hold_repo_fan_leg_id_by_hold_mug
             .entry(hold_mug)
             .or_default();
-        let hold_raw = NounIdentity::of(hold);
         for entry in bucket.iter() {
             let hold_match = unsafe { entry.hold.raw_equals(&hold) }
-                || NounIdentity::of(entry.hold) == hold_raw
                 || noun_eq(entry.hold, hold, &self.slab.noun_space())?;
             if hold_match {
                 return Ok(());
@@ -4129,14 +4121,8 @@ impl<'a> Ut<'a> {
 
         // hoon-138 `++mint` short-circuit: if the subject is void (except direct `dbug`),
         // allow only `%lost`/`%zpzp` under `vet`, and return `[void [0 0]]`.
-        let is_dbug = match gen {
-            Hoon::Dbug(_, _) => true,
-            _ => false,
-        };
-        let is_allowed_void = match gen {
-            Hoon::Lost(_) | Hoon::ZapZap => true,
-            _ => false,
-        };
+        let is_dbug = matches!(gen, Hoon::Dbug(_, _));
+        let is_allowed_void = matches!(gen, Hoon::Lost(_) | Hoon::ZapZap);
         if matches!(&*sut, NTy::Void) && !is_dbug {
             if self.vet && !is_allowed_void {
                 return Err(CompilerError::Noun("mint-vain".to_string()));
@@ -5716,19 +5702,15 @@ impl<'a> Ut<'a> {
         if let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) {
             ctx.in_progress_axes.remove(&fragment);
         }
-        match compiled {
-            Ok(formula) => {
-                // Cache the formula for the whole compile. Other cores read it, and
-                // re-minting on a later miss would run in the caller's %hold/fan
-                // scope instead of this arm's and could produce a wrong type.
-                // Caching keeps the resolver a pure lookup.
-                if let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) {
-                    ctx.cached_formula_by_axis.insert(fragment, formula);
-                }
-                Ok(Some(formula))
-            }
-            Err(err) => Err(err),
+        let formula = compiled?;
+        // Cache the formula for the whole compile. Other cores read it, and
+        // re-minting on a later miss would run in the caller's %hold/fan scope
+        // instead of this arm's and could produce a wrong type. Caching keeps the
+        // resolver a pure lookup.
+        if let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) {
+            ctx.cached_formula_by_axis.insert(fragment, formula);
         }
+        Ok(Some(formula))
     }
 
     fn semi_import_noun(&mut self, semi: Noun) -> Result<SemiId> {
@@ -6034,8 +6016,7 @@ impl<'a> Ut<'a> {
         if let Some(cached) = memo.get(&key) {
             return Ok(Some(*cached));
         }
-        let result = self.musk_araw_uncached(bus, fol, memo);
-        let result = result?;
+        let result = self.musk_araw_uncached(bus, fol, memo)?;
         if let Some(noun) = result {
             memo.insert(key, noun);
         }
@@ -7333,7 +7314,7 @@ impl<'a> Ut<'a> {
         let mut edits: Vec<(BigUint, FormulaId)> = Vec::with_capacity(pairs.len());
         match palo.opal {
             Opal::Leg(mut base_leg) => {
-                for (_idx, (sub_wing, expr)) in pairs.iter().enumerate() {
+                for (sub_wing, expr) in pairs.iter() {
                     let goal = cons_noun(&mut self.cx);
                     let (patch_ty, patch_formula) = self.mint(sut.clone(), goal, expr)?;
                     let (edit_axis, edited_leg) = self.tack(base_leg, sub_wing, patch_ty)?;
@@ -7352,7 +7333,7 @@ impl<'a> Ut<'a> {
                 arms,
             } => {
                 let mut hag = arms;
-                for (_idx, (sub_wing, expr)) in pairs.iter().enumerate() {
+                for (sub_wing, expr) in pairs.iter() {
                     let goal = cons_noun(&mut self.cx);
                     let (patch_ty, patch_formula) = self.mint(sut.clone(), goal, expr)?;
                     let (edit_axis, next_hag) = self.toss(sub_wing, patch_ty, &hag)?;
@@ -8190,17 +8171,7 @@ impl<'a> Ut<'a> {
             ))
         );
         self.arm_epoch = ArmEpoch(self.arm_epoch.0.wrapping_add(1));
-        let (ty, formula) = match result {
-            Ok(ok) => ok,
-            Err(err) => {
-                return Err(with_arm_context(key.as_ref(), err));
-            }
-        };
-        // `prune_recursive_holds` takes a noun type. `ty` is the arm's result, not the
-        // deepening core, so lowering it per arm is bounded.
-        let ty_noun = live_to_noun(&mut self.cx, &ty, self.slab);
-        let _ty = self.prune_recursive_holds(ty_noun, hoon_noun)?;
-
+        let (_ty, formula) = result.map_err(|err| with_arm_context(key.as_ref(), err))?;
         Ok(formula)
     }
 
@@ -8547,110 +8518,6 @@ impl<'a> Ut<'a> {
         })
     }
 
-    fn prune_recursive_holds(&mut self, typ: Noun, hoon_noun: Noun) -> Result<Noun> {
-        // Large recursive molds make this traversal very deep, so it uses an explicit
-        // stack to avoid Rust stack overflows.
-        let mut seen: HashSet<NounIdentity> = HashSet::new();
-        let mut todo: Vec<Noun> = vec![typ];
-        let mut post: Vec<Noun> = Vec::new();
-        while let Some(node) = todo.pop() {
-            let raw = NounIdentity::of(node);
-            if !seen.insert(raw) {
-                continue;
-            }
-            post.push(node);
-            match type_tag(node, &self.slab.noun_space())?.as_str() {
-                "fork" => {
-                    for option in type_fork_options(node, &self.slab.noun_space())? {
-                        todo.push(option);
-                    }
-                }
-                "cell" => {
-                    let (head, tail) = type_cell_parts(node, &self.slab.noun_space())?;
-                    todo.push(head);
-                    todo.push(tail);
-                }
-                "face" => {
-                    todo.push(type_face_inner(node, &self.slab.noun_space())?);
-                }
-                "hint" => {
-                    let (_inner, _note, payload) = type_hint_parts(node, &self.slab.noun_space())?;
-                    todo.push(payload);
-                }
-                "core" => {
-                    let (payload, coil) = type_core_parts(node, &self.slab.noun_space())?;
-                    let (_garb, context, _rest) = coil_parts(coil, &self.slab.noun_space())?;
-                    todo.push(payload);
-                    todo.push(context);
-                }
-                _ => {}
-            }
-        }
-        let mut memo: HashMap<NounIdentity, Noun> =
-            HashMap::with_capacity(post.len().saturating_mul(2));
-        for node in post.into_iter().rev() {
-            let raw = NounIdentity::of(node);
-            let result = match type_tag(node, &self.slab.noun_space())?.as_str() {
-                "hold" => {
-                    let _ = hoon_noun;
-                    let (_inner, _hoon) = type_hold_parts(node, &self.slab.noun_space())?;
-                    node
-                }
-                "fork" => {
-                    let options = type_fork_options(node, &self.slab.noun_space())?;
-                    let mut kept = Vec::with_capacity(options.len());
-                    for option in options {
-                        let opt_raw = NounIdentity::of(option);
-                        let pruned = memo.get(&opt_raw).copied().unwrap_or(option);
-                        if type_tag(pruned, &self.slab.noun_space())? == "void" {
-                            continue;
-                        }
-                        kept.push(pruned);
-                    }
-                    match kept.len() {
-                        0 => ty_void(self.slab),
-                        1 => kept[0],
-                        _ => self.fork_from_options(kept)?,
-                    }
-                }
-                "cell" => {
-                    let (head, tail) = type_cell_parts(node, &self.slab.noun_space())?;
-                    let head_raw = NounIdentity::of(head);
-                    let tail_raw = NounIdentity::of(tail);
-                    let head = memo.get(&head_raw).copied().unwrap_or(head);
-                    let tail = memo.get(&tail_raw).copied().unwrap_or(tail);
-                    ty_cell(self.slab, head, tail)
-                }
-                "face" => {
-                    let inner = type_face_inner(node, &self.slab.noun_space())?;
-                    let inner_raw = NounIdentity::of(inner);
-                    let inner = memo.get(&inner_raw).copied().unwrap_or(inner);
-                    type_face_with_inner(self.slab, node, inner)?
-                }
-                "hint" => {
-                    let (inner, note, payload) = type_hint_parts(node, &self.slab.noun_space())?;
-                    let payload_raw = NounIdentity::of(payload);
-                    let payload = memo.get(&payload_raw).copied().unwrap_or(payload);
-                    ty_hint(self.slab, inner, note, payload)
-                }
-                "core" => {
-                    let (payload, coil) = type_core_parts(node, &self.slab.noun_space())?;
-                    let (garb, context, rest) = coil_parts(coil, &self.slab.noun_space())?;
-                    let payload_raw = NounIdentity::of(payload);
-                    let context_raw = NounIdentity::of(context);
-                    let payload = memo.get(&payload_raw).copied().unwrap_or(payload);
-                    let context = memo.get(&context_raw).copied().unwrap_or(context);
-                    let new_coil = coil_from_parts(self.slab, garb, context, rest);
-                    ty_core(self.slab, payload, new_coil)
-                }
-                _ => node,
-            };
-            memo.insert(raw, result);
-        }
-        let root_raw = NounIdentity::of(typ);
-        Ok(*memo.get(&root_raw).unwrap_or(&typ))
-    }
-
     fn nest(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<bool> {
         // Walks native types. Cell, face, hint, and core children stay native; leaf
         // parts (core rest, fork set, atoms) are lowered through the memoized
@@ -8678,13 +8545,9 @@ impl<'a> Ut<'a> {
             &mut gil,
             &mut memo,
         )?;
-        // The top-level call always has empty seg and reg, so every result is cacheable.
-        let seg_empty = true;
-        let reg_empty = true;
-        let cacheable = (result && reg_empty) || (!result && seg_empty);
-        if cacheable {
-            nest_cache_store(&mut self.cx, &sut, &ref_, semantic.vet_key, fan, result);
-        }
+        // The top-level call starts with empty seen-hold sets, so every result is
+        // cacheable.
+        nest_cache_store(&mut self.cx, &sut, &ref_, semantic.vet_key, fan, result);
         Ok(result)
     }
 
@@ -9796,8 +9659,7 @@ impl<'a> Ut<'a> {
                 ut.crop(a, ref_for_duz.clone())
             }
         };
-        let (_axis, ty) = self.take(sut.clone(), &palo.vein, &duz)?;
-        let ty = if NRc::ptr_eq(&ty, &sut) { sut } else { ty };
+        let (_axis, ty) = self.take(sut, &palo.vein, &duz)?;
         Ok(ty)
     }
 
@@ -10437,8 +10299,7 @@ impl<'a> Ut<'a> {
         // `seen` and the memo key on canonical type IDs.
         let mut seen: Vec<(TypeId, TypeId)> = Vec::new();
         if let Some((stored_epoch, mut memo)) = self.miss_memo_persist.take() {
-            let context = self.cache_context_key();
-            let epoch = context;
+            let epoch = self.cache_context_key();
             if stored_epoch != epoch {
                 memo.clear();
             }

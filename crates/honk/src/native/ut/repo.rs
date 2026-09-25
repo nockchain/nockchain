@@ -162,18 +162,14 @@ impl<'a> Ut<'a> {
             gene: self.noun_mug_cached(hoon),
         };
         if let Some(entries) = self.hold_memo.hold_type.get(&key) {
-            let inner_raw = unsafe { inner.as_raw() };
-            let hoon_raw = unsafe { hoon.as_raw() };
             for entry in entries.iter().rev() {
                 let inner_match = unsafe { entry.inner.raw_equals(&inner) }
-                    || unsafe { entry.inner.as_raw() } == inner_raw
                     || noun_eq(entry.inner, inner, &space)?;
                 if !inner_match {
                     continue;
                 }
-                let hoon_match = unsafe { entry.hoon.raw_equals(&hoon) }
-                    || unsafe { entry.hoon.as_raw() } == hoon_raw
-                    || noun_eq(entry.hoon, hoon, &space)?;
+                let hoon_match =
+                    unsafe { entry.hoon.raw_equals(&hoon) } || noun_eq(entry.hoon, hoon, &space)?;
                 if hoon_match {
                     self.hold_memo.hold_type_raw.insert_with_limit(
                         raw_key,

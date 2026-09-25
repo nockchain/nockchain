@@ -7,7 +7,7 @@
 //! resolver caches and by the `open_cache` address guard.
 //!
 //! Equal integer representations do not make different ID domains compatible:
-//! ```compile_fail
+//! ```compile_fail,E0308
 //! use honk::native::identity::{FanContextId, LazyResolverId};
 //! let fan: FanContextId = LazyResolverId::default();
 //! ```

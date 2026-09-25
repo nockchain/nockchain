@@ -161,16 +161,6 @@ impl Default for BoundaryMemoSet {
     }
 }
 
-impl BoundaryMemoSet {
-    /// Drop noun-boundary results; future calls recompute them in their context.
-    pub fn clear(&mut self) {
-        self.mint.clear();
-        self.redo.clear();
-        self.rest.clear();
-        self.nest.clear();
-    }
-}
-
 pub struct HoldMemoSet {
     pub hold_type_raw: RawMemoMap<HoldKey<NounIdentity>, Noun>,
     pub hold_type: BucketMemo<HoldKey<NounMug>, HoldTypeCacheEntry>,
@@ -182,14 +172,6 @@ impl Default for HoldMemoSet {
             hold_type_raw: Default::default(),
             hold_type: Default::default(),
         }
-    }
-}
-
-impl HoldMemoSet {
-    /// Drop every memoized hold type (see `BoundaryMemoSet::clear`).
-    pub fn clear(&mut self) {
-        self.hold_type_raw.clear();
-        self.hold_type.clear();
     }
 }
 
@@ -488,11 +470,10 @@ impl NestTypeInterner {
 }
 
 /// Ordered recursion guard whose ID domain cannot change after construction.
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use honk::native::identity::NestNounId;
-/// use honk::native::ir::ty::TypeId;
 /// use honk::native::ut::types::NestSeenSet;
-/// let mut native = NestSeenSet::<TypeId>::new();
+/// let mut native: NestSeenSet = NestSeenSet::new();
 /// native.insert_id(NestNounId::default());
 /// ```
 #[derive(Clone)]

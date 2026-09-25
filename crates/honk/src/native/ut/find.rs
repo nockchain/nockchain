@@ -620,11 +620,8 @@ impl<'a> Ut<'a> {
     pub(super) fn twin(&mut self, left: Pony, right: Pony) -> Result<Pony> {
         match (left, right) {
             (Pony::Void, other) | (other, Pony::Void) => Ok(other),
-            (Pony::Unmatched(rem), other @ Pony::Palo(_))
-            | (other @ Pony::Palo(_), Pony::Unmatched(rem))
-            | (Pony::Unmatched(rem), other @ Pony::Synthetic { .. })
-            | (other @ Pony::Synthetic { .. }, Pony::Unmatched(rem)) => {
-                let _ = (rem, other);
+            (Pony::Unmatched(_), Pony::Palo(_) | Pony::Synthetic { .. })
+            | (Pony::Palo(_) | Pony::Synthetic { .. }, Pony::Unmatched(_)) => {
                 Err(CompilerError::Noun("find-fork".to_string()))
             }
             (Pony::Unmatched(a), Pony::Unmatched(b)) if a == b => Ok(Pony::Unmatched(a)),

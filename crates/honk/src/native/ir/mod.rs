@@ -8,7 +8,6 @@
 //! noun boundary. `crate::native::ut` uses these arenas throughout minting,
 //! type operations, formula construction, and seminoun completion.
 
-pub mod core;
 pub mod formula;
 pub mod formula_dag;
 pub(crate) mod intern;

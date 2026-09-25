@@ -30,7 +30,6 @@ use nockapp::noun::{BrandedEvalExt, BrandedNounSpaceExt, NounAllocatorExt};
 use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
 use nockapp::AtomExt;
 use nockvm::ext::NounExt;
-use nockvm::hamt::Hamt;
 use nockvm::interpreter::{interpret, Context, Error as NockError};
 use nockvm::jets::cold::{Cold, Nounable};
 use nockvm::jets::math::util::lth_b;
@@ -1026,9 +1025,8 @@ fn build_context_with_shared_prelude(
     // The seed play only produces the prelude type. Skip it when that type is
     // overwritten below: by a cued subject type (embedded or --sut-jam), or under
     // native parity by the minted prelude type.
-    let skip_prelude_play = subject_type_jam.is_some()
-        || (canonical_hoon_138 && !native_parity_enabled())
-        || native_parity_enabled();
+    let skip_prelude_play =
+        subject_type_jam.is_some() || canonical_hoon_138 || native_parity_enabled();
     let mut prelude_vase = trace_timed("seeding shared honc type", || {
         seed_honc_type_with_ut(&mut ut, &mut eval_context, prelude, skip_prelude_play)
     })?;
@@ -2389,7 +2387,6 @@ impl<'a> NativeBuildContext<'a> {
                         None
                     }
                     None => {
-                        self.reset_eval_memo_if_needed(path);
                         standard_jam = Some(self.eval_standard_formula_to_jam(
                             &imported_vases, formula, path, &label,
                         )?);
@@ -2419,7 +2416,6 @@ impl<'a> NativeBuildContext<'a> {
                 }
             } else {
                 let eval_value = if evaluate_value {
-                    self.reset_eval_memo_if_needed(path);
                     let value = self.eval_formula_with_subject(&imported_vases, formula, &label)?;
                     let value_space = self.eval_context.stack.noun_space();
                     Some(copy_noun_to_allocator(
@@ -2844,16 +2840,6 @@ impl<'a> NativeBuildContext<'a> {
         jam_standard_kernel_trap_native(&mut self.eval_context, gate, dir_hash)
     }
 
-    fn reset_eval_memo_if_needed(&mut self, path: &Path) {
-        if should_reset_eval_memo(path) {
-            trace_native(format!(
-                "resetting Nock memo cache before {}",
-                path.display()
-            ));
-            self.eval_context.cache = Hamt::new(&mut self.eval_context.stack);
-        }
-    }
-
     fn jam_product(
         &mut self,
         product: &mut NativeBuildProduct,
@@ -3021,10 +3007,6 @@ fn jam_noun_in_fresh_slab(noun: Noun, space: &NounSpace) -> Vec<u8> {
     let mut slab: NounSlab<NockJammer> = NounSlab::new();
     let noun = slab.copy_into(noun, space);
     jam_slab_noun(&mut slab, noun)
-}
-
-fn should_reset_eval_memo(_path: &Path) -> bool {
-    false
 }
 
 fn shot_gene() -> Hoon {
@@ -3202,11 +3184,9 @@ fn mint_honc_formula_with_ut(
     prelude: &Hoon,
 ) -> Result<(Noun, Noun)> {
     // The canonical prelude is `=< …`; mint it chunked to bound memory.
-    let dbg = format!("{:?}", prelude);
     eprintln!(
-        "[honk] mint_honc_formula path: prelude root = {} | debug = {}",
-        prelude_variant_name(prelude),
-        &dbg[..dbg.len().min(200)]
+        "[honk] mint_honc_formula path: prelude root = {}",
+        prelude_variant_name(prelude)
     );
     if std::env::var_os("NATIVE_HOON_NO_CHUNK").is_none()
         && matches!(peel_transparent(prelude), Hoon::TisGal(_, _))
