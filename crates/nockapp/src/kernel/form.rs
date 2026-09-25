@@ -2127,8 +2127,8 @@ impl Serf {
             Duration::ZERO
         };
 
-        let cumulative_event_processing_time_since_compaction = if snapshot_creation_enabled
-            && epoch_compaction_interval_event_time.is_some()
+        let cumulative_event_processing_time_since_compaction = if let Some(interval) =
+            epoch_compaction_interval_event_time.filter(|_| snapshot_creation_enabled)
         {
             match event_log.as_mut() {
                 Some(event_log) => {
@@ -2138,7 +2138,7 @@ impl Serf {
                         ))
                     })?;
                     event_log
-                        .event_processing_time_after(compaction_event_num)
+                        .event_processing_time_after_capped(compaction_event_num, interval)
                         .map_err(|err| {
                             CrownError::Unknown(format!(
                                 "serf: failed to load cumulative event processing time since epoch compaction: {err}"
@@ -3636,8 +3636,26 @@ mod tests {
     fn failed_epoch_compaction_retries_only_after_another_compute_interval() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let path = temp.path().join("event-log.sqlite3");
-        let event_log = EventLog::open(EventLogConfig { path: path.clone() })
+        let mut event_log = EventLog::open(EventLogConfig { path: path.clone() })
             .expect("open compaction retry event log");
+        event_log
+            .append_event(&EventLogEntry {
+                event_num: 1,
+                job_jam: vec![],
+                wire_source: "sys".to_string(),
+                wire_version: 1,
+                wire_tags_json: "[]".to_string(),
+                cause_hash: vec![0; 32],
+                job_hash: vec![0; 32],
+                event_processing_duration: Duration::from_secs(100),
+                created_at_ms: 0,
+            })
+            .expect("append historical compute time");
+        let interval = Duration::from_secs(10);
+        let restored = event_log
+            .event_processing_time_after_capped(0, interval)
+            .expect("restore due counter with excess historical compute time");
+        assert_eq!(restored, interval);
         // A real storage error exercises the runtime error path without needing
         // large PMA artifacts. Retrying would move the next retry deadline.
         let conn = rusqlite::Connection::open(path).expect("open failure injection connection");
@@ -3647,8 +3665,8 @@ mod tests {
         let mut serf = dummy_serf();
         serf.event_log = Some(event_log);
         serf.snapshot_creation_enabled = true;
-        serf.epoch_compaction_interval_event_time = Some(Duration::from_secs(10));
-        serf.cumulative_event_processing_time_since_compaction = Duration::from_secs(10);
+        serf.epoch_compaction_interval_event_time = Some(interval);
+        serf.cumulative_event_processing_time_since_compaction = restored;
 
         serf.maybe_compact_epoch_snapshot();
         assert_eq!(serf.epoch_compaction_retry_at, Duration::from_secs(20));

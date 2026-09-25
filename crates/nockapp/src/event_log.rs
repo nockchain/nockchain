@@ -19,6 +19,7 @@ const REPLAY_FLOOR_KEY: &str = "replay_floor";
 const COMPACTION_EVENT_NUM_KEY: &str = "compaction_event_num";
 const RECLAMATION_PENDING_KEY: &str = "reclamation_pending";
 const EVENT_LOG_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+const PROCESSING_TIME_RESTORE_BATCH_SIZE: i64 = 64;
 
 diesel::table! {
     events (id) {
@@ -612,6 +613,46 @@ impl EventLog {
         duration_from_sqlite("event_processing_duration_us", total_micros)
     }
 
+    /// Restore a scheduling counter, retaining its exact value only below `cap`.
+    /// Reading newest events first avoids scanning old large records once enough
+    /// accepted compute time has accumulated to make maintenance due.
+    pub(crate) fn event_processing_time_after_capped(
+        &mut self,
+        event_num: u64,
+        cap: Duration,
+    ) -> Result<Duration, EventLogError> {
+        let after = sqlite_i64("event_num", event_num)?;
+        let mut through = i64::MAX;
+        let mut total = Duration::ZERO;
+        while total < cap && through > after {
+            let rows = events::table
+                .select((events::event_num, events::event_processing_duration_us))
+                .filter(events::event_num.gt(after))
+                .filter(events::event_num.le(through))
+                .order(events::event_num.desc())
+                .limit(PROCESSING_TIME_RESTORE_BATCH_SIZE)
+                .load::<(i64, i64)>(&mut self.conn)?;
+            let Some(&(oldest, _)) = rows.last() else {
+                break;
+            };
+            for &(_, micros) in &rows {
+                total = total.saturating_add(duration_from_sqlite(
+                    "event_processing_duration_us", micros,
+                )?);
+                if total >= cap {
+                    return Ok(cap);
+                }
+            }
+            if rows.len() < PROCESSING_TIME_RESTORE_BATCH_SIZE as usize {
+                break;
+            }
+            // Every selected event is strictly greater than the nonnegative
+            // lower bound, so this cannot underflow or repeat a batch boundary.
+            through = oldest - 1;
+        }
+        Ok(total)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn max_event_num(&mut self) -> Result<Option<u64>, EventLogError> {
         let max_event_num = events::table
@@ -1092,6 +1133,96 @@ mod tests {
             log.event_processing_time_after(0)
                 .expect("event processing time after 0"),
             Duration::from_micros(3)
+        );
+    }
+
+    #[test]
+    fn capped_processing_time_restores_exact_total_and_excludes_compaction_head() {
+        let (_temp, mut log) = compaction_fixture();
+        let cap = Duration::from_secs(1);
+        assert_eq!(
+            log.event_processing_time_after_capped(2, cap)
+                .expect("restore after compaction head"),
+            Duration::from_micros(3 + 4 + 5 + 6)
+        );
+        assert_eq!(
+            log.event_processing_time_after_capped(6, cap)
+                .expect("no newer events"),
+            Duration::ZERO
+        );
+        assert_eq!(
+            log.event_processing_time_after_capped(0, Duration::ZERO)
+                .expect("zero cap"),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn capped_processing_time_crosses_batches_without_skipping_or_recounting_events() {
+        let (_temp, mut log) = compaction_fixture();
+        let count = PROCESSING_TIME_RESTORE_BATCH_SIZE as u64 * 2 + 7;
+        for event_num in 7..=count {
+            log.append_event(&sample_entry(event_num)).expect("append");
+        }
+        let expected = Duration::from_micros((1..=count).sum());
+        assert_eq!(
+            log.event_processing_time_after_capped(0, expected + Duration::from_secs(1))
+                .expect("restore all batches"),
+            expected
+        );
+
+        let newest_batch_total: u64 =
+            (count - PROCESSING_TIME_RESTORE_BATCH_SIZE as u64 + 1..=count).sum();
+        let cap = Duration::from_micros(newest_batch_total + 1);
+        assert_eq!(
+            log.event_processing_time_after_capped(0, cap)
+                .expect("cross into second batch before reaching cap"),
+            cap
+        );
+    }
+
+    #[test]
+    fn capped_processing_time_stops_querying_once_recent_events_make_compaction_due() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        use diesel::connection::InstrumentationEvent;
+
+        let (_temp, mut log) = compaction_fixture();
+        for event_num in 7..=PROCESSING_TIME_RESTORE_BATCH_SIZE as u64 * 3 {
+            log.append_event(&sample_entry(event_num)).expect("append");
+        }
+        let queries = Arc::new(AtomicUsize::new(0));
+        let query_counter = Arc::clone(&queries);
+        log.conn
+            .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+                if matches!(event, InstrumentationEvent::StartQuery { .. }) {
+                    query_counter.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        let cap = Duration::from_micros(10);
+        assert_eq!(
+            log.event_processing_time_after_capped(0, cap)
+                .expect("restore due counter"),
+            cap
+        );
+        assert_eq!(queries.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn capped_processing_time_avoids_sqlite_sum_overflow() {
+        let (_temp, mut log) = compaction_fixture();
+        let duration = Duration::from_micros(i64::MAX as u64);
+        for event_num in 7..=8 {
+            let mut event = sample_entry(event_num);
+            event.event_processing_duration = duration;
+            log.append_event(&event).expect("append large duration");
+        }
+        let cap = duration + Duration::from_micros(1);
+        assert_eq!(
+            log.event_processing_time_after_capped(6, cap)
+                .expect("cap total beyond SQLite integer range"),
+            cap
         );
     }
 
