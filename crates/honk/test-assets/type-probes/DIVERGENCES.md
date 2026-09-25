@@ -29,6 +29,7 @@ None.
 | 9 | Cell-skin gain/lose on a core tested a `%noun` base skin instead of the term `%noun` | same |
 | 10 | Cell-skin lose re-wrapped a face that hoon-138 strips | same |
 | 11 | A wash skin as a `?:` condition compiled in honk; hoonc recurses forever. honk now fails with `gain-wash` | same |
+| #NEW-c1 | `!@` on a two-limb wing whose rest searches a void type answered no; hoon-138 `++fond` has no `?~` guard on the rest of the wing and crashes | honk: match hoon-138 ++fond on a void wing tail |
 
 ## Parser and desugarer (`crates/hatch`)
 

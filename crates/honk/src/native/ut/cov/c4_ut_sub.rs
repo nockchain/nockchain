@@ -948,10 +948,13 @@ fn c4_fond_void_and_unmatched_tails() {
     let pair = ty_cell(&mut slab, payload, payload);
     let mut ut = Ut::new(&mut slab);
     let void_n = nat(&mut ut, void);
+    // `b` is a void search, and hoon-138 `++fond` crashes on a void tail.
     assert!(matches!(
-        ut.fond(void_n, Way::Read, &wing(&["a", "b"])).unwrap(),
+        ut.fond(void_n.clone(), Way::Read, &wing(&["b"])).unwrap(),
         Pony::Void
     ));
+    let msg = err_text(ut.fond(void_n, Way::Read, &wing(&["a", "b"])));
+    assert!(msg.contains("void wing tail"), "{msg}");
     // `p.b` looks for `p` in the core that holds arm `b`; it is not there.
     let core_n = nat(&mut ut, core);
     assert!(matches!(
@@ -981,6 +984,20 @@ fn c4_fond_void_and_unmatched_tails() {
     let (vein, ty) = leg_of(ut.find(core_n, Way::Read, &here).unwrap());
     assert_eq!(tend_big(&vein).unwrap(), BigUint::from(1u32));
     assert!(matches!(&*ty, NTy::Core { .. }));
+}
+
+#[test]
+fn c4_fond_void_tail_crashes_like_hoon_138() {
+    // `=+  loop` puts a hold that expands to itself at the subject head, so the
+    // search for `zz` is void. With a one-limb wing `!@` answers no; with
+    // `x.zz`, hoon-138 `++fond` crashes on the void tail.
+    let msg = mint_err(include_str!(
+        "../../../../test-assets/type-probes/reject/c4_fond_void_tail.hoon"
+    ));
+    assert!(msg.contains("void wing tail"), "{msg}");
+    mint_dump(include_str!(
+        "../../../../test-assets/type-probes/coverage/regressions/c4_feel_void_search.hoon"
+    ));
 }
 
 #[test]

@@ -121,7 +121,10 @@ impl<'a> Ut<'a> {
         let mor = self.fond(sut, way, tail)?;
 
         let out = match mor {
-            Pony::Void => Ok(Pony::Void),
+            // hoon-138 `++fond` switches on `-.mor` without a `?~` guard, so a
+            // void search for the rest of the wing crashes, in `feel` as well
+            // as in `find`.
+            Pony::Void => Err(CompilerError::Noun("fond: void wing tail".to_string())),
             Pony::Unmatched(skip) => Ok(Pony::Unmatched(skip)),
             Pony::Synthetic { typ, formula } => {
                 let goal = cons_noun(&mut self.cx);
