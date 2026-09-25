@@ -52,6 +52,7 @@ use crate::composite_full_air::{CompositeFullAir, CompositeFullAirPinned};
 use crate::composite_public::CompositePublicInputs;
 use crate::composite_trace::CompositeTrace;
 use crate::params::ZkParams;
+use crate::proof_rules::ProofRules;
 
 /// Concrete STARK verification failures are stringified at this API boundary because
 /// the uni-STARK and batch-STARK paths return different verifier error enums.
@@ -399,9 +400,9 @@ pub fn composite_prove_pinned_logup_sx_with_common(
     });
     let program = extract_program(&trace.matrix);
     let air =
-        crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with(
+        crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with_rules(
             program.clone(),
-            sx_bound,
+            sx_bound, trace.proof_rules(),
         )
         .expect("canonical program shape validated");
     let pvs = public_inputs.to_vec();
@@ -419,19 +420,29 @@ pub fn composite_prove_pinned_logup_sx_with_common(
 /// rebuilt witness-free from the program + its (public) height.
 /// `pub(crate)` so the recursion integration can obtain the
 /// `CommonData` the recursive verifier needs.
+#[cfg(feature = "recursion")]
 pub(crate) fn logup_common_for(
     config: &AiPowStarkConfig,
     program: &Program,
     sx_bound: bool,
+) -> p3_batch_stark::ProverData<AiPowStarkConfig> {
+    logup_common_for_with_rules(config, program, sx_bound, ProofRules::Hardened)
+}
+
+pub(crate) fn logup_common_for_with_rules(
+    config: &AiPowStarkConfig,
+    program: &Program,
+    sx_bound: bool,
+    rules: ProofRules,
 ) -> p3_batch_stark::ProverData<AiPowStarkConfig> {
     use p3_batch_stark::ProverData;
     let log_ext_db = checked_program_degree_bits(program)
         .expect("canonical program shape already validated")
         + config.is_zk();
     let air =
-        crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with(
+        crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with_rules(
             program.clone(),
-            sx_bound,
+            sx_bound, rules,
         )
         .expect("canonical program shape validated");
     ProverData::from_airs_and_degrees(config, std::slice::from_ref(&air), &[log_ext_db])
@@ -458,14 +469,32 @@ pub(crate) fn composite_verify_pinned_logup_sx(
     public_inputs: &CompositePublicInputs,
     sx_bound: bool,
 ) -> Result<(), CompositeVerificationError> {
+    composite_verify_pinned_logup_sx_with_rules(
+        config,
+        program,
+        proof,
+        public_inputs,
+        sx_bound,
+        ProofRules::Hardened,
+    )
+}
+
+fn composite_verify_pinned_logup_sx_with_rules(
+    config: &AiPowStarkConfig,
+    program: &Program,
+    proof: &p3_batch_stark::BatchProof<AiPowStarkConfig>,
+    public_inputs: &CompositePublicInputs,
+    sx_bound: bool,
+    rules: ProofRules,
+) -> Result<(), CompositeVerificationError> {
     use p3_batch_stark::verify_batch;
     checked_program_degree_bits(program)?;
     let air =
-        crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with(
+        crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with_rules(
             program.clone(),
-            sx_bound,
+            sx_bound, rules,
         )?;
-    let pd = logup_common_for(config, program, sx_bound);
+    let pd = logup_common_for_with_rules(config, program, sx_bound, rules);
     verify_batch(
         config,
         std::slice::from_ref(&air),
@@ -506,8 +535,32 @@ pub fn composite_verify_pow_pinned_logup_sx(
     target: &[u8; 32],
     sx_bound: bool,
 ) -> Result<(), PowVerifyError> {
-    composite_verify_pinned_logup_sx(config, program, proof, public_inputs, sx_bound)
-        .map_err(PowVerifyError::Stark)?;
+    composite_verify_pow_pinned_logup_sx_with_rules(
+        config,
+        program,
+        proof,
+        public_inputs,
+        target,
+        sx_bound,
+        ProofRules::Hardened,
+    )
+}
+
+/// Verify using consensus-selected AIR rules and a program reconstructed under
+/// those same rules. Neither may be selected from the supplied proof.
+pub fn composite_verify_pow_pinned_logup_sx_with_rules(
+    config: &AiPowStarkConfig,
+    program: &Program,
+    proof: &p3_batch_stark::BatchProof<AiPowStarkConfig>,
+    public_inputs: &CompositePublicInputs,
+    target: &[u8; 32],
+    sx_bound: bool,
+    rules: ProofRules,
+) -> Result<(), PowVerifyError> {
+    composite_verify_pinned_logup_sx_with_rules(
+        config, program, proof, public_inputs, sx_bound, rules,
+    )
+    .map_err(PowVerifyError::Stark)?;
     let hj = hash_jackpot_le_bytes(&public_inputs.hash_jackpot);
     if le_u256_le(&hj, target) {
         Ok(())
@@ -2989,6 +3042,36 @@ mod tests {
             composite_verify(&cfg, &proof_a, &pis_b).is_err(),
             "proof A with B's PIs must reject"
         );
+    }
+
+    #[test]
+    fn parent_bearing_proof_verifies() {
+        use crate::composite_trace::NOISED_CHUNK_ID_BASE;
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let kappa = [0x3Cu8; 32];
+        let kappa_words = [0x3C3C_3C3Cu32; 8];
+        let bytes: Vec<u8> = (0..2048).map(|i| (i % 65) as u8).collect();
+        let noise = vec![0i8; bytes.len()];
+        let mut trace = CompositeTrace::baseline_min();
+        let (next, _) = trace.place_matrix_strip_opening(
+            0,
+            &bytes,
+            0,
+            2,
+            2,
+            &[],
+            &kappa,
+            4,
+            Some(&noise),
+            Some(NOISED_CHUNK_ID_BASE),
+        );
+        trace.place_key_pin_row(next, false, &kappa_words);
+        let program = extract_program(&trace.matrix);
+        let public_inputs = CompositePublicInputs::derive_from_trace(&trace);
+        let (proof, _) = composite_prove_pinned_logup(&cfg, trace, &public_inputs);
+        composite_verify_pinned_logup(&cfg, &program, &proof, &public_inputs)
+            .expect("honest parent-bearing proof must verify");
     }
 
     /// PROD-shape bench. Ignored by default — run with

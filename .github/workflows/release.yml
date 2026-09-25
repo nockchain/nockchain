@@ -13,6 +13,7 @@ on:
 
 jobs:
   build:
+    if: github.repository == 'nockchain/nockchain'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -451,7 +452,7 @@ jobs:
     name: Collate Channel Manifests
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
+    if: github.repository == 'nockchain/nockchain' && (github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag'))
     permissions:
         contents: write
 

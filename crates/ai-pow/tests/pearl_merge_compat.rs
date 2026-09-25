@@ -3,17 +3,19 @@ use ai_pow::commit::matrix_commitment;
 use ai_pow::fiat_shamir::canonical_noise_seeds_from_matrix_commitments;
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    compute_pearl_pattern_ticket, evaluate_pearl_merge_ticket_attempt,
-    mine_pearl_merge_ticket_attempt, pearl_adjust_target_for_config,
-    pearl_bitcoin_double_sha256_raw, pearl_kappa, pearl_nbits_to_target_le,
-    pearl_nockchain_aux_commitment, validate_pearl_merge_config_for_recursive_prover,
-    verify_pearl_aux_inclusion, verify_pearl_compatible_public_data, verify_pearl_compatible_work,
-    verify_pearl_merge_mining_public_data, verify_pearl_merge_mining_public_data_with_aux_bytes,
+    canonical_pearl_aux_coinbase, compute_pearl_pattern_ticket,
+    evaluate_pearl_merge_ticket_attempt, mine_pearl_merge_ticket_attempt,
+    pearl_adjust_target_for_config, pearl_bitcoin_double_sha256_raw, pearl_kappa,
+    pearl_nbits_to_target_le, pearl_nockchain_aux_commitment,
+    validate_pearl_merge_config_for_recursive_prover, verify_pearl_aux_inclusion,
+    verify_pearl_aux_inclusion_with_limits, verify_pearl_compatible_public_data,
+    verify_pearl_compatible_work, verify_pearl_merge_mining_public_data,
+    verify_pearl_merge_mining_public_data_with_aux_bytes,
     verify_pearl_merge_public_statement_bytes,
     verify_pearl_merge_public_statement_bytes_with_aux_inclusion, verify_pearl_pattern_ticket,
-    PearlAttempt, PearlAuxInclusionProof, PearlCompatError, PearlIncompleteBlockHeader,
-    PearlMergePublicStatement, PearlMiningConfig, PearlNockchainAux, PearlPeriodicPattern,
-    PearlPublicProofParams, PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES,
+    PearlAdmissionLimits, PearlAttempt, PearlAuxInclusionProof, PearlCompatError,
+    PearlIncompleteBlockHeader, PearlMergePublicStatement, PearlMiningConfig, PearlNockchainAux,
+    PearlPeriodicPattern, PearlPublicProofParams, PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES,
     PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH, PEARL_INCOMPLETE_BLOCK_HEADER_SIZE,
     PEARL_MERGE_PUBLIC_STATEMENT_MAGIC, PEARL_MINING_CONFIG_RESERVED_SIZE,
     PEARL_MINING_CONFIG_SIZE, PEARL_MMA_INT7XINT7_TO_INT32, PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX,
@@ -104,6 +106,41 @@ fn coinbase_aux_script(aux_commitment: &[u8; 32]) -> Vec<u8> {
 fn display_root_from_raw(mut root_raw: [u8; 32]) -> [u8; 32] {
     root_raw.reverse();
     root_raw
+}
+
+fn merkle_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut pair = [0u8; 64];
+    pair[..32].copy_from_slice(left);
+    pair[32..].copy_from_slice(right);
+    pearl_bitcoin_double_sha256_raw(&pair)
+}
+
+fn transaction_block_inclusion(
+    aux_commitment: &[u8; 32],
+) -> (PearlIncompleteBlockHeader, PearlAuxInclusionProof) {
+    let script = coinbase_aux_script(aux_commitment);
+    let coinbase = coinbase_tx_with_script(&script, Some(&[0x71; 32]));
+    let coinbase_txid = pearl_bitcoin_double_sha256_raw(&coinbase_tx_with_script(&script, None));
+    // Two ordinary transaction encodings with non-coinbase prevouts. An odd
+    // leaf count duplicates the last txid, not the coinbase or its witness hash.
+    let mut transaction = coinbase_tx_with_script(&[], None);
+    transaction[5..37].fill(0x23);
+    transaction[37..41].copy_from_slice(&0u32.to_le_bytes());
+    let txid_a = pearl_bitcoin_double_sha256_raw(&transaction);
+    transaction[5..37].fill(0x45);
+    let txid_b = pearl_bitcoin_double_sha256_raw(&transaction);
+    let right_subtree = merkle_parent(&txid_b, &txid_b);
+    let root = merkle_parent(&merkle_parent(&coinbase_txid, &txid_a), &right_subtree);
+    (
+        PearlIncompleteBlockHeader {
+            merkle_root: display_root_from_raw(root),
+            ..header()
+        },
+        PearlAuxInclusionProof {
+            coinbase_tx: coinbase,
+            merkle_branch: vec![txid_a, right_subtree],
+        },
+    )
 }
 
 fn mining_config() -> PearlMiningConfig {
@@ -198,6 +235,61 @@ fn pearl_aux_inclusion_verifies_tagged_coinbase_commitment_against_merkle_root()
         .expect("tagged aux commitment is included in Pearl merkle root");
 }
 
+#[test]
+fn pearl_aux_inclusion_verifies_transaction_tree_and_rejects_tampering() {
+    let aux_commitment = [0x42; 32];
+    let (header, mut proof) = transaction_block_inclusion(&aux_commitment);
+    proof.coinbase_tx = canonical_pearl_aux_coinbase(&proof.coinbase_tx).unwrap();
+    verify_pearl_aux_inclusion(&header, &aux_commitment, &proof)
+        .expect("canonical coinbase evidence is included alongside ordinary Pearl transactions");
+
+    let mut changed_sibling = proof.clone();
+    changed_sibling.merkle_branch[0][0] ^= 1;
+    let mut reversed_order = proof.clone();
+    reversed_order.merkle_branch.reverse();
+    let mut display_order_sibling = proof.clone();
+    display_order_sibling.merkle_branch[0].reverse();
+    let mut truncated = proof.clone();
+    truncated.merkle_branch.pop();
+    for invalid in [changed_sibling, reversed_order, display_order_sibling, truncated] {
+        assert_eq!(
+            verify_pearl_aux_inclusion(&header, &aux_commitment, &invalid),
+            Err(PearlCompatError::PearlAuxMerkleRootMismatch)
+        );
+    }
+
+    let mut changed_header = header;
+    changed_header.merkle_root[0] ^= 1;
+    assert_eq!(
+        verify_pearl_aux_inclusion(&changed_header, &aux_commitment, &proof),
+        Err(PearlCompatError::PearlAuxMerkleRootMismatch)
+    );
+}
+
+#[test]
+fn pearl_aux_inclusion_accepts_maximum_depth() {
+    let aux_commitment = [0x42; 32];
+    let coinbase = coinbase_tx_with_script(&coinbase_aux_script(&aux_commitment), None);
+    let mut root = pearl_bitcoin_double_sha256_raw(&coinbase);
+    let branch = vec![[0x53; 32]; PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH];
+    for sibling in &branch {
+        root = merkle_parent(&root, sibling);
+    }
+    let header = PearlIncompleteBlockHeader {
+        merkle_root: display_root_from_raw(root),
+        ..header()
+    };
+    verify_pearl_aux_inclusion(
+        &header,
+        &aux_commitment,
+        &PearlAuxInclusionProof {
+            coinbase_tx: coinbase,
+            merkle_branch: branch,
+        },
+    )
+    .expect("the inclusive branch depth limit is accepted");
+}
+
 // A coinbase carrying TWO aux tags (one Pearl PoW trying to bind two distinct
 // Nockchain commitments -> two competing same-height forks) must be rejected for
 // BOTH commitments — a plain subslice check would accept each.
@@ -273,6 +365,15 @@ fn pearl_aux_inclusion_rejects_witness_only_commitment() {
 
     assert_eq!(
         verify_pearl_aux_inclusion(&header, &aux_commitment, &proof),
+        Err(PearlCompatError::PearlAuxNoncanonicalCoinbaseEvidence)
+    );
+    assert_eq!(
+        verify_pearl_aux_inclusion_with_limits(
+            &header,
+            &aux_commitment,
+            &proof,
+            PearlAdmissionLimits::LEGACY
+        ),
         Err(PearlCompatError::PearlAuxCommitmentTagMissing)
     );
 }
@@ -299,7 +400,7 @@ fn pearl_aux_inclusion_rejects_output_only_commitment() {
 }
 
 #[test]
-fn pearl_aux_inclusion_rejects_non_empty_branch_and_non_coinbase_leaf() {
+fn pearl_aux_inclusion_rejects_wrong_root_and_non_coinbase_leaf() {
     let aux_commitment =
         pearl_nockchain_aux_commitment(b"nockchain-mainnet", &[0x42; 32], 123_456, b"merge-window")
             .unwrap();
@@ -314,7 +415,7 @@ fn pearl_aux_inclusion_rejects_non_empty_branch_and_non_coinbase_leaf() {
     };
     assert_eq!(
         verify_pearl_aux_inclusion(&header, &aux_commitment, &proof),
-        Err(PearlCompatError::PearlAuxMerkleBranchTooDeep(1))
+        Err(PearlCompatError::PearlAuxMerkleRootMismatch)
     );
 
     let mut non_coinbase = coinbase;
@@ -1924,16 +2025,10 @@ fn pearl_merge_public_statement_with_aux_inclusion_closes_header_binding() {
         extra_domain_data: b"ai-pow-target-window".to_vec(),
     };
     let aux_commitment = aux.commitment().unwrap();
-    let coinbase = coinbase_tx_with_script(&coinbase_aux_script(&aux_commitment), None);
-    let mut easy_header = PearlIncompleteBlockHeader {
-        nbits: 0x1e7f_ffff,
-        ..header()
-    };
-    easy_header.merkle_root = display_root_from_raw(pearl_bitcoin_double_sha256_raw(&coinbase));
-    let inclusion_proof = PearlAuxInclusionProof {
-        coinbase_tx: coinbase,
-        merkle_branch: vec![],
-    };
+    let (mut easy_header, mut inclusion_proof) = transaction_block_inclusion(&aux_commitment);
+    inclusion_proof.coinbase_tx =
+        canonical_pearl_aux_coinbase(&inclusion_proof.coinbase_tx).unwrap();
+    easy_header.nbits = 0x1e7f_ffff;
 
     let (a, b) = synth_matrices(b"pearl-merge-public-statement-aux-inclusion", &params);
     let attempt = evaluate_pearl_merge_ticket_attempt(
@@ -2419,5 +2514,41 @@ fn pearl_merge_mining_precheck_rejects_aux_and_work_tampering() {
             &expected_aux_commitment,
         ),
         Err(PearlCompatError::JackpotHashMismatch)
+    );
+}
+
+#[test]
+fn aux_evidence_canonicalization_preserves_txid_and_legacy_acceptance() {
+    let commitment = [0x42; 32];
+    let script = coinbase_aux_script(&commitment);
+    let original = coinbase_tx_with_script(&script, Some(&[0x55; 32]));
+    let canonical = canonical_pearl_aux_coinbase(&original).unwrap();
+    assert_eq!(canonical, coinbase_tx_with_script(&script, None));
+    assert_eq!(canonical_pearl_aux_coinbase(&canonical).unwrap(), canonical);
+    let mut header = header();
+    header.merkle_root = display_root_from_raw(pearl_bitcoin_double_sha256_raw(&canonical));
+    let evidence = PearlAuxInclusionProof {
+        coinbase_tx: original.clone(),
+        merkle_branch: vec![],
+    };
+    verify_pearl_aux_inclusion_with_limits(
+        &header,
+        &commitment,
+        &evidence,
+        PearlAdmissionLimits::LEGACY,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_pearl_aux_inclusion(&header, &commitment, &evidence),
+        Err(PearlCompatError::PearlAuxNoncanonicalCoinbaseEvidence)
+    );
+    let normalized = PearlAuxInclusionProof {
+        coinbase_tx: canonical,
+        merkle_branch: vec![],
+    };
+    verify_pearl_aux_inclusion(&header, &commitment, &normalized).unwrap();
+    assert_eq!(
+        evidence.coinbase_tx, original,
+        "normalizing evidence leaves the Pearl transaction intact"
     );
 }

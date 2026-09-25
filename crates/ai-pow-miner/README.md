@@ -27,7 +27,7 @@ nockchain kernel --%mine-ai effect--> ai-pow-mine
 
 ## Maintained invariants
 
-- A candidate supplies the block commitment, AI target, and puzzle variant. The miner never chooses consensus target or fork-choice weight.
+- A candidate supplies the block commitment, AI target, puzzle variant, and candidate height. The miner selects proof rules using that height, with the updated rules starting at 154,500, including after a reorg. The miner never chooses consensus target or fork-choice weight.
 - Every extranonce is upstream of `kappa`, matrix commitments, noise, noised matrices, tile state, and jackpot. A new mining attempt rebuilds nonce-bound state; a nonce-only hash loop is forbidden.
 - A recursive certificate is generated only after the ticket's jackpot satisfies the Nockchain target. The node repeats the target and proof checks.
 - The certificate and opaque nonce envelope commit to the same Pearl transcript and Nockchain block commitment.
@@ -66,9 +66,17 @@ docker run --rm --gpus all \
   ai-pow-miner-gpu
 ```
 
-The image uses up to eight visible CUDA devices, canonical mode, and batches of 32,768 attempts per device by default. Set `CUDA_DEVICES` to `all` or a comma-separated ordinal list such as `0,1,2,3`; set `CANONICAL` or `GPU_BATCH_ATTEMPTS` to override the other values. Non-canonical mode also requires `PEARL_GATEWAY`.
+The image uses up to eight visible CUDA devices, reference mode, and batches of 32,768 attempts per device by default. Set `CUDA_DEVICES` to `all` or a comma-separated ordinal list such as `0,1,2,3`; set `REFERENCE` or `GPU_BATCH_ATTEMPTS` to override the other values. Non-reference mode also requires `PEARL_GATEWAY`.
 
 ## Validation
+
+Upgrade the node and AI miner together for the 154,500 cutover. The `%mine-ai`
+effect now ends with `pow-len candidate-height`; the height is required to choose
+the correct proof program. The upgraded miner rejects old effects without a
+height and asks for a node upgrade. Old miners cannot decode the extended effect.
+The `%mine-zk` effect and on-chain proof encoding are unchanged. See
+[`AI_POW_CUTOVER.md`](../../docs/AI_POW_CUTOVER.md) for activation and upgrade
+guidance.
 
 ```sh
 cargo test -p ai-pow-miner

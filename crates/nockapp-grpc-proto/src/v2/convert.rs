@@ -759,6 +759,34 @@ mod tests {
     }
 
     #[test]
+    fn test_seed_output_source_roundtrip_preserves_noun() {
+        // The wallet sets output-source on bridge deposit seeds. A submitted
+        // seed must reach the node unchanged, or the transaction id changes
+        // and the spend's signature no longer covers it.
+        let seed = V1Seed {
+            output_source: Some(nockchain_types::tx_engine::common::Source {
+                hash: sample_hash(161),
+                is_coinbase: false,
+            }),
+            lock_root: sample_hash(171),
+            note_data: NoteData::new(vec![NoteDataEntry::new(
+                "bridge".to_string(),
+                nockchain_types::tx_engine::v1::NoteDataValue::BridgeDeposit(
+                    nockchain_types::tx_engine::v1::BridgeDepositNoteData {
+                        evm_address_based: [1, 2, 3],
+                    },
+                ),
+            )]),
+            gift: Nicks(9),
+            parent_hash: sample_hash(181),
+        };
+
+        let decoded = V1Seed::try_from(PbSeed::from(seed.clone())).expect("decode seed");
+        assert_eq!(decoded, seed);
+        assert_eq!(decoded.jam_bytes(), seed.jam_bytes());
+    }
+
+    #[test]
     fn test_raw_transaction_roundtrip_canonicalizes_nested_set_locks() {
         let pkh_a = sample_hash(91);
         let pkh_b = sample_hash(101);

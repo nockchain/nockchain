@@ -26,6 +26,29 @@ contract NockWithdrawalTest is BridgeTestBase {
         assertEq(nock.balanceOf(burner), 0);
     }
 
+    function testPausedWithdrawalPreservesFundsAndCanResume() public {
+        address burner = makeAddr("burner");
+        uint256 amount = nockAmount(25);
+        bytes32 lockRoot = keccak256("lock-root");
+        mintFromInbox(burner, amount);
+        uint256 supplyBefore = nock.totalSupply();
+
+        inbox.setWithdrawalsEnabled(false);
+        vm.prank(burner);
+        (bool burned,) = address(nock).call(abi.encodeCall(Nock.burn, (amount, lockRoot)));
+
+        assertFalse(burned, "paused withdrawal must revert");
+        assertEq(nock.balanceOf(burner), amount, "failed withdrawal must preserve the balance");
+        assertEq(nock.totalSupply(), supplyBefore, "failed withdrawal must preserve supply");
+
+        inbox.setWithdrawalsEnabled(true);
+        vm.prank(burner);
+        nock.burn(amount, lockRoot);
+
+        assertEq(nock.balanceOf(burner), 0);
+        assertEq(nock.totalSupply(), supplyBefore - amount);
+    }
+
     function testBurnAcceptsTrailingCalldata() public {
         address burner = makeAddr("burner");
         uint256 amount = nockAmount(25);

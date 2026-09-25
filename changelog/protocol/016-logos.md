@@ -230,6 +230,36 @@ glue), `ai-pow-zk` (the Plonky3 AIR + recursion), `ai-pow-jets` (the consensus
 verify jet + verifier-setup residency), and the miner-side `ai-pow-miner` +
 `zk-pow-miner` + shared `nockchain-mining-common`.
 
+#### Pearl transaction commitment
+
+Merge-mined Pearl blocks may contain ordinary transactions as well as the
+coinbase. The Rust-owned `AIP1` (dense) and `AIM1` (MoE) nonces carry the
+coinbase transaction and up to 32 transaction-Merkle siblings. Siblings are
+32-byte raw SHA256d hashes in leaf-to-root order. The coinbase is transaction
+index zero: each level hashes `current_root || sibling`, then only the final
+root is reversed to match the Pearl header's display byte order.
+
+Admission requires that this path reach the exact header root and that the
+txid-committed coinbase input script contain exactly one
+`NOCKCHAIN-AI-POW-AUX` tag followed by the expected Nockchain aux commitment.
+SegWit witness bytes do not contribute to the txid. Empty branches represent
+coinbase-only blocks. Nockchain verifies this inclusion, not the validity of
+the other Pearl transactions.
+
+The nonce wire format is unchanged. These limits follow the candidate block's
+height-selected rules, including on historical replay and reorgs:
+
+| Candidate height | Maximum siblings | Maximum MoE routing entries |
+| --- | ---: | ---: |
+| Below 154,500 | 0 | 235,626 |
+| From 154,500 | 32 | 235,370 |
+
+The branch cap bounds hashing work and adds at most 1,024 sibling bytes. The
+existing 1 MiB MoE nonce budget reserves that space by reducing the routing
+allowance by 256 entries only after activation. The decoder, native routing
+binding, verifier, and miner select the same rules from the Nockchain block
+height.
+
 ### Puzzle-priced heaviness
 
 From `dual-puzzle-phase` (`== phase.ai-asert == phase.zk-asert-post-ai`) on, a
@@ -349,7 +379,7 @@ variant of the candidate: the same block re-targeted to the AI ASERT target
 identical variant from the same candidate + state and runs the verify jet.
 
 The reference miner is `ai-pow-miner` (`ai-pow-mine`), with a self-contained
-gateway-free `--canonical` CPU mode for fakenet. A submitted block is
+gateway-free `--reference` CPU mode for fakenet. A submitted block is
 `[%command %pow %ai-pow nonce cert]`.
 
 ### Pearl merge-mining compatibility
@@ -462,6 +492,40 @@ outright (unknown block variant / no verify jet), so it forks off.
 
 ## Backward Compatibility
 
+### AI-PoW rules at height 154,500
+
+The candidate block's height selects AI-PoW verification rules. Blocks below
+154,500 use the historical verifier, including during replay and reorgs. Blocks
+at or above 154,500 use the updated proof program and verifier setup.
+
+Dense and MoE compact certificates must satisfy the admission rules selected
+by the candidate height. The certificate wire format is unchanged.
+
+Deploy the consensus kernel and Rust verifier jets from the same release.
+The `ai-pow-verify` gate receives a rule tag selected from the block height and
+uses the `%ai-pow-verify-v2` jet binding. A missing binding or unknown rule tag
+halts verification; verification does not retry using another rule version.
+The AI-PoW proof version remains `%4`.
+
+### Pending blocks during upgrade and promotion
+
+Every kernel load discards pending headers, including a same-version `%12`
+load, and refreshes the mining candidate. Pending-header cleanup releases
+transaction dependencies and returns retained raw transactions to the mempool.
+Compatible accepted chain state is preserved. Discarded blocks require fresh
+header validation when received again. Pending-block promotion performs a
+proof-of-work check under the selected rules.
+
+See the [operator guidance](../../docs/AI_POW_CUTOVER.md) for setup initialization,
+matched-component upgrades, and recovery requirements.
+
+### Miner terminology
+
+The gateway-free default miner profile is named the **reference** profile
+(`ai-pow-mine --reference`, previously `--canonical`). Its fixed
+`m=64,k=1024,n=64` shape is one member of the consensus-admissible parameter
+envelope. This CLI rename does not change wire encoding or consensus rules.
+
 ### Breaking Changes
 
 This is a **consensus-critical** upgrade. After activation:
@@ -476,6 +540,10 @@ This is a **consensus-critical** upgrade. After activation:
   reproduce it.
 - The `blockchain-constants` noun gains the AI-PoW fields, causing decode
   failures on pre-0.1.16 software.
+- Pearl transaction-tree admission widens the former zero-sibling restriction
+  at height 154,500. Upgrade validators and miners before that height. Below
+  it, the historical zero-sibling and routing limits remain in force; from it,
+  the MoE routing-entry cap is 256 entries lower to retain the 1 MiB budget.
 
 ### Network Partition Risk
 
@@ -564,7 +632,7 @@ structurally valid across the boundary.
   use, requiring the measured setup-table RSS budget. Lower caps reduce RSS by
   paging contexts in and out. jemalloc is required (not optional).
 - **Dual mining.** Two miner processes can attach: `zk-pow-mine` and
-  `ai-pow-mine` (the latter with a self-contained `--canonical` CPU mode). Each
+  `ai-pow-mine` (the latter with a self-contained `--reference` CPU mode). Each
   receives its own candidate effect (`%mine-zk` / `%mine-ai`) and submits its own
   block; both re-target immediately on a new heaviest block.
 - **Block cadence.** The AI puzzle targets a 500 s per-puzzle ideal and the ZK
@@ -572,7 +640,7 @@ structurally valid across the boundary.
   149.86 s combined cadence that targets 29.97% AI and 70.03% ZK. If only one
   puzzle is active, that puzzle's ASERT converges it toward its own ideal (500 s
   or 214 s).
-- **AI proving cost.** A canonical CPU proof takes ~30 s; the node's
+- **AI proving cost.** A reference CPU proof takes ~30 s; the node's
   candidate-update interval must exceed the prove time (fakenet:
   `--fakenet-update-candidate-interval-secs`). GPU-shaped provers are the
   intended mainnet path.
@@ -621,7 +689,7 @@ structurally valid across the boundary.
 ### Live fakenet
 
 A dual-miner fakenet smoke harness runs a node with both `zk-pow-mine` and
-`ai-pow-mine --canonical`, advancing a single chain with both puzzles winning
+`ai-pow-mine --reference`, advancing a single chain with both puzzles winning
 heights and each block carrying its own per-puzzle ASERT target (zero errors
 over multi-minute runs).
 

@@ -423,7 +423,8 @@
 :::
 ++  zk-asert-anchor-schedule
   ^-  (list asert-anchor)
-  :~  [zk-pow-v5-phase:page:t zk-pow-v5-zk-anchor-target:page:t ~ zk-pow-v5-zk-ideal-block-time:page:t half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+  :~  [harden-phase:page:t asert-reset-zk-anchor-target:page:t ~ zk-pow-v5-zk-ideal-block-time:page:t half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+      [zk-pow-v5-phase:page:t zk-pow-v5-zk-anchor-target:page:t ~ zk-pow-v5-zk-ideal-block-time:page:t half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
       [phase.zk-asert-post-ai.blockchain-constants anchor-target-atom.zk-asert-post-ai.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert-post-ai.blockchain-constants) ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
       [proof-version-3-start (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert.blockchain-constants) ~ ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
       [112.500 (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert.blockchain-constants) ~ ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
@@ -432,7 +433,8 @@
 ::::
 ++  ai-asert-anchor-schedule
   ^-  (list asert-anchor)
-  :~  [zk-pow-v5-phase:page:t zk-pow-v5-ai-anchor-target:page:t ~ zk-pow-v5-ai-ideal-block-time:page:t half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
+  :~  [harden-phase:page:t zk-pow-v5-ai-anchor-target:page:t ~ zk-pow-v5-ai-ideal-block-time:page:t half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
+      [zk-pow-v5-phase:page:t zk-pow-v5-ai-anchor-target:page:t ~ zk-pow-v5-ai-ideal-block-time:page:t half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
       [phase.ai-asert.blockchain-constants anchor-target-atom.ai-asert.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.ai-asert.blockchain-constants) ideal-block-time.ai-asert.blockchain-constants half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
   ==
 :::
@@ -512,7 +514,7 @@
   ?.  (gte child-height phase.zk-asert-post-ai.blockchain-constants)
     (compute-target-asert %zk child-height parent-digest)
   =/  state
-    ?:  =(child-height zk-pow-v5-phase:page:t)
+    ?:  (puzzle-asert-reset-at:page:t child-height)
       *puzzle-asert-state:dk
     (post-ai-parent-state parent-digest)
   =/  current-min-ts=(unit @)
@@ -561,7 +563,7 @@
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
   =/  state
-    ?:  =(child-height zk-pow-v5-phase:page:t)
+    ?:  (puzzle-asert-reset-at:page:t child-height)
       *puzzle-asert-state:dk
     (post-ai-parent-state parent-digest)
   =/  current-min-ts=(unit @)
@@ -1227,6 +1229,17 @@
     c
   =.  pending-blocks.c  (~(del h-by pending-blocks.c) ~(digest get:page:t pag))
   c
+::
+::  Discard pending headers on load so each receives fresh admission.
+::  +reject-pending-block releases dependencies and returns retained raw txs to
+::  the mempool without touching accepted blocks or their transaction claims.
+++  discard-pending-blocks
+  ^-  consensus-state:dk
+  =/  pending=(list block-id:t)  ~(tap h-in ~(key h-by pending-blocks.c))
+  %+  roll  pending
+  |=  [bid=block-id:t current=_c]
+  =.  c  current
+  (reject-pending-block bid)
 ::
 ::  missing transaction ids from pending blocks
 ++  missing-tx-ids

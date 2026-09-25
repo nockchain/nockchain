@@ -47,18 +47,19 @@ use p3_lookup::{Count, InteractionBuilder};
 use crate::composite_full_air::{CompositeFullAir, CompositeFullAirPinned, ProgramShapeError};
 use crate::composite_layout::{
     AB_ID_LIMBS_LEN, AB_ID_LIMBS_START, A_ID, A_ID_LEN, A_NOISED_START, A_NOISED_UNPACK_LEN,
-    A_NOISED_UNPACK_START, B_ID, B_ID_LEN, B_NOISED_START, B_NOISED_UNPACK_LEN,
+    A_NOISED_UNPACK_START, BLAKE3_MSG_START, B_ID, B_ID_LEN, B_NOISED_START, B_NOISED_UNPACK_LEN,
     B_NOISED_UNPACK_START, CV_IN_LEN, CV_IN_START, CV_OR_TWEAK_PREP, CV_OUT_FREQ, CV_OUT_LEN,
     CV_OUT_START, I8U8_FREQ, I8U8_TABLE, IRANGE7P1_FREQ, IRANGE7P1_TABLE, IRANGE8_FREQ,
-    IRANGE8_TABLE, IS_CV_IN, IS_MSG_MAT, IS_RESET_CUMSUM, IS_UPDATE_CUMSUM, MAT_FREQ, MAT_ID,
-    MAT_ID_LIMBS_LEN, MAT_ID_LIMBS_START, MAT_UNPACK_START, MAT_UNPACK_WIN, NOISED_PACKED_START,
-    NOISE_UNPACK_START, NOISE_UNPACK_WIN, STARK_ROW_IDX, TOTAL_TRACE_WIDTH, UINT8_DATA_START,
-    UINT8_DATA_WIN, URANGE13_FREQ, URANGE13_TABLE, URANGE8_FREQ, URANGE8_TABLE,
+    IRANGE8_TABLE, IS_CV_IN, IS_MSG_MAT, IS_PARENT_CV, IS_RESET_CUMSUM, IS_UPDATE_CUMSUM, MAT_FREQ,
+    MAT_ID, MAT_ID_LIMBS_LEN, MAT_ID_LIMBS_START, MAT_UNPACK_START, MAT_UNPACK_WIN,
+    NOISED_PACKED_START, NOISE_UNPACK_START, NOISE_UNPACK_WIN, STARK_ROW_IDX, TOTAL_TRACE_WIDTH,
+    UINT8_DATA_START, UINT8_DATA_WIN, URANGE13_FREQ, URANGE13_TABLE, URANGE8_FREQ, URANGE8_TABLE,
 };
 use crate::composite_lookups::{
     BUS_CV_ROUTING, BUS_I8U8, BUS_IRANGE7P1, BUS_IRANGE8, BUS_NOISED_PACKED, BUS_URANGE13,
-    BUS_URANGE8,
+    BUS_URANGE8, PARENT_LEFT_MSG_POS, PARENT_RIGHT_MSG_POS,
 };
+use crate::proof_rules::ProofRules;
 
 /// Lookup-aware composite AIR.
 ///
@@ -97,7 +98,7 @@ where
         bus_emit::irange8::<AB>(builder);
         bus_emit::i8u8::<AB>(builder);
         bus_emit::noised_packed::<AB>(builder);
-        bus_emit::cv_routing::<AB>(builder);
+        bus_emit::cv_routing::<AB>(builder, ProofRules::Hardened);
     }
 }
 
@@ -125,9 +126,15 @@ where
 #[derive(Clone)]
 pub struct CompositeFullAirWithLookupsPinned {
     inner: CompositeFullAirPinned,
+    rules: ProofRules,
 }
 
 impl CompositeFullAirWithLookupsPinned {
+    #[cfg(feature = "recursion")]
+    pub(crate) fn proof_rules(&self) -> ProofRules {
+        self.rules
+    }
+
     /// Build from the canonical program matrix (see
     /// `composite_full_air::extract_program`) with the
     /// keystone enabled (production / `num_stripes ≤ 16`).
@@ -154,8 +161,17 @@ impl CompositeFullAirWithLookupsPinned {
         program: p3_matrix::dense::RowMajorMatrix<crate::Val>,
         sx_bound: bool,
     ) -> Result<Self, ProgramShapeError> {
+        Self::try_new_with_rules(program, sx_bound, ProofRules::Hardened)
+    }
+
+    pub fn try_new_with_rules(
+        program: p3_matrix::dense::RowMajorMatrix<crate::Val>,
+        sx_bound: bool,
+        rules: ProofRules,
+    ) -> Result<Self, ProgramShapeError> {
         Ok(Self {
             inner: CompositeFullAirPinned::try_new_with(program, sx_bound)?,
+            rules,
         })
     }
 }
@@ -193,7 +209,7 @@ where
         bus_emit::irange8::<AB>(builder);
         bus_emit::i8u8::<AB>(builder);
         bus_emit::noised_packed::<AB>(builder);
-        bus_emit::cv_routing::<AB>(builder);
+        bus_emit::cv_routing::<AB>(builder, self.rules);
     }
 }
 
@@ -464,11 +480,15 @@ mod bus_emit {
     ///
     /// Table key: (STARK_ROW_IDX, CV_OUT[0..8]), multiplicity
     /// CV_OUT_FREQ. Every row publishes its CV_OUT.
-    /// Queries: (CV_OR_TWEAK_PREP, CV_IN[0..8]) gated by
-    /// IS_CV_IN. When IS_CV_IN = 1, CV_OR_TWEAK_PREP holds the
-    /// referenced row's STARK_ROW_IDX (the column's dual use as
-    /// a BLAKE3 tweak is gated by IS_NEW_BLAKE instead).
-    pub fn cv_routing<AB: AirBuilder + InteractionBuilder>(builder: &mut AB) {
+    /// Queries:
+    /// - `(CV_OR_TWEAK_PREP, CV_IN[0..8])` for ordinary chaining rows;
+    /// - `(CV_OR_TWEAK_PREP, parent_message_child[0..8])` for parent
+    ///   compressions, gated by `IS_PARENT_CV`.
+    ///
+    /// On parent rows `IS_CV_IN` selects the message half: zero selects the
+    /// left child on round 1 and one selects the right child on round 6. The
+    /// canonical program pins both selectors and the referenced source row.
+    pub fn cv_routing<AB: AirBuilder + InteractionBuilder>(builder: &mut AB, rules: ProofRules) {
         let main = builder.main();
         let cur = main.current_slice();
 
@@ -483,6 +503,10 @@ mod bus_emit {
             Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[CV_OUT_FREQ]), 0),
         );
 
+        let is_cv_in: AB::Expr = cur[IS_CV_IN].into();
+        let is_parent_cv: AB::Expr = cur[IS_PARENT_CV].into();
+        let one = <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE;
+
         let mut query_key: Vec<AB::Expr> = Vec::with_capacity(1 + CV_IN_LEN);
         query_key.push(cur[CV_OR_TWEAK_PREP].into());
         for i in 0..CV_IN_LEN {
@@ -491,8 +515,26 @@ mod bus_emit {
         builder.push_interaction(
             BUS_CV_ROUTING,
             query_key,
-            Count::bounded(<AB::Var as Into<AB::Expr>>::into(cur[IS_CV_IN]), 1),
+            Count::bounded(
+                match rules {
+                    ProofRules::Legacy => is_cv_in.clone(),
+                    ProofRules::Hardened => is_cv_in.clone() * (one.clone() - is_parent_cv.clone()),
+                },
+                1,
+            ),
         );
+
+        if rules == ProofRules::Legacy {
+            return;
+        }
+        let mut parent_key: Vec<AB::Expr> = Vec::with_capacity(1 + CV_OUT_LEN);
+        parent_key.push(cur[CV_OR_TWEAK_PREP].into());
+        for i in 0..CV_OUT_LEN {
+            let left: AB::Expr = cur[BLAKE3_MSG_START + PARENT_LEFT_MSG_POS[i]].into();
+            let right: AB::Expr = cur[BLAKE3_MSG_START + PARENT_RIGHT_MSG_POS[i]].into();
+            parent_key.push(left.clone() + is_cv_in.clone() * (right - left));
+        }
+        builder.push_interaction(BUS_CV_ROUTING, parent_key, Count::bounded(is_parent_cv, 1));
     }
 }
 
@@ -1427,12 +1469,14 @@ mod tests {
         let cfg = build_stark_config(&test_zk_params(), &CircuitConfig::PROD);
         let mut trace = CompositeTrace::baseline_min();
         trace.populate_lookup_freq();
+        let pis =
+            crate::composite_public::CompositePublicInputs::derive_from_trace(&trace).to_vec();
 
         let air = CompositeFullAirWithLookups;
         let instances = vec![StarkInstance {
             air: &air,
             trace: &trace.matrix,
-            public_values: vec![],
+            public_values: pis.clone(),
         }];
 
         let t0 = std::time::Instant::now();
@@ -1441,7 +1485,7 @@ mod tests {
         let prove_ms = t0.elapsed().as_millis();
 
         let t1 = std::time::Instant::now();
-        verify_batch(&cfg, &[air], &proof, &[vec![]], &prover_data.common)
+        verify_batch(&cfg, &[air], &proof, &[pis], &prover_data.common)
             .expect("PROD verify with LogUp");
         let verify_ms = t1.elapsed().as_millis();
 

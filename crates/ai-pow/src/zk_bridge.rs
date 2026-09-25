@@ -68,6 +68,7 @@ use ai_pow_zk::canonical::StripIndexSchedule;
 use ai_pow_zk::composite_proof::{
     build_config, composite_prove_pinned_logup_sx_with_common, composite_verify_pow_pinned_logup_sx,
 };
+use ai_pow_zk::proof_rules::ProofRules;
 use ai_pow_zk::{
     AiPowBatchProof, AiPowCommonData, AiPowProgram, CircuitConfig, CompositePublicInputs,
     CompositeTrace, PowVerifyError, ZkParams,
@@ -1674,9 +1675,39 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
     local_b_cols: &[u32],
     n_e: usize,
 ) -> Result<PearlMoeCompactProveRun, BridgeError> {
+    prove_pearl_moe_compact_recursive_certificate_with_rules(
+        params,
+        a_row_major,
+        b_col_major,
+        kappa,
+        h_a,
+        h_b,
+        routing,
+        expert_idx,
+        inner_a_rows,
+        local_b_cols,
+        n_e,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn prove_pearl_moe_compact_recursive_certificate_with_rules(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+    rules: ProofRules,
+) -> Result<PearlMoeCompactProveRun, BridgeError> {
     prove_pearl_moe_compact_recursive_certificate_inner(
         params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
-        local_b_cols, n_e, None,
+        local_b_cols, n_e, None, rules,
     )
 }
 
@@ -1695,6 +1726,38 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_prover_cache(
     n_e: usize,
     cache: &AiPowCompactRecursiveProverCache,
 ) -> Result<PearlMoeCompactProveRun, BridgeError> {
+    prove_pearl_moe_compact_recursive_certificate_with_prover_cache_with_rules(
+        params,
+        a_row_major,
+        b_col_major,
+        kappa,
+        h_a,
+        h_b,
+        routing,
+        expert_idx,
+        inner_a_rows,
+        local_b_cols,
+        n_e,
+        cache,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn prove_pearl_moe_compact_recursive_certificate_with_prover_cache_with_rules(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+    cache: &AiPowCompactRecursiveProverCache,
+    rules: ProofRules,
+) -> Result<PearlMoeCompactProveRun, BridgeError> {
     prove_pearl_moe_compact_recursive_certificate_inner(
         params,
         a_row_major,
@@ -1708,6 +1771,7 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_prover_cache(
         local_b_cols,
         n_e,
         Some(cache),
+        rules,
     )
 }
 
@@ -1725,11 +1789,12 @@ fn prove_pearl_moe_compact_recursive_certificate_inner(
     local_b_cols: &[u32],
     n_e: usize,
     cache: Option<&AiPowCompactRecursiveProverCache>,
+    rules: ProofRules,
 ) -> Result<PearlMoeCompactProveRun, BridgeError> {
     let (proof, prover_program, pis, zk_params, trace_height, ticket, l0_common) =
         prove_pearl_moe_l0_and_ticket(
             params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
-            local_b_cols, n_e,
+            local_b_cols, n_e, rules,
         )?;
 
     let verified_l0 = unsafe {
@@ -1741,7 +1806,7 @@ fn prove_pearl_moe_compact_recursive_certificate_inner(
             proof,
             &pis,
             l0_common,
-        )
+        ).with_rules(rules)
     };
     let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
 
@@ -1783,6 +1848,7 @@ fn prove_pearl_moe_l0_and_ticket(
     inner_a_rows: &[u32],
     local_b_cols: &[u32],
     n_e: usize,
+    rules: ProofRules,
 ) -> Result<
     (
         AiPowBatchProof,
@@ -1823,7 +1889,7 @@ fn prove_pearl_moe_l0_and_ticket(
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
 
-    let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context(
+    let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context_with_rules(
         &zctx,
         params,
         0,
@@ -1831,6 +1897,7 @@ fn prove_pearl_moe_l0_and_ticket(
         &strip_schedule,
         |_| {},
         None,
+        rules,
     )?;
     let ZkProofArtifact {
         proof,
@@ -1914,10 +1981,46 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
     ),
     BridgeError,
 > {
+    prove_pearl_moe_compact_recursive_certificate_with_seed_with_rules(
+        params,
+        a_row_major,
+        b_col_major,
+        kappa,
+        h_a,
+        h_b,
+        routing,
+        expert_idx,
+        inner_a_rows,
+        local_b_cols,
+        n_e,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn prove_pearl_moe_compact_recursive_certificate_with_seed_with_rules(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+    rules: ProofRules,
+) -> Result<
+    (
+        PearlMoeCompactProveRun,
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
+    ),
+    BridgeError,
+> {
     let (proof, prover_program, pis, zk_params, trace_height, ticket, l0_common) =
         prove_pearl_moe_l0_and_ticket(
             params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
-            local_b_cols, n_e,
+            local_b_cols, n_e, rules,
         )?;
 
     let verified_l0 = unsafe {
@@ -1928,7 +2031,7 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
             proof,
             &pis,
             l0_common,
-        )
+        ).with_rules(rules)
     };
     let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)?;
 
@@ -2085,6 +2188,49 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
     routing_data: &[u32],
     max_pattern_len: usize,
 ) -> Result<(), BridgeError> {
+    verify_pearl_moe_compact_recursive_certificate_with_rules(
+        context,
+        cert,
+        pis,
+        params,
+        kappa,
+        h_a,
+        h_b,
+        mining_config,
+        moe,
+        m,
+        n_e,
+        t_rows,
+        t_cols,
+        routing_data,
+        max_pattern_len,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn verify_pearl_moe_compact_recursive_certificate_with_rules(
+    context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    cert: ai_pow_zk::recursion::AiPowCompactBatchRecursiveCertificate,
+    pis: &ai_pow_zk::composite_public::CompositePublicInputs,
+    params: &MatmulParams,
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    mining_config: &crate::pearl_compat::PearlMiningConfig,
+    moe: &crate::pearl_compat::PearlMoeParams,
+    m: u32,
+    n_e: u32,
+    t_rows: u32,
+    t_cols: u32,
+    routing_data: &[u32],
+    max_pattern_len: usize,
+    rules: ProofRules,
+) -> Result<(), BridgeError> {
+    if context.proof_rules() != rules {
+        return Err(BridgeError::RecursiveCertificate(
+            "verifier setup proof rules mismatch".to_string(),
+        ));
+    }
     if params.difficulty_bits != 0 {
         return Err(BridgeError::PearlMergeStatement(
             crate::pearl_compat::PearlCompatError::UnsupportedRecursivePearlParams(
@@ -2094,8 +2240,15 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
     }
 
     // (1) Routing-consistency binding: opened rows are the expert's routed tokens.
-    crate::pearl_compat::verify_pearl_moe_routing_binding(
-        kappa, mining_config, moe, m, t_rows, routing_data, max_pattern_len,
+    crate::pearl_compat::verify_pearl_moe_routing_binding_with_limits(
+        kappa,
+        mining_config,
+        moe,
+        m,
+        t_rows,
+        routing_data,
+        max_pattern_len,
+        rules.into(),
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
@@ -2145,8 +2298,8 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
         s_a,
         s_b,
     };
-    let expected_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
-        &zk_params, &schedule, &bp, trace_height,
+    let expected_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule_with_rules(
+        &zk_params, &schedule, &bp, trace_height, rules,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
     let profile = CircuitConfig::for_layer0_trace(trace_height);
@@ -2176,7 +2329,13 @@ pub fn prove_pearl_merge_compact_recursive_certificate(
     max_pattern_len: usize,
 ) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
     prove_pearl_merge_compact_recursive_certificate_inner(
-        attempt, params, a_row_major, b_col_major, max_pattern_len, None,
+        attempt,
+        params,
+        a_row_major,
+        b_col_major,
+        max_pattern_len,
+        None,
+        ProofRules::Hardened,
     )
     .map(|(run, _)| run)
 }
@@ -2197,6 +2356,7 @@ pub fn prove_pearl_merge_compact_recursive_certificate_with_prover_cache(
         b_col_major,
         max_pattern_len,
         Some(cache),
+        ProofRules::Hardened,
     )
     .map(|(run, _)| run)
 }
@@ -2208,8 +2368,24 @@ pub fn prove_pearl_merge_compact_recursive_certificate_checked(
     a_row_major: &[i8],
     b_col_major: &[i8],
 ) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+    prove_pearl_merge_compact_recursive_certificate_checked_with_rules(
+        checked,
+        params,
+        a_row_major,
+        b_col_major,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn prove_pearl_merge_compact_recursive_certificate_checked_with_rules(
+    checked: &PearlMergeCheckedTicketAttempt,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    rules: ProofRules,
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
     prove_pearl_merge_compact_recursive_certificate_checked_inner(
-        checked, params, a_row_major, b_col_major, None,
+        checked, params, a_row_major, b_col_major, None, rules,
     )
     .map(|(run, _)| run)
 }
@@ -2222,12 +2398,31 @@ pub fn prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache
     b_col_major: &[i8],
     cache: &AiPowCompactRecursiveProverCache,
 ) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+    prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache_with_rules(
+        checked,
+        params,
+        a_row_major,
+        b_col_major,
+        cache,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache_with_rules(
+    checked: &PearlMergeCheckedTicketAttempt,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    cache: &AiPowCompactRecursiveProverCache,
+    rules: ProofRules,
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
     prove_pearl_merge_compact_recursive_certificate_checked_inner(
         checked,
         params,
         a_row_major,
         b_col_major,
         Some(cache),
+        rules,
     )
     .map(|(run, _)| run)
 }
@@ -2253,7 +2448,32 @@ pub fn prove_pearl_merge_compact_recursive_certificate_with_seed(
     BridgeError,
 > {
     prove_pearl_merge_compact_recursive_certificate_inner(
-        attempt, params, a_row_major, b_col_major, max_pattern_len, None,
+        attempt,
+        params,
+        a_row_major,
+        b_col_major,
+        max_pattern_len,
+        None,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn prove_pearl_merge_compact_recursive_certificate_with_seed_with_rules(
+    attempt: &PearlMergeTicketAttempt,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    max_pattern_len: usize,
+    rules: ProofRules,
+) -> Result<
+    (
+        AiPowCompactRecursiveCertificateRun,
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
+    ),
+    BridgeError,
+> {
+    prove_pearl_merge_compact_recursive_certificate_inner(
+        attempt, params, a_row_major, b_col_major, max_pattern_len, None, rules,
     )
 }
 
@@ -2264,6 +2484,7 @@ fn prove_pearl_merge_compact_recursive_certificate_inner(
     b_col_major: &[i8],
     max_pattern_len: usize,
     cache: Option<&AiPowCompactRecursiveProverCache>,
+    rules: ProofRules,
 ) -> Result<
     (
         AiPowCompactRecursiveCertificateRun,
@@ -2321,7 +2542,7 @@ fn prove_pearl_merge_compact_recursive_certificate_inner(
     }
 
     prove_pearl_merge_compact_recursive_certificate_prechecked(
-        &precheck, &public_params, params, a_row_major, b_col_major, cache,
+        &precheck, &public_params, params, a_row_major, b_col_major, cache, rules,
     )
 }
 
@@ -2331,6 +2552,7 @@ fn prove_pearl_merge_compact_recursive_certificate_checked_inner(
     a_row_major: &[i8],
     b_col_major: &[i8],
     cache: Option<&AiPowCompactRecursiveProverCache>,
+    rules: ProofRules,
 ) -> Result<
     (
         AiPowCompactRecursiveCertificateRun,
@@ -2372,7 +2594,7 @@ fn prove_pearl_merge_compact_recursive_certificate_checked_inner(
     }
 
     prove_pearl_merge_compact_recursive_certificate_prechecked(
-        precheck, &attempt.public_params, params, a_row_major, b_col_major, cache,
+        precheck, &attempt.public_params, params, a_row_major, b_col_major, cache, rules,
     )
 }
 
@@ -2383,6 +2605,7 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
     a_row_major: &[i8],
     b_col_major: &[i8],
     cache: Option<&AiPowCompactRecursiveProverCache>,
+    rules: ProofRules,
 ) -> Result<
     (
         AiPowCompactRecursiveCertificateRun,
@@ -2433,7 +2656,7 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
         s_b: precheck.work.commitments.s_b,
         jackpot_key: precheck.work.commitments.s_a,
     };
-    let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context(
+    let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context_with_rules(
         &zctx,
         params,
         tile_i,
@@ -2441,6 +2664,7 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
         &strip_schedule,
         |_| {},
         None,
+        rules,
     )?;
 
     expect_pi_eq(
@@ -2482,8 +2706,8 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
             s_b: precheck.work.commitments.s_b,
         },
     };
-    verify_ai_pow_tiled_with_statement(
-        params, &precheck.work.nockchain_adjusted_target, &verified, &artifact,
+    verify_ai_pow_tiled_with_statement_with_rules(
+        params, &precheck.work.nockchain_adjusted_target, &verified, &artifact, rules,
     )?;
 
     let ZkProofArtifact {
@@ -2503,7 +2727,7 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
             proof,
             &pis,
             l0_common,
-        )
+        ).with_rules(rules)
     };
     let compact = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
 
@@ -2739,6 +2963,22 @@ fn verify_ai_pow_tiled_with_statement(
     verified: &VerifiedZkStatement,
     artifact: &ZkProofArtifact,
 ) -> Result<(), BridgeError> {
+    verify_ai_pow_tiled_with_statement_with_rules(
+        params,
+        target,
+        verified,
+        artifact,
+        ProofRules::Hardened,
+    )
+}
+
+fn verify_ai_pow_tiled_with_statement_with_rules(
+    params: &MatmulParams,
+    target: &[u8; 32],
+    verified: &VerifiedZkStatement,
+    artifact: &ZkProofArtifact,
+    rules: ProofRules,
+) -> Result<(), BridgeError> {
     let zk_params = zk_params_from(params);
     // Degree-adaptive profile re-derived from the bound Layer-0 trace height —
     // MUST match the prover's `for_layer0_trace(height)`.
@@ -2747,8 +2987,8 @@ fn verify_ai_pow_tiled_with_statement(
         &CircuitConfig::for_layer0_trace(artifact.trace_height),
     );
     let bp = verified_block_public(verified);
-    let canonical = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
-        &zk_params, &verified.strip_schedule, &bp, artifact.trace_height,
+    let canonical = ai_pow_zk::canonical::canonical_program_for_strip_schedule_with_rules(
+        &zk_params, &verified.strip_schedule, &bp, artifact.trace_height, rules,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
     // R-b: `sx_bound` is verifier-derived from the trusted
@@ -2757,8 +2997,8 @@ fn verify_ai_pow_tiled_with_statement(
     // TileReduce + FOLD_XSTEP==TR_NEW binding). The canonical program
     // above is already the params-pure R-b schedule for `>STRIPE_MAX`.
     let sx_bound = (params.num_stripes() as usize) <= crate::params::STRIPE_MAX;
-    composite_verify_pow_pinned_logup_sx(
-        &cfg, &canonical, &artifact.proof, &artifact.pis, target, sx_bound,
+    ai_pow_zk::composite_proof::composite_verify_pow_pinned_logup_sx_with_rules(
+        &cfg, &canonical, &artifact.proof, &artifact.pis, target, sx_bound, rules,
     )
     .map_err(BridgeError::Pow)
 }
@@ -3019,6 +3259,28 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     tamper: F,
     sweep_override: Option<(&[i8], &[i8])>,
 ) -> Result<(ZkProofArtifact, AiPowProgram, bool), BridgeError> {
+    prove_ai_pow_scheduled_full_with_context_with_rules(
+        zctx,
+        params,
+        _tile_i,
+        _tile_j,
+        strip_schedule,
+        tamper,
+        sweep_override,
+        ProofRules::Hardened,
+    )
+}
+
+fn prove_ai_pow_scheduled_full_with_context_with_rules<F: FnOnce(&mut CompositeTrace)>(
+    zctx: &ZkProverContext<'_>,
+    params: &MatmulParams,
+    _tile_i: u32,
+    _tile_j: u32,
+    strip_schedule: &StripIndexSchedule,
+    tamper: F,
+    sweep_override: Option<(&[i8], &[i8])>,
+    rules: ProofRules,
+) -> Result<(ZkProofArtifact, AiPowProgram, bool), BridgeError> {
     validate_scheduled_params(params)?;
     if zctx.params != *params {
         return Err(BridgeError::ParamsMismatch {
@@ -3050,7 +3312,7 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // matrix side is now an O(t·k) strip opening, not the
     // O(|matrix|) full re-hash).
     let budget = expected_layer0_rows_for_strip_schedule(params, strip_schedule)?;
-    let mut trace = CompositeTrace::baseline(budget.required_trace_len());
+    let mut trace = CompositeTrace::baseline_with_rules(budget.required_trace_len(), rules);
     let height = trace.height();
 
     // C3 / HASH_A / HASH_B — **Pearl §4.6 strip opening**:
@@ -3106,9 +3368,8 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     let cb0 = b_chunks[0];
     let b_lane_base = ai_pow_zk::canonical::covering_id_lane_base("B", cb0, kk)
         .map_err(BridgeError::ZkParamsInvalid)?;
-    // Bases cover the selected chunks' matrix-row lanes. The chunk index and
-    // matrix row use different units whenever k != 1024.
-    let (a_id_base, b_id_base) = ai_pow_zk::composite_trace::try_noised_id_bases(
+    // Select the same producer namespace as the canonical verifier program.
+    let (a_id_base, b_id_base) = ai_pow_zk::composite_trace::try_noised_id_bases_with_rules(
         ai_pow_zk::canonical::covering_id_span("A", a_indices, ca0, kk)
             .map_err(BridgeError::ZkParamsInvalid)?
             - 1,
@@ -3116,6 +3377,7 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
             .map_err(BridgeError::ZkParamsInvalid)?
             - 1,
         kk,
+        rules,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
     // Noise bytes parallel to the SELECTED strip bytes: each byte at its ACTUAL
@@ -8401,6 +8663,30 @@ mod tests {
              rejected — else a miner forges the PoW without doing \
              the real matmul of the committed matrices."
         );
+    }
+
+    #[test]
+    fn partial_chunk_shape_accepts_honest_proof() {
+        use crate::synth::synth_matrices;
+
+        let params = MatmulParams {
+            m: 8,
+            k: 1088,
+            n: 8,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        params.validate().expect("k=1088 is consensus-admitted");
+        let (a, b) = synth_matrices(b"partial-chunk-coverage", &params);
+        let ctx = BlockContext::build(b"partial-chunk-coverage-block", TEST_NONCE, &a, &b, &params)
+            .expect("context");
+        let target = crate::tile_hash::difficulty_target(&params);
+
+        prove_and_verify_tiled_full(&ctx, &params, TEST_NONCE, &target, 0, 0, |_| {}, None)
+            .expect("honest k=1088 proof must verify");
+
     }
 
     /// **Producer-planting / position-permutation

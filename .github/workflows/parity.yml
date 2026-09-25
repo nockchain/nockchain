@@ -37,6 +37,7 @@ concurrency:
 
 jobs:
   kernel-parity:
+    if: github.repository == 'nockchain/nockchain'
     name: ${{ matrix.kernel }} kernel parity
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -58,6 +59,7 @@ jobs:
         run: bazel test //assets/native:${{ matrix.kernel }}_parity_test
 
   type-probe-parity:
+    if: github.repository == 'nockchain/nockchain'
     # Small probe pairings: curated type probes + compiler fixtures (strict
     # cmp of hoonc-vs-honk --arbitrary builds with an empty deps dir) plus
     # the rejection-parity corpus (ill-typed probes both compilers must
@@ -75,6 +77,7 @@ jobs:
         run: bazel test //crates/honk/test-assets/type-probes:all_parity_test
 
   hoon-138-parity:
+    if: github.repository == 'nockchain/nockchain'
     # The honk native self-mint peaks ~14GB RSS; ubuntu-latest (16GB) is
     # tight but the resource_set declaration serializes it against the hoonc
     # reference build. Move to a larger runner class if it OOMs.

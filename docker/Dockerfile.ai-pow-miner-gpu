@@ -58,7 +58,7 @@ RUN ln -s libcudart.so.12.8.90 /usr/local/cuda/lib64/libcudart.so.12 \
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
 COPY --from=test-builder /tmp/ai-pow-gpu-tests /usr/local/bin/ai-pow-gpu-tests
 ENTRYPOINT ["/usr/local/bin/ai-pow-gpu-tests"]
-CMD ["canonical_v3_device_pipeline_matches_scalar", "--exact", "--nocapture"]
+CMD ["gpu::tests::canonical_v3_device_pipeline_matches_scalar", "--exact", "--nocapture"]
 
 FROM ubuntu:24.04 AS benchmark
 RUN apt-get update \
@@ -69,7 +69,7 @@ RUN ln -s libcudart.so.12.8.90 /usr/local/cuda/lib64/libcudart.so.12 \
     && ln -s libcudart.so.12 /usr/local/cuda/lib64/libcudart.so
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
 COPY --from=benchmark-builder /tmp/search /usr/local/bin/search
-ENV AI_POW_SEARCH_BENCH_CANONICAL_ATTEMPTS=8192
+ENV AI_POW_SEARCH_BENCH_REFERENCE_ATTEMPTS=8192
 CMD ["sleep", "infinity"]
 
 FROM ubuntu:24.04

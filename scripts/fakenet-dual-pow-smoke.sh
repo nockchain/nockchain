@@ -178,7 +178,7 @@ echo
 echo "[phase] mine AI block 1 ..."
 RUST_LOG="${AI_RUST_LOG:-info}" "$AI_BIN" \
     --node-addr "http://127.0.0.1:$PRIV_PORT" --mining-pkh "$MINING_PKH" \
-    --canonical >"$AI_LOG" 2>&1 &
+    --reference >"$AI_LOG" 2>&1 &
 AI_PID=$!
 wait_for_acceptances "$AI_PAT" 1 "first AI block" || { EXIT_CODE=5; exit 5; }
 stop_miner "$AI_PID"
@@ -196,7 +196,7 @@ ZK_PID=""
 echo "[phase] mine AI block 2 across the interleaved ZK block ..."
 RUST_LOG="${AI_RUST_LOG:-info}" "$AI_BIN" \
     --node-addr "http://127.0.0.1:$PRIV_PORT" --mining-pkh "$MINING_PKH" \
-    --canonical >>"$AI_LOG" 2>&1 &
+    --reference >>"$AI_LOG" 2>&1 &
 AI_PID=$!
 wait_for_acceptances "$AI_PAT" 2 "second AI block" || { EXIT_CODE=7; exit 7; }
 stop_miner "$AI_PID"

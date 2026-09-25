@@ -165,12 +165,18 @@ pub const IS_LAST_ROUND: usize = IS_NEW_BLAKE + 1;
 pub const IS_MSG_MAT: usize = IS_LAST_ROUND + 1;
 pub const IS_MSG_JACKPOT: usize = IS_MSG_MAT + 1;
 pub const IS_MSG_AUX_DATA: usize = IS_MSG_JACKPOT + 1;
+/// Marks a BLAKE3 parent-compression row whose message words are loaded from a
+/// computed child CV. This uses the Pearl auxiliary-message selector slot
+/// within the existing trace and canonical-program layout.
+/// `IS_CV_IN = 0` selects the left child; `IS_CV_IN = 1` selects the right.
+pub const IS_PARENT_CV: usize = IS_MSG_AUX_DATA;
 /// `IS_JOB_KEYED` — marks a κ-keyed BLAKE3 compression's round-0
 /// row (matrix-commitment chunk block 0 / chunk-Merkle parent). The
 /// pinned AIR binds that row's `CV_IN` to `PI_JOB_KEY`, so the
 /// proven `HASH_A`/`HASH_B` are commitments under the statement's
 /// κ, never under a prover-chosen key. Repurposes Pearl's
-/// `IS_MSG_CV` slot (the Nockchain port has no CV-message loads).
+/// `IS_MSG_CV` slot; parent-message CV routing uses the auxiliary-message slot
+/// exposed as [`IS_PARENT_CV`].
 pub const IS_JOB_KEYED: usize = IS_MSG_AUX_DATA + 1;
 pub const IS_LOAD: usize = IS_JOB_KEYED + 1;
 pub const IS_XOR: usize = IS_LOAD + 1;

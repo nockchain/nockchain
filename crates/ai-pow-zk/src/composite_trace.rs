@@ -70,14 +70,16 @@ use crate::composite_layout::{
     CV_OR_TWEAK_PREP, CV_OUT_FREQ, CV_OUT_LEN, CV_OUT_START, FOLD_IS_FOLD, FOLD_MCUR_BITS_START,
     FOLD_SLOT_SEL_START, FOLD_STATE_START, FOLD_STRIPE_SEL_START, FOLD_XOR_OUT, FOLD_XSTEP,
     FOLD_XSTEP_BITS_START, I8U8_FREQ, IRANGE7P1_FREQ, IRANGE8_FREQ, IS_CV_IN, IS_MSG_MAT,
-    IS_RESET_CUMSUM, IS_UPDATE_CUMSUM, JACKPOT_MSG_START, JACKPOT_SIZE, JACKPOT_SLOT_SEL_START,
-    JACKPOT_X_BITS_START, MAT_FREQ, MAT_ID, MAT_ID_LIMBS_LEN, MAT_ID_LIMBS_START, MAT_UNPACK_START,
-    MAT_UNPACK_WIN, NOISED_PACKED_START, NOISE_UNPACK_START, NOISE_UNPACK_WIN, RB_CONTROL_PREP,
-    STARK_ROW_IDX, STRIPE_MAX, SX_CONTROL_PREP, SX_IN_BITS_START, SX_IN_START, SX_IS_ACTIVE,
-    SX_LANE_SEL_START, SX_NEW_SEL, SX_NEW_SEL_BITS_START, SX_Q_START, SX_XR_SEL_BITS_START,
-    SX_XR_START, TILE_D, TILE_H, TOTAL_TRACE_WIDTH, UINT8_DATA_START, UINT8_DATA_WIN,
-    URANGE13_FREQ, URANGE8_FREQ,
+    IS_PARENT_CV, IS_RESET_CUMSUM, IS_UPDATE_CUMSUM, JACKPOT_MSG_START, JACKPOT_SIZE,
+    JACKPOT_SLOT_SEL_START, JACKPOT_X_BITS_START, MAT_FREQ, MAT_ID, MAT_ID_LIMBS_LEN,
+    MAT_ID_LIMBS_START, MAT_UNPACK_START, MAT_UNPACK_WIN, NOISED_PACKED_START, NOISE_UNPACK_START,
+    NOISE_UNPACK_WIN, RB_CONTROL_PREP, STARK_ROW_IDX, STRIPE_MAX, SX_CONTROL_PREP,
+    SX_IN_BITS_START, SX_IN_START, SX_IS_ACTIVE, SX_LANE_SEL_START, SX_NEW_SEL,
+    SX_NEW_SEL_BITS_START, SX_Q_START, SX_XR_SEL_BITS_START, SX_XR_START, TILE_D, TILE_H,
+    TOTAL_TRACE_WIDTH, UINT8_DATA_START, UINT8_DATA_WIN, URANGE13_FREQ, URANGE8_FREQ,
 };
+use crate::composite_lookups::{PARENT_LEFT_MSG_POS, PARENT_RIGHT_MSG_POS};
+use crate::proof_rules::ProofRules;
 use crate::Val;
 
 /// Interpret a Goldilocks field element as a signed integer
@@ -111,8 +113,7 @@ pub struct NoisedChunkSrc {
 }
 
 /// Reserve low chunk IDs for all-zero padding rows. Real matrix
-/// producer IDs start here so `(0..8, 0, 0)` padding table entries
-/// cannot satisfy a malicious zero-substitution query.
+/// Producer IDs start after the reserved `(0..8, 0, 0)` padding-table keys.
 pub const NOISED_CHUNK_ID_BASE: u64 = 8;
 
 pub fn noised_chunk_id(id_base: u64, k: usize, src: &[Option<(u32, u32)>; 8]) -> u64 {
@@ -125,15 +126,8 @@ pub fn noised_chunk_id(id_base: u64, k: usize, src: &[Option<(u32, u32)>; 8]) ->
 
 /// Side-disjoint `noised_packed` id bases.
 ///
-/// The A-side key for covering-range lane `lane` and `k`-column `l` is
-/// `a_id_base + (lane·k + l)/8`, so every A-side key lies strictly below
-/// `a_id_base + (max_a_lane+1)·k/8`. `b_id_base` must be derived from the
-/// full A covering-range span (`max_a_lane + 1`), never from the tile
-/// height: a scattered (or non-origin, sub-1024-`k`) schedule has lanes
-/// beyond `h_tile`, and a tile-height base lets A keys collide with B
-/// keys — the fingerprint's packed value then only binds a read to
-/// *some* committed store entry, so committed-B bytes could be
-/// substituted at colliding A positions.
+/// Producer namespaces cover complete opened BLAKE3 chunks and remain disjoint.
+/// Consumers address 8-byte matrix slices within those namespaces.
 ///
 /// Fallible form of [`noised_id_bases`]: rejects spans that would push any
 /// producer or consumer id outside the `pack_ab_id` limb budget
@@ -147,9 +141,36 @@ pub fn try_noised_id_bases(
     max_b_lane: usize,
     k: usize,
 ) -> Result<(u64, u64), String> {
+    try_noised_id_bases_with_rules(max_a_lane, max_b_lane, k, ProofRules::Hardened)
+}
+
+pub fn try_noised_id_bases_with_rules(
+    max_a_lane: usize,
+    max_b_lane: usize,
+    k: usize,
+    rules: ProofRules,
+) -> Result<(u64, u64), String> {
+    let producer_key_span = |max_lane: usize| -> Result<u64, String> {
+        let bytes = max_lane
+            .checked_add(1)
+            .and_then(|lanes| lanes.checked_mul(k))
+            .ok_or_else(|| "noised_packed producer byte span overflow".to_string())?;
+        let keys = match rules {
+            ProofRules::Legacy => bytes.div_ceil(8),
+            ProofRules::Hardened => bytes
+                .div_ceil(crate::blake3_tree::CHUNK_LEN)
+                .checked_mul(crate::blake3_tree::CHUNK_LEN / 8)
+                .ok_or_else(|| "noised_packed producer key span overflow".to_string())?,
+        };
+        u64::try_from(keys).map_err(|_| "noised_packed producer key span overflow".to_string())
+    };
     let a_id_base = NOISED_CHUNK_ID_BASE;
-    let b_id_base = a_id_base + (((max_a_lane + 1) * k).div_ceil(8)) as u64;
-    let max_b_id = b_id_base + (((max_b_lane + 1) * k).div_ceil(8)) as u64;
+    let b_id_base = a_id_base
+        .checked_add(producer_key_span(max_a_lane)?)
+        .ok_or_else(|| "noised_packed A id span overflow".to_string())?;
+    let max_b_id = b_id_base
+        .checked_add(producer_key_span(max_b_lane)?)
+        .ok_or_else(|| "noised_packed B id span overflow".to_string())?;
     if max_b_id >= (1u64 << (2 * crate::composite_layout::BITS_PER_LIMB)) {
         return Err(format!(
             "noised_packed id span exceeds the {}-bit pack_ab_id budget \
@@ -172,9 +193,18 @@ pub fn noised_id_bases(max_a_lane: usize, max_b_lane: usize, k: usize) -> (u64, 
 /// [`crate::composite_full_air::CompositeFullAir`].
 #[derive(Clone, Debug)]
 pub struct CompositeTrace {
+    rules: ProofRules,
     /// The TOTAL_TRACE_WIDTH × N matrix; `N` is a power of 2 and
     /// `>= composite_layout::MIN_STARK_LEN = 8192`.
     pub matrix: RowMajorMatrix<Val>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RoutedCv {
+    words: [u32; 8],
+    /// Finalize row that produced `words`. Authentication siblings have no
+    /// in-trace source and therefore remain ordinary Merkle-path witness data.
+    source_row: Option<usize>,
 }
 
 impl CompositeTrace {
@@ -222,6 +252,14 @@ impl CompositeTrace {
     /// [`crate::composite_full_air::CompositeFullAir`] but
     /// represents no chip-level activity.
     pub fn baseline(n: usize) -> Self {
+        Self::baseline_with_rules(n, ProofRules::Hardened)
+    }
+
+    pub fn proof_rules(&self) -> ProofRules {
+        self.rules
+    }
+
+    pub fn baseline_with_rules(n: usize, rules: ProofRules) -> Self {
         use p3_field::integers::QuotientMap;
 
         assert!(n.is_power_of_two(), "trace length must be a power of 2");
@@ -253,6 +291,7 @@ impl CompositeTrace {
         }
 
         Self {
+            rules,
             matrix: RowMajorMatrix::new(flat, TOTAL_TRACE_WIDTH),
         }
     }
@@ -414,25 +453,7 @@ impl CompositeTrace {
         extra_selectors_on_finalize: &[usize],
     ) -> [u32; 8] {
         self.place_blake3_hash_with_selectors_and_cv_source(
-            row_start, message, cv_in, tweak, extra_selectors_on_finalize, None, false,
-        )
-    }
-
-    /// κ-keyed variant of [`place_blake3_hash_with_selectors`]:
-    /// marks the block's round-0 row `IS_JOB_KEYED` so the pinned
-    /// AIR binds its `CV_IN` to `PI_JOB_KEY`. Used for the
-    /// matrix-commitment compressions whose chaining value is the
-    /// chain-pinned κ (chunk block 0, chunk-Merkle parents).
-    pub(crate) fn place_blake3_hash_job_keyed_with_selectors(
-        &mut self,
-        row_start: usize,
-        message: &[u32; 16],
-        cv_in: &[u32; 8],
-        tweak: &Blake3Tweak,
-        extra_selectors_on_finalize: &[usize],
-    ) -> [u32; 8] {
-        self.place_blake3_hash_with_selectors_and_cv_source(
-            row_start, message, cv_in, tweak, extra_selectors_on_finalize, None, true,
+            row_start, message, cv_in, tweak, extra_selectors_on_finalize, None, None, false,
         )
     }
 
@@ -444,6 +465,7 @@ impl CompositeTrace {
         tweak: &Blake3Tweak,
         extra_selectors_on_finalize: &[usize],
         cv_source_row: Option<usize>,
+        parent_cv_sources: Option<[Option<usize>; 2]>,
         job_keyed: bool,
     ) -> [u32; 8] {
         use p3_field::integers::QuotientMap;
@@ -573,6 +595,26 @@ impl CompositeTrace {
             } else {
                 row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(tweak_packed);
             }
+            if let Some([left_source, right_source]) =
+                parent_cv_sources.filter(|_| self.rules == ProofRules::Hardened)
+            {
+                assert!(
+                    cv_source_row.is_none(),
+                    "a BLAKE3 block cannot be both a chaining continuation and a parent"
+                );
+                if r == 1 {
+                    if let Some(src) = left_source {
+                        selectors[12] = true; // IS_PARENT_CV, left half
+                        row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(src as u64);
+                    }
+                } else if r == 6 {
+                    if let Some(src) = right_source {
+                        selectors[12] = true; // IS_PARENT_CV
+                        selectors[7] = true; // IS_CV_IN selects the right half
+                        row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(src as u64);
+                    }
+                }
+            }
             ControlChip.fill_row(&selectors, 0, row);
 
             current_input_state = snaps[3];
@@ -671,7 +713,6 @@ impl CompositeTrace {
         // BLAKE3 standard flag bits.
         const F_CHUNK_START: u32 = 1 << 0;
         const F_CHUNK_END: u32 = 1 << 1;
-        const F_PARENT: u32 = 1 << 2;
         const F_ROOT: u32 = 1 << 3;
         const F_KEYED_HASH: u32 = 1 << 4;
         const BLAKE3_CHUNK_LEN: usize = 1024;
@@ -690,7 +731,7 @@ impl CompositeTrace {
         });
 
         let mut row = row_start;
-        let mut chunk_cvs: Vec<[u32; 8]> = Vec::with_capacity(num_chunks);
+        let mut chunk_cvs: Vec<RoutedCv> = Vec::with_capacity(num_chunks);
 
         // CHUNK LAYER — for each chunk, 16 keyed BLAKE3 compressions.
         for c in 0..num_chunks {
@@ -739,48 +780,31 @@ impl CompositeTrace {
                     &tweak,
                     extras,
                     cv_source,
+                    None,
                     b == 0,
                 );
                 row += 8;
             }
-            chunk_cvs.push(chunk_cv);
+            chunk_cvs.push(RoutedCv {
+                words: chunk_cv,
+                source_row: Some(row - 1),
+            });
         }
 
         // PARENT LAYER — binary-tree reduce. Promote unpaired CVs
         // (BLAKE3 spec for non-power-of-2 chunk counts).
         while chunk_cvs.len() > 1 {
             let is_top_layer = chunk_cvs.len() == 2;
-            let mut next: Vec<[u32; 8]> = Vec::with_capacity(chunk_cvs.len().div_ceil(2));
+            let mut next: Vec<RoutedCv> = Vec::with_capacity(chunk_cvs.len().div_ceil(2));
             let mut i = 0;
             while i + 1 < chunk_cvs.len() {
                 let left = chunk_cvs[i];
                 let right = chunk_cvs[i + 1];
-                let mut message = [0u32; 16];
-                message[..8].copy_from_slice(&left[..8]);
-                message[8..16].copy_from_slice(&right[..8]);
-
                 let is_root_parent = is_top_layer && i + 2 == chunk_cvs.len();
-                let mut flags = F_KEYED_HASH | F_PARENT;
-                if is_root_parent {
-                    flags |= F_ROOT;
-                }
-                let tweak = Blake3Tweak {
-                    counter_low: 0,
-                    counter_high: 0,
-                    block_len: BLAKE3_BLOCK_LEN as u32,
-                    flags,
-                };
-
-                let extras: &[usize] = if is_root_parent {
-                    core::slice::from_ref(&selector_idx)
-                } else {
-                    &[]
-                };
-                let parent_cv = self.place_blake3_hash_job_keyed_with_selectors(
-                    row, &message, &key_words, &tweak, extras,
+                let parent_cv = self.place_parent(
+                    &mut row, &left, &right, &key_words, is_root_parent, selector_idx,
                 );
                 next.push(parent_cv);
-                row += 8;
                 i += 2;
             }
             if i < chunk_cvs.len() {
@@ -789,7 +813,7 @@ impl CompositeTrace {
             chunk_cvs = next;
         }
 
-        let root_cv = chunk_cvs[0];
+        let root_cv = chunk_cvs[0].words;
         (row, root_cv)
     }
 
@@ -911,7 +935,7 @@ impl CompositeTrace {
             auth_siblings.len(),
             "unconsumed authentication siblings"
         );
-        (row, root)
+        (row, root.words)
     }
 
     /// Place the 16-compression keyed BLAKE3 chunk-hash of one
@@ -984,6 +1008,7 @@ impl CompositeTrace {
                 &tweak,
                 extras,
                 cv_source,
+                None,
                 b == 0,
             );
             *row += 8;
@@ -1069,18 +1094,18 @@ impl CompositeTrace {
     fn place_parent(
         &mut self,
         row: &mut usize,
-        left: &[u32; 8],
-        right: &[u32; 8],
+        left: &RoutedCv,
+        right: &RoutedCv,
         key_words: &[u32; 8],
         is_root: bool,
         selector_idx: usize,
-    ) -> [u32; 8] {
+    ) -> RoutedCv {
         const F_PARENT: u32 = 1 << 2;
         const F_ROOT: u32 = 1 << 3;
         const F_KEYED_HASH: u32 = 1 << 4;
         let mut message = [0u32; 16];
-        message[..8].copy_from_slice(&left[..8]);
-        message[8..16].copy_from_slice(&right[..8]);
+        message[..8].copy_from_slice(&left.words);
+        message[8..16].copy_from_slice(&right.words);
         let mut flags = F_KEYED_HASH | F_PARENT;
         if is_root {
             flags |= F_ROOT;
@@ -1096,10 +1121,21 @@ impl CompositeTrace {
         } else {
             &[]
         };
-        let cv = self
-            .place_blake3_hash_job_keyed_with_selectors(*row, &message, key_words, &tweak, extras);
+        let cv = self.place_blake3_hash_with_selectors_and_cv_source(
+            *row,
+            &message,
+            key_words,
+            &tweak,
+            extras,
+            None,
+            Some([left.source_row, right.source_row]),
+            true,
+        );
         *row += 8;
-        cv
+        RoutedCv {
+            words: cv,
+            source_row: Some(*row - 1),
+        }
     }
 
     /// True-BLAKE3-tree fold mirroring
@@ -1125,7 +1161,7 @@ impl CompositeTrace {
         noise_strip: Option<&[i8]>,
         mat_id_base: Option<u64>,
         strip_c0: usize,
-    ) -> [u32; 8] {
+    ) -> RoutedCv {
         if hi <= c0 || lo >= c1 {
             let s = &sibs[*si];
             *si += 1;
@@ -1135,9 +1171,17 @@ impl CompositeTrace {
                 s.lo,
                 s.hi
             );
-            return core::array::from_fn(|i| {
-                u32::from_le_bytes([s.cv[i * 4], s.cv[i * 4 + 1], s.cv[i * 4 + 2], s.cv[i * 4 + 3]])
-            });
+            return RoutedCv {
+                words: core::array::from_fn(|i| {
+                    u32::from_le_bytes([
+                        s.cv[i * 4],
+                        s.cv[i * 4 + 1],
+                        s.cv[i * 4 + 2],
+                        s.cv[i * 4 + 3],
+                    ])
+                }),
+                source_row: None,
+            };
         }
         if c0 <= lo && hi <= c1 {
             return self.subtree_inside(
@@ -1173,12 +1217,12 @@ impl CompositeTrace {
         noise_strip: Option<&[i8]>,
         mat_id_base: Option<u64>,
         strip_c0: usize,
-    ) -> [u32; 8] {
+    ) -> RoutedCv {
         if hi - lo == 1 {
             let off = (lo - c0) * 1024;
             // num_chunks > 1 in this path ⇒ a leaf is never the
             // root (the lone-chunk case is handled before fold).
-            return self.place_leaf_chunk(
+            let words = self.place_leaf_chunk(
                 row,
                 &strip_bytes[off..off + 1024],
                 lo as u64,
@@ -1189,6 +1233,10 @@ impl CompositeTrace {
                 mat_id_base,
                 strip_c0,
             );
+            return RoutedCv {
+                words,
+                source_row: Some(*row - 1),
+            };
         }
         let mid = lo + crate::blake3_tree::left_len((hi - lo) as u64) as usize;
         let l = self.subtree_inside(
@@ -1278,7 +1326,7 @@ impl CompositeTrace {
             auth_siblings.len(),
             "unconsumed authentication siblings"
         );
-        (row, root)
+        (row, root.words)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1297,7 +1345,7 @@ impl CompositeTrace {
         noise_strip: Option<&[i8]>,
         mat_id_base: Option<u64>,
         strip_c0: usize,
-    ) -> [u32; 8] {
+    ) -> RoutedCv {
         let cnt = sel.partition_point(|&c| c < hi) - sel.partition_point(|&c| c < lo);
         if cnt == 0 {
             let s = &sibs[*si];
@@ -1308,9 +1356,17 @@ impl CompositeTrace {
                 s.lo,
                 s.hi
             );
-            return core::array::from_fn(|i| {
-                u32::from_le_bytes([s.cv[i * 4], s.cv[i * 4 + 1], s.cv[i * 4 + 2], s.cv[i * 4 + 3]])
-            });
+            return RoutedCv {
+                words: core::array::from_fn(|i| {
+                    u32::from_le_bytes([
+                        s.cv[i * 4],
+                        s.cv[i * 4 + 1],
+                        s.cv[i * 4 + 2],
+                        s.cv[i * 4 + 3],
+                    ])
+                }),
+                source_row: None,
+            };
         }
         if cnt == hi - lo {
             return self.subtree_inside_set(
@@ -1344,11 +1400,11 @@ impl CompositeTrace {
         noise_strip: Option<&[i8]>,
         mat_id_base: Option<u64>,
         strip_c0: usize,
-    ) -> [u32; 8] {
+    ) -> RoutedCv {
         if hi - lo == 1 {
             // Fully selected ⇒ lo ∈ sel; its bytes sit at rank(lo) in the strip.
             let off = sel.partition_point(|&c| c < lo) * 1024;
-            return self.place_leaf_chunk(
+            let words = self.place_leaf_chunk(
                 row,
                 &strip_bytes[off..off + 1024],
                 lo as u64,
@@ -1359,6 +1415,10 @@ impl CompositeTrace {
                 mat_id_base,
                 strip_c0,
             );
+            return RoutedCv {
+                words,
+                source_row: Some(*row - 1),
+            };
         }
         let mid = lo + crate::blake3_tree::left_len((hi - lo) as u64) as usize;
         let l = self.subtree_inside_set(
@@ -1952,11 +2012,13 @@ impl CompositeTrace {
         assert_eq!(b_prime_cols.len(), w_tile * k, "b_prime_cols must be w*k");
         let n_sbi = h_tile / TILE_H;
         let n_sbj = w_tile / TILE_H;
-        let (a_id_base, b_id_base) = noised_id_bases(
+        let (a_id_base, b_id_base) = try_noised_id_bases_with_rules(
             *a_lanes.iter().max().expect("nonempty a_lanes"),
             *b_lanes.iter().max().expect("nonempty b_lanes"),
             k,
-        );
+            self.rules,
+        )
+        .expect("noised_packed id budget pre-validated by schedule guards");
         let trace_h = self.height();
         assert!(
             row_start + n_sbi * n_sbj * num_stripes * chunks < trace_h,
@@ -2179,11 +2241,13 @@ impl CompositeTrace {
         assert!(n_sb * 4 <= 256, "h·w = {} exceeds MAX_CELLS=256", n_sb * 4);
         let trace_h = self.height();
         // Positioned noised-chunk ID bases (for the LogUp bus).
-        let (a_id_base, b_id_base) = noised_id_bases(
+        let (a_id_base, b_id_base) = try_noised_id_bases_with_rules(
             *a_lanes.iter().max().expect("nonempty a_lanes"),
             *b_lanes.iter().max().expect("nonempty b_lanes"),
             k,
-        );
+            self.rules,
+        )
+        .expect("noised_packed id budget pre-validated by schedule guards");
 
         let set_bits = |row: &mut [Val], at: usize, v: u32| {
             for i in 0..32 {
@@ -3067,8 +3131,9 @@ impl CompositeTrace {
         // ---- CV_ROUTING bus ----
         //
         // Table key: (STARK_ROW_IDX[r], CV_OUT[r][0..8]).
-        // Each row publishes one entry. Queries from rows with
-        // IS_CV_IN=1 emit (CV_OR_TWEAK_PREP[r], CV_IN[r][0..8]).
+        // Each row publishes one entry. Ordinary chaining rows emit
+        // (CV_OR_TWEAK_PREP, CV_IN[0..8]). Parent-message rows emit the
+        // referenced child CV reconstructed from their permuted BLAKE3_MSG.
         let mut cv_freq = vec![0u64; n];
         let mut cv_key_to_first_row: hashbrown::HashMap<Vec<u64>, usize> =
             hashbrown::HashMap::new();
@@ -3084,16 +3149,30 @@ impl CompositeTrace {
         for r in 0..n {
             let base = r * TOTAL_TRACE_WIDTH;
             let is_cv_in = self.matrix.values[base + IS_CV_IN].as_canonical_u64();
-            if is_cv_in == 0 {
+            let is_parent_cv = self.matrix.values[base + IS_PARENT_CV].as_canonical_u64();
+            if is_cv_in == 0 && is_parent_cv == 0 {
                 continue;
             }
-            let mut query = Vec::with_capacity(1 + CV_IN_LEN);
+            let mut query = Vec::with_capacity(1 + CV_OUT_LEN);
             query.push(self.matrix.values[base + CV_OR_TWEAK_PREP].as_canonical_u64());
-            for i in 0..CV_IN_LEN {
-                query.push(self.matrix.values[base + CV_IN_START + i].as_canonical_u64());
+            if is_parent_cv == 1 {
+                let positions = if is_cv_in == 0 {
+                    &PARENT_LEFT_MSG_POS
+                } else {
+                    &PARENT_RIGHT_MSG_POS
+                };
+                for &position in positions {
+                    query.push(
+                        self.matrix.values[base + BLAKE3_MSG_START + position].as_canonical_u64(),
+                    );
+                }
+            } else {
+                for i in 0..CV_IN_LEN {
+                    query.push(self.matrix.values[base + CV_IN_START + i].as_canonical_u64());
+                }
             }
             if let Some(&tr) = cv_key_to_first_row.get(&query) {
-                cv_freq[tr] += is_cv_in;
+                cv_freq[tr] += 1;
             }
             // No-match queries → unbalanced bus → LogUp rejects.
         }

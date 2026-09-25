@@ -397,4 +397,84 @@
           (~(has z-in:zoon (filter-heard-tx-effects:h block-effs)) raw)
           (~(has-raw-tx k-by:h nockchain) tx-id)
       ==
+::
+::  +stripped: .sed with its output-source cleared, for hashing a seed set
+::  the way +build-outputs does
+++  stripped
+  |=  sed=seed:v1:t
+  ^-  seed:v1:t
+  sed(output-source ~)
+::
+::  +signed-spend: a spend-1 of .coin carrying .seds and .fee, signed with
+::  the coin's coinbase keys against its own lock
+++  signed-spend
+  |=  $:  coin=nnote:t
+          in-root=hash:t
+          in-sc=spend-condition:v1:t
+          seds=seeds:v1:t
+          fee=coins:t
+      ==
+  ^-  [nname:t spend-1:v1:t]
+  =/  sp1=spend-1:v1:t
+    %*  .  *spend-1:v1:t
+      witness  *witness:v1:t
+      seeds    seds
+      fee      fee
+    ==
+  =/  sig-h=hash:t  (sig-hash:spend-1:v1:t sp1)
+  =/  pks=(list schnorr-pubkey:t)
+    ~(tap z-in:zoon pubkeys.p:default-keys-1:h)
+  =/  wit=witness:t
+    (make-pkh-witness:v1:h in-root in-sc sig-h ~[[s:default-keys-1:h (snag 0 pks)]])
+  [~(name get:nnote:t coin) sp1(witness wit)]
+::
+::  +test-v1-mempool-accept-pinned-merged-output: the outputs check must not
+::  over-reject. two spends pay the same lock root and every seed pins the
+::  source of the merged output they form together -- the shape the wallet
+::  emits for a deposit split across input notes (+pin-deposit-sources).
+::  This transaction is mineable, and admission takes it.
+++  test-v1-mempool-accept-pinned-merged-output
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 3 nockchain)
+  =/  bal  ~(get-cur-balance k-by:h nockchain)
+  =/  coin-1=nnote:t  (get-coinbase-from-balance:v1:h (snag 1 pages) bal)
+  =/  coin-2=nnote:t  (get-coinbase-from-balance:v1:h (snag 2 pages) bal)
+  =/  pks=(list schnorr-pubkey:t)
+    ~(tap z-in:zoon pubkeys.p:default-keys-1:h)
+  =/  [in-root=hash:t in-sc=spend-condition:v1:t *]
+    (make-coinbase-lock:v1:h (lent pks) pks)
+  =/  [dest-root=hash:t * *]
+    (make-pkh-lock:v1:h 1 ~[(snag 0 pks)])
+  =/  fee=coins:t  256
+  =/  sed-1=seed:v1:t
+    (make-seed:v1:h dest-root (sub assets.coin-1 fee) (hash:nnote:t coin-1))
+  =/  sed-2=seed:v1:t
+    (make-seed:v1:h dest-root (sub assets.coin-2 fee) (hash:nnote:t coin-2))
+  ::  every seed paying the root pins the merged set's source
+  =/  merged-pin=hash:t
+    (hash:seeds:v1:t (~(gas z-in:zoon *seeds:v1:t) ~[(stripped sed-1) (stripped sed-2)]))
+  =/  sed-1=seed:v1:t  sed-1(output-source `[merged-pin %.n])
+  =/  sed-2=seed:v1:t  sed-2(output-source `[merged-pin %.n])
+  =/  [name-1=nname:t spend-1=spend-1:v1:t]
+    (signed-spend coin-1 in-root in-sc (~(put z-in:zoon *seeds:v1:t) sed-1) fee)
+  =/  [name-2=nname:t spend-2=spend-1:v1:t]
+    (signed-spend coin-2 in-root in-sc (~(put z-in:zoon *seeds:v1:t) sed-2) fee)
+  =/  raw=raw-tx:v1:t
+    (new:raw-tx:v1:t (~(gas z-by:zoon *spends:v1:t) ~[[name-1 [%1 spend-1]] [name-2 [%1 spend-2]]]))
+  =/  tip=page:t  ~(tip-page k-by:h nockchain)
+  =/  cand-height=page-number:t  +(~(height get:page:t tip))
+  =/  built=tx:t  (new:tx:t raw cand-height)
+  ::  sanity: the pinned merged output validates in the engine, and the
+  ::  raw-tx does too
+  ?>  (validate:raw-tx:t raw)
+  ?>  (validate:outputs:t ~(outputs get:tx:t built))
+  =^  effs=(list effect:h)  nockchain
+    (pok:h [%fact %0 %heard-tx raw] nockchain)
+  %+  expect-eq
+    !>([%.y %.y %.y])
+  !>  :*  (~(has-raw-tx k-by:h nockchain) id.raw)
+          (~(has-excluded k-by:h nockchain) id.raw)
+          (~(has z-in:zoon (filter-heard-tx-effects:h effs)) raw)
+      ==
 --

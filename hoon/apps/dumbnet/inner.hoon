@@ -17,6 +17,104 @@
 ~%  %dumb-inner-lib  ..ut  ~
 |%
 ++  moat  (keep kernel-state:dk)
+::  Recheck retained post-cutover history on every boot. The preceding load
+::  repair discards side branches; this also audits any page retained by a
+::  future repair policy. There is no local rollback or implicit fresh state.
+++  check-hardened-history
+  |=  k=kernel-state:dk
+  ^-  kernel-state:dk
+  =/  t  ~(. c-transact constants.k)
+  ::  A saved suffix can carry pre-reset ASERT caches. Validate parents first
+  ::  and rebuild their derived lineage before checking each child.
+  =/  pages=(list [block-id:t local-page:t])
+    %-  sort
+    :_  |=  [a=[block-id:t local-page:t] b=[block-id:t local-page:t]]
+        (lth ~(height get:local-page:t +.a) ~(height get:local-page:t +.b))
+    %+  skim  ~(tap h-by blocks.c.k)
+    |=  entry=[block-id:t local-page:t]
+    (gte ~(height get:local-page:t +.entry) (dec harden-phase:page:t))
+  |-
+  ?~  pages  k
+  =/  pag=page:t  (to-page:local-page:t +.i.pages)
+  ::  The predecessor may still cache the old schedule's anchor timestamp.
+  ::  Seed the new anchor even when no post-cutover block has been stored yet.
+  ?:  (lth ~(height get:page:t pag) harden-phase:page:t)
+    =.  c.k
+      (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %zk pag)
+    =.  c.k
+      (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %ai pag)
+    $(pages t.pages)
+  =/  con  ~(. dumb-consensus c.k d.k constants.k)
+  =/  header-valid
+    (validate-page-without-txs:con pag ~(timestamp get:page:t pag))
+  ?.  ?&  -.header-valid
+          (verify-page-pow constants.k pag 0)
+      ==
+    ~&  hardening-load-rejected-block+-.i.pages
+    ~|  'load: Incompatible post-hardening history; preserving state. Restore a pre-cutover archive and replay with this release.'
+    !!
+  =.  c.k
+    (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %zk pag)
+  =.  c.k
+    (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %ai pag)
+  =.  d.k
+    (~(update-puzzle-asert-state dumb-derived d.k constants.k) c.k pag)
+  $(pages t.pages)
+::
+++  verify-page-pow
+  |=  [bc=blockchain-constants:c-transact pag=page:c-transact entropy=@]
+  ^-  ?
+  =/  t  ~(. c-transact bc)
+  =/  con  ~(. dumb-consensus *consensus-state:dk *derived-state:dk bc)
+  |^
+  =/  pow  ~(pow get:page:t pag)
+  ?~  pow
+    ::  Missing proofs are permitted only by explicit test configuration.
+    ?:(check-pow-flag:t %.n %.y)
+  ?.  %+  proof-version-valid-at-height:con
+        (pow-artifact-to-proof-version:con u.pow)
+      ~(height get:page:t pag)
+    %.n
+  ?.  check-pow-flag:t
+    ~>  %slog.[1 'check-pow: check-pow-flag is off, skipping expensive pow check']
+    %.y
+  ?:  (legacy-v4-proof-artifact:con u.pow)
+    %.n
+  ?:  ?=([%ai-pow *] u.pow)
+    %:  ai-pow-verify:mine
+      (ai-pow-proof-rules:page:t ~(height get:page:t pag))
+      u.pow
+      (block-commitment:page:t pag)
+      (merge:bignum:t ~(target get:page:t pag))
+    ==
+  =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
+  ?~  prf
+    %.n
+  ::
+  ::  validate that powork puzzle in the proof is correct.
+  ?&  (check-pow-puzzle u.prf pag)
+      (canonical-pow-proof:dk [~(height get:page:t pag) u.prf])
+      ::
+      ::  validate the powork. this is done separately since the
+      ::  other checks are much cheaper.
+      (verify:nv u.prf ~ entropy)
+  ==
+::
+  ++  check-pow-puzzle
+    ~/  %check-pow-puzzle
+    |=  [pow=proof:sp pag=page:t]
+    ^-  ?
+    ?:  =((lent objects.pow) 0)
+      %.n
+    =/  puzzle  (snag 0 objects.pow)
+    ?.  ?=(%puzzle -.puzzle)
+      %.n
+    ?&  =((block-commitment:page:t pag) commitment.puzzle)
+        =(pow-len:t len.puzzle)
+    ==
+  ::
+  --
+::
 ++  inner
   ~%  %dumb-inner  ..inner  ~
   |_  k=kernel-state:dk
@@ -58,6 +156,14 @@
       ~>  %bout  repair-orphaned-claims:con
     =.  c.k  -.repaired
     =.  d.k  +.repaired
+    ::  Require fresh admission for pending headers after every load, using
+    ::  normal pending rejection to release their dependencies.
+    =.  c.k  discard-pending-blocks:con
+    ::  Stored admission and mining work must use this executable's rules,
+    ::  even when the persisted schema was already %12.
+    =.  k  (check-hardened-history k)
+    =.  m.k  m.k(candidate-block *page:t, candidate-acc *tx-acc:t)
+    =.  m.k  (rebuild-mining-candidate c.k d.k m.k constants.k)
     ~|  %v1-phase-must-be-lte-zk-asert-phase
     ?>  (lte v1-phase.constants.k phase.zk-asert.constants.k)
     ::  The ZK re-pin and the introduction of the AI ASERT are the same event.
@@ -1144,7 +1250,7 @@
         =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
         =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
         =/  ai-target  ~(target get:page:t ai-cand)
-        [[%mine-ai %4 ai-commit ai-target pow-len:t] zk-effect effs]
+        [[%mine-ai %4 ai-commit ai-target pow-len:t candidate-height] zk-effect effs]
       [zk-effect effs]
     ::
     ::  +heard-genesis-block: check if block is a genesis block and decide whether to keep it
@@ -1469,10 +1575,10 @@
          check-btc-hash
          check-checkpoint
      ==
-    ::  +check-pow dispatches a version-%4 (%ai-pow) block to the door-level
-    ::  +ai-pow-verify arm (the mandatory Rust jet; see its doc at the top of
-    ::  %dumb-inner). Sample: the transparent structured artifact
-    ::  `[%ai-pow nonce certificate]`, the structured block-commitment noun
+    ::  +check-pow dispatches a version-%4 (%ai-pow) block to +ai-pow-verify
+    ::  in /common/pow (the mandatory Rust jet). Sample: the rule version from
+    ::  this block's height, the transparent artifact `[%ai-pow nonce certificate]`,
+    ::  the structured block-commitment noun
     ::  (jammed + BLAKE3'd inside the jet to match the miner), and the target as a
     ::  `merge:bignum` LE atom. Safe: `validate-page-without-txs-da` rejects
     ::  pre-activation `%ai-pow` (via `proof-version-valid-at-height`) before
@@ -1480,48 +1586,7 @@
     ++  check-pow
       ~/  %check-pow
       |=  pag=page:t
-      ^-  ?
-      =/  pow  ~(pow get:page:t pag)
-      ?~  pow
-        ::  Missing proofs are permitted only by explicit test configuration.
-        ?:(check-pow-flag:t %.n %.y)
-      ?.  %+  proof-version-valid-at-height:con
-            (pow-artifact-to-proof-version:con u.pow)
-          ~(height get:page:t pag)
-        %.n
-      ?.  check-pow-flag:t
-        ~>  %slog.[1 'check-pow: check-pow-flag is off, skipping expensive pow check']
-        %.y
-      ?:  (legacy-v4-proof-artifact:con u.pow)
-        %.n
-      ?:  ?=([%ai-pow *] u.pow)
-        %+  ai-pow-verify:mine  u.pow
-        [(block-commitment:page:t pag) (merge:bignum:t ~(target get:page:t pag))]
-      =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
-      ?~  prf
-        %.n
-      ::
-      ::  validate that powork puzzle in the proof is correct.
-      ?&  (check-pow-puzzle u.prf pag)
-          (canonical-pow-proof:dk [~(height get:page:t pag) u.prf])
-          ::
-          ::  validate the powork. this is done separately since the
-          ::  other checks are much cheaper.
-          (verify:nv u.prf ~ eny)
-      ==
-    ::
-    ++  check-pow-puzzle
-      ~/  %check-pow-puzzle
-      |=  [pow=proof:sp pag=page:t]
-      ^-  ?
-      ?:  =((lent objects.pow) 0)
-        %.n
-      =/  puzzle  (snag 0 objects.pow)
-      ?.  ?=(%puzzle -.puzzle)
-        %.n
-      ?&  =((block-commitment:page:t pag) commitment.puzzle)
-          =(pow-len:t len.puzzle)
-      ==
+      (verify-page-pow constants.k pag eny)
     ::
     ++  heard-tx
       ~/  %heard-tx
@@ -1673,6 +1738,18 @@
         ~>  %slog.[1 (cat 3 'heard-tx: Transaction context invalid: ' +.ctx-valid)]
         `k
       ::
+      ::  Validate merged v1 outputs before admitting the transaction. Build
+      ::  them as the miner does; output validation does not use origin-page.
+      =/  cand-height=page-number:t
+        +(get-cur-height:con)
+      =/  built=tx:t  (new:tx:t raw cand-height)
+      =/  outputs-valid=?
+        ?^  -.raw
+          %.y
+        (validate:outputs:t ~(outputs get:tx:t built))
+      ?.  outputs-valid
+        ~>  %slog.[1 'heard-tx: Transaction outputs invalid, discarding']
+        `k
       =^  work  c.k
         (add-raw-tx:con raw)
       :: no blocks were depending on this so work should be empty
@@ -1693,14 +1770,20 @@
         %+  roll  work
         |=  [bid=block-id:t effs=(list effect:dk) k=_k]
         =.  ^k  k
+        =/  pag=page:t  page:(~(got h-by pending-blocks.c.k) bid)
+        ::  Validate pending promotion under the current consensus rules.
+        ?.  (check-pow pag)
+          =.  c.k  (reject-pending-block:con bid)
+          :_  k
+          [[%seen %block bid ~] [[%liar-block-id bid %failed-pow-check] effs]]
         ::  process the block, skipping the steps that we know its already
         ::  done by the fact that it was in pending-blocks.c.k
         =^  new-effs  k
           %:  process-block-with-txs
             now  eny
-            page:(~(got h-by pending-blocks.c.k) bid)
+            pag
             :: if the block is bad, then tell the driver we dont want to see it
-            :: again
+            ::  again
             ~[[%seen %block bid ~]]
           ==
         ::  remove the block from pending blocks. at this point, its either
@@ -2285,7 +2368,7 @@
           =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
           =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
           =/  ai-target  ~(target get:page:t ai-cand)
-          [[%mine-ai %4 ai-commit ai-target pow-len:t] zk-effect ~]
+          [[%mine-ai %4 ai-commit ai-target pow-len:t candidate-height] zk-effect ~]
         [zk-effect ~]
       ::
       ::  only send a %elders request for reasonable heights

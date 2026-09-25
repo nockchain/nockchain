@@ -468,9 +468,9 @@ mod tests {
         }
 
         #[cfg(feature = "node")]
-        fn search_canonical(
+        fn search_reference(
             &self,
-            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            _: Arc<crate::reference::PreparedReferenceMoeTemplate>,
             _: SearchBatch,
         ) -> Result<Option<SearchWinner>, SearchBackendError> {
             Ok(None)
@@ -492,9 +492,9 @@ mod tests {
         }
 
         #[cfg(feature = "node")]
-        fn search_canonical(
+        fn search_reference(
             &self,
-            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            _: Arc<crate::reference::PreparedReferenceMoeTemplate>,
             _: SearchBatch,
         ) -> Result<Option<SearchWinner>, SearchBackendError> {
             self.cancel.cancel();
@@ -526,9 +526,9 @@ mod tests {
         }
 
         #[cfg(feature = "node")]
-        fn search_canonical(
+        fn search_reference(
             &self,
-            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            _: Arc<crate::reference::PreparedReferenceMoeTemplate>,
             _: SearchBatch,
         ) -> Result<Option<SearchWinner>, SearchBackendError> {
             Ok(None)

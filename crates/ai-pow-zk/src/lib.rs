@@ -120,10 +120,13 @@ pub mod composite_trace;
 pub mod moe_ref;
 pub mod noise_ref;
 pub mod params;
+pub mod proof_rules;
 
 /// Integration of the composite proof with the vendored
 /// `Plonky3-recursion` substrate. Opt-in (`--features recursion`); the
 /// default build pulls no recursion crates.
+#[cfg(feature = "recursion")]
+mod hardened_tip5;
 #[cfg(feature = "recursion")]
 pub mod recursion;
 

@@ -332,6 +332,7 @@ mod tests {
         target.set_root(D(0xFFFF_FFFF));
         let candidate = MiningCandidate {
             kind: MiningCandidateKind::Zk,
+            candidate_height: None,
             version,
             block_header,
             target,
@@ -526,6 +527,7 @@ mod tests {
         target.set_root(t);
         MiningCandidate {
             kind: MiningCandidateKind::Zk,
+            candidate_height: None,
             version,
             block_header,
             target,

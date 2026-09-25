@@ -1,0 +1,15 @@
+source_equivalent_public_revision=cbd9298f96584b14ab93074ecdf32d0ec212e50e
+artifact_origin=synthetic honest MoE artifact generated with the historical AI-PoW implementation
+artifact_bytes=147484
+artifact_blake3=ba1ca5b90d167ad33edf83d58d0c30d6dd21dfb4d9a14173d568f47a32322ac3
+commit_blake3=129c83ed1f1996881b36db2b1f3fd521907662ad5fbc8dc0810d15d85cb4a09c
+verifier_key_digest_blake3=00cc46b2a2b67c93289a7b9b5d84b17818cd7081901822487a0797cdecc8cf95
+trace_height=8192
+legacy_verification=accepted
+rustc 1.96.0-nightly (55e86c996 2026-04-02)
+binary: rustc
+commit-hash: 55e86c996809902e8bbad512cfb4d2c18be446d9
+commit-date: 2026-04-02
+host: aarch64-apple-darwin
+release: 1.96.0-nightly
+LLVM version: 22.1.2

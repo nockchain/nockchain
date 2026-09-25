@@ -574,6 +574,7 @@ mod tests {
         target.set_root(target_noun);
         MiningCandidate {
             kind: MiningCandidateKind::Zk,
+            candidate_height: None,
             version,
             block_header,
             target,

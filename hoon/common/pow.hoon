@@ -5,7 +5,7 @@
 |%
 ::  +ai-pow-verify: consensus verifier for a version-%4 (%ai-pow) block's
 ::  recursive certificate. Branch (b): the Hoon body is a fail-safe `!!`; the
-::  real implementation is the mandatory `~/ %ai-pow-verify` jet (crate
+::  real implementation is the mandatory `~/ %ai-pow-verify-v2` jet (crate
 ::  `ai-pow-jets`), which canonicalizes the block commitment (`BLAKE3(jam(..))`,
 ::  matching the miner), re-derives the canonical matrices from the protocol
 ::  seed, verifies the compact recursive certificate against the boot-injected
@@ -17,8 +17,11 @@
 ::  registration. `!!` is fail-safe: a missing/mis-chained jet crashes rather
 ::  than silently accepting. Called from +check-pow's `%ai-pow` branch.
 ++  ai-pow-verify
-  ~/  %ai-pow-verify
-  |=  [artifact=* commit=* target=@]
+  ::  The kernel selects rules from the block height, never the certificate.
+  ::  Version the jet binding when changing its sample: old kernels/binaries
+  ::  must hit the fail-safe body rather than misinterpret the new arguments.
+  ~/  %ai-pow-verify-v2
+  |=  [rules=?(%legacy %hardened) artifact=* commit=* target=@]
   ^-  ?
   !!
 ::

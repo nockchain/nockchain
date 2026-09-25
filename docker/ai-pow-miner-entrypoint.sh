@@ -6,7 +6,7 @@ set -euo pipefail
 
 args=(
   --gpu
-  --canonical
+  --reference
   --node-addr "$NODE_ADDR"
   --mining-pkh "$MINING_PKH"
   --cuda-devices "${CUDA_DEVICES:-all}"

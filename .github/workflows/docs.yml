@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   docs-check:
+    if: github.repository == 'nockchain/nockchain'
     name: make docs-check
     runs-on: ubuntu-latest
     timeout-minutes: 5

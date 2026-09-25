@@ -29,10 +29,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    verify_pearl_aux_inclusion, verify_pearl_compatible_work_committed,
-    verify_pearl_merge_public_statement_bytes,
-    verify_pearl_merge_public_statement_bytes_with_aux_inclusion, verify_pearl_moe_compatible_work,
-    PearlAuxInclusionProof, PearlCompatError, PearlIncompleteBlockHeader, PearlMergeMiningPrecheck,
+    verify_pearl_aux_inclusion, verify_pearl_aux_inclusion_with_limits,
+    verify_pearl_compatible_work_committed, verify_pearl_merge_public_statement_bytes,
+    verify_pearl_merge_public_statement_bytes_with_aux_inclusion,
+    verify_pearl_moe_compatible_work_with_limits, PearlAdmissionLimits, PearlAuxInclusionProof,
+    PearlCompatError, PearlIncompleteBlockHeader, PearlMergeMiningPrecheck,
     PearlMergePublicStatement, PearlMergeTicketAttempt, PearlMiningConfig, PearlMoeParams,
     PearlMoeWorkPrecheck, PearlNockchainAux, PearlPatternTicket, PearlPublicProofParams,
     PearlWorkCommitments, PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES,
@@ -43,11 +44,12 @@ use ai_pow::pearl_compat::{
 #[cfg(test)]
 use ai_pow::pearl_compat::{PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX, PEARL_NOCKCHAIN_AUX_EXTRA_MAX};
 use ai_pow::zk_bridge::{
-    expected_layer0_rows_for_strip_schedule, verify_pearl_moe_compact_recursive_certificate,
-    zk_params_from_matmul, AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun,
-    BridgeError, ZkPublicCommitments,
+    expected_layer0_rows_for_strip_schedule, zk_params_from_matmul,
+    AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun, BridgeError,
+    ZkPublicCommitments,
 };
 use ai_pow_zk::canonical::StripIndexSchedule;
+use ai_pow_zk::proof_rules::ProofRules;
 use ai_pow_zk::{CompositePublicInputs, ZkParams};
 use nockapp::noun::slab::{CueError, NounSlab};
 use nockapp::Bytes;
@@ -112,7 +114,9 @@ pub enum CertificateNounError {
     IntegerOutOfRange { field: &'static str },
     #[error("field element {field} is not canonical")]
     NonCanonicalField { field: &'static str },
-    #[error("certificate ZK params do not match trusted AI-PoW params: expected {expected:?}, got {actual:?}")]
+    #[error(
+        "certificate ZK params do not match trusted AI-PoW params: expected {expected:?}, got {actual:?}"
+    )]
     ZkParamsMismatch {
         expected: ZkParams,
         actual: ZkParams,
@@ -123,7 +127,9 @@ pub enum CertificateNounError {
     PearlMergeStatement(#[from] PearlCompatError),
     #[error("Pearl merge recursive certificate public input mismatch: {0}")]
     PearlMergePublicInputMismatch(&'static str),
-    #[error("Pearl merge recursive certificate params are not supported by the current recursive parameter envelope")]
+    #[error(
+        "Pearl merge recursive certificate params are not supported by the current recursive parameter envelope"
+    )]
     PearlMergeUnsupportedTileShape,
     #[error("recursive certificate verification failed: {0}")]
     RecursiveCertificate(String),
@@ -247,15 +253,32 @@ pub(crate) fn encode_pearl_merge_ai_pow_nonce(
     statement: &PearlMergePublicStatementShape,
     aux_inclusion: &PearlAuxInclusionProof,
 ) -> Result<Vec<u8>, CertificateNounError> {
+    encode_pearl_merge_ai_pow_nonce_with_rules(statement, aux_inclusion, ProofRules::Hardened)
+}
+
+pub(crate) fn encode_pearl_merge_ai_pow_nonce_with_rules(
+    statement: &PearlMergePublicStatementShape,
+    aux_inclusion: &PearlAuxInclusionProof,
+    rules: ProofRules,
+) -> Result<Vec<u8>, CertificateNounError> {
+    let canonical_coinbase;
+    let coinbase = if rules == ProofRules::Hardened {
+        canonical_coinbase =
+            ai_pow::pearl_compat::canonical_pearl_aux_coinbase(&aux_inclusion.coinbase_tx)?;
+        canonical_coinbase.as_slice()
+    } else {
+        aux_inclusion.coinbase_tx.as_slice()
+    };
+    let admission = PearlAdmissionLimits::from(rules);
     let statement_bytes = statement.to_wire_bytes()?;
     let statement_len = u16::try_from(statement_bytes.len())
         .map_err(|_| CertificateNounError::LimitExceeded("ai-pow nonce statement bytes"))?;
-    if aux_inclusion.coinbase_tx.len() > PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES {
+    if coinbase.len() > PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES {
         return Err(CertificateNounError::LimitExceeded(
             "ai-pow nonce coinbase bytes",
         ));
     }
-    if aux_inclusion.merkle_branch.len() > PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH {
+    if aux_inclusion.merkle_branch.len() > admission.max_merkle_branch() {
         return Err(CertificateNounError::LimitExceeded(
             "ai-pow nonce merkle branch",
         ));
@@ -265,15 +288,15 @@ pub(crate) fn encode_pearl_merge_ai_pow_nonce(
         4 + 2
             + statement_bytes.len()
             + 4
-            + aux_inclusion.coinbase_tx.len()
+            + coinbase.len()
             + 1
             + 32 * aux_inclusion.merkle_branch.len(),
     );
     out.extend_from_slice(&AI_POW_NONCE_MAGIC);
     out.extend_from_slice(&statement_len.to_le_bytes());
     out.extend_from_slice(&statement_bytes);
-    out.extend_from_slice(&(aux_inclusion.coinbase_tx.len() as u32).to_le_bytes());
-    out.extend_from_slice(&aux_inclusion.coinbase_tx);
+    out.extend_from_slice(&(coinbase.len() as u32).to_le_bytes());
+    out.extend_from_slice(coinbase);
     out.push(aux_inclusion.merkle_branch.len() as u8);
     for digest in &aux_inclusion.merkle_branch {
         out.extend_from_slice(digest);
@@ -284,7 +307,15 @@ pub(crate) fn encode_pearl_merge_ai_pow_nonce(
 pub(crate) fn decode_pearl_merge_ai_pow_nonce(
     nonce: &[u8],
 ) -> Result<PearlMergeAiPowNonceShape, CertificateNounError> {
-    if nonce.len() > AI_POW_NONCE_MAX_SIZE {
+    decode_pearl_merge_ai_pow_nonce_with_rules(nonce, ProofRules::Hardened)
+}
+
+pub(crate) fn decode_pearl_merge_ai_pow_nonce_with_rules(
+    nonce: &[u8],
+    rules: ProofRules,
+) -> Result<PearlMergeAiPowNonceShape, CertificateNounError> {
+    let admission = PearlAdmissionLimits::from(rules);
+    if nonce.len() > admission.dense_nonce_max_bytes() {
         return Err(CertificateNounError::LimitExceeded("ai-pow nonce bytes"));
     }
     if nonce.len() < 4 + 2 + 4 + 1 {
@@ -344,7 +375,7 @@ pub(crate) fn decode_pearl_merge_ai_pow_nonce(
     };
     let branch_len = branch_len_byte as usize;
     offset += 1;
-    if branch_len > PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH {
+    if branch_len > admission.max_merkle_branch() {
         return Err(CertificateNounError::LimitExceeded(
             "ai-pow nonce merkle branch",
         ));
@@ -427,11 +458,27 @@ fn moe_expert_count_from_core(
 /// `statement.public_data` must be a GROUPED_GEMM core (`e > 0`) with
 /// `e == moe.moe.routing_offsets.len()`. All Pearl caps (`e ≤ 1024`,
 /// `outer ≤ 128`) and the [`PEARL_MOE_MAX_ROUTING_ENTRIES`] DoS cap are enforced.
+#[cfg(test)]
 pub(crate) fn encode_pearl_merge_ai_pow_nonce_moe(
     statement: &PearlMergePublicStatementShape,
     aux_inclusion: &PearlAuxInclusionProof,
     moe: &PearlMergeMoeArtifact,
 ) -> Result<Vec<u8>, CertificateNounError> {
+    encode_pearl_merge_ai_pow_nonce_moe_with_rules(
+        statement,
+        aux_inclusion,
+        moe,
+        ProofRules::Hardened,
+    )
+}
+
+pub(crate) fn encode_pearl_merge_ai_pow_nonce_moe_with_rules(
+    statement: &PearlMergePublicStatementShape,
+    aux_inclusion: &PearlAuxInclusionProof,
+    moe: &PearlMergeMoeArtifact,
+    rules: ProofRules,
+) -> Result<Vec<u8>, CertificateNounError> {
+    let admission = PearlAdmissionLimits::from(rules);
     let e = moe_expert_count_from_core(&statement.public_data)?;
     if e == 0 {
         return Err(CertificateNounError::Shape(
@@ -456,7 +503,7 @@ pub(crate) fn encode_pearl_merge_ai_pow_nonce_moe(
             "ai-pow MoE outer indices",
         ));
     }
-    if moe.routing_data.len() > PEARL_MOE_MAX_ROUTING_ENTRIES {
+    if moe.routing_data.len() > admission.max_routing_entries() {
         return Err(CertificateNounError::LimitExceeded(
             "ai-pow MoE routing_data",
         ));
@@ -464,7 +511,7 @@ pub(crate) fn encode_pearl_merge_ai_pow_nonce_moe(
 
     // Reuse the exact dense framing, then retag the magic — this guarantees the
     // statement/aux bytes are identical to the dense encoding.
-    let mut out = encode_pearl_merge_ai_pow_nonce(statement, aux_inclusion)?;
+    let mut out = encode_pearl_merge_ai_pow_nonce_with_rules(statement, aux_inclusion, rules)?;
     out[0..4].copy_from_slice(&AI_POW_NONCE_MAGIC_MOE);
 
     // Pearl MoE tail (mirror of `PublicProofParams::to_wire_bytes_moe`).
@@ -486,15 +533,24 @@ pub(crate) fn encode_pearl_merge_ai_pow_nonce_moe(
     Ok(out)
 }
 
-/// Decode a MoE `ai-pow-nonce` produced by [`encode_pearl_merge_ai_pow_nonce_moe`].
+/// Decode a MoE nonce produced by [`encode_pearl_merge_ai_pow_nonce_moe_with_rules`].
 ///
 /// Every read is length-checked before indexing and every count is capped before
 /// allocation, so a crafted nonce cannot over-allocate or index out of bounds.
 /// The final length must match exactly (no trailing bytes).
+#[cfg(test)]
 pub(crate) fn decode_pearl_merge_ai_pow_nonce_moe(
     nonce: &[u8],
 ) -> Result<PearlMergeAiPowNonceMoeShape, CertificateNounError> {
-    if nonce.len() > AI_POW_NONCE_MOE_MAX_SIZE {
+    decode_pearl_merge_ai_pow_nonce_moe_with_rules(nonce, ProofRules::Hardened)
+}
+
+pub(crate) fn decode_pearl_merge_ai_pow_nonce_moe_with_rules(
+    nonce: &[u8],
+    rules: ProofRules,
+) -> Result<PearlMergeAiPowNonceMoeShape, CertificateNounError> {
+    let admission = PearlAdmissionLimits::from(rules);
+    if nonce.len() > admission.moe_nonce_max_bytes() {
         return Err(CertificateNounError::LimitExceeded(
             "ai-pow MoE nonce bytes",
         ));
@@ -567,7 +623,7 @@ pub(crate) fn decode_pearl_merge_ai_pow_nonce_moe(
     };
     let branch_len = branch_len_byte as usize;
     offset += 1;
-    if branch_len > PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH {
+    if branch_len > admission.max_merkle_branch() {
         return Err(CertificateNounError::LimitExceeded(
             "ai-pow MoE nonce merkle branch",
         ));
@@ -671,7 +727,7 @@ pub(crate) fn decode_pearl_merge_ai_pow_nonce_moe(
             .expect("fixed-width field; buffer length checked above"),
     ) as usize;
     offset += 4;
-    if routing_len > PEARL_MOE_MAX_ROUTING_ENTRIES {
+    if routing_len > admission.max_routing_entries() {
         return Err(CertificateNounError::LimitExceeded(
             "ai-pow MoE routing_data",
         ));
@@ -1145,7 +1201,13 @@ fn validate_pearl_merge_statement_aux_inclusion(
     aux_inclusion: &PearlAuxInclusionProof,
 ) -> Result<(), CertificateNounError> {
     let header = PearlIncompleteBlockHeader::from_bytes(&statement.block_header)?;
-    verify_pearl_aux_inclusion(&header, &statement.expected_aux_commitment, aux_inclusion)?;
+    let evidence = PearlAuxInclusionProof {
+        coinbase_tx: ai_pow::pearl_compat::canonical_pearl_aux_coinbase(
+            &aux_inclusion.coinbase_tx,
+        )?,
+        merkle_branch: aux_inclusion.merkle_branch.clone(),
+    };
+    verify_pearl_aux_inclusion(&header, &statement.expected_aux_commitment, &evidence)?;
     Ok(())
 }
 
@@ -1182,7 +1244,7 @@ pub(crate) fn build_ai_pow_pearl_merge_artifact_noun_from_node(
 /// GROUPED_GEMM counterpart of [`build_ai_pow_pearl_merge_artifact_noun_from_node`].
 ///
 /// Identical framing (`[%ai-pow nonce cert]`) except the opaque nonce is the MoE
-/// nonce ([`encode_pearl_merge_ai_pow_nonce_moe`]): the dense statement + aux
+/// nonce ([`encode_pearl_merge_ai_pow_nonce_moe_with_rules`]): the dense statement + aux
 /// framing verbatim, retagged `AIM1`, with the Pearl MoE tail
 /// (`expert_idx ‖ routing_offsets ‖ hash_routing ‖ outer_indices`) + the DoS-capped
 /// `routing_data` appended. Decodes back through
@@ -1200,7 +1262,35 @@ pub fn build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
     pis: &CompositePublicInputs,
     certificate: &AiProofNode,
 ) -> Result<NounSlab, CertificateNounError> {
-    let nonce = encode_pearl_merge_ai_pow_nonce_moe(statement, aux_inclusion, moe)?;
+    build_ai_pow_pearl_merge_moe_artifact_noun_from_node_with_rules(
+        statement,
+        aux_inclusion,
+        moe,
+        zk_params,
+        found_idx,
+        trace_height,
+        commitments,
+        pis,
+        certificate,
+        ProofRules::Hardened,
+    )
+}
+
+/// Encode a MoE artifact with the candidate's consensus-selected framing limits.
+pub fn build_ai_pow_pearl_merge_moe_artifact_noun_from_node_with_rules(
+    statement: &PearlMergePublicStatementShape,
+    aux_inclusion: &PearlAuxInclusionProof,
+    moe: &PearlMergeMoeArtifact,
+    zk_params: &ZkParams,
+    found_idx: u32,
+    trace_height: usize,
+    commitments: &ZkPublicCommitments,
+    pis: &CompositePublicInputs,
+    certificate: &AiProofNode,
+    rules: ProofRules,
+) -> Result<NounSlab, CertificateNounError> {
+    let nonce =
+        encode_pearl_merge_ai_pow_nonce_moe_with_rules(statement, aux_inclusion, moe, rules)?;
     validate_pearl_merge_statement_aux_inclusion(statement, aux_inclusion)?;
 
     let mut slab = NounSlab::new();
@@ -1597,7 +1687,7 @@ fn decode_ai_pow_certificate_metadata_fields(
     })
 }
 
-fn cue_canonical_artifact_jam(
+fn cue_reference_artifact_jam(
     jammed: &[u8],
     limits: CertificateNounLimits,
 ) -> Result<NounSlab, CertificateNounError> {
@@ -1816,23 +1906,40 @@ pub fn decode_ai_pow_pearl_merge_artifact_noun(
     space: &NounSpace,
     limits: CertificateNounLimits,
 ) -> Result<PearlMergeAiPowArtifactShape, CertificateNounError> {
+    decode_ai_pow_pearl_merge_artifact_noun_with_rules(root, space, limits, ProofRules::Hardened)
+}
+
+/// Apply height-selected nonce limits before decoding the certificate. The
+/// caller must derive `rules` from chain context, never from the artifact.
+pub fn decode_ai_pow_pearl_merge_artifact_noun_with_rules(
+    root: Noun,
+    space: &NounSpace,
+    limits: CertificateNounLimits,
+    rules: ProofRules,
+) -> Result<PearlMergeAiPowArtifactShape, CertificateNounError> {
+    let admission = PearlAdmissionLimits::from(rules);
     let fields = tuple3(root, space, "ai-pow artifact")?;
     let tag = expect_u64(fields[0], space, "ai-pow artifact tag")?;
     if tag != tas!(b"ai-pow") {
         return Err(CertificateNounError::Shape("expected %ai-pow artifact"));
     }
     let nonce = expect_declared_bounded_bytes(
-        fields[1], space, 1, AI_POW_NONCE_MOE_MAX_SIZE, "ai-pow nonce", limits,
+        fields[1],
+        space,
+        1,
+        admission.moe_nonce_max_bytes(),
+        "ai-pow nonce",
+        limits,
     )?;
     // Dispatch on the nonce tag: `AIM1` (MoE) carries the routing tail, `AIP1`
     // (dense) does not. The dense decoder rejects an `AIM1` nonce on the magic, so
     // this branch is the only way MoE data reaches the node.
     let (statement, aux_inclusion, moe) =
         if nonce.len() >= 4 && nonce[0..4] == AI_POW_NONCE_MAGIC_MOE {
-            let parsed = decode_pearl_merge_ai_pow_nonce_moe(&nonce)?;
+            let parsed = decode_pearl_merge_ai_pow_nonce_moe_with_rules(&nonce, rules)?;
             (parsed.statement, parsed.aux_inclusion, Some(parsed.moe))
         } else {
-            let parsed = decode_pearl_merge_ai_pow_nonce(&nonce)?;
+            let parsed = decode_pearl_merge_ai_pow_nonce_with_rules(&nonce, rules)?;
             (parsed.statement, parsed.aux_inclusion, None)
         };
     Ok(PearlMergeAiPowArtifactShape {
@@ -1957,8 +2064,22 @@ pub fn decode_ai_pow_pearl_merge_artifact_jam(
     jammed: &[u8],
     limits: CertificateNounLimits,
 ) -> Result<PearlMergeAiPowArtifactShape, CertificateNounError> {
-    let slab = cue_canonical_artifact_jam(jammed, limits)?;
-    decode_ai_pow_pearl_merge_artifact_slab(&slab, limits)
+    decode_ai_pow_pearl_merge_artifact_jam_with_rules(jammed, limits, ProofRules::Hardened)
+}
+
+/// Jam counterpart of [`decode_ai_pow_pearl_merge_artifact_noun_with_rules`].
+pub fn decode_ai_pow_pearl_merge_artifact_jam_with_rules(
+    jammed: &[u8],
+    limits: CertificateNounLimits,
+    rules: ProofRules,
+) -> Result<PearlMergeAiPowArtifactShape, CertificateNounError> {
+    let slab = cue_reference_artifact_jam(jammed, limits)?;
+    decode_ai_pow_pearl_merge_artifact_noun_with_rules(
+        unsafe { *slab.root() },
+        &slab.noun_space(),
+        limits,
+        rules,
+    )
 }
 
 /// Production statement precheck for a decoded Pearl merge-mined AI-PoW
@@ -2022,13 +2143,17 @@ pub fn precheck_ai_pow_pearl_merge_artifact_statement_with_context(
 pub(crate) fn precheck_ai_pow_pearl_merge_artifact_statement_committed(
     artifact: &PearlMergeAiPowArtifactShape,
     context: &PearlMergeAiPowVerifierContext<'_>,
+    rules: ProofRules,
 ) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
     let statement = &artifact.statement;
 
     // (1) Aux binding (matrix-free) — identical to the MoE compact path.
     let header = PearlIncompleteBlockHeader::from_bytes(&statement.block_header)?;
-    verify_pearl_aux_inclusion(
-        &header, &statement.expected_aux_commitment, &artifact.aux_inclusion,
+    verify_pearl_aux_inclusion_with_limits(
+        &header,
+        &statement.expected_aux_commitment,
+        &artifact.aux_inclusion,
+        rules.into(),
     )?;
     if statement.aux.nock_block_commitment != *context.candidate_nock_block_commitment {
         return Err(CertificateNounError::PearlMergeStatement(
@@ -2143,7 +2268,7 @@ pub fn precheck_ai_pow_pearl_merge_artifact_jam_with_context(
     limits: CertificateNounLimits,
     context: PearlMergeAiPowVerifierContext<'_>,
 ) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
-    let slab = cue_canonical_artifact_jam(jammed, limits)?;
+    let slab = cue_reference_artifact_jam(jammed, limits)?;
     let space = slab.noun_space();
     let root = unsafe { *slab.root() };
     let fields = tuple3(root, &space, "ai-pow artifact")?;
@@ -2191,7 +2316,13 @@ fn verify_compact_certificate_shape_with_context_and_limits(
     // opened schedule (never from the prover). Binds the opened schedule on the
     // compact path (the recursion folds it into the statement digest).
     l0_program_commitment: &[ai_pow_zk::Val],
+    rules: ProofRules,
 ) -> Result<(), CertificateNounError> {
+    if compact_context.proof_rules() != rules {
+        return Err(CertificateNounError::Shape(
+            "verifier setup proof rules mismatch",
+        ));
+    }
     if compact_context.verifier_key_digest() != expected_verifier_key_digest {
         return Err(CertificateNounError::CompactVerifierKeyDigestMismatch(
             "verifier-context",
@@ -2217,6 +2348,7 @@ fn verify_compact_certificate_shape_with_context_and_limits(
 fn canonical_l0_commitment_for_compact(
     certificate: &AiPowCertificateShape,
     precheck: &PearlMergeMiningPrecheck,
+    rules: ProofRules,
 ) -> Result<Vec<ai_pow_zk::Val>, CertificateNounError> {
     let zk_params = certificate.zk_params;
     let ticket = &precheck.work.ticket;
@@ -2234,8 +2366,8 @@ fn canonical_l0_commitment_for_compact(
         s_a: precheck.work.commitments.s_a,
         s_b: precheck.work.commitments.s_b,
     };
-    let program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
-        &zk_params, &strip_schedule, &block_public, certificate.trace_height,
+    let program = ai_pow_zk::canonical::canonical_program_for_strip_schedule_with_rules(
+        &zk_params, &strip_schedule, &block_public, certificate.trace_height, rules,
     )
     .map_err(|e| {
         CertificateNounError::RecursiveCertificate(format!("canonical L0 program: {e:?}"))
@@ -2275,6 +2407,25 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_an
     expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
     limits: CertificateNounLimits,
 ) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
+    verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits_with_rules(
+        artifact,
+        context,
+        compact_context,
+        expected_verifier_key_digest,
+        limits,
+        ProofRules::Hardened,
+    )
+}
+
+pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits_with_rules(
+    artifact: &PearlMergeAiPowArtifactShape,
+    context: PearlMergeAiPowVerifierContext<'_>,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
+    limits: CertificateNounLimits,
+    rules: ProofRules,
+) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
+    validate_pearl_artifact_admission(artifact, rules)?;
     // Dense compact verify: a MoE (AIM1) artifact MUST NOT be routed here. The
     // statement precheck already fail-closes on a MoE `public_data` (via
     // `sanity_check`), but reject explicitly for a precise error — MoE uses
@@ -2288,16 +2439,19 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_an
     // is proof-bound, not recomputed from a fixed matrix set. See
     // `precheck_ai_pow_pearl_merge_artifact_statement_committed`.
     let mut precheck =
-        precheck_ai_pow_pearl_merge_artifact_statement_committed(artifact, &context)?;
+        precheck_ai_pow_pearl_merge_artifact_statement_committed(artifact, &context, rules)?;
+    verify_native_jackpot(
+        &artifact.certificate.public_inputs, &precheck.work.commitments.s_a, rules,
+    )?;
     // Derive the canonical L0 program commitment from the opened schedule
     // the precheck rebuilt (never from the prover) and bind it into the compact
     // verify — a certificate proven over a different program fails the statement
     // digest.
     let l0_program_commitment =
-        canonical_l0_commitment_for_compact(&artifact.certificate, &precheck)?;
+        canonical_l0_commitment_for_compact(&artifact.certificate, &precheck, rules)?;
     verify_compact_certificate_shape_with_context_and_limits(
         &artifact.certificate, compact_context, expected_verifier_key_digest, limits,
-        &l0_program_commitment,
+        &l0_program_commitment, rules,
     )?;
     precheck.work.ticket.tile_state =
         tile_state_from_words(&artifact.certificate.public_inputs.jackpot);
@@ -2374,6 +2528,25 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
     expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
     limits: CertificateNounLimits,
 ) -> Result<PearlMergeMoeMiningPrecheck, CertificateNounError> {
+    verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits_with_rules(
+        artifact,
+        context,
+        compact_context,
+        expected_verifier_key_digest,
+        limits,
+        ProofRules::Hardened,
+    )
+}
+
+pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits_with_rules(
+    artifact: &PearlMergeAiPowArtifactShape,
+    context: PearlMergeAiPowVerifierContext<'_>,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
+    limits: CertificateNounLimits,
+    rules: ProofRules,
+) -> Result<PearlMergeMoeMiningPrecheck, CertificateNounError> {
+    validate_pearl_artifact_admission(artifact, rules)?;
     let moe_art = artifact.moe.as_ref().ok_or(CertificateNounError::Shape(
         "MoE compact verify requires a MoE (AIM1) artifact",
     ))?;
@@ -2383,8 +2556,11 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
     // prefix: the Nockchain candidate block is committed into the Pearl header via
     // the aux inclusion + commitment. (`?` auto-converts PearlCompatError.)
     let header = PearlIncompleteBlockHeader::from_bytes(&statement.block_header)?;
-    verify_pearl_aux_inclusion(
-        &header, &statement.expected_aux_commitment, &artifact.aux_inclusion,
+    verify_pearl_aux_inclusion_with_limits(
+        &header,
+        &statement.expected_aux_commitment,
+        &artifact.aux_inclusion,
+        rules.into(),
     )?;
     if statement.aux.nock_block_commitment != *context.candidate_nock_block_commitment {
         return Err(CertificateNounError::PearlMergeStatement(
@@ -2403,9 +2579,13 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
     // precheck (envelope + routing-consistency + jackpot/difficulty binding).
     let public_params =
         PearlPublicProofParams::from_public_data_allowing_moe(header, &statement.public_data)?;
-    let work = verify_pearl_moe_compatible_work(
-        &public_params, &moe_art.moe, &moe_art.routing_data, context.nockchain_target,
+    let work = verify_pearl_moe_compatible_work_with_limits(
+        &public_params,
+        &moe_art.moe,
+        &moe_art.routing_data,
+        context.nockchain_target,
         context.max_pattern_len,
+        rules.into(),
     )?;
 
     // (a) Bind the difficulty-gated statement jackpot to the PROVEN jackpot. Step (5)'s
@@ -2437,6 +2617,10 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
         context.max_pattern_len,
     )?;
 
+    verify_native_jackpot(
+        &artifact.certificate.public_inputs, &work.commitments.s_a, rules,
+    )?;
+
     // (4) Verifier-key digest checks + decode the compact certificate.
     if compact_context.verifier_key_digest() != expected_verifier_key_digest {
         return Err(CertificateNounError::CompactVerifierKeyDigestMismatch(
@@ -2454,11 +2638,12 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
 
     // (5) Proof half: routing-consistency + expert-column recompute + routing-spliced
     // s_A/PI binding + the opened-schedule commitment fold + compact verify.
-    verify_pearl_moe_compact_recursive_certificate(
+    ai_pow::zk_bridge::verify_pearl_moe_compact_recursive_certificate_with_rules(
         compact_context, cert, &artifact.certificate.public_inputs, &params,
         &work.commitments.kappa, &work.commitments.h_a, &work.commitments.h_b,
         &public_params.mining_config, &moe_art.moe, public_params.m, public_params.n,
         public_params.t_rows, public_params.t_cols, &moe_art.routing_data, context.max_pattern_len,
+        rules,
     )
     .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))?;
 
@@ -2607,6 +2792,24 @@ fn precheck_pearl_merge_certificate_metadata(
     precheck_pearl_merge_bound_public_inputs(
         &metadata.public_inputs, &expected_public_inputs, check_jackpot,
     )?;
+    Ok(())
+}
+
+/// Validate the public tile state's final keyed hash using the key derived
+/// from authenticated matrix commitments.
+fn verify_native_jackpot(
+    inputs: &CompositePublicInputs,
+    s_a: &[u8; 32],
+    rules: ProofRules,
+) -> Result<(), CertificateNounError> {
+    if rules == ProofRules::Hardened {
+        let tile = tile_state_from_words(&inputs.jackpot);
+        if ai_pow::pearl_compat::pearl_jackpot_hash(&tile, s_a)
+            != digest_words_to_bytes(&inputs.hash_jackpot)
+        {
+            return Err(PearlCompatError::JackpotHashMismatch.into());
+        }
+    }
     Ok(())
 }
 
@@ -2853,7 +3056,7 @@ pub fn verify_ai_pow_pearl_merge_compact_artifact_jam_with_context(
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
 ) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
-    let slab = cue_canonical_artifact_jam(jammed, limits)?;
+    let slab = cue_reference_artifact_jam(jammed, limits)?;
     let space = slab.noun_space();
     let root = unsafe { *slab.root() };
     let fields = tuple3(root, &space, "ai-pow artifact")?;
@@ -2879,10 +3082,15 @@ pub fn verify_ai_pow_pearl_merge_compact_artifact_jam_with_context(
     let certificate_shape = decode_ai_pow_certificate_noun(fields[2], &space, limits)?;
     // Bind the canonical L0 program commitment (derived from the opened
     // schedule, not the prover) into the compact verify.
-    let l0_program_commitment = canonical_l0_commitment_for_compact(&certificate_shape, &precheck)?;
+    let l0_program_commitment =
+        canonical_l0_commitment_for_compact(&certificate_shape, &precheck, ProofRules::Hardened)?;
     verify_compact_certificate_shape_with_context_and_limits(
-        &certificate_shape, compact_context, expected_verifier_key_digest, limits,
+        &certificate_shape,
+        compact_context,
+        expected_verifier_key_digest,
+        limits,
         &l0_program_commitment,
+        ProofRules::Hardened,
     )?;
     Ok(precheck)
 }
@@ -2996,10 +3204,32 @@ pub fn verify_ai_pow_block_artifact_jam(
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     expected_verifier_key_digest_bytes: &[u8],
 ) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
-    let artifact = decode_ai_pow_pearl_merge_artifact_jam(jammed, limits)?;
-    verify_ai_pow_block_artifact(
+    verify_ai_pow_block_artifact_jam_with_rules(
+        jammed,
+        limits,
+        candidate_nock_block_commitment,
+        nockchain_target,
+        max_pattern_len,
+        compact_context,
+        expected_verifier_key_digest_bytes,
+        ProofRules::Hardened,
+    )
+}
+
+pub fn verify_ai_pow_block_artifact_jam_with_rules(
+    jammed: &[u8],
+    limits: CertificateNounLimits,
+    candidate_nock_block_commitment: &[u8; 32],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest_bytes: &[u8],
+    rules: ProofRules,
+) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
+    let artifact = decode_ai_pow_pearl_merge_artifact_jam_with_rules(jammed, limits, rules)?;
+    verify_ai_pow_block_artifact_with_rules(
         &artifact, limits, candidate_nock_block_commitment, nockchain_target, max_pattern_len,
-        compact_context, expected_verifier_key_digest_bytes,
+        compact_context, expected_verifier_key_digest_bytes, rules,
     )
 }
 
@@ -3019,6 +3249,59 @@ pub fn verify_ai_pow_block_artifact(
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     expected_verifier_key_digest_bytes: &[u8],
 ) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
+    verify_ai_pow_block_artifact_with_rules(
+        artifact,
+        limits,
+        candidate_nock_block_commitment,
+        nockchain_target,
+        max_pattern_len,
+        compact_context,
+        expected_verifier_key_digest_bytes,
+        ProofRules::Hardened,
+    )
+}
+
+fn validate_pearl_artifact_admission(
+    artifact: &PearlMergeAiPowArtifactShape,
+    rules: ProofRules,
+) -> Result<(), CertificateNounError> {
+    let admission = PearlAdmissionLimits::from(rules);
+    if artifact.aux_inclusion.merkle_branch.len() > admission.max_merkle_branch() {
+        return Err(CertificateNounError::LimitExceeded(
+            "ai-pow nonce merkle branch",
+        ));
+    }
+    if let Some(moe) = &artifact.moe {
+        if moe.routing_data.len() > admission.max_routing_entries() {
+            return Err(CertificateNounError::LimitExceeded(
+                "ai-pow MoE routing_data",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_ai_pow_block_artifact_with_rules(
+    artifact: &PearlMergeAiPowArtifactShape,
+    limits: CertificateNounLimits,
+    candidate_nock_block_commitment: &[u8; 32],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest_bytes: &[u8],
+    rules: ProofRules,
+) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
+    validate_pearl_artifact_admission(artifact, rules)?;
+    if rules == ProofRules::Hardened
+        && !ai_pow_compact_recursive_certificate_from_node_with_limits(
+            &artifact.certificate.certificate, limits,
+        )?
+        .has_canonical_pow_witnesses()
+    {
+        return Err(CertificateNounError::Shape(
+            "noncanonical unused FRI witnesses",
+        ));
+    }
     // Consensus cap (defense-in-depth; the jet also rejects before its setup
     // lookup): reject any block whose Layer-0 trace height exceeds
     // AI_POW_MAX_TRACE_HEIGHT (2^19). The top-of-envelope 2^20 setup is not built
@@ -3048,14 +3331,15 @@ pub fn verify_ai_pow_block_artifact(
     };
 
     if artifact.moe.is_some() {
-        let pre = verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
-            artifact, context, compact_context, &expected_verifier_key_digest, limits,
+        let pre = verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits_with_rules(
+            artifact, context, compact_context, &expected_verifier_key_digest, limits, rules,
         )?;
         Ok(AiPowBlockVerifyOutcome::Moe(pre))
     } else {
-        let pre = verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
-            artifact, context, compact_context, &expected_verifier_key_digest, limits,
-        )?;
+        let pre =
+            verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits_with_rules(
+                artifact, context, compact_context, &expected_verifier_key_digest, limits, rules,
+            )?;
         Ok(AiPowBlockVerifyOutcome::Dense(pre))
     }
 }
@@ -5166,11 +5450,53 @@ mod tests {
         tx
     }
 
+    fn max_size_canonical_coinbase() -> Vec<u8> {
+        let mut tx = pearl_test_coinbase_tx(&[0x42; 32]);
+        // Replace the one-byte output script with a large, canonically encoded
+        // script. Keep a structurally valid transaction at the evidence limit.
+        tx.truncate(tx.len() - 6);
+        let script_len = PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES - tx.len() - 5 - 4;
+        tx.push(0xfe);
+        tx.extend_from_slice(&(script_len as u32).to_le_bytes());
+        tx.resize(tx.len() + script_len, 0x51);
+        tx.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(tx.len(), PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES);
+        tx
+    }
+
     fn pearl_test_aux_inclusion(
         aux_commitment: &[u8; 32],
     ) -> (PearlIncompleteBlockHeader, PearlAuxInclusionProof) {
+        // Four leaves: the coinbase and three ordinary (non-coinbase) transactions.
+        let mut tx = pearl_test_coinbase_tx(aux_commitment);
+        tx[5..37].fill(0x21);
+        tx[37..41].copy_from_slice(&0u32.to_le_bytes());
+        let first = pearl_bitcoin_double_sha256_raw(&tx);
+        tx[5..37].fill(0x22);
+        let second = pearl_bitcoin_double_sha256_raw(&tx);
+        tx[5..37].fill(0x23);
+        let third = pearl_bitcoin_double_sha256_raw(&tx);
+        let mut pair = [0u8; 64];
+        pair[..32].copy_from_slice(&second);
+        pair[32..].copy_from_slice(&third);
+        pearl_test_aux_inclusion_with_branch(
+            aux_commitment,
+            vec![first, pearl_bitcoin_double_sha256_raw(&pair)],
+        )
+    }
+
+    fn pearl_test_aux_inclusion_with_branch(
+        aux_commitment: &[u8; 32],
+        merkle_branch: Vec<[u8; 32]>,
+    ) -> (PearlIncompleteBlockHeader, PearlAuxInclusionProof) {
         let coinbase_tx = pearl_test_coinbase_tx(aux_commitment);
         let mut merkle_root = pearl_bitcoin_double_sha256_raw(&coinbase_tx);
+        for sibling in &merkle_branch {
+            let mut pair = [0u8; 64];
+            pair[..32].copy_from_slice(&merkle_root);
+            pair[32..].copy_from_slice(sibling);
+            merkle_root = pearl_bitcoin_double_sha256_raw(&pair);
+        }
         merkle_root.reverse();
         let mut header = pearl_test_header();
         header.merkle_root = merkle_root;
@@ -5178,7 +5504,7 @@ mod tests {
             header,
             PearlAuxInclusionProof {
                 coinbase_tx,
-                merkle_branch: Vec::new(),
+                merkle_branch,
             },
         )
     }
@@ -5370,6 +5696,19 @@ mod tests {
         );
         slab.set_root(root);
         slab
+    }
+
+    #[test]
+    fn native_jackpot_accepts_the_authenticated_public_state() {
+        let mut inputs = CompositePublicInputs::zero();
+        inputs.jackpot = core::array::from_fn(|i| i as u32);
+        let key = [0x42; 32];
+        let hash =
+            ai_pow::pearl_compat::pearl_jackpot_hash(&tile_state_from_words(&inputs.jackpot), &key);
+        inputs.hash_jackpot = core::array::from_fn(|i| {
+            u32::from_le_bytes(hash[i * 4..i * 4 + 4].try_into().unwrap())
+        });
+        verify_native_jackpot(&inputs, &key, ProofRules::Hardened).unwrap();
     }
 
     #[test]
@@ -6054,6 +6393,7 @@ mod tests {
     fn real_compact_pearl_merge_artifact_jam_size_for_selected_route() {
         let params = pearl_test_params();
         let (attempt, aux_inclusion, a, b) = pearl_merge_ticket_attempt_fixture();
+        assert_eq!(aux_inclusion.merkle_branch.len(), 2);
 
         let start = std::time::Instant::now();
         eprintln!("real compact Pearl artifact: proving compact recursive certificate");
@@ -6216,7 +6556,7 @@ mod tests {
                 &AiProofNode::Unit,
             ),
             Err(CertificateNounError::PearlMergeStatement(
-                PearlCompatError::PearlAuxMerkleBranchTooDeep(1)
+                PearlCompatError::PearlAuxMerkleRootMismatch
             ))
         ));
     }
@@ -6537,7 +6877,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            CertificateNounError::LimitExceeded("ai-pow nonce merkle branch")
+            CertificateNounError::PearlMergeStatement(PearlCompatError::PearlAuxMerkleRootMismatch)
         ));
     }
 
@@ -6547,14 +6887,13 @@ mod tests {
         statement.aux.nockchain_chain_id = vec![0x43; PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX];
         statement.aux.extra_domain_data = vec![0x45; PEARL_NOCKCHAIN_AUX_EXTRA_MAX];
         let aux_inclusion = PearlAuxInclusionProof {
-            coinbase_tx: vec![0x51; PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES],
+            coinbase_tx: max_size_canonical_coinbase(),
             merkle_branch: vec![[0x52; 32]; PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH],
         };
 
         let nonce = encode_pearl_merge_ai_pow_nonce(&statement, &aux_inclusion)
             .expect("max-size nonce should encode");
         assert_eq!(nonce.len(), AI_POW_NONCE_MAX_SIZE);
-        assert_eq!(AI_POW_NONCE_MAX_SIZE, 101_424);
 
         let decoded =
             decode_pearl_merge_ai_pow_nonce(&nonce).expect("max-size nonce should decode");
@@ -6653,7 +6992,7 @@ mod tests {
 
         let mut truncated_coinbase = valid.clone();
         truncated_coinbase[coinbase_len_offset..coinbase_len_offset + 4]
-            .copy_from_slice(&((coinbase_len + 2) as u32).to_le_bytes());
+            .copy_from_slice(&((valid.len() - coinbase_len_offset - 4 + 1) as u32).to_le_bytes());
         assert!(matches!(
             decode_pearl_merge_ai_pow_nonce(&truncated_coinbase),
             Err(CertificateNounError::Shape("ai-pow nonce coinbase length"))
@@ -6666,6 +7005,19 @@ mod tests {
             Err(CertificateNounError::LimitExceeded(
                 "ai-pow nonce merkle branch"
             ))
+        ));
+
+        for cut in branch_len_offset..valid.len() {
+            assert!(
+                decode_pearl_merge_ai_pow_nonce(&valid[..cut]).is_err(),
+                "truncated branch at {cut} must reject"
+            );
+        }
+        let mut missing_sibling = valid.clone();
+        missing_sibling[branch_len_offset] += 1;
+        assert!(matches!(
+            decode_pearl_merge_ai_pow_nonce(&missing_sibling),
+            Err(CertificateNounError::Shape(_))
         ));
 
         let mut trailing_bytes = valid;
@@ -6956,8 +7308,8 @@ mod tests {
                 &easy_nock_target(),
                 16,
             ),
-            Err(CertificateNounError::LimitExceeded(
-                "ai-pow nonce merkle branch"
+            Err(CertificateNounError::PearlMergeStatement(
+                PearlCompatError::PearlAuxMerkleRootMismatch
             ))
         ));
     }
@@ -7173,8 +7525,8 @@ mod tests {
                     max_pattern_len: 16,
                 },
             ),
-            Err(CertificateNounError::LimitExceeded(
-                "ai-pow nonce merkle branch"
+            Err(CertificateNounError::PearlMergeStatement(
+                PearlCompatError::PearlAuxMerkleRootMismatch
             ))
         ));
 
@@ -7552,6 +7904,7 @@ mod tests {
         let aux = pearl_test_aux();
         let aux_commitment = aux.commitment().unwrap();
         let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux_commitment);
+        assert_eq!(aux_inclusion.merkle_branch.len(), 2);
 
         let config = PearlMiningConfig {
             common_dim: 1024,
@@ -8074,17 +8427,116 @@ mod tests {
     }
 
     #[test]
+    fn pearl_nonce_branch_admission_tracks_height_for_dense_and_moe() {
+        let (statement, mut inclusion) = moe_nonce_test_statement(2, 1);
+        let moe = moe_nonce_test_artifact(2, 2, 8);
+        for branch_len in [0, 1, 32] {
+            inclusion.merkle_branch = vec![[0x52; 32]; branch_len];
+            let dense = encode_pearl_merge_ai_pow_nonce(&statement, &inclusion).unwrap();
+            let grouped =
+                encode_pearl_merge_ai_pow_nonce_moe(&statement, &inclusion, &moe).unwrap();
+            for height in [153_500, 154_499, 154_500, 154_501, 154_499] {
+                let rules = ProofRules::at_height(height);
+                let allowed = branch_len == 0 || height >= 154_500;
+                assert_eq!(
+                    decode_pearl_merge_ai_pow_nonce_with_rules(&dense, rules).is_ok(),
+                    allowed
+                );
+                assert_eq!(
+                    decode_pearl_merge_ai_pow_nonce_moe_with_rules(&grouped, rules).is_ok(),
+                    allowed
+                );
+                assert_eq!(
+                    encode_pearl_merge_ai_pow_nonce_with_rules(&statement, &inclusion, rules)
+                        .is_ok(),
+                    allowed
+                );
+                assert_eq!(
+                    encode_pearl_merge_ai_pow_nonce_moe_with_rules(
+                        &statement, &inclusion, &moe, rules
+                    )
+                    .is_ok(),
+                    allowed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_moe_nonce_preserves_full_historical_budget() {
+        let admission = PearlAdmissionLimits::LEGACY;
+        let e = PEARL_MOE_MAX_NUM_EXPERTS;
+        let (mut statement, mut inclusion) = moe_nonce_test_statement(e as u16, 1);
+        inclusion.merkle_branch.clear();
+        statement.aux.nockchain_chain_id = vec![0x43; PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX];
+        statement.aux.extra_domain_data = vec![0x45; PEARL_NOCKCHAIN_AUX_EXTRA_MAX];
+        inclusion.coinbase_tx = vec![0x51; PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES];
+        let moe = moe_nonce_test_artifact(
+            e,
+            PEARL_MOE_MAX_OUTER_INDICES,
+            admission.max_routing_entries(),
+        );
+        let nonce = encode_pearl_merge_ai_pow_nonce_moe_with_rules(
+            &statement,
+            &inclusion,
+            &moe,
+            ProofRules::Legacy,
+        )
+        .unwrap();
+        assert_eq!(nonce.len(), admission.moe_nonce_max_bytes());
+        assert!(nonce.len() <= CertificateNounLimits::default().max_atom_bytes);
+        for height in [154_499, 154_500, 154_501, 154_499] {
+            let rules = ProofRules::at_height(height);
+            let decoded = decode_pearl_merge_ai_pow_nonce_moe_with_rules(&nonce, rules);
+            if height < 154_500 {
+                assert_eq!(decoded.unwrap().moe, moe);
+            } else {
+                assert!(matches!(
+                    decoded,
+                    Err(CertificateNounError::LimitExceeded(
+                        "ai-pow MoE routing_data"
+                    ))
+                ));
+            }
+        }
+        let mut oversized = nonce;
+        oversized.extend_from_slice(&[0; 4]);
+        assert!(matches!(
+            decode_pearl_merge_ai_pow_nonce_moe_with_rules(&oversized, ProofRules::Legacy),
+            Err(CertificateNounError::LimitExceeded(
+                "ai-pow MoE nonce bytes"
+            ))
+        ));
+    }
+
+    #[test]
     fn rb03_moe_nonce_cap_fits_default_atom_limit_and_cap_plus_one_rejects() {
         assert!(AI_POW_NONCE_MOE_MAX_SIZE <= CertificateNounLimits::default().max_atom_bytes);
+        assert!(AI_POW_NONCE_MOE_MAX_SIZE <= 1 << 20);
         let e = PEARL_MOE_MAX_NUM_EXPERTS;
-        let (statement, aux_inclusion) = moe_nonce_test_statement(e as u16, 1);
+        let (mut statement, mut aux_inclusion) = moe_nonce_test_statement(e as u16, 1);
+        statement.aux.nockchain_chain_id = vec![0x43; PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX];
+        statement.aux.extra_domain_data = vec![0x45; PEARL_NOCKCHAIN_AUX_EXTRA_MAX];
+        aux_inclusion.coinbase_tx = max_size_canonical_coinbase();
+        aux_inclusion.merkle_branch = vec![[0x52; 32]; PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH];
         let art = moe_nonce_test_artifact(
             e, PEARL_MOE_MAX_OUTER_INDICES, PEARL_MOE_MAX_ROUTING_ENTRIES,
         );
         let nonce = encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art)
             .expect("max-size MoE nonce encodes");
-        assert!(nonce.len() <= AI_POW_NONCE_MOE_MAX_SIZE);
-        decode_pearl_merge_ai_pow_nonce_moe(&nonce).expect("max-size MoE nonce decodes");
+        assert_eq!(nonce.len(), AI_POW_NONCE_MOE_MAX_SIZE);
+        let decoded =
+            decode_pearl_merge_ai_pow_nonce_moe(&nonce).expect("max-size MoE nonce decodes");
+        assert_eq!(decoded.aux_inclusion, aux_inclusion);
+        assert_eq!(decoded.moe, art);
+        let mut oversized_nonce = nonce;
+        oversized_nonce.push(0);
+        assert!(matches!(
+            decode_pearl_merge_ai_pow_nonce_moe(&oversized_nonce),
+            Err(CertificateNounError::LimitExceeded(
+                "ai-pow MoE nonce bytes"
+            ))
+        ));
 
         let over_cap = moe_nonce_test_artifact(
             e,
@@ -8124,7 +8576,27 @@ mod tests {
         let decoded =
             decode_ai_pow_pearl_merge_artifact_slab(&slab, CertificateNounLimits::default())
                 .expect("full artifact decoder dispatches AIM1 before dense cap");
-        assert_eq!(decoded.moe, Some(art));
+        assert_eq!(decoded.aux_inclusion, aux_inclusion);
+        assert_eq!(decoded.moe.as_ref(), Some(&art));
+
+        let mut tampered_aux = decoded.aux_inclusion;
+        tampered_aux.merkle_branch[0][0] ^= 1;
+        assert!(matches!(
+            build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+                &decoded.statement,
+                &tampered_aux,
+                &art,
+                &sample_params(),
+                0,
+                8_192,
+                &sample_commitments(),
+                &sample_pis(),
+                &AiProofNode::Unit,
+            ),
+            Err(CertificateNounError::PearlMergeStatement(
+                PearlCompatError::PearlAuxMerkleRootMismatch
+            ))
+        ));
     }
 
     #[test]
@@ -8154,15 +8626,49 @@ mod tests {
     }
 
     #[test]
-    fn moe_nonce_round_trips_and_is_tagged() {
-        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+    fn dense_and_moe_nonce_round_trip_empty_and_bounded_merkle_branches() {
+        let (mut statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
         let art = moe_nonce_test_artifact(4, 6, 40);
-        let nonce = encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
-        assert_eq!(&nonce[0..4], &AI_POW_NONCE_MAGIC_MOE);
-        let decoded = decode_pearl_merge_ai_pow_nonce_moe(&nonce).unwrap();
-        assert_eq!(decoded.statement, statement);
-        assert_eq!(decoded.aux_inclusion, aux_inclusion);
-        assert_eq!(decoded.moe, art);
+        // Legacy empty branch, a transaction-bearing block, and the admitted
+        // depth boundary. Distinct siblings expose reordering or byte reversal.
+        for branch in [
+            Vec::new(),
+            aux_inclusion.merkle_branch,
+            (0..PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH)
+                .map(|i| pearl_bitcoin_double_sha256_raw(&[i as u8]))
+                .collect(),
+        ] {
+            let (header, inclusion) =
+                pearl_test_aux_inclusion_with_branch(&statement.expected_aux_commitment, branch);
+            statement.block_header = header.to_bytes();
+            let dense = encode_pearl_merge_ai_pow_nonce(&statement, &inclusion).unwrap();
+            assert_eq!(
+                dense,
+                build_pearl_merge_nonce_bytes_for_test(&statement, &inclusion)
+            );
+            if inclusion.merkle_branch.is_empty() {
+                assert_eq!(dense.last(), Some(&0));
+            }
+            let decoded_dense = decode_pearl_merge_ai_pow_nonce(&dense).unwrap();
+            assert_eq!(decoded_dense.statement, statement);
+            assert_eq!(decoded_dense.aux_inclusion, inclusion);
+            validate_pearl_merge_statement_aux_inclusion(
+                &decoded_dense.statement, &decoded_dense.aux_inclusion,
+            )
+            .expect("dense decoded branch matches the header");
+
+            let nonce = encode_pearl_merge_ai_pow_nonce_moe(&statement, &inclusion, &art).unwrap();
+            assert_eq!(&nonce[0..4], &AI_POW_NONCE_MAGIC_MOE);
+            assert_eq!(&nonce[4..dense.len()], &dense[4..]);
+            let decoded = decode_pearl_merge_ai_pow_nonce_moe(&nonce).unwrap();
+            assert_eq!(decoded.statement, statement);
+            assert_eq!(decoded.aux_inclusion, inclusion);
+            assert_eq!(decoded.moe, art);
+            validate_pearl_merge_statement_aux_inclusion(
+                &decoded.statement, &decoded.aux_inclusion,
+            )
+            .expect("MoE decoded branch matches the header");
+        }
     }
 
     #[test]
@@ -8184,18 +8690,6 @@ mod tests {
         let decoded = decode_pearl_merge_ai_pow_nonce_moe(&nonce).unwrap();
         assert_eq!(decoded.moe, art);
         assert_eq!(decoded.statement, statement);
-    }
-
-    #[test]
-    fn moe_nonce_reuses_dense_framing_verbatim() {
-        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
-        let art = moe_nonce_test_artifact(4, 3, 8);
-        let dense = encode_pearl_merge_ai_pow_nonce(&statement, &aux_inclusion).unwrap();
-        let moe = encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
-        assert_eq!(&dense[0..4], &AI_POW_NONCE_MAGIC);
-        // Everything after the 4-byte magic is the dense framing verbatim.
-        assert_eq!(&moe[4..dense.len()], &dense[4..]);
-        assert!(moe.len() > dense.len());
     }
 
     #[test]
@@ -8310,10 +8804,11 @@ mod tests {
     }
 
     #[test]
-    fn moe_decode_rejects_truncation_at_every_length() {
-        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+    fn moe_nonce_rejects_overdepth_branches_and_truncation_at_every_length() {
+        let (statement, mut aux_inclusion) = moe_nonce_test_statement(4, 2);
         let art = moe_nonce_test_artifact(4, 5, 12);
-        let nonce = encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        let mut nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
         for cut in 0..nonce.len() {
             assert!(
                 decode_pearl_merge_ai_pow_nonce_moe(&nonce[..cut]).is_err(),
@@ -8321,6 +8816,23 @@ mod tests {
             );
         }
         assert!(decode_pearl_merge_ai_pow_nonce_moe(&nonce).is_ok());
+
+        let statement_len = u16::from_le_bytes(nonce[4..6].try_into().unwrap()) as usize;
+        let branch_len_offset = 6 + statement_len + 4 + aux_inclusion.coinbase_tx.len();
+        nonce[branch_len_offset] = (PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH + 1) as u8;
+        assert!(matches!(
+            decode_pearl_merge_ai_pow_nonce_moe(&nonce),
+            Err(CertificateNounError::LimitExceeded(
+                "ai-pow MoE nonce merkle branch"
+            ))
+        ));
+        aux_inclusion.merkle_branch = vec![[0x55; 32]; PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH + 1];
+        assert!(matches!(
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art),
+            Err(CertificateNounError::LimitExceeded(
+                "ai-pow nonce merkle branch"
+            ))
+        ));
     }
 
     #[test]
@@ -8355,7 +8867,7 @@ mod tests {
 
     /// Cheap canonical MoE work statement (real jackpot, no certificate) plus
     /// the certificate metadata that statement implies.
-    fn canonical_moe_metadata_fixture() -> (
+    fn reference_moe_metadata_fixture() -> (
         PearlPublicProofParams,
         crate::certificate_noun::PearlMergeMoeArtifact,
         PearlMoeWorkPrecheck,
@@ -8372,7 +8884,7 @@ mod tests {
             difficulty_bits: 0,
         };
         let (mut public, moe_art) =
-            crate::canonical::canonical_moe_statement_parts(&mp, 8, 2, 1, [0x5a; 32], 0)
+            crate::reference::reference_moe_statement_parts(&mp, 8, 2, 1, [0x5a; 32], 0)
                 .expect("canonical moe statement");
         // The difficulty gate is not what this fixture exercises: zero the
         // jackpot so it clears at the loosest target consensus can emit, and
@@ -8450,7 +8962,7 @@ mod tests {
     /// setup for a different circuit than the statement describes.
     #[test]
     fn moe_certificate_metadata_gates_match_the_dense_path() {
-        let (public, moe_art, work, params, certificate) = canonical_moe_metadata_fixture();
+        let (public, moe_art, work, params, certificate) = reference_moe_metadata_fixture();
 
         precheck_moe_certificate_metadata(
             &certificate, &public, &params, &work, &moe_art.moe, CONSENSUS_MAX_PATTERN_LEN,
@@ -8535,7 +9047,7 @@ mod tests {
             difficulty_bits: 0,
         };
         let (mut public, moe_art) =
-            crate::canonical::canonical_moe_statement_parts(&mp, 8, 2, 1, [0x5a; 32], 0)
+            crate::reference::reference_moe_statement_parts(&mp, 8, 2, 1, [0x5a; 32], 0)
                 .expect("canonical moe statement");
         public.hash_jackpot = [0u8; 32];
 
@@ -8566,13 +9078,110 @@ mod tests {
     }
 
     #[test]
+    fn dense_partial_chunk_proofs_follow_cutover_and_rebuild_cross_version_cache() {
+        use ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache_with_rules;
+
+        // Use honest winning work through the production builder.
+        let params = MatmulParams {
+            m: 8,
+            k: 1088,
+            n: 8,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let commit = [0x5a; 32];
+        let target = ai_pow::difficulty::AI_POW_MAX_CONSENSUS_TARGET;
+        let (a, b) = synth_matrices(b"historical-dense-cutover", &params);
+        let a = std::sync::Arc::new(a);
+        let b = std::sync::Arc::new(b);
+        let template = crate::reference::PreparedReferenceDenseTemplate::new(
+            &params,
+            commit,
+            a.clone(),
+            b.clone(),
+        )
+        .expect("dense template");
+        let winner = (0..4096)
+            .find_map(|extranonce| {
+                let prepared = template.prepare(extranonce).expect("dense transcript");
+                let (rows, cols) = prepared.offsets_at_ordinal(0).unwrap();
+                let ticket = prepared
+                    .evaluate(rows, cols, &mut prepared.scratch())
+                    .unwrap();
+                let factor = prepared.config().shape_work_factor().unwrap();
+                if !ai_pow::difficulty::attempt_wins(&ticket.jackpot_hash, &target, factor).unwrap()
+                {
+                    return None;
+                }
+                Some(
+                    template
+                        .checked_winner(&prepared, 0, &target)
+                        .expect("checked winner"),
+                )
+            })
+            .expect("deterministic search must find a winner");
+        let block = template
+            .prove_with_rules(winner, ProofRules::Legacy)
+            .expect("prove initial legacy block");
+        let mut initial_run = Some(block.run);
+        let mut cache = None;
+        // Forward activation and a reorg both replace incompatible prover data.
+        for rules in [ProofRules::Legacy, ProofRules::Hardened, ProofRules::Legacy] {
+            let run = match cache.as_ref() {
+                Some(cache) => prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache_with_rules(
+                    &block.attempt, &params, &a, &b, cache, rules,
+                ),
+                None => Ok(initial_run.take().unwrap()),
+            }.expect("prove with selected rules and rebuild incompatible cache");
+            let artifact =
+                build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
+                    block.attempt.attempt(),
+                    &block.aux_inclusion,
+                    &a,
+                    &b,
+                    params.tile as usize,
+                    &run,
+                )
+                .expect("dense artifact")
+                .jam();
+            let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+                run.verifier_key_digest(),
+            );
+            for height in [153_500, 154_499, 154_500, 154_501, 154_499] {
+                let selected = ProofRules::at_height(height);
+                let result = verify_ai_pow_block_artifact_jam_with_rules(
+                    &artifact,
+                    CertificateNounLimits::default(),
+                    &commit,
+                    &target,
+                    params.tile as usize,
+                    run.verifier_context(),
+                    &digest,
+                    selected,
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    rules == selected,
+                    "dense {rules:?} proof at {height}: {result:?}"
+                );
+            }
+            cache = Some(
+                run.into_prover_cache()
+                    .expect("new version must produce a fresh cache"),
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "builds and verifies the full peak production certificate"]
     fn peak_production_certificate_verifies_through_consensus_entrypoint() {
         let params = crate::PEAK_PRODUCTION_PARAMS;
         let commit = [0x5a; 32];
         let target = ai_pow::difficulty::AI_POW_MAX_CONSENSUS_TARGET;
         let (a, b) = synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
-        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+        let template = crate::reference::PreparedReferenceDenseTemplate::new(
             &params,
             commit,
             std::sync::Arc::new(a),

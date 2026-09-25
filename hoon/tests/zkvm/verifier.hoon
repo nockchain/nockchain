@@ -80,10 +80,8 @@
   =/  v5-hashes=proof  v5(hashes ~[*noun-digest:tip5])
   =/  v5-index=proof  v5(read-index 1)
   %+  expect-eq
-    !>([%.y %.n %.n %.n %.y %.y])
-  !>  :*  =((hash-proof v2) (hash-proof v3))
-          =((hash-proof-for-block v2) (hash-proof-for-block v3))
-          =((hash-proof v3) (hash-proof v5))
+    !>([%.n %.n %.y %.y])
+  !>  :*  =((hash-proof-for-block v2) (hash-proof-for-block v3))
           =((hash-proof-for-block v3) (hash-proof-for-block v5))
           =((hash-proof-for-block v5) (hash-proof-for-block v5-hashes))
           =((hash-proof-for-block v5) (hash-proof-for-block v5-index))
@@ -236,7 +234,7 @@
   (expect-eq !>(%.n) !>(res))
 ::
 ++  test-bad-proof-base-m-root-not-after-heights
-  =/  pf  (replace-proof-entry:bp pf %m-root [%terms *bpoly] 1)
+  =/  pf  (replace-proof-entry:bp pf %m-root [%terms zero-bpoly] 1)
   =/  res  (verify:vrf pf ~ 4)
   (expect-eq !>(%.n) !>(res))
 ::
@@ -269,7 +267,7 @@
   (expect-eq !>(%.n) !>(res))
 ::
 ++  test-bad-proof-ext-m-root-not-after-base-m-root
-  =/  pf  (replace-proof-entry:bp pf %m-root [%terms *bpoly] 2)
+  =/  pf  (replace-proof-entry:bp pf %m-root [%terms zero-bpoly] 2)
   =/  res  (verify:vrf pf ~ 4)
   (expect-eq !>(%.n) !>(res))
 ::
@@ -330,12 +328,12 @@
   (expect-eq !>(%.n) !>(res))
 ::
 ++  test-bad-proof-mega-m-root-not-after-ext-m-root
-  =/  pf  (replace-proof-entry:bp pf %m-root [%terms *bpoly] 3)
+  =/  pf  (replace-proof-entry:bp pf %m-root [%terms zero-bpoly] 3)
   =/  res  (verify:vrf pf ~ 4)
   (expect-eq !>(%.n) !>(res))
 ::
 ++  test-bad-proof-terminals-not-after-mega-m-root
-  =/  pf  (replace-proof-entry:bp pf %terms [%evals *fpoly] 1)
+  =/  pf  (replace-proof-entry:bp pf %terms [%evals zero-fpoly] 1)
   =/  res  (verify:vrf pf ~ 4)
   (expect-eq !>(%.n) !>(res))
 ::
@@ -405,7 +403,7 @@
   (expect-eq !>(%.n) !>(res))
 ::
 ++  test-bad-proof-evals-not-after-comp-m
-  =/  pf  (replace-proof-entry:bp pf %evals [%codeword *fpoly] 1)
+  =/  pf  (replace-proof-entry:bp pf %evals [%codeword zero-fpoly] 1)
   =/  res  (verify:vrf pf ~ 4)
   (expect-eq !>(%.n) !>(res))
 ::
@@ -594,7 +592,7 @@
   (expect-eq !>(%.n) !>(res))
 ::
 ++  test-bad-proof-deep-m-root-not-after-comp-evals
-  =/  pf  (replace-proof-entry:bp pf %m-root [%codeword *fpoly] 4)
+  =/  pf  (replace-proof-entry:bp pf %m-root [%codeword zero-fpoly] 4)
   =/  res  (verify:vrf pf ~ 4)
   (expect-eq !>(%.n) !>(res))
 ::
@@ -701,7 +699,7 @@
   (expect-eq !>(%.n) !>(res))
 ::
 ++  test-bad-proof-m-pathbf-doesnt-follow-m-paths
-  =/  pf  (replace-proof-entry:bp pf %m-pathbf [%m-path *proof-path] 1)
+  =/  pf  (replace-proof-entry:bp pf %m-pathbf [%m-path [zero-fpoly ~]] 1)
   =/  res  (verify:vrf pf ~ 4)
   (expect-eq !>(%.n) !>(res))
 ::
