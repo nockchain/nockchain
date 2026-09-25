@@ -29,8 +29,8 @@ None.
 | 9 | Cell-skin gain/lose on a core tested a `%noun` base skin instead of the term `%noun` | same |
 | 10 | Cell-skin lose re-wrapped a face that hoon-138 strips | same |
 | 11 | A wash skin as a `?:` condition compiled in honk; hoonc recurses forever. honk now fails with `gain-wash` | same |
-| #NEW-c1 | `!@` on a two-limb wing whose rest searches a void type answered no; hoon-138 `++fond` has no `?~` guard on the rest of the wing and crashes | honk: match hoon-138 ++fond on a void wing tail |
-| #NEW-c2 | Mulled cores' lazy batteries never resolved, so `^~` of an arm formula in a `?=` alias stayed a slot and passed `++cove`; hoon-138's `++mile` battery is `++laze`, which mints the arm, and `++cove` rejects the constant | honk: resolve mulled cores' arms through ++laze like hoon-138 |
+| 40 | `!@` on a two-limb wing whose rest searches a void type answered no; hoon-138 `++fond` has no `?~` guard on the rest of the wing and crashes | honk: match hoon-138 ++fond on a void wing tail |
+| 41 | Mulled cores' lazy batteries never resolved, so `^~` of an arm formula in a `?=` alias stayed a slot and passed `++cove`; hoon-138's `++mile` battery is `++laze`, which mints the arm, and `++cove` rejects the constant | honk: resolve mulled cores' arms through ++laze like hoon-138 |
 
 ## Parser and desugarer (`crates/hatch`)
 
@@ -78,7 +78,9 @@ None.
 - A batch manifest listing one entry twice fails with `--cache-dir`
   ("duplicate root name", `bin/honk.rs`). Pinned by an ignored test in
   `tests/cov_t1_cache_parity.rs`.
-- An empty `/*` data file panics the honk worker (hoonc also fails).
-- A truncated `--sut-jam` panics in `cue` instead of returning an error.
+- Some inputs that both compilers reject make hatch panic, so the honk worker
+  reports a panic instead of an error: `!?` with an unsatisfied version
+  (`open` `%zpwt`) and a free `%loop` spec in a mold (`spore`), among others.
+  hoon-138 crashes on the same inputs.
 - `NATIVE_HOON_NO_CHUNK=1` produces a different prelude artifact than the
   default chunked mint (debug path only).

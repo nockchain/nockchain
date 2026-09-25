@@ -33,7 +33,7 @@ covered there once a reject probe reaches it.
 |---|---|---|
 | L5454, B5453 T (`semi_blocks_root_blocked` cache hit) | P | Performance cache only: the only caller, `semi_noun_blocked_encoded`, memoizes its own result. |
 | L5490, B5489 T | P | Unreachable in practice: resolver-ID wraparound needs 2^64 IDs. |
-| L5591, B5584 F (`lazy_resolver_resolve_axis`) | P | Defensive: every resolver ID honk makes is registered when its lazy root is built (`mint_core`, and `mull_mile` since #NEW-c2), so only a decoded type noun could carry an unknown one. |
+| L5591, B5584 F (`lazy_resolver_resolve_axis`) | P | Defensive: every resolver ID honk makes is registered when its lazy root is built (`mint_core` and `mull_mile`), so only a decoded type noun could carry an unknown one. |
 | L5602, B5601 F; L5605, B5604 T; L5619-5622, B5618 F, B5619 T (`lazy_resolver_compile_arm` guards) | P | Unreachable in production: the only caller, `lazy_resolver_resolve_axis`, has just checked that the ID is registered, the axis is not cached, and the axis is an arm. |
 | L5608, B5607 T; L5639-5642, B5630 T, B5639 T; L7214-7219, B7211 T, B7212 F, B7216 T/F (`arm_goal_for_hoon_in_progress`) | P | A `^~` fold inside an arm that needs that same arm's formula. hoon-138's `++laze` recurses without bound on such code, so hoonc gives no verdict to compare. |
 | L5616, B5600 F | UP | Dead: the block before the `else` always returns early or yields `Some`. |
