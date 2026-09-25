@@ -5,12 +5,30 @@
 
 use std::sync::Arc;
 
+use chumsky::extra::ParserExtra;
 use chumsky::prelude::*;
 
 use crate::ast::hoon::*;
 use crate::utils::*;
 
+#[path = "cram.rs"]
+mod cram;
+
 type Boxed<'src, O> = chumsky::Boxed<'src, 'src, &'src str, O, Err<'src>>;
+
+/// What sail needs to reparse markdown text: the file path and whether
+/// hoons carry dbug spots.
+#[derive(Clone)]
+pub struct SailCtx {
+    wer: Path,
+    trace: bool,
+}
+
+impl SailCtx {
+    pub fn new(wer: Path, trace: bool) -> Self {
+        Self { wer, trace }
+    }
+}
 
 /// A node or a node list, hoon-138 `(each tuna marl)`.
 #[derive(Clone)]
@@ -84,6 +102,14 @@ fn hoon_to_beers(hoon: Hoon) -> Vec<Beer> {
 
 fn text_beers(text: &str) -> Vec<Beer> {
     text.bytes().map(byte_beer).collect()
+}
+
+/// An element head with no attributes, `[name ~]`.
+fn tag(name: &str) -> Marx {
+    Marx {
+        n: Mane::Tag(name.to_string()),
+        a: vec![],
+    }
 }
 
 /// `;/(tape)`: a text node, `[[%$ [%$ tape] ~] ~]`.
@@ -176,7 +202,8 @@ fn tuna_mode<'src>() -> impl Parser<'src, &'src str, fn(Hoon) -> TunaTail, Err<'
 }
 
 /// `++bix:ab`: two lowercase hex digits.
-fn hex_byte<'src>() -> impl Parser<'src, &'src str, u8, Err<'src>> + Clone {
+fn hex_byte<'src, E: ParserExtra<'src, &'src str>>() -> impl Parser<'src, &'src str, u8, E> + Clone
+{
     let six = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'));
     six.then(six).map(|(hi, lo)| {
         (hi.to_digit(16).expect("hex digit") * 16 + lo.to_digit(16).expect("hex digit")) as u8
@@ -199,38 +226,59 @@ fn sump<'src>(hoon_wide: Boxed<'src, Hoon>) -> Boxed<'src, Hoon> {
         .boxed()
 }
 
-/// `++quote-innards`. In tall form `"` is text; outside a `"""` block
-/// (`lin`) there are no newlines.
-fn quote_innards<'src>(
-    inline_embed: Boxed<'src, Tuna>,
-    tall: bool,
-    lin: bool,
-) -> Boxed<'src, Vec<Innard>> {
+/// An element of `++quote-innards` other than a newline: an escape, an
+/// embedded node, or text (where in tall form `"` is text).
+fn innard<'src, E, P>(embed: P, tall: bool) -> impl Parser<'src, &'src str, Vec<Innard>, E> + Clone
+where
+    E: ParserExtra<'src, &'src str>,
+    P: Parser<'src, &'src str, Tuna, E> + Clone,
+{
     let escape = just('\\')
         .ignore_then(choice((
             one_of("-+*%;{\\\"").map(|c: char| c as u8),
             hex_byte(),
         )))
         .map(|byte| vec![Innard::Byte(byte)]);
-    let embed = inline_embed.map(|tuna| vec![Innard::Tuna(tuna)]);
+    let embed = embed.map(|tuna| vec![Innard::Tuna(tuna)]);
     let text = any()
         .filter(move |c: &char| is_prn(*c) && *c != '\\' && *c != '{' && (tall || *c != '"'))
         .map(|c| utf8_bytes(c).into_iter().map(Innard::Byte).collect());
-    let item = if lin {
-        choice((escape, embed, text)).boxed()
-    } else {
-        //  a newline and the next line's indentation, unless that line
-        //  closes the block
-        let newline = just('\n')
-            .ignore_then(just(' ').repeated().count())
-            .then_ignore(just("\"\"\"").not())
-            .map(|spaces| vec![Innard::Newline(spaces)]);
-        choice((escape, embed, text, newline)).boxed()
-    };
-    item.repeated()
+    choice((escape, embed, text))
+}
+
+/// `++quote-innards` on one line.
+fn quote_innards<'src>(inline_embed: Boxed<'src, Tuna>, tall: bool) -> Boxed<'src, Vec<Innard>> {
+    innard(inline_embed, tall)
+        .repeated()
         .collect::<Vec<Vec<Innard>>>()
         .map(|chunks| chunks.into_iter().flatten().collect())
         .boxed()
+}
+
+type BlockErr<'src> = extra::Full<Rich<'src, char>, (), usize>;
+
+/// `++quote-innards` in a `"""` block whose `"""` is `lev` columns in (the
+/// parser context). A newline is kept with the indentation of the next
+/// line, unless that line is the closing `"""`: `lev` spaces and `"""`.
+fn block_innards<'src>(
+    inline_embed: Boxed<'src, Tuna>,
+    tall: bool,
+) -> impl Parser<'src, &'src str, Vec<Innard>, BlockErr<'src>> + Clone {
+    let newline = just('\n')
+        .ignore_then(just(' ').repeated().count())
+        .then(just("\"\"\"").rewind().or_not())
+        .map_with(|(spaces, close), extra| (spaces, close.is_some(), *extra.ctx()))
+        .try_map(|(spaces, close, lev), span| {
+            if close && spaces == lev {
+                Err(Rich::custom(span, "end of sail block"))
+            } else {
+                Ok(vec![Innard::Newline(spaces)])
+            }
+        });
+    choice((innard(inline_embed.with_ctx(()), tall), newline))
+        .repeated()
+        .collect::<Vec<Vec<Innard>>>()
+        .map(|chunks| chunks.into_iter().flatten().collect())
 }
 
 /// Resolve a `"""` block's indentation as hoon-138 `++inde` does: every line
@@ -281,34 +329,40 @@ fn wide_quote<'src>(
 ) -> Boxed<'src, Marl> {
     let single = just("\"\"\"")
         .not()
-        .ignore_then(
-            quote_innards(inline_embed.clone(), tall, true).delimited_by(just('"'), just('"')),
-        )
+        .ignore_then(quote_innards(inline_embed.clone(), tall).delimited_by(just('"'), just('"')))
         .map(move |innards| collapse_chars(innards, tall));
     let open = just("\"\"\"").map_with(move |_, extra| {
         let span: SimpleSpan = extra.span();
         linemap.raw_column(span.start)
     });
     let indent = just(' ').repeated().count();
-    let block = open
-        .then_ignore(just('\n'))
-        .then(indent)
-        .then(quote_innards(inline_embed, tall, false))
-        .then(just('\n').ignore_then(indent).then_ignore(just("\"\"\"")))
-        .try_map(move |(((lev, first), innards), close), span| {
+    let body = indent
+        .then(block_innards(inline_embed, tall))
+        .then(just('\n').ignore_then(indent).then_ignore(just("\"\"\"")));
+    let block = open.then_ignore(just('\n')).then_with_ctx(body).try_map(
+        move |(lev, ((first, innards), close)), span| {
             dedent_block(lev, first, innards, close)
                 .map(|innards| collapse_chars(innards, tall))
                 .map_err(|msg| Rich::custom(span, msg))
-        });
+        },
+    );
     choice((single, block)).boxed()
 }
 
-/// The sail parsers `(tall-top, wide-top)`, each run after the leading `;`.
+/// The sail parsers `++tall-top` and `++wide-top` (each run after the
+/// leading `;`), and `++inline-embed`.
+struct Sail<'src> {
+    tall_top: Boxed<'src, Top>,
+    wide_top: Boxed<'src, Top>,
+    inline_embed: Boxed<'src, Tuna>,
+}
+
 fn sail_parsers<'src>(
     hoon: Boxed<'src, Hoon>,
     hoon_wide: Boxed<'src, Hoon>,
     linemap: Arc<LineMap>,
-) -> (Boxed<'src, Top>, Boxed<'src, Top>) {
+    ctx: SailCtx,
+) -> Sail<'src> {
     let mut wide_top = Recursive::declare();
     let mut tall_top = Recursive::declare();
 
@@ -423,9 +477,19 @@ fn sail_parsers<'src>(
         .boxed(),
     );
 
+    //  ++cram: markdown, as a list of children or in a `;>` block
+    let expr = just(' ')
+        .repeated()
+        .ignore_then(just(';'))
+        .ignore_then(tall_top.clone())
+        .then_ignore(gap().rewind())
+        .map(drop_top)
+        .boxed();
+    let cram = cram::cram(expr, linemap.clone(), ctx);
+
     //  ++tall-tail and ++tall-kids
     let top_level = just(';').ignore_then(tall_top.clone());
-    let tall_kids = top_level
+    let tall_kids = choice((top_level, cram.clone().map(Top::Many)))
         .separated_by(gap())
         .at_least(1)
         .collect::<Vec<_>>()
@@ -434,7 +498,7 @@ fn sail_parsers<'src>(
         just(';').to(Vec::new()),
         just(':').ignore_then(wrapped_elems),
         just(": ")
-            .ignore_then(quote_innards(inline_embed.clone(), true, true))
+            .ignore_then(quote_innards(inline_embed.clone(), true))
             .map(|innards| collapse_chars(innards, false)),
         gap()
             .ignore_then(tall_kids)
@@ -488,14 +552,18 @@ fn sail_parsers<'src>(
             just(' ')
                 .repeated()
                 .at_least(1)
-                .ignore_then(quote_innards(inline_embed.clone(), true, true))
+                .ignore_then(quote_innards(inline_embed.clone(), true))
                 .map(|innards| Top::Many(collapse_chars(innards, true))),
             script_or_style
                 .then(script_style_tail)
                 .map(|(g, c)| Top::One(Tuna::Manx(Manx { g, c }))),
             tall_elem.map(|manx| Top::One(Tuna::Manx(manx))),
-            wide_quote(inline_embed, true, linemap).map(Top::Many),
+            wide_quote(inline_embed.clone(), true, linemap).map(Top::Many),
             just('=').ignore_then(tall_tail).map(Top::Many),
+            just('>')
+                .ignore_then(gap())
+                .ignore_then(cram)
+                .map(|c| Top::One(Tuna::Manx(Manx { g: tag("div"), c }))),
             tuna_mode()
                 .then_ignore(gap())
                 .then(hoon)
@@ -505,7 +573,11 @@ fn sail_parsers<'src>(
         .boxed(),
     );
 
-    (tall_top.boxed(), wide_top.boxed())
+    Sail {
+        tall_top: tall_top.boxed(),
+        wide_top: wide_top.boxed(),
+        inline_embed,
+    }
 }
 
 /// Tall-form sail (hoon-138 `apex:(sail &)`), after the leading `;`.
@@ -513,9 +585,11 @@ pub fn sail_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     hoon_wide: impl ParserExt<'src, Hoon>,
     linemap: Arc<LineMap>,
+    ctx: SailCtx,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    let (tall_top, _) = sail_parsers(hoon.boxed(), hoon_wide.boxed(), linemap);
-    tall_top.map(apex)
+    sail_parsers(hoon.boxed(), hoon_wide.boxed(), linemap, ctx)
+        .tall_top
+        .map(apex)
 }
 
 /// Wide-form sail (hoon-138 `apex:(sail |)`), after the leading `;`.
@@ -523,7 +597,9 @@ pub fn sail_wide<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     hoon_wide: impl ParserExt<'src, Hoon>,
     linemap: Arc<LineMap>,
+    ctx: SailCtx,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    let (_, wide_top) = sail_parsers(hoon.boxed(), hoon_wide.boxed(), linemap);
-    wide_top.map(apex)
+    sail_parsers(hoon.boxed(), hoon_wide.boxed(), linemap, ctx)
+        .wide_top
+        .map(apex)
 }

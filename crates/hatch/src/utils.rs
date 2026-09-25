@@ -6355,6 +6355,14 @@ pub struct LineMap {
     col_offsets: Vec<u64>,
     source: Arc<str>,
     docs_enabled: bool,
+    //  the hoon position (line, column) of the first byte: (1, 1) for a
+    //  file, elsewhere for text that hoon-138 reparses from the middle of
+    //  a file (sail markdown)
+    origin: (u64, u64),
+    //  columns by which hoon-138's position runs ahead of its text from a
+    //  byte to the end of that byte's line, by byte (sail markdown can end
+    //  with its column set past the indentation it has not consumed)
+    drifts: Arc<std::sync::RwLock<std::collections::BTreeMap<usize, u64>>>,
 }
 
 fn leading_spaces(bytes: &[u8]) -> usize {
@@ -6440,7 +6448,68 @@ impl LineMap {
             col_offsets,
             source,
             docs_enabled,
+            origin: (1, 1),
+            drifts: Default::default(),
         }
+    }
+
+    /// A map for text that hoon-138 parses from the position `origin`
+    /// (line, column) of a file rather than from its start.
+    pub fn with_origin(src: &str, docs_enabled: bool, origin: (u64, u64)) -> Self {
+        let mut starts = vec![0];
+        starts.extend(src.match_indices('\n').map(|(i, _)| i + 1));
+        Self {
+            col_offsets: vec![0; starts.len()],
+            starts,
+            source: Arc::<str>::from(src),
+            docs_enabled,
+            origin,
+            drifts: Default::default(),
+        }
+    }
+
+    /// Record that hoon-138's column at `byte` is `col`, so the rest of the
+    /// line runs that far ahead of the text.
+    pub fn set_column(&self, byte: usize, col: u64) {
+        let line = self.line_index(byte);
+        let raw = (byte - self.starts[line] + 1) as u64;
+        if let Ok(mut drifts) = self.drifts.write() {
+            if col > raw {
+                drifts.insert(byte, col - raw);
+            } else {
+                drifts.remove(&byte);
+            }
+        }
+    }
+
+    /// Columns by which hoon-138's position at `byte` (on line `line`) runs
+    /// ahead of the text.
+    fn drift(&self, line: usize, byte: usize) -> u64 {
+        let Ok(drifts) = self.drifts.read() else {
+            return 0;
+        };
+        if drifts.is_empty() {
+            return 0;
+        }
+        match drifts.range(..=byte).next_back() {
+            Some((&from, &cols)) if from >= self.starts[line] => cols,
+            _ => 0,
+        }
+    }
+
+    pub fn docs_enabled(&self) -> bool {
+        self.docs_enabled
+    }
+
+    /// The byte offset of a hoon position, if it is in this text.
+    fn hair_offset(&self, line: u64, col: u64) -> Option<usize> {
+        let idx = line.checked_sub(self.origin.0)? as usize;
+        let col = if idx == 0 {
+            col.checked_sub(self.origin.1 - 1)?
+        } else {
+            col
+        };
+        Some(self.starts.get(idx)? + (col as usize).saturating_sub(1))
     }
 
     #[inline(always)]
@@ -6457,18 +6526,33 @@ impl LineMap {
                 col = 1;
             }
         }
+        if line == 0 {
+            col += self.origin.1 - 1;
+        }
+        col += self.drift(line, byte);
 
-        ((line + 1) as u64, col)
+        (line as u64 + self.origin.0, col)
     }
 
-    /// The byte column of `byte` within its line, from 0, without the
-    /// column offsets of tall-tape lines.
-    pub fn raw_column(&self, byte: usize) -> usize {
+    /// The hoon position (line, column) of `byte`, without the column
+    /// offsets of tall-tape lines.
+    pub fn hair(&self, byte: usize) -> (u64, u64) {
         let line = match self.starts.binary_search(&byte) {
             Ok(i) => i,
             Err(i) => i - 1,
         };
-        byte - self.starts[line]
+        let mut col = (byte - self.starts[line] + 1) as u64;
+        if line == 0 {
+            col += self.origin.1 - 1;
+        }
+        col += self.drift(line, byte);
+        (line as u64 + self.origin.0, col)
+    }
+
+    /// The column of `byte` from 0, without the column offsets of
+    /// tall-tape lines.
+    pub fn raw_column(&self, byte: usize) -> usize {
+        (self.hair(byte).1 - 1) as usize
     }
 
     #[inline(always)]
@@ -11519,10 +11603,9 @@ fn unanchor_spec_spot(spec: &mut Spec, linemap: &LineMap) {
 fn unanchor_spot_start(spot: &mut Spot, linemap: &LineMap) {
     let bytes = linemap.source.as_bytes();
     let (line, col) = spot.q.p;
-    let Some(&line_start) = linemap.starts.get((line as usize).saturating_sub(1)) else {
+    let Some(mut pos) = linemap.hair_offset(line, col) else {
         return;
     };
-    let mut pos = line_start + (col as usize).saturating_sub(1);
     if pos + 1 >= bytes.len() || bytes[pos] != b':' || bytes[pos + 1] != b':' {
         return;
     }

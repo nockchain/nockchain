@@ -1445,6 +1445,107 @@ fn sail_text_links_scripts_and_blocks() {
     );
 }
 
+fn element(name: &str, c: Vec<Tuna>) -> Tuna {
+    Tuna::Manx(Manx {
+        g: Marx {
+            n: Mane::Tag(s(name)),
+            a: vec![],
+        },
+        c,
+    })
+}
+
+#[test]
+fn sail_markdown_blocks_and_inline() {
+    // a text line among tall children is a markdown paragraph, reparsed
+    // with its indentation, so its newline ends it with a space
+    let Hoon::Xray(manx) = parse_one(";div\n  some *text*\n==\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(
+        manx.c,
+        vec![element(
+            "p",
+            vec![text_node("some "), element("b", vec![text_node("text")]), text_node(" "),]
+        )]
+    );
+    // `;>`: a heading (with an id), then a list
+    let Hoon::Xray(manx) = parse_one(";>\n  # Hi\n\n  - a\n  - b\n") else {
+        panic!("expected sail");
+    };
+    let heading = Tuna::Manx(Manx {
+        g: Marx {
+            n: Mane::Tag(s("h1")),
+            a: vec![(
+                Mane::Tag(s("id")),
+                vec![Beer::Char(s("h")), Beer::Char(s("i")), Beer::Char(s("-"))],
+            )],
+        },
+        c: vec![text_node("Hi ")],
+    });
+    let item = |text: &str| element("li", vec![element("p", vec![text_node(text)])]);
+    assert_eq!(manx.g.n, Mane::Tag(s("div")));
+    assert_eq!(
+        manx.c,
+        vec![heading, element("ul", vec![item("a "), item("b ")])]
+    );
+    // inline code, a smart-quoted span, and a link
+    let Hoon::Xray(manx) = parse_one(";>\n  `c` \"q\" [l](u)\n") else {
+        panic!("expected sail");
+    };
+    let link = Tuna::Manx(Manx {
+        g: Marx {
+            n: Mane::Tag(s("a")),
+            a: vec![(Mane::Tag(s("href")), vec![Beer::Char(s("u"))])],
+        },
+        c: vec![text_node("l")],
+    });
+    let quoted = "\u{201c}q\u{201d}"
+        .bytes()
+        .map(|b| char::from(b))
+        .collect::<String>();
+    assert_eq!(
+        manx.c,
+        vec![element(
+            "p",
+            vec![
+                element("code", vec![text_node("c")]),
+                text_node(" "),
+                text_node(&quoted),
+                text_node(" "),
+                link,
+                text_node(" "),
+            ]
+        )]
+    );
+    // a heading followed by text, not a blank line, is an error
+    assert!(parse_src(";>\n  # Hi\n  text\n").is_err());
+    // in a tall `"""` block a `"""` indented past the opening one is text
+    assert_eq!(
+        parse_one(";\"\"\"\n a\n   \"\"\" x\n \"\"\"\n"),
+        Hoon::MicTis(vec![text_node("a\n  \"\"\" x\n")])
+    );
+}
+
+#[test]
+fn linemap_with_origin_shifts_the_first_line() {
+    let linemap = LineMap::with_origin("ab\ncd", false, (5, 7));
+    assert_eq!(linemap.hair(0), (5, 7));
+    assert_eq!(linemap.hair(1), (5, 8));
+    assert_eq!(linemap.hair(3), (6, 1));
+    assert_eq!(linemap.pint(1..4).p, (5, 8));
+    assert_eq!(linemap.pint(1..4).q, (6, 2));
+    assert_eq!(linemap.raw_column(1), 7);
+    // hoon-138's column can run ahead of the text for the rest of a line
+    let linemap = LineMap::new("ab\n  cd\nef");
+    linemap.set_column(3, 3);
+    assert_eq!(linemap.hair(3), (2, 3));
+    assert_eq!(linemap.hair(6), (2, 6));
+    assert_eq!(linemap.pint(5..6).p, (2, 5));
+    assert_eq!(linemap.hair(8), (3, 1));
+    assert_eq!(linemap.hair(1), (1, 2));
+}
+
 #[test]
 fn sigbuc_wide_sigzap_wide_bucpam_and_zapwut_forms() {
     for src in ["~$  %foo  5\n", "~$(%foo 5)\n"] {
