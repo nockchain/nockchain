@@ -821,31 +821,71 @@ fn import_and_entry_wers() {
         );
     }
 
-    // Separate checkouts of the same open/hoon tree match by root marker.
+    // Separate checkouts of an open/hoon tree are unrelated roots, as in
+    // hoonc: the entry is keyed by its canonical path.
     let entry = tree.write("one/open/hoon/app/k.hoon", "42\n");
     let other_root = tree.path("two/open/hoon");
     fs::create_dir_all(&other_root).expect("root");
+    let canonical = entry.canonicalize().unwrap();
+    assert!(!path_is_inside_dir(&entry, &other_root));
     assert_eq!(
-        matching_hoon_root_marker(&entry, &other_root).as_deref(),
-        Some("open")
+        build_import_wer(&entry, &other_root),
+        components(&canonical)
     );
-    assert!(path_is_inside_dir(&entry, &other_root));
-    assert_eq!(build_import_wer(&entry, &other_root), ["app", "k.hoon"]);
     assert_eq!(
         entry_path_for_hoon(&entry, &other_root).unwrap(),
-        "/app/k.hoon"
+        canonical.to_string_lossy()
     );
-    let closed_root = tree.path("three/closed/hoon");
-    fs::create_dir_all(&closed_root).expect("root");
-    assert_eq!(matching_hoon_root_marker(&entry, &closed_root), None);
-    assert!(!path_is_inside_dir(&entry, &closed_root));
-    assert_eq!(hoon_root_marker(&tree.path("x/hoon/y")), None);
-    assert_eq!(hoon_relative_components(&tree.path("x/hoon/y")), None);
-    assert_eq!(hoon_relative_components(&tree.path("a/open/x/b")), None);
     assert_eq!(
         path_components_for_dbug(Path::new("/a/./b/../c")),
         ["a", "b", "c"]
     );
+}
+
+#[test]
+fn dependency_tree_check_follows_hoonc_parse_dir() {
+    let check = |root: &Path, entry: &Path, files: Option<&[PathBuf]>| {
+        check_dependency_tree(entry, root, files, &mut DependencyTreeMemo::default())
+    };
+    let tree = Tree::new();
+    let root = tree.root();
+    let entry = tree.write("app/entry.hoon", "/+  util\n42\n");
+    tree.write("lib/util.hoon", "|%\n++  two  2\n--\n");
+    tree.write("data/blob.jam", "hi");
+    tree.write("app/notes.md", "");
+    tree.write("target/Junk.hoon", "(((\n");
+    check(root, &entry, None).expect("a clean tree passes");
+    let outside = Tree::new();
+    let outside_entry = outside.write("Main.hoon", "/+  util\n42\n");
+    check(root, &outside_entry, None).expect("the entry path is not a directory key");
+
+    // Files nothing imports still fail the build, as in hoonc.
+    let failing = [
+        ("junk/bad.hoon", "(((\n", "native parser failed"),
+        ("junk/x.hoon", "/+  nope\n42\n", "native import not found"),
+        ("junk/Upper.hoon", "42\n", "not a Hoon path"),
+        ("data/empty.jam", "", "empty dependency"),
+    ];
+    for (rel, contents, message) in failing {
+        let path = tree.write(rel, contents);
+        let err = check(root, &entry, None).expect_err(rel).to_string();
+        assert!(err.contains(message), "{rel}: {err}");
+        // A batch directory list that leaves the file out ignores it.
+        let files = [entry.clone(), tree.path("lib/util.hoon")];
+        check(root, &entry, Some(&files)).expect("listed files pass");
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    // Import cycles anywhere in the tree fail, including self-imports.
+    for (a, b) in [("/+  b\n1\n", "/+  a\n2\n"), ("/+  a\n1\n", "3\n")] {
+        tree.write("lib/a.hoon", a);
+        tree.write("lib/b.hoon", b);
+        let err = check(root, &entry, None).expect_err("cycle").to_string();
+        assert!(err.contains("import cycle"), "{err}");
+    }
+    fs::remove_file(tree.path("lib/a.hoon")).expect("cleanup");
+    fs::remove_file(tree.path("lib/b.hoon")).expect("cleanup");
+    check(root, &entry, None).expect("clean again");
 }
 
 #[test]

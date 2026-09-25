@@ -11536,41 +11536,6 @@ pub fn wrap_hoon_with_trace(
                 return Hoon::Dbug(existing_spot, inner);
             }
 
-            let line_idx = spot.q.p.0;
-            let should_skip_outer = if spot.p == existing_spot.p {
-                let idx = line_idx.saturating_sub(1) as usize;
-                if idx < linemap.starts.len() {
-                    let start = linemap.starts[idx];
-                    let mut end = linemap
-                        .starts
-                        .get(idx + 1)
-                        .copied()
-                        .unwrap_or(linemap.source.len());
-                    let bytes = linemap.source.as_bytes();
-                    if end > start && bytes[end - 1] == b'\n' {
-                        end -= 1;
-                    }
-                    let line = &bytes[start..end];
-                    let mut cursor = 0;
-                    while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') {
-                        cursor += 1;
-                    }
-                    matches!(
-                        line.get(cursor),
-                        Some(b'/')
-                            if matches!(line.get(cursor + 1), Some(b'=') | Some(b'*') | Some(b'#'))
-                    )
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if should_skip_outer {
-                return Hoon::Dbug(existing_spot, inner);
-            }
-
             return Hoon::Dbug(spot, Box::new(Hoon::Dbug(existing_spot, inner)));
         }
 

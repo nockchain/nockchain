@@ -59,22 +59,18 @@ C6_PAIRINGS = [
     ("c6_imports", "imports/app/entry.hoon", "imports", True),
     ("c6_imports_kernel", "imports/app/kernel.hoon", "imports", False),
     ("c6_outside_kernel", "outside/app/kernel.hoon", "outside/deps", False),
+    ("c6_sur_lib_spot", "sur-lib-spot/app/entry.hoon", "sur-lib-spot", True),
+    ("c6_dat_eager", "dat-eager/app/entry.hoon", "dat-eager", True),
+    ("c6_dat_core", "dat-core/app/entry.hoon", "dat-core", True),
+    ("c6_comment_after_comma", "comment-after-comma/app/entry.hoon", "comment-after-comma", True),
+    ("c6_blank_continuation", "blank-continuation/app/entry.hoon", "blank-continuation", True),
+    ("c6_double_hyphen", "double-hyphen/app/entry.hoon", "double-hyphen", True),
+    ("c6_bar_mark", "bar-mark/app/entry.hoon", "bar-mark", True),
+    ("c6_bar_hoon", "bar-hoon/app/entry.hoon", "bar-hoon", True),
+    ("c6_hoon_root_marker", "root-marker/a/open/hoon/app/kernel.hoon", "root-marker/b/open/hoon", False),
 ]
 
-C6_DIVERGENT_PAIRINGS = [
-    ("divergent/c6_sur_lib_spot", "divergent/sur-lib-spot/app/entry.hoon", "divergent/sur-lib-spot", True),
-    ("divergent/c6_dat_eager", "divergent/dat-eager/app/entry.hoon", "divergent/dat-eager", True),
-    ("divergent/c6_comment_after_comma", "divergent/comment-after-comma/app/entry.hoon", "divergent/comment-after-comma", True),
-    ("divergent/c6_blank_continuation", "divergent/blank-continuation/app/entry.hoon", "divergent/blank-continuation", True),
-    ("divergent/c6_double_hyphen", "divergent/double-hyphen/app/entry.hoon", "divergent/double-hyphen", True),
-    ("divergent/c6_bar_mark", "divergent/bar-mark/app/entry.hoon", "divergent/bar-mark", True),
-    ("divergent/c6_bar_star_face", "divergent/bar-star-face/app/entry.hoon", "divergent/bar-star-face", True),
-    ("divergent/c6_bar_bare_mark", "divergent/bar-bare-mark/app/entry.hoon", "divergent/bar-bare-mark", True),
-    ("divergent/c6_trailing_comma", "divergent/trailing-comma/app/entry.hoon", "divergent/trailing-comma", True),
-    ("divergent/c6_tab_continuation", "divergent/tab-continuation/app/entry.hoon", "divergent/tab-continuation", True),
-    ("divergent/c6_unreachable_broken_file", "divergent/unreachable-broken-file/app/entry.hoon", "divergent/unreachable-broken-file", True),
-    ("divergent/c6_hoon_root_marker", "divergent/root-marker/a/open/hoon/app/kernel.hoon", "divergent/root-marker/b/open/hoon", False),
-]
+C6_DIVERGENT_PAIRINGS = []
 
 C6_PACKAGE = "crates/honk/test-assets/type-probes/coverage/c6"
 
@@ -119,6 +115,46 @@ C6_PACKAGE = "crates/honk/test-assets/type-probes/coverage/c6"
     for name, _, _, _ in C6_PAIRINGS + C6_DIVERGENT_PAIRINGS
 ]
 
+
+# c6 rejection trees: both compilers must refuse to build the entry against
+# the dependency root (verdict = artifact absence, rejection_tree_test.sh).
+# Each is (name, dependency root under reject/); the entry is app/entry.hoon.
+C6_REJECTION_TREES = [
+    ("bar_bare_mark", "bar-bare-mark"),
+    ("bar_star_face", "bar-star-face"),
+    ("lib_before_sur", "lib-before-sur"),
+    ("one_space_gap", "one-space-gap"),
+    ("raw_after_dat", "raw-after-dat"),
+    ("skipped_dir", "skipped-dir"),
+    ("tab_continuation", "tab-continuation"),
+    ("tab_in_comment", "tab-in-comment"),
+    ("trailing_comma", "trailing-comma"),
+    ("unreachable_bad_path", "unreachable-bad-path"),
+    ("unreachable_broken_file", "unreachable-broken-file"),
+    ("unreachable_cycle", "unreachable-cycle"),
+    ("unreachable_missing_import", "unreachable-missing-import"),
+]
+
+[
+    sh_test(
+        name = "c6_reject_{}_test".format(name),
+        size = "small",
+        srcs = ["rejection_tree_test.sh"],
+        args = [
+            "$(rootpath //crates/hoonc:hoonc_bin)",
+            "$(rootpath //crates/honk:honk)",
+            "$(rootpath //hoon/common:hoon.hoon)",
+            "$(rootpath reject/{}/app/entry.hoon)".format(root),
+            "{}/reject/{}".format(C6_PACKAGE, root),
+        ],
+        data = glob(["reject/{}/**".format(root)]) + [
+            "//crates/honk:honk",
+            "//crates/hoonc:hoonc_bin",
+            "//hoon/common:hoon.hoon",
+        ],
+    )
+    for name, root in C6_REJECTION_TREES
+]
 
 # c6 CLI pairings that the hoon_library/honk_library rules cannot express:
 # dynock output modes and a batch manifest built twice against a persistent
@@ -259,5 +295,6 @@ test_suite(
     name = "coverage_parity_test",
     tests = ["{}_parity_test".format(name) for name in PROBES] +
             ["{}_parity_test".format(name) for name, _, _, _ in C6_PAIRINGS] +
-            ["{}_parity_test".format(name) for name in C6_CLI_PAIRINGS],
+            ["{}_parity_test".format(name) for name in C6_CLI_PAIRINGS] +
+            ["c6_reject_{}_test".format(name) for name, _ in C6_REJECTION_TREES],
 )

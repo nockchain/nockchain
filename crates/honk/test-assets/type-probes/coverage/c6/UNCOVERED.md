@@ -33,22 +33,39 @@ Parity pairings (all PASS; `coverage_parity_test` runs them):
   against `--cache-dir`; the warm pass reads cached entry products and cached
   dependency vases, and the kernel line carries an explicit directory list.
 
-## Divergences (in `divergent/`, tests tagged manual)
+## Fixed divergences (DIVERGENCES.md rows 28-32)
 
-| probe | verdict | cause |
-| --- | --- | --- |
-| `c6_sur_lib_spot`, `c6_ford_pin_spot` | MISMATCH | The body `%spot` of a file whose import block starts with `/-`, `/+` or `/?` begins at that line in honk and after the block in hoonc. hatch `utils.rs` ~11545 (`should_skip_outer`) drops the outer spot only after `/=`, `/*`, `/#`. Blocks parity for every `/-` and `/+` import. |
-| `c6_dat_eager` | MISMATCH | hoonc kicks `/dat` nodes and wraps the value (`hoonc.hoon` compile, `is-dat`); honk gives every `/#` import except the pinned softed constraints an unevaluated swet trap (`honk.rs` ~2357-2380). Blocks parity for `/#`. |
-| `c6_comment_after_comma` | HOONC-ONLY | Continuation lines are joined before `::` comments are stripped per comma item, so `util,  :: note` swallows the next line's items (`pipeline.rs` ~447-461, ~596). |
-| `c6_blank_continuation` | HOONC-ONLY | An empty line ends a continued clause and the indented item after it ends the import block (`pipeline.rs` ~449); hoonc's `gaw` allows blank lines. |
-| `c6_double_hyphen` | HOONC-ONLY | `/+ dbl--dash`: honk drops empty hyphen parts (`pipeline.rs` ~645), hoonc's `+segments` falls back to the literal name. |
-| `c6_bar_mark` | HOONC-ONLY | honk rejects `/*` marks other than `%jam` (`pipeline.rs` ~239-249); hoonc ignores the mark and vases any file as `$octs`. Deliberate per the code comment. |
-| `c6_bar_star_face` | HONK-ONLY | `/*  *  ...` is accepted (`pipeline.rs` ~536); hoonc requires a face. |
-| `c6_bar_bare_mark` | HONK-ONLY | `/*  x  jam  ...` is accepted (`pipeline.rs` ~544); hoonc requires `%`. |
-| `c6_trailing_comma` | HONK-ONLY | Empty comma items are skipped (`pipeline.rs` ~553); hoonc needs an item after each comma. |
-| `c6_tab_continuation` | HONK-ONLY | A tab-indented continuation line is accepted (`pipeline.rs` ~449); tabs are not Hoon whitespace. |
-| `c6_unreachable_broken_file` | HONK-ONLY | hoonc parses every file in the dependency tree and fails on an unimported broken file; honk compiles only the entry's import closure (`honk.rs` compile_entry/compile_path). |
-| `c6_hoon_root_marker` | MISMATCH | Deliberate: an entry under a different `open/hoon` checkout than the dependency root is keyed `/app/...` by root marker in honk (`honk.rs` entry_path_for_hoon ~4720, build_import_wer ~922) and by absolute path in hoonc. |
+The former `divergent/` pairings now run in `coverage_parity_test`:
+
+- `c6_sur_lib_spot`, `regressions:c6_ford_pin_spot`: honk parses the import
+  header with a port of hoonc's `+pile-rule` header (`pipeline.rs`
+  `parse_import_header`) and blanks it before hatch parses the body, so the
+  body's `%spot` starts after the header as in hoonc. hatch itself now skips
+  an import block only at the top of a file (`runes/fas.rs`
+  `import_header`), outside the traced body, so it no longer needs
+  `should_skip_outer`, and a tall `/-1` or `/=/foo` elsewhere parses as a
+  path (`regressions:p3_tall_path_after_import_rune`).
+- `c6_dat_eager`, `c6_dat_core`: a node keyed under `/dat` is kicked while it
+  is built and its value kept in an eval-vase trap (`honk.rs`
+  `is_hoonc_dat_node`, `kick_vase_trap_value`).
+- `c6_comment_after_comma`, `c6_blank_continuation`, `c6_double_hyphen`,
+  `c6_bar_mark`, `c6_bar_hoon`: the header port accepts what hoonc accepts;
+  `/*` takes any mark and a `.hoon` target compiles as Hoon (`+is-hoon`);
+  `+segments` keeps a name with an empty hyphen part whole.
+- `c6_hoon_root_marker`: the `open|closed/hoon` root-marker matching is gone;
+  an entry outside the dependency root is keyed by its canonical path, as in
+  hoonc. It came from the monorepo layout (separate `open/hoon` checkouts in
+  sandboxes); nothing in this repository builds under an `open/hoon` root.
+
+Both-reject trees under `reject/` (`c6_reject_*_test`, rejection_tree_test.sh):
+`trailing-comma`, `tab-continuation`, `bar-star-face`, `bar-bare-mark`,
+`lib-before-sur`, `raw-after-dat` (runes out of order), `one-space-gap`,
+`tab-in-comment`, `skipped-dir` (hoonc's walk skips `packages` and friends),
+and, for hoonc's whole-tree pass (`honk.rs` `check_dependency_tree`),
+`unreachable-broken-file`, `unreachable-missing-import`, `unreachable-cycle`
+and `unreachable-bad-path` (a path `+stab` rejects). An empty file anywhere in
+the tree hangs hoonc; honk rejects it (unit-tested only, since hoonc does not
+terminate).
 
 Other findings (not parity verdicts):
 
@@ -151,9 +168,6 @@ Other findings (not parity verdicts):
   walked root; unreachable.
 - `noun_eq` L4456, 4466-4467 B4452c2F B4455T B4460F B4460c2F: need a mug
   collision; unreachable in practice.
-- `build_import_wer` L925 B923F, `entry_path_for_hoon` L4723 B4721F: a
-  matching `open|closed/hoon` marker implies the relative components exist;
-  unreachable.
 - `lexical_absolute_path` L4756: `Component::Prefix`, Windows only.
 
 ### pipeline.rs
@@ -196,19 +210,17 @@ honk run over each tree (the same flags as the Bazel rules).
   `find_urbit_arvo_root`, `resolve_imports_for` B226T): the binary resolves
   each leaf with `ScopeMode::Standard` and never parses the graph as one AST.
   Unit-covered.
-- pipeline.rs `/+`, `/-`, `/?` handling (`resolve_import` L303 B312F,
-  `parse_leading_imports` L466, 472, `parse_import_clause` L571-583 B570T
-  B573F B573c2F) and `/#` resolution: blocked by the `c6_sur_lib_spot`,
-  `c6_ford_pin_spot` and `c6_dat_eager` divergences (the divergent probes
-  run this code).
+- pipeline.rs `/+`, `/-`, `/?` and `/#` handling: covered by
+  `c6_sur_lib_spot`, `regressions:c6_ford_pin_spot`, `c6_dat_eager` and
+  `c6_dat_core` since the rows 28-32 fixes (line numbers in this ledger
+  predate them).
 - pipeline.rs rejections, which hoonc also rejects (checked against hoonc):
   `/%` (L477-479), a non-import rune (B440T is covered by `c6_fas_path`, but
   `/~` rejects), malformed `/=` `/*` `/+` clauses (L491-496, 503, 521-537,
   554, 560-562 B495T B502T B525T B533T B553T B559T B573T B573c2T), missing
   imports (L279, 298-299, 331-334 B269F B273F B277F B287F B296F), cycles,
-  B447F (import block to EOF with no body). Unit-covered. `/*` with a
-  non-`%jam` mark (L241-247), a `*` face (B536T) and bare marks, trailing
-  commas and tab continuations are divergences above.
+  B447F (import block to EOF with no body). Unit-covered. The header edge
+  cases hoonc rejects are the `reject/` trees above.
 - bin/honk.rs CLI plumbing (`from_flags` errors, `CompileMode::parse`,
   `usage`, `parse_args`, `parse_batch_manifest` errors, `main` subcommands
   and help, `hoon_log_path`, timing helpers): not salient; unit-covered.
@@ -240,12 +252,10 @@ honk run over each tree (the same flags as the Bazel rules).
   build (`c6_cli_subject_type_override_and_relative_output`), which is
   parity-checked; the rest are error paths. Unit-covered.
 - Path fallbacks: `build_entry_wer` B865T, `path_is_inside_dir` B891T,
-  `matching_hoon_root_marker`, `build_import_wer` B911F B919T/F B922T/F,
-  `hoon_relative_components`, `entry_path_for_hoon` B4716T B4720T B4731T,
-  `hoon_path_from_relative` B4741T: symlinked roots and marker matching. The
-  marker case is the deliberate `c6_hoon_root_marker` divergence; a
-  symlink-only match cannot be arranged with Bazel-declared inputs; an entry
-  equal to the root is not buildable. Unit-covered.
+  `build_import_wer` B911F B919T/F, `entry_path_for_hoon` B4716T B4731T,
+  `hoon_path_from_relative` B4741T: symlinked roots. A symlink-only match
+  cannot be arranged with Bazel-declared inputs; an entry equal to the root
+  is not buildable. Unit-covered.
 - Cache internals not reached by `c6_batch_*`: the defensive paths listed in
   the unit section, `compile_path` cycle B2281T and
   `dependency_merkle_for_path` B1937T (rejections: hoonc rejects cyclic

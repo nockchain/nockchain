@@ -396,11 +396,11 @@ fn import_block_resolves_every_rune_kind_in_order() {
         "app/entry.hoon",
         concat!(
             "/?  310\n", "::  a comment line before the imports\n", "\n", "/-  *shapes, kinds\n",
-            "/+  util,\n", "    ::  a comment line inside a continued clause\n", "    \n",
-            "    alias=math-extra,,\n", "\t*star-lib\n",
+            "/+  util,\n", "    ::  a comment line inside a continued clause\n", "\n",
+            "    alias=math-extra,\n", "    *star-lib\n",
             "/=  raw  /common/raw  ::  a trailing comment\n", "/=  *  /common/star\n", "/=\n",
-            "    twice\n", "    //common//raw\n", "/*  blob  %jam  /data/blob/jam\n",
-            "/*  *  jam  /data/blob/jam\n", "/#  const\n", "|%\n", "--\n",
+            "    twice\n", "    /common/raw\n", "/*  blob  %jam  /data/blob/jam\n",
+            "/*  text  %txt  /data/blob/jam\n", "/#  const\n", "|%\n", "--\n",
         ),
     );
     let imports = resolved(&entry, tree.root());
@@ -425,7 +425,8 @@ fn import_block_resolves_every_rune_kind_in_order() {
             (hoon, None, at("common/star.hoon")),
             (hoon, Some("twice"), at("common/raw.hoon")),
             (data, Some("blob"), at("data/blob.jam")),
-            (data, None, at("data/blob.jam")),
+            // hoonc ignores the mark: any non-Hoon file is `$octs` data.
+            (data, Some("text"), at("data/blob.jam")),
             (hoon, Some("const"), at("dat/const.hoon")),
         ]
     );
@@ -449,27 +450,41 @@ fn import_block_ends_at_the_first_non_import_line() {
         );
     }
 
-    // The import block may run to the end of the file, including inside a
-    // continued clause.
-    let entry = tree.write(
-        "app/eof.hoon", "/=  raw  /common/raw\n/+  util,\n    star-lib",
-    );
+    // The import block may run to the end of the file.
+    let entry = tree.write("app/eof.hoon", "/+  util,\n    star-lib\n");
     let faces: Vec<Option<String>> = resolved(&entry, tree.root())
         .into_iter()
         .map(|import| import.face)
         .collect();
     assert_eq!(
         faces,
-        [Some("raw".to_string()), Some("util".to_string()), Some("star-lib".to_string())]
+        [Some("util".to_string()), Some("star-lib".to_string())]
     );
+
+    // A clause after the header ends (out of order, or not followed by a
+    // gap) is left for the body, where hoonc cannot parse it.
+    for source in ["/=  raw  /common/raw\n/+  util,\n    star-lib\n", "/+  util,\n    star-lib"] {
+        let entry = tree.write("app/order.hoon", source);
+        let err = resolve_native_imports(&entry, tree.root(), ScopeMode::Standard)
+            .expect_err("clause outside the header");
+        assert!(
+            err.to_string().contains("malformed /+"),
+            "{source:?}: {err}"
+        );
+    }
 }
 
 #[test]
 fn malformed_import_clauses_are_parse_errors() {
     for source in [
-        "/=\n", "/=  ::  only a comment\n", "/=  onlyface\n", "/=  a  /b  extra\n", "/*\n",
-        "/*  ::  only a comment\n", "/*  a  %jam\n", "/*  a  %jam  /b/jam  extra\n", "/+  *\n",
-        "/+  =x\n", "/+  x=\n", "/-  util, *  \n",
+        "/=\n", "/=  ::  only a comment\n", "/=  onlyface\n", "/*\n", "/*  ::  only a comment\n",
+        "/*  a  %jam\n", "/+  *\n", "/+  =x\n", "/+  x=\n", "/-  util, *  \n",
+        // hoonc's header rule: a name after every comma, no tab indentation,
+        // a `sym` face and a `%` mark for /*, a two-space gap after the rune,
+        // and the runes in /- /+ /= /* /# order.
+        "/+  util,\n42\n", "/=  raw\n\t/common/raw\n42\n", "/*  *  %jam  /data/blob/jam\n42\n",
+        "/*  x  jam  /data/blob/jam\n42\n", "/+ util\n42\n", "/+  util\n/-  kinds\n42\n",
+        "/#  const\n/=  raw  /common/raw\n42\n", "/?  310\n/?  311\n42\n",
     ] {
         match resolve_err(source) {
             CompilerError::Parse(message) => {
@@ -480,21 +495,46 @@ fn malformed_import_clauses_are_parse_errors() {
     }
     // `/%` is recognized and rejected rather than dropped.
     assert!(resolve_err("/%  thing  %hoon  /lib/thing\n").is_unsupported_expr());
+
+    // Text after a complete clause and its gap is the body, not the clause.
+    let tree = import_tree();
+    for (source, face) in [
+        ("/=  raw  /common/raw  extra\n", "raw"),
+        ("/*  blob  %jam  /data/blob/jam  extra\n", "blob"),
+    ] {
+        let entry = tree.write("app/body.hoon", source);
+        let imports = resolved(&entry, tree.root());
+        assert_eq!(imports.len(), 1, "{source:?}");
+        assert_eq!(imports[0].face.as_deref(), Some(face));
+    }
 }
 
 #[test]
-fn data_imports_accept_only_the_jam_mark() {
+fn data_imports_accept_any_mark_and_hoon_files_stay_hoon() {
     let tree = import_tree();
-    let entry = tree.write("app/txt.hoon", "/*  blob  %txt  /data/blob/jam\n42\n");
-    let err = resolve_native_imports(&entry, tree.root(), ScopeMode::Standard)
-        .expect_err("non-jam marks are rejected");
-    assert!(err.is_unsupported_expr());
-    assert!(err.to_string().contains("%txt"), "{err}");
+    let entry = tree.write(
+        "app/marks.hoon", "/*  blob  %txt  /data/blob/jam\n/*  code  %hoon  /lib/util/hoon\n42\n",
+    );
+    let kinds: Vec<(NativeImportKind, PathBuf)> = resolved(&entry, tree.root())
+        .into_iter()
+        .map(|import| (import.kind, canon(&import.path)))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (NativeImportKind::Data, canon(&tree.path("data/blob.jam"))),
+            // hoonc picks the node kind from the file name (`+is-hoon`).
+            (NativeImportKind::Hoon, canon(&tree.path("lib/util.hoon"))),
+        ]
+    );
 }
 
 #[test]
 fn missing_imports_name_their_rune() {
     let tree = import_tree();
+    tree.write("lib/dbl/dash.hoon", "|%\n--\n");
+    tree.write("packages/raw.hoon", "[1 2]\n");
+    tree.write("data/blob.bin", "hi");
     for (source, rune) in [
         ("/+  nope\n", "`/+ nope`"),
         ("/-  nope\n", "`/- nope`"),
@@ -502,13 +542,22 @@ fn missing_imports_name_their_rune() {
         ("/=  x  /common/nope\n", "`/= /common/nope`"),
         // A raw import naming no file at all.
         ("/=  x  /\n", "`/= /`"),
+        // An empty knot names no file hoonc loads.
+        ("/=  x  /common//raw\n", "`/= /common//raw`"),
+        (
+            "/=  x  /common/../common/raw\n", "`/= /common/../common/raw`",
+        ),
+        // hoonc's directory walk skips `packages` and unlisted extensions.
+        ("/=  x  /packages/raw\n", "`/= /packages/raw`"),
+        ("/*  x  %bin  /data/blob/bin\n", "`/* /data/blob/bin`"),
         ("/*  x  %jam  /data/nope/jam\n", "`/* /data/nope/jam`"),
         // A data import needs at least a stem and an extension.
         ("/*  x  %jam  /blob\n", "`/* /blob`"),
         // Hyphen variants are tried and none exists.
         ("/+  no-such-lib\n", "`/+ no-such-lib`"),
-        // A suffix of only hyphens has no path candidates.
-        ("/+  -\n", "`/+ -`"),
+        // With an empty hyphen part only the literal name is tried, so
+        // lib/dbl/dash.hoon does not match.
+        ("/+  dbl--dash\n", "`/+ dbl--dash`"),
     ] {
         let entry = tree.write("app/missing.hoon", source);
         let err = resolve_native_imports(&entry, tree.root(), ScopeMode::Standard)
@@ -619,6 +668,29 @@ fn leaf_parse_ignores_imports() {
     let entry = tree.write("a.hoon", "/+  missing\n[1 2]\n");
     let expr = parse_native_hoon_leaf(&entry, tree.root(), false).expect("leaf parses");
     assert!(!matches!(expr, Hoon::TisLus(..)), "{expr:?}");
+}
+
+#[test]
+fn body_spot_starts_after_the_import_header() {
+    // hoonc parses the header apart from the body, so whatever the first
+    // rune, the body's outermost spot starts at the body, not the header.
+    let tree = Tree::new();
+    for header in [
+        "/?  310\n/-  a\n", "/-  a\n/+  b,\n    c\n", "/+  b,\n\n    c\n", "/=  a  /a\n",
+        "/*  a  %jam  /a/jam\n", "/#  a\n",
+    ] {
+        let source = format!("{header}::  a comment\n\n[1 2]\n");
+        let entry = tree.write("a.hoon", &source);
+        let expr = parse_native_hoon_leaf(&entry, tree.root(), true).expect("leaf parses");
+        let Hoon::TisSig(items) = &expr else {
+            panic!("expected a %tssg body, got {expr:?}");
+        };
+        let Hoon::Dbug(spot, _) = &items[0] else {
+            panic!("expected a traced body, got {expr:?}");
+        };
+        let body_line = source.lines().count() as u64;
+        assert_eq!(spot.q.p, (body_line, 1), "{source:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

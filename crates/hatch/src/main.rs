@@ -386,14 +386,6 @@ pub fn hoon_parser<'src>(
             dot_runes_tall(hoon.clone(), spec.clone()),
             dot_runes_wide(hoon_wide.clone(), spec_wide.clone())
         ),
-        just('/') // skip imports...
-            .ignore_then(fas_runes_tall(
-                hoon.clone(),
-                hoon_wide.clone(),
-                wer.clone(),
-                linemap.clone(),
-            ))
-            .boxed(),
         hoon_wide.clone().boxed(),
         noun_tall(hoon.clone()).boxed(),
     ];
@@ -528,11 +520,18 @@ pub fn parser<'src>(
 
     let hoon = if bug { hoon } else { hoon_no_trace };
 
-    hoon.separated_by(gap())
-        .at_least(1)
-        .collect::<Vec<Hoon>>()
-        .map(|hoons| Hoon::TisSig(hoons))
-        .delimited_by(gap().or_not(), gap().or_not())
+    // An import block may open the file; the body's first spot starts after
+    // it, as hoonc parses the block apart from the body.
+    gap()
+        .or_not()
+        .ignore_then(import_header().or_not())
+        .ignore_then(
+            hoon.separated_by(gap())
+                .at_least(1)
+                .collect::<Vec<Hoon>>()
+                .map(|hoons| Hoon::TisSig(hoons)),
+        )
+        .then_ignore(gap().or_not())
         .boxed()
 }
 

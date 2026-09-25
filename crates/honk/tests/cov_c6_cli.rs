@@ -285,37 +285,44 @@ fn c6_cli_subcommands_and_runtime_errors() {
     assert!(!out.exists());
 
     // Source-level failures: a syntax error, a missing import, and an import
-    // cycle (found while compiling, or while hashing for the cache).
-    let bad = write(&deps, "app/bad.hoon", "|=  a=@\n(\n");
-    let missing_import = write(&deps, "app/missing.hoon", "/=  x  /common/nope\n42\n");
-    write(&deps, "cycle/a.hoon", "/=  b  /cycle/b\n42\n");
-    write(&deps, "cycle/b.hoon", "/=  a  /cycle/a\n42\n");
-    let cyclic = write(&deps, "app/cyclic.hoon", "/=  a  /cycle/a\n42\n");
-    let cache = cwd.join("cycle-cache");
-    for (args, expected) in [
+    // cycle. hoonc parses the whole dependency tree first, so each gets its
+    // own tree, and a broken file fails the build even when nothing imports
+    // it.
+    let cases = [
         (
-            args!["--arbitrary", "--output", out, "--prelude", prelude, bad, deps],
-            "native parser failed",
+            "bad", "app/bad.hoon", "|=  a=@\n(\n", "native parser failed",
         ),
         (
-            args!["--arbitrary", "--output", out, "--prelude", prelude, missing_import, deps],
-            "native import not found",
+            "missing", "app/missing.hoon", "/=  x  /common/nope\n42\n", "native import not found",
         ),
         (
-            args!["--arbitrary", "--output", out, "--prelude", prelude, cyclic, deps],
-            "cyclic native dependency",
+            "cycle", "cycle/a.hoon", "/=  b  /cycle/b\n42\n", "import cycle",
         ),
-        (
-            args![
-                "--arbitrary", "--cache-dir", cache, "--output", out, "--prelude", prelude, cyclic,
-                deps
-            ],
-            "cyclic native dependency",
-        ),
-    ] {
-        let output = honk(&args, cwd);
-        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-        assert!(stderr(&output).contains(expected), "{}", stderr(&output));
+    ];
+    for (name, rel, contents, expected) in cases {
+        let deps = deps_tree(&cwd.join(name));
+        let broken = write(&deps, rel, contents);
+        if name == "cycle" {
+            write(&deps, "cycle/b.hoon", "/=  a  /cycle/a\n42\n");
+        }
+        let cache = cwd.join(format!("{name}-cache"));
+        for entry in [broken, deps.join("app/gate.hoon")] {
+            for args in [
+                args!["--arbitrary", "--output", out, "--prelude", prelude, entry, deps],
+                args![
+                    "--arbitrary", "--cache-dir", cache, "--output", out, "--prelude", prelude,
+                    entry, deps
+                ],
+            ] {
+                let output = honk(&args, cwd);
+                assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+                assert!(
+                    stderr(&output).contains(expected),
+                    "{name}: {}",
+                    stderr(&output)
+                );
+            }
+        }
     }
     assert!(!out.exists());
 }
