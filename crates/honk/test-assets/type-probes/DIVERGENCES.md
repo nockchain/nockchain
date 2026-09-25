@@ -1,8 +1,8 @@
 # hoonc divergences found by the coverage work
 
 Each entry was a source program where honk (or its parser, hatch) disagreed
-with hoonc. All but the two under Open are fixed. Their probes now run in CI with the type
-probe parity suite: byte-identical builds in `coverage/regressions/` (or the
+with hoonc. All but those under Open are fixed. Their probes now run in CI
+with the type probe parity suite: byte-identical builds in `coverage/regressions/` (or the
 `coverage/c6` import pairings), programs both compilers reject in `reject/`
 (`REJECTION_PROBES`), and two native-only rejections (`divergent_bunt`,
 `wash_gain_loop`) where hoonc never terminates.
@@ -14,8 +14,8 @@ row here until it is fixed.
 
 | # | Divergence | Probe |
 |---|---|---|
-| 34 | hatch does not parse the sail `;p: text` form | `coverage/p4/divergent/p4_sail_colon_text` |
-| 35 | hatch does not parse the sail `/"url"` and `@"url"` tag shorthands | `coverage/p4/divergent/p4_sail_href_src` |
+| 36 | hatch does not implement sail markdown (`++cram`): bare text lines among a tall element's children | `coverage/p4/divergent/p4_sail_cram` |
+| 37 | In a tall `;"""` block, a `"""` line indented deeper than the opener ends the block in honk; hoonc reads it as text | none yet |
 
 ## Type checker (`crates/honk/src/native/ut`)
 
@@ -64,6 +64,8 @@ row here until it is fixed.
 | 31 | honk ignored broken files the entry does not import; hoonc checks the whole tree | same |
 | 32 | Entries under an `open/hoon` root were keyed by the root marker instead of the path | same |
 | 33 | A tall arm body starting with a `/-` path segment was read as an import header | same |
+| 34 | hatch did not parse the sail `;p: text` form | hatch: port hoon-138's ++sail grammar |
+| 35 | hatch did not parse the sail `/"url"` and `@"url"` tag shorthands (and a dozen other sail forms) | same |
 
 ## Open honk bugs (no hoonc verdict)
 
