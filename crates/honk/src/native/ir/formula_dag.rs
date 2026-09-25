@@ -19,10 +19,12 @@ use smallvec::SmallVec;
 
 use super::leaf::Leaf;
 use crate::errors::{CompilerError, Result};
+use crate::native::identity::*;
 use crate::native::noun::noun_pair;
 
 /// Compile-local identity of one canonical Nock formula node.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct FormulaId(pub(crate) u32);
 
 /// Arbitrary-precision Nock axis.
@@ -105,7 +107,7 @@ enum FormulaNode {
         body: FormulaId,
     },
     Op {
-        code: u8,
+        code: NockOpcode,
         args: SmallVec<[FormulaId; 2]>,
     },
 }
@@ -120,8 +122,8 @@ struct FormulaEntry {
 #[derive(Default)]
 pub struct FormulaArena {
     entries: Vec<FormulaEntry>,
-    buckets: HashMap<u64, Vec<FormulaId>>,
-    imported_by_raw: HashMap<u64, FormulaId>,
+    buckets: HashMap<NodeHash, Vec<FormulaId>>,
+    imported_by_raw: HashMap<NounIdentity, FormulaId>,
     pub requested: u64,
     pub hits: u64,
     pub imports: u64,
@@ -151,7 +153,7 @@ impl FormulaArena {
         self.requested += 1;
         let mut hasher = DefaultHasher::new();
         node.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = NodeHash(hasher.finish());
         if let Some(bucket) = self.buckets.get(&hash) {
             if let Some(id) = bucket
                 .iter()
@@ -228,7 +230,7 @@ impl FormulaArena {
         })
     }
 
-    pub fn op(&mut self, code: u8, args: &[FormulaId]) -> FormulaId {
+    pub fn op(&mut self, code: NockOpcode, args: &[FormulaId]) -> FormulaId {
         self.intern(FormulaNode::Op {
             code,
             args: SmallVec::from_slice(args),
@@ -240,7 +242,7 @@ impl FormulaArena {
     /// to the data embedded in it.
     pub fn import(&mut self, noun: Noun, space: &NounSpace) -> Result<FormulaId> {
         if !noun.is_direct() {
-            let raw = unsafe { noun.as_raw() };
+            let raw = NounIdentity::of(noun);
             if let Some(id) = self.imported_by_raw.get(&raw).copied() {
                 return Ok(id);
             }
@@ -277,13 +279,13 @@ impl FormulaArena {
                     FormulaNode::Eval(self.import(subject, space)?, self.import(formula, space)?)
                 }
                 3 | 4 => FormulaNode::Op {
-                    code: op as u8,
+                    code: NockOpcode(op as u8),
                     args: smallvec::smallvec![self.import(tail, space)?],
                 },
                 5 | 7 | 8 | 12 | 13 => {
                     let (left, right) = pair(tail)?;
                     FormulaNode::Op {
-                        code: op as u8,
+                        code: NockOpcode(op as u8),
                         args: smallvec::smallvec![
                             self.import(left, space)?,
                             self.import(right, space)?
@@ -331,7 +333,7 @@ impl FormulaArena {
         let node = decoded.unwrap_or_else(|_| FormulaNode::Raw(Leaf::from_noun_raw(noun, space)));
         let id = self.intern_with_materialized(node, Some(noun));
         if !noun.is_direct() {
-            self.imported_by_raw.insert(unsafe { noun.as_raw() }, id);
+            self.imported_by_raw.insert(NounIdentity::of(noun), id);
         }
         Ok(id)
     }
@@ -404,12 +406,12 @@ impl FormulaArena {
             FormulaNode::Op { code, args } => match args.as_slice() {
                 [arg] => {
                     let arg = self.materialize(*arg, slab);
-                    T(slab, &[D(u64::from(code)), arg])
+                    T(slab, &[D(u64::from(code.0)), arg])
                 }
                 [left, right] => {
                     let left = self.materialize(*left, slab);
                     let right = self.materialize(*right, slab);
-                    T(slab, &[D(u64::from(code)), left, right])
+                    T(slab, &[D(u64::from(code.0)), left, right])
                 }
                 _ => unreachable!("native formula opcodes have arity one or two"),
             },
@@ -509,18 +511,18 @@ impl FormulaArena {
                         }
                     }
                 }
-                return self.op(7, &[mal, buz]);
+                return self.op(NockOpcode::COMPOSE, &[mal, buz]);
             }
         }
         if let FormulaNode::Cell(head, tail) = self.entry(mal).node {
             if self.slot_axis(tail).is_some_and(Axis::is_one) {
-                return self.op(8, &[head, buz]);
+                return self.op(NockOpcode::PUSH, &[head, buz]);
             }
         }
         if self.slot_axis(buz).is_some_and(Axis::is_one) {
             return mal;
         }
-        self.op(7, &[mal, buz])
+        self.op(NockOpcode::COMPOSE, &[mal, buz])
     }
 
     /// `++cond`, preserving constant-folding order.
@@ -628,8 +630,8 @@ mod tests {
         let mut arena = FormulaArena::new();
         let one_a = arena.slot_u64(1);
         let one_b = arena.slot_u64(1);
-        let composed_a = arena.op(7, &[one_a, one_b]);
-        let composed_b = arena.op(7, &[one_b, one_a]);
+        let composed_a = arena.op(NockOpcode::COMPOSE, &[one_a, one_b]);
+        let composed_b = arena.op(NockOpcode::COMPOSE, &[one_b, one_a]);
         assert_eq!(one_a, one_b);
         assert_eq!(composed_a, composed_b);
         assert_eq!(arena.distinct(), 2);

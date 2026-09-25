@@ -78,8 +78,8 @@ impl<T> TypeRef<T> {
     }
 
     #[inline(always)]
-    pub fn identity(&self) -> usize {
-        self.arena_id().0 as usize
+    pub fn identity(&self) -> TypeId {
+        self.arena_id()
     }
 
     #[inline(always)]

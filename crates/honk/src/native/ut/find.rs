@@ -285,7 +285,7 @@ impl<'a> Ut<'a> {
         // hash-consed, so ptr == structural identity), mirroring C8's NestSeenSet.
         #[derive(Default)]
         struct SeenState {
-            hold_path: Vec<u64>,
+            hold_path: Vec<TypeId>,
         }
 
         fn go(
@@ -491,7 +491,7 @@ impl<'a> Ut<'a> {
                     go(ut, inner, way, axe, skip, name, lon, seen)
                 }
                 NTy::Hold { .. } => {
-                    let sut_id = native_type_id_u64(&sut);
+                    let sut_id = native_type_id(&sut);
                     if seen.hold_path.contains(&sut_id) {
                         return Ok(Pony::Void);
                     }
@@ -612,7 +612,7 @@ impl<'a> Ut<'a> {
 
     pub(super) fn noun_seen_insert_structural(
         &mut self,
-        seen: &mut HashMap<u32, Vec<Noun>>,
+        seen: &mut HashMap<NounMug, Vec<Noun>>,
         noun: Noun,
     ) -> Result<bool> {
         let mug = self.noun_mug_cached(noun);

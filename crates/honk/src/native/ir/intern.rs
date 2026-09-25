@@ -21,7 +21,9 @@ use super::formula_dag::FormulaId;
 use super::leaf::Leaf;
 use super::ty::{tas, BoundaryType, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
+use crate::native::identity::*;
 use crate::native::noun::{noun_eq, noun_pair};
+use crate::native::ut::keys::*;
 
 /// Decode a type noun into the native IR AND intern it in one O(n) pass, using a
 /// persistent pointer-identity `memo` so the noun DAG (and anything carried over
@@ -50,7 +52,7 @@ fn intern_type_noun(
     }
     // SAFETY: `noun` is a live, in-`space` slab noun; `as_raw` only reads its
     // identity word (used purely as a memo key, never dereferenced).
-    let raw_addr = unsafe { noun.as_raw() };
+    let raw_addr = NounIdentity::of(noun);
     if let Some(rc) = memo.get(&raw_addr) {
         return Ok(Rc::clone(rc));
     }
@@ -140,7 +142,7 @@ fn pair(n: Noun, space: &NounSpace) -> Result<(Noun, Noun)> {
 /// stays live for the whole compile). The memo therefore just accumulates for the
 /// life of the `Context` (one compile) — a plain map, no frame-scoped eviction.
 struct InternMemo {
-    map: HashMap<u64, Rc<Type>>,
+    map: HashMap<NounIdentity, Rc<Type>>,
 }
 
 impl InternMemo {
@@ -151,12 +153,12 @@ impl InternMemo {
     }
 
     #[inline]
-    fn get(&self, raw: &u64) -> Option<&Rc<Type>> {
+    fn get(&self, raw: &NounIdentity) -> Option<&Rc<Type>> {
         self.map.get(raw)
     }
 
     #[inline]
-    fn insert(&mut self, raw: u64, rc: Rc<Type>) {
+    fn insert(&mut self, raw: NounIdentity, rc: Rc<Type>) {
         self.map.insert(raw, rc);
     }
 }
@@ -202,32 +204,25 @@ pub struct Context {
     live: LiveIntern,
 
     // --- encode memos ---
-    to_noun_memo: HashMap<u32, Noun>, // was TO_NOUN_MEMO
-    leaf_memo: HashMap<usize, Noun>,  // was LEAF_MEMO
+    to_noun_memo: HashMap<TypeId, Noun>,   // was TO_NOUN_MEMO
+    leaf_memo: HashMap<JamIdentity, Noun>, // was LEAF_MEMO
 
-    // --- boundary caches (key/value tuples copied verbatim) ---
-    nest_cache: HashMap<(u32, u32, u8, u64), bool>, // NEST_CACHE
-    #[allow(clippy::type_complexity)]
-    core_mint_cache: HashMap<(u32, u32, u64, u8, u8, u64, u64, u64), (Rc<Type>, FormulaId)>, // CORE_MINT_CACHE
-    #[allow(clippy::type_complexity)]
-    mint_cache: HashMap<(u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, FormulaId)>, // MINT_CACHE
-    #[allow(clippy::type_complexity)]
-    mull_cache: HashMap<(u32, u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
-    fuse_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // FUSE_CACHE
-    crop_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<(u32, BigUint, u8, u64), FormulaId>, // FISH_CACHE
+    // --- native boundary caches ---
+    nest_cache: HashMap<TypeBinaryKey<TypeId>, bool>, // NEST_CACHE
+    core_mint_cache: HashMap<CoreMintKey, (Rc<Type>, FormulaId)>, // CORE_MINT_CACHE
+    mint_cache: HashMap<MintKey<TypeId>, (Rc<Type>, FormulaId)>, // MINT_CACHE
+    mull_cache: HashMap<MullKey, (Rc<Type>, Rc<Type>)>, // MULL_CACHE
+    fuse_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>, // FUSE_CACHE
+    crop_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>, // CROP_CACHE
+    fish_cache: HashMap<FishKey, FormulaId>,          // FISH_CACHE
 
     // --- native_of content-keyed decode cache + fork cache ---
-    native_of_mug_memo: HashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
-    fork_cache: HashMap<Vec<u32>, Rc<Type>>,         // FORK_CACHE
+    native_of_mug_memo: HashMap<NounMug, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
+    fork_cache: HashMap<Vec<TypeId>, Rc<Type>>,          // FORK_CACHE
 
-    // --- scope-precise fan key support (reachable %hold legs per type) ---
-    // `legset_memo` maps an interned `Rc<Type>` pointer to the sorted-deduped set
-    // of %hold leg-ids reachable from that type (`reachable_legs` in ut/mod.rs).
-    // Sound because `intern_node` hash-conses (ptr == structural identity), so the
-    // legset is a pure function of the pointer; computed bottom-up over the Rc DAG
-    // and memoized so each distinct node is visited once (O(1) amortized).
-    legset_memo: HashMap<u32, SharedRc<[u64]>>,
+    // Sorted, deduplicated hold legs reachable from each canonical type.
+    // Computed bottom-up over the arena DAG once per distinct TypeId.
+    legset_memo: HashMap<TypeId, SharedRc<[FanLegId]>>,
 }
 
 impl Context {
@@ -257,61 +252,50 @@ impl Default for Context {
 }
 
 #[inline(always)]
-fn canonical_id(ty: &Rc<Type>) -> u32 {
-    ty.arena_id().0
+fn canonical_id(ty: &Rc<Type>) -> TypeId {
+    ty.arena_id()
 }
 
 static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Look up a memoized `cons_fork` result by its canonical option-pointer key.
-///
-/// The `cons_fork` memo (was `FORK_CACHE`): the canonical (sorted, deduped)
-/// option `Rc` pointers -> the resulting fork `Rc`. A fork is mug-ordered and
-/// set-valued, so it is fully determined by the SET of its option types; since
-/// options are interned (canonical), their pointer set is the exact key. In the
-/// recursive-type elaboration the same forks recur constantly, and each
-/// `cons_fork` miss costs a full mug-treap rebuild (fork_from_options:
-/// set_put_mug/slab_mug) PLUS a decode+jam of the treap leaf (native_of). This
-/// memo collapses the recurrence to O(1). Byte-exact: returns the SAME interned
-/// `Rc` the rebuild would. Its lifetime is the lifetime of the owning `Context`.
-pub fn fork_cache_lookup(cx: &Context, key: &[u32]) -> Option<Rc<Type>> {
+/// Look up a fork by its sorted, deduplicated canonical option IDs.
+/// Equal option sets reuse the same interned fork for the lifetime of `cx`.
+pub fn fork_cache_lookup(cx: &Context, key: &[TypeId]) -> Option<Rc<Type>> {
     cx.fork_cache.get(key).cloned()
 }
 
-/// Store a `cons_fork` result keyed by its canonical option-pointer key.
-pub fn fork_cache_store(cx: &mut Context, key: Vec<u32>, fork: Rc<Type>) {
+/// Store a fork keyed by its sorted, deduplicated canonical option IDs.
+pub fn fork_cache_store(cx: &mut Context, key: Vec<TypeId>, fork: Rc<Type>) {
     cx.fork_cache.insert(key, fork);
 }
 
-/// Look up the memoized reachable-leg set for an interned type pointer.
-/// `ptr` is `canonical_id(t)`; the value is the sorted-deduped set of
-/// %hold leg-ids reachable from `t`. See `reachable_legs` in ut/mod.rs.
-pub fn legset_memo_lookup(cx: &Context, id: u32) -> Option<SharedRc<[u64]>> {
+/// Look up the sorted, deduplicated hold legs reachable from a canonical type.
+pub fn legset_memo_lookup(cx: &Context, id: TypeId) -> Option<SharedRc<[FanLegId]>> {
     cx.legset_memo.get(&id).cloned()
 }
 
-/// Store a memoized reachable-leg set for an interned type pointer.
-pub fn legset_memo_store(cx: &mut Context, id: u32, legs: SharedRc<[u64]>) {
+/// Store the reachable hold legs for a canonical type.
+pub fn legset_memo_store(cx: &mut Context, id: TypeId, legs: SharedRc<[FanLegId]>) {
     cx.legset_memo.insert(id, legs);
 }
 
 /// Content-keyed `native_of` fast path (see `Context::native_of_mug_memo`).
 /// Returns the memoized candidate `Rc`s for a noun mug (a tiny bucket;
 /// collisions are rare).
-pub fn native_of_mug_candidates(cx: &Context, mug: u64) -> Vec<Rc<Type>> {
+pub fn native_of_mug_candidates(cx: &Context, mug: NounMug) -> Vec<Rc<Type>> {
     cx.native_of_mug_memo.get(&mug).cloned().unwrap_or_default()
 }
 
 /// Record a decoded `(mug -> Rc)` association for the content-keyed `native_of`
 /// cache. Idempotent per `Rc` within a bucket.
-pub fn native_of_mug_insert(cx: &mut Context, mug: u64, rc: Rc<Type>) {
+pub fn native_of_mug_insert(cx: &mut Context, mug: NounMug, rc: Rc<Type>) {
     let bucket = cx.native_of_mug_memo.entry(mug).or_default();
     if !bucket.iter().any(|existing| Rc::ptr_eq(existing, &rc)) {
         bucket.push(rc);
     }
 }
 
-/// Look up a native `core_mint` result by interned (sut, gol) pointers + the
+/// Look up a native `core_mint` result by canonical (sut, gol) IDs + the
 /// preserved semantic key fields (tomes_sig, vet, poly, fan, arm_epoch,
 /// placeholder). Returns the native (core type, formula) directly — no `native_of`.
 #[allow(clippy::too_many_arguments)]
@@ -319,55 +303,55 @@ pub fn core_mint_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
     gol: &Rc<Type>,
-    tomes_sig: u64,
-    vet: u8,
-    poly: u8,
-    fan: u64,
-    arm_epoch: u64,
-    placeholder: u64,
+    tomes_sig: TomesSignature,
+    vet: VetMode,
+    poly: PolyKey,
+    fan: FanContextId,
+    arm_epoch: ArmEpoch,
+    placeholder: PlaceholderSignature,
 ) -> Option<(Rc<Type>, FormulaId)> {
-    let key = (
-        canonical_id(sut),
-        canonical_id(gol),
-        tomes_sig,
+    let key = CoreMintKey {
+        subject: canonical_id(sut),
+        goal: canonical_id(gol),
+        tomes: tomes_sig,
         vet,
         poly,
         fan,
         arm_epoch,
         placeholder,
-    );
+    };
     cx.core_mint_cache.get(&key).cloned()
 }
 
-/// Store a native `core_mint` result by interned (sut, gol) pointers + semantic key.
+/// Store a native `core_mint` result by canonical (sut, gol) IDs + semantic key.
 #[allow(clippy::too_many_arguments)]
 pub fn core_mint_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
     gol: &Rc<Type>,
-    tomes_sig: u64,
-    vet: u8,
-    poly: u8,
-    fan: u64,
-    arm_epoch: u64,
-    placeholder: u64,
+    tomes_sig: TomesSignature,
+    vet: VetMode,
+    poly: PolyKey,
+    fan: FanContextId,
+    arm_epoch: ArmEpoch,
+    placeholder: PlaceholderSignature,
     core_type: Rc<Type>,
     formula: FormulaId,
 ) {
-    let key = (
-        canonical_id(sut),
-        canonical_id(gol),
-        tomes_sig,
+    let key = CoreMintKey {
+        subject: canonical_id(sut),
+        goal: canonical_id(gol),
+        tomes: tomes_sig,
         vet,
         poly,
         fan,
         arm_epoch,
         placeholder,
-    );
+    };
     cx.core_mint_cache.insert(key, (core_type, formula));
 }
 
-/// Look up a native `mint` result by interned (sut, gol) pointers + the preserved
+/// Look up a native `mint` result by canonical (sut, gol) IDs + the preserved
 /// semantic key fields (vet, gen_sig, fan, arm_epoch, placeholder). Returns the
 /// native (type, formula) directly — no `native_of`.
 #[allow(clippy::too_many_arguments)]
@@ -375,51 +359,51 @@ pub fn mint_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
     gol: &Rc<Type>,
-    vet: u8,
-    gen_sig: u64,
-    fan: u64,
-    arm_epoch: u64,
-    placeholder: u64,
+    vet: VetMode,
+    gen_sig: HoonSignature,
+    fan: FanContextId,
+    arm_epoch: ArmEpoch,
+    placeholder: PlaceholderSignature,
 ) -> Option<(Rc<Type>, FormulaId)> {
-    let key = (
-        canonical_id(sut),
-        canonical_id(gol),
+    let key = MintKey {
+        subject: canonical_id(sut),
+        goal: canonical_id(gol),
         vet,
-        gen_sig,
+        gene: gen_sig,
         fan,
         arm_epoch,
         placeholder,
-    );
+    };
     cx.mint_cache.get(&key).cloned()
 }
 
-/// Store a native `mint` result by interned (sut, gol) pointers + semantic key.
+/// Store a native `mint` result by canonical (sut, gol) IDs + semantic key.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
     gol: &Rc<Type>,
-    vet: u8,
-    gen_sig: u64,
-    fan: u64,
-    arm_epoch: u64,
-    placeholder: u64,
+    vet: VetMode,
+    gen_sig: HoonSignature,
+    fan: FanContextId,
+    arm_epoch: ArmEpoch,
+    placeholder: PlaceholderSignature,
     ty: Rc<Type>,
     formula: FormulaId,
 ) {
-    let key = (
-        canonical_id(sut),
-        canonical_id(gol),
+    let key = MintKey {
+        subject: canonical_id(sut),
+        goal: canonical_id(gol),
         vet,
-        gen_sig,
+        gene: gen_sig,
         fan,
         arm_epoch,
         placeholder,
-    );
+    };
     cx.mint_cache.insert(key, (ty, formula));
 }
 
-/// Look up a native `mull` result by interned (sut, gol, dox) pointers + the
+/// Look up a native `mull` result by canonical (sut, gol, dox) IDs + the
 /// preserved semantic key fields (vet, gen_sig, fan, arm_epoch, placeholder).
 /// Returns the native (p type, q type) directly — no `native_of`.
 #[allow(clippy::too_many_arguments)]
@@ -428,155 +412,195 @@ pub fn mull_cache_lookup(
     sut: &Rc<Type>,
     gol: &Rc<Type>,
     dox: &Rc<Type>,
-    vet: u8,
-    gen_sig: u64,
-    fan: u64,
-    arm_epoch: u64,
-    placeholder: u64,
+    vet: VetMode,
+    gen_sig: HoonSignature,
+    fan: FanContextId,
+    arm_epoch: ArmEpoch,
+    placeholder: PlaceholderSignature,
 ) -> Option<(Rc<Type>, Rc<Type>)> {
-    let key = (
-        canonical_id(sut),
-        canonical_id(gol),
-        canonical_id(dox),
+    let key = MullKey {
+        subject: canonical_id(sut),
+        goal: canonical_id(gol),
+        secondary_subject: canonical_id(dox),
         vet,
-        gen_sig,
+        gene: gen_sig,
         fan,
         arm_epoch,
         placeholder,
-    );
+    };
     cx.mull_cache.get(&key).cloned()
 }
 
-/// Store a native `mull` result by interned (sut, gol, dox) pointers + semantic key.
+/// Store a native `mull` result by canonical (sut, gol, dox) IDs + semantic key.
 #[allow(clippy::too_many_arguments)]
 pub fn mull_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
     gol: &Rc<Type>,
     dox: &Rc<Type>,
-    vet: u8,
-    gen_sig: u64,
-    fan: u64,
-    arm_epoch: u64,
-    placeholder: u64,
+    vet: VetMode,
+    gen_sig: HoonSignature,
+    fan: FanContextId,
+    arm_epoch: ArmEpoch,
+    placeholder: PlaceholderSignature,
     p_ty: Rc<Type>,
     q_ty: Rc<Type>,
 ) {
-    let key = (
-        canonical_id(sut),
-        canonical_id(gol),
-        canonical_id(dox),
+    let key = MullKey {
+        subject: canonical_id(sut),
+        goal: canonical_id(gol),
+        secondary_subject: canonical_id(dox),
         vet,
-        gen_sig,
+        gene: gen_sig,
         fan,
         arm_epoch,
         placeholder,
-    );
+    };
     cx.mull_cache.insert(key, (p_ty, q_ty));
 }
 
-/// Look up a native `nest` result by interned (sut, ref) pointers + context.
+/// Look up a native `nest` result by canonical (sut, ref) IDs + context.
 pub fn nest_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
     ref_: &Rc<Type>,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
 ) -> Option<bool> {
-    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
+    let key = TypeBinaryKey {
+        subject: canonical_id(sut),
+        reference: canonical_id(ref_),
+        vet,
+        fan,
+    };
     cx.nest_cache.get(&key).copied()
 }
 
-/// Store a native `nest` result by interned (sut, ref) pointers + context.
+/// Store a native `nest` result by canonical (sut, ref) IDs + context.
 pub fn nest_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
     ref_: &Rc<Type>,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
     result: bool,
 ) {
-    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
+    let key = TypeBinaryKey {
+        subject: canonical_id(sut),
+        reference: canonical_id(ref_),
+        vet,
+        fan,
+    };
     cx.nest_cache.insert(key, result);
 }
 
-/// Look up a native `fuse` result by interned (sut, ref) pointers + (vet, fan).
+/// Look up a native `fuse` result by canonical (sut, ref) IDs + (vet, fan).
 /// Returns the native result type directly — no `native_of`.
 pub fn fuse_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
     ref_: &Rc<Type>,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
 ) -> Option<Rc<Type>> {
-    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
+    let key = TypeBinaryKey {
+        subject: canonical_id(sut),
+        reference: canonical_id(ref_),
+        vet,
+        fan,
+    };
     cx.fuse_cache.get(&key).cloned()
 }
 
-/// Store a native `fuse` result by interned (sut, ref) pointers + (vet, fan).
+/// Store a native `fuse` result by canonical (sut, ref) IDs + (vet, fan).
 pub fn fuse_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
     ref_: &Rc<Type>,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
     result: Rc<Type>,
 ) {
-    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
+    let key = TypeBinaryKey {
+        subject: canonical_id(sut),
+        reference: canonical_id(ref_),
+        vet,
+        fan,
+    };
     cx.fuse_cache.insert(key, result);
 }
 
-/// Look up a native `crop` result by interned (sut, ref) pointers + (vet, fan).
+/// Look up a native `crop` result by canonical (sut, ref) IDs + (vet, fan).
 /// Returns the native result type directly — no `native_of`.
 pub fn crop_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
     ref_: &Rc<Type>,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
 ) -> Option<Rc<Type>> {
-    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
+    let key = TypeBinaryKey {
+        subject: canonical_id(sut),
+        reference: canonical_id(ref_),
+        vet,
+        fan,
+    };
     cx.crop_cache.get(&key).cloned()
 }
 
-/// Store a native `crop` result by interned (sut, ref) pointers + (vet, fan).
+/// Store a native `crop` result by canonical (sut, ref) IDs + (vet, fan).
 pub fn crop_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
     ref_: &Rc<Type>,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
     result: Rc<Type>,
 ) {
-    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
+    let key = TypeBinaryKey {
+        subject: canonical_id(sut),
+        reference: canonical_id(ref_),
+        vet,
+        fan,
+    };
     cx.crop_cache.insert(key, result);
 }
 
-/// Look up a native `fish` result by interned (sut) pointer + (axis, vet, fan).
+/// Look up a native `fish` result by canonical subject ID + (axis, vet, fan).
 /// Returns the cached canonical formula ID directly.
 pub fn fish_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
     axis: &BigUint,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
 ) -> Option<FormulaId> {
     cx.fish_cache
-        .get(&(canonical_id(sut), axis.clone(), vet, fan))
+        .get(&FishKey {
+            subject: canonical_id(sut),
+            axis: axis.clone(),
+            vet,
+            fan,
+        })
         .copied()
 }
 
-/// Store a native `fish` result by interned (sut) pointer +
+/// Store a native `fish` result by canonical subject ID +
 /// (axis, vet, fan).
 pub fn fish_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
     axis: &BigUint,
-    vet: u8,
-    fan: u64,
+    vet: VetMode,
+    fan: FanContextId,
     result: FormulaId,
 ) {
-    let key = (canonical_id(sut), axis.clone(), vet, fan);
+    let key = FishKey {
+        subject: canonical_id(sut),
+        axis: axis.clone(),
+        vet,
+        fan,
+    };
     cx.fish_cache.insert(key, result);
 }
 
@@ -784,7 +808,7 @@ pub fn live_leaf_to_noun(cx: &mut Context, leaf: &Leaf, dst: &mut NounSlab) -> N
         // so return it as-is — no copy, no cue.
         Leaf::Noun(n, _) => *n,
         Leaf::Jammed(arc, _) => {
-            let ptr = std::sync::Arc::as_ptr(arc) as *const u8 as usize;
+            let ptr = JamIdentity(std::sync::Arc::as_ptr(arc) as *const u8 as usize);
             if let Some(noun) = cx.leaf_memo.get(&ptr).copied() {
                 return noun;
             }
@@ -818,13 +842,13 @@ pub fn assert_native_eq(noun: Noun, native: &Rc<Type>, space: &NounSpace) {
 
 #[derive(Default)]
 pub struct TypeTable {
-    buckets: HashMap<u64, Vec<Rc<Type>>>,
+    buckets: HashMap<NodeHash, Vec<Rc<Type>>>,
     /// Source-noun identity to its canonical carried leaf.
-    live_leaves_by_raw: HashMap<u64, Leaf>,
+    live_leaves_by_raw: HashMap<NounIdentity, Leaf>,
     /// Mug buckets for the one exact comparison needed to canonicalize a new
     /// source identity. The full noun comparison protects against mug
     /// collisions; equal leaves then share one raw noun.
-    live_leaves_by_mug: HashMap<u32, Vec<Leaf>>,
+    live_leaves_by_mug: HashMap<NounMug, Vec<Leaf>>,
     /// Stable ownership for canonical nodes. Handles point into these boxes and
     /// therefore clone without touching a reference count. The boxes are
     /// required: growing the outer vector must not move slots while `TypeRef`
@@ -848,7 +872,7 @@ impl TypeTable {
         if noun.is_direct() {
             return Leaf::from_noun_raw(noun, space);
         }
-        let raw = unsafe { noun.as_raw() };
+        let raw = NounIdentity::of(noun);
         if let Some(canonical) = self.live_leaves_by_raw.get(&raw) {
             return canonical.clone();
         }
@@ -975,7 +999,7 @@ impl TypeTable {
 /// adaptive `options`/`options_seen` state is deliberately excluded: both are
 /// pure caches of the exact `set` witness, and interior mutation must never
 /// change a key after insertion into `TypeTable`.
-fn node_hash(t: &Type) -> u64 {
+fn node_hash(t: &Type) -> NodeHash {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
     let p = |rc: &Rc<Type>, h: &mut DefaultHasher| (canonical_id(rc)).hash(h);
@@ -1014,7 +1038,7 @@ fn node_hash(t: &Type) -> u64 {
             gene.hash(&mut h);
         }
     }
-    h.finish()
+    NodeHash(h.finish())
 }
 
 /// Shallow structural equality (children by canonical `Rc` identity). As with
