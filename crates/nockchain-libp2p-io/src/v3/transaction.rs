@@ -600,11 +600,14 @@ impl NounCodec for pb::TxLockPrimitive {
     }
 }
 
-pub(crate) fn pubkey_from_noun(noun: NounHandle<'_>) -> io::Result<pb::TxPubkey> {
-    pb::TxPubkey::decode_noun(noun)
+pub(crate) fn legacy_lock_from_noun(noun: NounHandle<'_>) -> io::Result<pb::TxLegacyLock> {
+    pb::TxLegacyLock::decode_noun(noun)
 }
 
-pub(crate) fn pubkey_to_noun(value: &pb::TxPubkey, slab: &mut NounSlab) -> io::Result<Noun> {
+pub(crate) fn legacy_lock_to_noun(
+    value: &pb::TxLegacyLock,
+    slab: &mut NounSlab,
+) -> io::Result<Noun> {
     value.encode_noun(slab)
 }
 

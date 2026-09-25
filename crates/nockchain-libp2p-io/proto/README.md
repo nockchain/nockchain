@@ -55,6 +55,11 @@ cargo test -p nockchain-libp2p-io --lib v3::
 bazel test //crates/nockchain-libp2p-io:peer_v3_schema_test
 ```
 
+The [historical corpus](../tests/fixtures/peer_v3/PROVENANCE.md) pins real pages
+and transactions across both consensus versions and all six proof variants.
+Its tests preserve original JAM through the checked types and framed codec,
+verify block inclusion, and exercise reconstructed authenticated gossip.
+
 Code generation writes `nockchain.peer.v3.rs` and `peer_v3_descriptor.bin` into
 the build output directory. These files are not checked in. The descriptor
 tests exercise the production schema and prohibited schema changes.

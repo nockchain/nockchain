@@ -12,11 +12,11 @@ use super::common::{
     invalid, list, required, tree_entries, tuple, PeerAtom, PeerHash, PeerNoun, MAX_NODES, PRIME,
 };
 use super::pb;
-use super::transaction::{pubkey_from_noun, pubkey_to_noun};
+use super::transaction::{legacy_lock_from_noun, legacy_lock_to_noun};
 
 #[derive(Clone, Debug)]
 enum Coinbase {
-    Legacy(Vec<(pb::TxPubkey, u64)>),
+    Legacy(Vec<(pb::TxLegacyLock, u64)>),
     V1(Vec<(PeerHash, u64)>),
 }
 
@@ -89,10 +89,12 @@ impl Coinbase {
                 count(&value.entries)?;
                 let mut entries = Vec::with_capacity(value.entries.len());
                 let mut validation = NounSlab::new();
+                let mut seen = BTreeSet::new();
                 for entry in value.entries {
                     let key = required(entry.key, "page.coinbase.key")?;
-                    pubkey_to_noun(&key, &mut validation)?;
-                    if entries.iter().any(|(existing, _)| existing == &key) {
+                    let noun = legacy_lock_to_noun(&key, &mut validation)?;
+                    validation.set_root(noun);
+                    if !seen.insert(validation.jam().to_vec()) {
                         return Err(invalid("duplicate page coinbase key"));
                     }
                     let coins = belt(required(entry.coins, "page.coinbase.coins")?)?;
@@ -153,7 +155,7 @@ impl Coinbase {
                     .map(|entry| {
                         let parts = tuple(entry, 2)?;
                         Ok(pb::PageLegacyCoinbaseEntry {
-                            key: Some(pubkey_from_noun(parts[0])?),
+                            key: Some(legacy_lock_from_noun(parts[0])?),
                             coins: Some(scalar(parts[1])?),
                         })
                     })
@@ -188,7 +190,7 @@ impl Coinbase {
         match self {
             Self::Legacy(entries) => {
                 for (key, coins) in entries {
-                    let key = pubkey_to_noun(key, slab)?;
+                    let key = legacy_lock_to_noun(key, slab)?;
                     insert(slab, key, *coins)?;
                 }
             }
@@ -381,12 +383,15 @@ mod tests {
         PeerHash::new([seed, seed + 1, seed + 2, seed + 3, seed + 4]).unwrap()
     }
 
-    fn pubkey(seed: u64) -> pb::TxPubkey {
-        pb::TxPubkey {
-            x: (seed..seed + 6).collect(),
-            y: (seed + 6..seed + 12).collect(),
-            infinity: Some(false),
+    fn legacy_recipient(slab: &mut NounSlab, seed: u64) -> Noun {
+        let mut pubkeys = D(0);
+        for seed in [seed, seed + 100] {
+            let x = T(slab, &(seed..seed + 6).map(D).collect::<Vec<_>>());
+            let y = T(slab, &(seed + 6..seed + 12).map(D).collect::<Vec<_>>());
+            let mut key = T(slab, &[x, y, D(1)]);
+            pubkeys = zset::z_set_put(slab, &pubkeys, &mut key, &DefaultTipHasher).unwrap();
         }
+        T(slab, &[D(2), pubkeys])
     }
 
     // Construct the consensus tuple independently of the page conversion.
@@ -404,7 +409,7 @@ mod tests {
         let mut coinbase = D(0);
         for (seed, coins) in [(60, 500), (80, 250)] {
             let mut key = match version {
-                0 => pubkey_to_noun(&pubkey(seed), &mut slab).unwrap(),
+                0 => legacy_recipient(&mut slab, seed),
                 _ => hash(seed).to_noun(&mut slab),
             };
             let mut amount = D(coins);
@@ -477,6 +482,15 @@ mod tests {
                 let wire = page.to_proto();
                 assert_eq!(wire.version, Some(version));
                 assert_eq!(wire.pow.is_some(), with_pow);
+                if let pb::page_coinbase::Kind::Legacy(map) =
+                    wire.coinbase.as_ref().unwrap().kind.as_ref().unwrap()
+                {
+                    for entry in &map.entries {
+                        let recipient = entry.key.as_ref().unwrap();
+                        assert_eq!(recipient.keys_required, Some(2));
+                        assert_eq!(recipient.pubkeys.len(), 2);
+                    }
+                }
                 assert_eq!(wire.target.as_ref().unwrap().limbs, [123, 0]);
                 assert_eq!(
                     wire.accumulated_work.as_ref().unwrap().limbs,
@@ -536,6 +550,17 @@ mod tests {
             }
             assert!(PeerPage::from_proto(page).is_err());
         }
+
+        let mut page = wire(0);
+        let pb::page_coinbase::Kind::Legacy(map) =
+            page.coinbase.as_mut().unwrap().kind.as_mut().unwrap()
+        else {
+            panic!("legacy fixture");
+        };
+        let mut duplicate = map.entries[0].clone();
+        duplicate.key.as_mut().unwrap().pubkeys.reverse();
+        map.entries.push(duplicate);
+        assert!(PeerPage::from_proto(page).is_err());
     }
 
     #[test]
@@ -546,7 +571,12 @@ mod tests {
             let mut reordered = page;
             reordered.tx_ids.reverse();
             match reordered.coinbase.as_mut().unwrap().kind.as_mut().unwrap() {
-                pb::page_coinbase::Kind::Legacy(map) => map.entries.reverse(),
+                pb::page_coinbase::Kind::Legacy(map) => {
+                    map.entries.reverse();
+                    for entry in &mut map.entries {
+                        entry.key.as_mut().unwrap().pubkeys.reverse();
+                    }
+                }
                 pb::page_coinbase::Kind::V1(map) => map.entries.reverse(),
             }
             assert_eq!(jam(reordered), expected);
@@ -572,7 +602,7 @@ mod tests {
         else {
             panic!("legacy fixture");
         };
-        map.entries[0].key.as_mut().unwrap().x.pop();
+        map.entries[0].key.as_mut().unwrap().pubkeys[0].x.pop();
         assert!(PeerPage::from_proto(page).is_err());
     }
 

@@ -39,7 +39,8 @@ message PageCoinbase {
 // duplicate keys before reconstructing their canonical consensus z-map.
 message PageLegacyCoinbase { repeated PageLegacyCoinbaseEntry entries = 1; }
 message PageLegacyCoinbaseEntry {
-  TxPubkey key = 1;
+  // Legacy recipients are [keys-required (z-set pubkey)] threshold locks.
+  TxLegacyLock key = 1;
   optional fixed64 coins = 2;
 }
 message PageV1Coinbase { repeated PageV1CoinbaseEntry entries = 1; }

@@ -5,6 +5,8 @@
 //! field contains jam. Consensus validation remains the kernel's responsibility.
 pub(crate) mod codec;
 mod common;
+#[cfg(test)]
+mod corpus_tests;
 mod envelope;
 mod page;
 mod transaction;

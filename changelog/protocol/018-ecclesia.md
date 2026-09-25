@@ -87,8 +87,9 @@ construction. Authenticated connection state supplies the sending peer's
 identity. Existing proof, signature, identity, and consensus checks remain
 mandatory after representation validation.
 
-Page version `0` reconstructs the untagged legacy page tuple and its public-key
-coinbase map; version `1` reconstructs the `%1` page tuple and its hash-keyed
+Page version `0` reconstructs the untagged legacy page tuple and its coinbase
+map keyed by threshold locks (required signature count and public-key set);
+version `1` reconstructs the `%1` page tuple and its hash-keyed
 coinbase map. Other versions and mismatched coinbase variants are invalid.
 Both versions retain the optional proof, transaction-ID set, full coinbase,
 timestamp, epoch counter, target, accumulated work, height, and message.

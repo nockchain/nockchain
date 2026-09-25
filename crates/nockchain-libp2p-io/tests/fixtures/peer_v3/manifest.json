@@ -1,0 +1,1057 @@
+{
+  "version": 1,
+  "capture_date": "2026-09-25",
+  "reference_revision": "cbd9298f96584b14ab93074ecdf32d0ec212e50e",
+  "specification": "changelog/protocol/018-ecclesia.md",
+  "required": {
+    "page_versions": [
+      0,
+      1
+    ],
+    "transaction_versions": [
+      0,
+      1
+    ],
+    "pow_versions": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "spend_versions": [
+      0,
+      1
+    ],
+    "lock_merkle_proof_kinds": [
+      "stub",
+      "full"
+    ],
+    "nonempty_bundle_page_versions": [
+      0,
+      1
+    ]
+  },
+  "public_checkpoints": [
+    {
+      "height": 144,
+      "id_base58": "3rbqdep8HLqwwkW4YvZazVPYZpbqsFbqHCfEKGt13GVUUzA9ToDCsxT"
+    },
+    {
+      "height": 4032,
+      "id_base58": "DhaVTgMz6CMy3ZG3vsci1z9U2Gg7WZL6y3g7bZzfJLUbus1rd8j4BQU"
+    },
+    {
+      "height": 16128,
+      "id_base58": "ANjtb2YNFo3cAtLVkjkXXP2DJ2S5ZvByywpxgAa1UhxXM5f8YmiJLWX"
+    }
+  ],
+  "captures": [
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "6JM1JrgVdRedkcGWm27FukwPwFuM5HnveN36dhzf3Zch1Xvm9vZERP9",
+      "height": 1,
+      "pow_version": 0,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-6JM1JrgVdRedkcGWm27FukwPwFuM5HnveN36dhzf3Zch1Xvm9vZERP9.jam",
+      "sha256": "da0fdc22ac1cedd4c07569d0b007dde57ec0d89977d6174e478747d8bae542be",
+      "size_bytes": 118157
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "3rbqdep8HLqwwkW4YvZazVPYZpbqsFbqHCfEKGt13GVUUzA9ToDCsxT",
+      "height": 144,
+      "pow_version": 0,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-3rbqdep8HLqwwkW4YvZazVPYZpbqsFbqHCfEKGt13GVUUzA9ToDCsxT.jam",
+      "sha256": "4a77dc7ee49b3d7747a3a1ef77d9c936affecb806adf561f89418a82fd57cc89",
+      "size_bytes": 117615
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "DhaVTgMz6CMy3ZG3vsci1z9U2Gg7WZL6y3g7bZzfJLUbus1rd8j4BQU",
+      "height": 4032,
+      "pow_version": 0,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-DhaVTgMz6CMy3ZG3vsci1z9U2Gg7WZL6y3g7bZzfJLUbus1rd8j4BQU.jam",
+      "sha256": "6e6bc9d3175b9fb3d81c0570f62f8858711c731efc935c7668eb9ffb37259961",
+      "size_bytes": 117317
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "DNtkgUJSU4YM2kBFZtsoNUcZgrGCxrfTvtboPdgPjzvFSHRkyNPFD5c",
+      "height": 6749,
+      "pow_version": 0,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-DNtkgUJSU4YM2kBFZtsoNUcZgrGCxrfTvtboPdgPjzvFSHRkyNPFD5c.jam",
+      "sha256": "868f290c96ca17866193de84517e7781e34ddbca22483afc7fbbfb59f3b7d10f",
+      "size_bytes": 117600
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "4qaB4EUTWV5cpxHpPyQUissHYRU9mDSHNEnqCjKjU5QB9ZRUSH9Nrzm",
+      "height": 6750,
+      "pow_version": 1,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-4qaB4EUTWV5cpxHpPyQUissHYRU9mDSHNEnqCjKjU5QB9ZRUSH9Nrzm.jam",
+      "sha256": "8dbe1c3931a95a9aea1b7cafbac2cd42354c5782647f79bc79ef131b028ee099",
+      "size_bytes": 117027
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "7M5NLmg6JoRZqPN49iayYK9QZHbmez77Wn88Ev4yfsHDvpQ5jrTdDWg",
+      "height": 11999,
+      "pow_version": 1,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-7M5NLmg6JoRZqPN49iayYK9QZHbmez77Wn88Ev4yfsHDvpQ5jrTdDWg.jam",
+      "sha256": "089105ceacba3fa5e6730444b7ba0f357df99b2600d3fce2ac56161268ec1053",
+      "size_bytes": 117313
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "4EfELrdEM3a5T2qqJMLJ428uLGJVEWxVYUQ66vrpv3WUGHNKpKVRf7c",
+      "height": 12000,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-4EfELrdEM3a5T2qqJMLJ428uLGJVEWxVYUQ66vrpv3WUGHNKpKVRf7c.jam",
+      "sha256": "522444dafa71d4dbbe2858ea629c96d83ab81d90dcb3bc9e4efa1533206952ab",
+      "size_bytes": 117047
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "ANjtb2YNFo3cAtLVkjkXXP2DJ2S5ZvByywpxgAa1UhxXM5f8YmiJLWX",
+      "height": 16128,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-ANjtb2YNFo3cAtLVkjkXXP2DJ2S5ZvByywpxgAa1UhxXM5f8YmiJLWX.jam",
+      "sha256": "02945ec20ab462951a6762f07415ab58c87f81db79d440c2ab00c1cf5f51a578",
+      "size_bytes": 117437
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "3nHWEpZNFvwBn3V9pS8Tr7wdDMicafh2hv1mp7zVY1PcXi2EKbP5pC6",
+      "height": 19996,
+      "pow_version": 2,
+      "transaction_count": 1,
+      "tx_ids_base58": [
+        "AaxcXJPiGBA6aBi8bcf3YxSsa1GD2q56PYa2NCXR5buP8b8P7mZCckZ"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-3nHWEpZNFvwBn3V9pS8Tr7wdDMicafh2hv1mp7zVY1PcXi2EKbP5pC6.jam",
+      "sha256": "ab67f0d35bf222aa07eacbf37b2f1215342122050286b9e24d1dbf960d79b2c5",
+      "size_bytes": 117695
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "3XXKFadvj43y2knEiRAhKbjs8Jy3yZTPajNtgEJWRJRCTrK9nmazdTj",
+      "height": 20010,
+      "pow_version": 2,
+      "transaction_count": 4,
+      "tx_ids_base58": [
+        "6PJMyfjALUPTFMoWsLTHvMfmZ2J9UQzxqrMvekf3R3S2tkTLXmUqgho",
+        "DRwh67nLxmoXcXSJNxm7KE5vEUZnsSHjaapHvVYJk5h53A46oxhvWnk",
+        "5LiWqN6hnd1DU29Xo16vqrwPK1iot5Sge7HgaQ6PpfAA9oJezZfaa3x",
+        "6S88w9xkqCZqxyUmC4CgEkvJQyymMRPpTi89BDnmFDCuf3Yxx6BUCWX"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-3XXKFadvj43y2knEiRAhKbjs8Jy3yZTPajNtgEJWRJRCTrK9nmazdTj.jam",
+      "sha256": "c90f6a329d9c68fa7b5bdf304c6527527d78c11372d47ba95ede2119ec278e54",
+      "size_bytes": 117221
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "2uJm8FV6v4pF1Wf8HC3KkU1Xek1BTYX8z44YaSHR8D73BaF45AAsqKH",
+      "height": 20011,
+      "pow_version": 2,
+      "transaction_count": 4,
+      "tx_ids_base58": [
+        "Am7WjxdiB3oddMmEbbgvKL81S1zfeNQ2Tm5S2guXVQFdJkzCS6bFDET",
+        "27mt8jWN7Es5mQgdnpZRAjcq7tyx1vg3ZB39t38EKkoQxk2zzHFNJH7",
+        "3wyTKnfJ68Eth5aF3WeDGPDWM6vNNVcDbV7iP2srtKMbXzGibTyVprR",
+        "5U8rV9fWrDeiKheEhyiV8tsh3ixSPhgiKmEmYRhj1i26KAwkrimbZho"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-2uJm8FV6v4pF1Wf8HC3KkU1Xek1BTYX8z44YaSHR8D73BaF45AAsqKH.jam",
+      "sha256": "a62a7c2ce4072204833f56ce41dd6199bf7a36823752b56ac60acebfbaeea583",
+      "size_bytes": 134073
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "2pW3xuKtpUGKvnSZMt2ixXkJJTdPYLBBELTyDdJyV6AETvcmn9Jvyc9",
+      "height": 37349,
+      "pow_version": 2,
+      "transaction_count": 4,
+      "tx_ids_base58": [
+        "3LevB1g2tQ7Yn3PFmgdZH1tKVE98aSJHpC3W7tB28t7HEH12Nx1PyiD",
+        "4wcm76bWpW1wGqMPajdpEzmwtU6A5vrKhBWFXVcsnyp43rGxyXX9NTC",
+        "DPg6aV3nLjN5NjFZC2yDS3iSPr6tvp4r2cDqJrDsGSHDvBGiuniubZg",
+        "2LvudHAX9goaKJu4VZ263DU9oTA9qhfaHbRkF51qjdPsjsyQXpqJPKh"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-2pW3xuKtpUGKvnSZMt2ixXkJJTdPYLBBELTyDdJyV6AETvcmn9Jvyc9.jam",
+      "sha256": "30996b218b07a8e9449ea66da276ce16a66ad3424fd37431871763f12195fee8",
+      "size_bytes": 117068
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "DfjAL5VtSJ6QCM79WJ5tXiSHjL97t5euAwRUtXbqgir5PDBsu8hNnfd",
+      "height": 37350,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-DfjAL5VtSJ6QCM79WJ5tXiSHjL97t5euAwRUtXbqgir5PDBsu8hNnfd.jam",
+      "sha256": "84cab0405048afd8fe505d784ddc6c56f250a5c5471fb048fea68eac202d0c53",
+      "size_bytes": 116146
+    },
+    {
+      "kind": "page",
+      "consensus_version": 0,
+      "id_base58": "8eWAndhPp7udPqbGsANHBZ1H5Qr8ihErkPEk91QxFckPwQRHaxy7TiJ",
+      "height": 38999,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v0-8eWAndhPp7udPqbGsANHBZ1H5Qr8ihErkPEk91QxFckPwQRHaxy7TiJ.jam",
+      "sha256": "e7c7b55aae54990bd3e38798bab8627c62bf1c43df872d5a4a76e85eae857974",
+      "size_bytes": 116521
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "Bmq4Dxd7WRUSTjTv7ML6eziNnCh9jcGd6N4w1FG9dESYwFrHSGNDGhi",
+      "height": 39000,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-Bmq4Dxd7WRUSTjTv7ML6eziNnCh9jcGd6N4w1FG9dESYwFrHSGNDGhi.jam",
+      "sha256": "7ef5083280f1c2b73e44631959dab32f92369456b093d9b94332907807a9d33b",
+      "size_bytes": 116564
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "7yFNM62AZfwSURacXW6yq7mP5HVJPtw3MTJAiuMZFcc3qEpBZcUnsvW",
+      "height": 41568,
+      "pow_version": 2,
+      "transaction_count": 1,
+      "tx_ids_base58": [
+        "9reANmAGtWWboibDUumvbXYWupM7TWvr2JrBT7pQaf4TFCyqJMBpp8B"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-7yFNM62AZfwSURacXW6yq7mP5HVJPtw3MTJAiuMZFcc3qEpBZcUnsvW.jam",
+      "sha256": "c570b2f25e8a369c9b3331670ec7a40ee290e6f1c1fa3f64d576b920dcc773b6",
+      "size_bytes": 115881
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "2jWPayaqtaXmwQcxsyUgVCVWGtTbzJbSQgZXg9NRSGMBCypnTYsY71B",
+      "height": 41878,
+      "pow_version": 2,
+      "transaction_count": 1,
+      "tx_ids_base58": [
+        "8r8RYk8vnEe5RR1fypRm9We7aqE7zswKEdCVfaeaEAWrgkNfhym2MqE"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-2jWPayaqtaXmwQcxsyUgVCVWGtTbzJbSQgZXg9NRSGMBCypnTYsY71B.jam",
+      "sha256": "969c26b8847a43635ef7ae1ce489e7f22a41a6f74e8329a93751dcda044e93be",
+      "size_bytes": 117532
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "4ikmXqMkn145QtaWrh52Tf4LNNYKd3oAZAXmjttSDTcTkj1cCGLRULg",
+      "height": 53999,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-4ikmXqMkn145QtaWrh52Tf4LNNYKd3oAZAXmjttSDTcTkj1cCGLRULg.jam",
+      "sha256": "0c9626c074028e9272de08b0c8a1998d980ac3f68664d61499fa8c976de3f4ca",
+      "size_bytes": 115959
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "AGK6DNY58mBjMhZX5qkrXoxc8QUPDqUK4TXVEoozuH26X2uC6V25Sew",
+      "height": 54000,
+      "pow_version": 2,
+      "transaction_count": 1,
+      "tx_ids_base58": [
+        "7PACY5o9ygM4sf67WwzufTyFuNxxez5eLrncszEAKBRK8GzzRTCLxkA"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-AGK6DNY58mBjMhZX5qkrXoxc8QUPDqUK4TXVEoozuH26X2uC6V25Sew.jam",
+      "sha256": "adcbdf554fc92e948b4682618b95d5a1e0de12cfbf5e4bb0dbf986f65f4aee03",
+      "size_bytes": 116674
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "vYekzUpi6o95oA6qHfvcq9kVRzFMZLuUw33YxXQRqNCvBHwU7wys73",
+      "height": 65499,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-vYekzUpi6o95oA6qHfvcq9kVRzFMZLuUw33YxXQRqNCvBHwU7wys73.jam",
+      "sha256": "891a17349a6617ef958f702d36ce6ab4c179eb31aba125e74aa4b54369cb874e",
+      "size_bytes": 115959
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "4dr8f3hWcQfgSMUrKRcNb1Z4nwzECbbUuqDYUp8G4WF6G5ocFXzPp2",
+      "height": 65500,
+      "pow_version": 2,
+      "transaction_count": 1,
+      "tx_ids_base58": [
+        "BXBC1jZdjnq6AieKHbe8DTzHHwaeY3shUnpsV1h262pQWBriv4cXhPv"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-4dr8f3hWcQfgSMUrKRcNb1Z4nwzECbbUuqDYUp8G4WF6G5ocFXzPp2.jam",
+      "sha256": "c1fb5a5aa9cfebee08500aa4028e7c30a721347814bbfdb72552a450c0cac1b9",
+      "size_bytes": 116706
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "BfvmZiUnv4gkHPfj6hfFdQ2qxBFXt9kZuRXSN1SQjBH7q5yBn1pfTRU",
+      "height": 119399,
+      "pow_version": 2,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-BfvmZiUnv4gkHPfj6hfFdQ2qxBFXt9kZuRXSN1SQjBH7q5yBn1pfTRU.jam",
+      "sha256": "254727c4cfe66c8169354639288b1f03e7b999051b60094baf082a284cca4af8",
+      "size_bytes": 116114
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "2tRPPd39UgGzrQooaHq118UnpCS7pHNdT16YtZ3MseuzfyLWxwgvGwv",
+      "height": 119400,
+      "pow_version": 3,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-2tRPPd39UgGzrQooaHq118UnpCS7pHNdT16YtZ3MseuzfyLWxwgvGwv.jam",
+      "sha256": "957377f89d77d43aeed504d7771edb6d43d7ee297610f4e3971acf0e82b386d4",
+      "size_bytes": 118300
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "AGLmC9oVBZJXKoVUqL2idrnSHacx2WKTGLb8wLLAFPy3DNHjMhZRxnZ",
+      "height": 125999,
+      "pow_version": 3,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-AGLmC9oVBZJXKoVUqL2idrnSHacx2WKTGLb8wLLAFPy3DNHjMhZRxnZ.jam",
+      "sha256": "9e5491aa54f0794f89edf0950cd39c85b25fc0efba93d290f4103807a3db737d",
+      "size_bytes": 117943
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "38yLHeX4zRSaCWxB7QGmrnJUSVUsJRyNk1h5rhmoZ2XPPvGaSsK3NJy",
+      "height": 126000,
+      "pow_version": 3,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-38yLHeX4zRSaCWxB7QGmrnJUSVUsJRyNk1h5rhmoZ2XPPvGaSsK3NJy.jam",
+      "sha256": "2685e966643b8c2c430f2d3fa66344ee314369ec5b8cd43ab53ea2abd2277dfb",
+      "size_bytes": 117209
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "9vKX1PJTgBe1fpfiCdCrr7om1GCYomqccFcv4mqqiEFLoXzmmCaDC5D",
+      "height": 147499,
+      "pow_version": 3,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-9vKX1PJTgBe1fpfiCdCrr7om1GCYomqccFcv4mqqiEFLoXzmmCaDC5D.jam",
+      "sha256": "09fbbbbd53e40fc26c1dc95a92a07e18ebd2915f0ea067e5387331b107f3bcc9",
+      "size_bytes": 117346
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "5DjaYcevfmBoVUbug5cXsFCZfdmrCpuTq9rLxzvaLf9jguc7uNqt28i",
+      "height": 147500,
+      "pow_version": 4,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-5DjaYcevfmBoVUbug5cXsFCZfdmrCpuTq9rLxzvaLf9jguc7uNqt28i.jam",
+      "sha256": "aab3d7df43a8e7137e932138b071b728d2fb45b4edbf381b67edf343d156fb1c",
+      "size_bytes": 147652
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "236KMzdwNCwGFazZD4GeCTiggWGTJF1baqpkkTbQFbDkrH9GDaMCvvy",
+      "height": 148868,
+      "pow_version": 5,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-236KMzdwNCwGFazZD4GeCTiggWGTJF1baqpkkTbQFbDkrH9GDaMCvvy.jam",
+      "sha256": "a8491cd228399d0f72c66b0bea848af5d2a4d19984330fa6680fd613db086e30",
+      "size_bytes": 116926
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "BGfEmP827LchgXwxPuPqbbRBZy5X7567riKXMky4iHZii9ta4MQgz8Y",
+      "height": 148869,
+      "pow_version": 5,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-BGfEmP827LchgXwxPuPqbbRBZy5X7567riKXMky4iHZii9ta4MQgz8Y.jam",
+      "sha256": "2795bfca4df172e7d64865d94e443a7c1d7853e6ab554e94d99e9f6bc2927980",
+      "size_bytes": 115131
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "BmVfeTxDLbFbnrAuY4ao9GRyDBoNF4KxG5uuPGxwEtYcBYgwfTXgP1U",
+      "height": 148899,
+      "pow_version": 4,
+      "transaction_count": 1,
+      "tx_ids_base58": [
+        "Ct2TSemkdbEQJtNiKnY8LTN5tp4SVnS6bNeeAbpJZx6zQq2UrXfFSJq"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-BmVfeTxDLbFbnrAuY4ao9GRyDBoNF4KxG5uuPGxwEtYcBYgwfTXgP1U.jam",
+      "sha256": "93e1102f7238b1f071d2a492415ae9a20df7a5cea860a2890cde5a36ace393f4",
+      "size_bytes": 147446
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "AaNeN8MmHYLKeKtoL4QLDRPS3mkNSSHH3prVacJeBrNvqnqvkNm2oYn",
+      "height": 153864,
+      "pow_version": 4,
+      "transaction_count": 1,
+      "tx_ids_base58": [
+        "2kFnob8ydg3RUZA34Ek2m95ifbG8U7vrao3Hy97A2MGpMgXRsB8jDY4"
+      ],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-AaNeN8MmHYLKeKtoL4QLDRPS3mkNSSHH3prVacJeBrNvqnqvkNm2oYn.jam",
+      "sha256": "ea65504afba159ca996eee806ebee132670ae777965d9507f0106efded6cb443",
+      "size_bytes": 147462
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "27mt8jWN7Es5mQgdnpZRAjcq7tyx1vg3ZB39t38EKkoQxk2zzHFNJH7",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-27mt8jWN7Es5mQgdnpZRAjcq7tyx1vg3ZB39t38EKkoQxk2zzHFNJH7.jam",
+      "sha256": "62cec847a4bbce21d8d342d2b050e9eb4cb9abc3746e7aebd31aab251d2b113b",
+      "size_bytes": 629,
+      "included_in_pages": [
+        {
+          "height": 20011,
+          "id_base58": "2uJm8FV6v4pF1Wf8HC3KkU1Xek1BTYX8z44YaSHR8D73BaF45AAsqKH"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "2LvudHAX9goaKJu4VZ263DU9oTA9qhfaHbRkF51qjdPsjsyQXpqJPKh",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-2LvudHAX9goaKJu4VZ263DU9oTA9qhfaHbRkF51qjdPsjsyQXpqJPKh.jam",
+      "sha256": "2f0ee1866d3d9defd33b66c65ee9329286bbfeee5fc4b48b1da082d42d41e1ff",
+      "size_bytes": 624,
+      "included_in_pages": [
+        {
+          "height": 37349,
+          "id_base58": "2pW3xuKtpUGKvnSZMt2ixXkJJTdPYLBBELTyDdJyV6AETvcmn9Jvyc9"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 1,
+      "id_base58": "2kFnob8ydg3RUZA34Ek2m95ifbG8U7vrao3Hy97A2MGpMgXRsB8jDY4",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [
+        1
+      ],
+      "inputs_or_spends_count": 2,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v1-2kFnob8ydg3RUZA34Ek2m95ifbG8U7vrao3Hy97A2MGpMgXRsB8jDY4.jam",
+      "sha256": "758102629554c2492ff87c7901dcac064c7d03553ac46c603a64aea372e63592",
+      "size_bytes": 904,
+      "included_in_pages": [
+        {
+          "height": 153864,
+          "id_base58": "AaNeN8MmHYLKeKtoL4QLDRPS3mkNSSHH3prVacJeBrNvqnqvkNm2oYn"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "3LevB1g2tQ7Yn3PFmgdZH1tKVE98aSJHpC3W7tB28t7HEH12Nx1PyiD",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-3LevB1g2tQ7Yn3PFmgdZH1tKVE98aSJHpC3W7tB28t7HEH12Nx1PyiD.jam",
+      "sha256": "612f4369c21ce0be83b9b7847201dc1e73a23568fafad512d474aa0dad76e3f8",
+      "size_bytes": 629,
+      "included_in_pages": [
+        {
+          "height": 37349,
+          "id_base58": "2pW3xuKtpUGKvnSZMt2ixXkJJTdPYLBBELTyDdJyV6AETvcmn9Jvyc9"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "3wyTKnfJ68Eth5aF3WeDGPDWM6vNNVcDbV7iP2srtKMbXzGibTyVprR",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-3wyTKnfJ68Eth5aF3WeDGPDWM6vNNVcDbV7iP2srtKMbXzGibTyVprR.jam",
+      "sha256": "63df4b8959350602cb99b04a9c6ef0d0ea783f403a7abd46f235d65787475c9f",
+      "size_bytes": 631,
+      "included_in_pages": [
+        {
+          "height": 20011,
+          "id_base58": "2uJm8FV6v4pF1Wf8HC3KkU1Xek1BTYX8z44YaSHR8D73BaF45AAsqKH"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "4wcm76bWpW1wGqMPajdpEzmwtU6A5vrKhBWFXVcsnyp43rGxyXX9NTC",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-4wcm76bWpW1wGqMPajdpEzmwtU6A5vrKhBWFXVcsnyp43rGxyXX9NTC.jam",
+      "sha256": "a8421f66932577fb110d868d23c2865111da6d78024897d03634cbf4f8ab2f5b",
+      "size_bytes": 629,
+      "included_in_pages": [
+        {
+          "height": 37349,
+          "id_base58": "2pW3xuKtpUGKvnSZMt2ixXkJJTdPYLBBELTyDdJyV6AETvcmn9Jvyc9"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "5LiWqN6hnd1DU29Xo16vqrwPK1iot5Sge7HgaQ6PpfAA9oJezZfaa3x",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-5LiWqN6hnd1DU29Xo16vqrwPK1iot5Sge7HgaQ6PpfAA9oJezZfaa3x.jam",
+      "sha256": "dab0d62acc0e17e8322b85fee5a70b0697c245f284849a4aca3d9a1b7bc31f12",
+      "size_bytes": 627,
+      "included_in_pages": [
+        {
+          "height": 20010,
+          "id_base58": "3XXKFadvj43y2knEiRAhKbjs8Jy3yZTPajNtgEJWRJRCTrK9nmazdTj"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "5U8rV9fWrDeiKheEhyiV8tsh3ixSPhgiKmEmYRhj1i26KAwkrimbZho",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-5U8rV9fWrDeiKheEhyiV8tsh3ixSPhgiKmEmYRhj1i26KAwkrimbZho.jam",
+      "sha256": "c40ab028908c31b6c44622c8b4b3ab7cacd0829d37754a0f07028e73d87541ce",
+      "size_bytes": 627,
+      "included_in_pages": [
+        {
+          "height": 20011,
+          "id_base58": "2uJm8FV6v4pF1Wf8HC3KkU1Xek1BTYX8z44YaSHR8D73BaF45AAsqKH"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "6PJMyfjALUPTFMoWsLTHvMfmZ2J9UQzxqrMvekf3R3S2tkTLXmUqgho",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-6PJMyfjALUPTFMoWsLTHvMfmZ2J9UQzxqrMvekf3R3S2tkTLXmUqgho.jam",
+      "sha256": "0428ab0b0ae79fe68eb42ea74c5e485bbab4522f85abe94af0ce9eff62427ebf",
+      "size_bytes": 630,
+      "included_in_pages": [
+        {
+          "height": 20010,
+          "id_base58": "3XXKFadvj43y2knEiRAhKbjs8Jy3yZTPajNtgEJWRJRCTrK9nmazdTj"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "6S88w9xkqCZqxyUmC4CgEkvJQyymMRPpTi89BDnmFDCuf3Yxx6BUCWX",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-6S88w9xkqCZqxyUmC4CgEkvJQyymMRPpTi89BDnmFDCuf3Yxx6BUCWX.jam",
+      "sha256": "9e7e5b8e28b9f9d73cf97fd47c61be55a0b26b9e58525bd90db2295a8ba32804",
+      "size_bytes": 633,
+      "included_in_pages": [
+        {
+          "height": 20010,
+          "id_base58": "3XXKFadvj43y2knEiRAhKbjs8Jy3yZTPajNtgEJWRJRCTrK9nmazdTj"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 1,
+      "id_base58": "7PACY5o9ygM4sf67WwzufTyFuNxxez5eLrncszEAKBRK8GzzRTCLxkA",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [
+        1
+      ],
+      "inputs_or_spends_count": 84,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v1-7PACY5o9ygM4sf67WwzufTyFuNxxez5eLrncszEAKBRK8GzzRTCLxkA.jam",
+      "sha256": "a48f51a6dc9c8563eab1029e84db93d935c808a844ed7810540d477aa6cfe507",
+      "size_bytes": 18869,
+      "included_in_pages": [
+        {
+          "height": 54000,
+          "id_base58": "AGK6DNY58mBjMhZX5qkrXoxc8QUPDqUK4TXVEoozuH26X2uC6V25Sew"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 1,
+      "id_base58": "8r8RYk8vnEe5RR1fypRm9We7aqE7zswKEdCVfaeaEAWrgkNfhym2MqE",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [
+        0
+      ],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v1-8r8RYk8vnEe5RR1fypRm9We7aqE7zswKEdCVfaeaEAWrgkNfhym2MqE.jam",
+      "sha256": "77f93e506b0e4b26d4e46080b9afd194d6eb7fd0b05033f1253a582481dcd4ff",
+      "size_bytes": 543,
+      "included_in_pages": [
+        {
+          "height": 41878,
+          "id_base58": "2jWPayaqtaXmwQcxsyUgVCVWGtTbzJbSQgZXg9NRSGMBCypnTYsY71B"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 1,
+      "id_base58": "9reANmAGtWWboibDUumvbXYWupM7TWvr2JrBT7pQaf4TFCyqJMBpp8B",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [
+        1
+      ],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v1-9reANmAGtWWboibDUumvbXYWupM7TWvr2JrBT7pQaf4TFCyqJMBpp8B.jam",
+      "sha256": "6ec6b2aaeed6e40b067ae104097b842e0fb97cc93b3ba25d607e3697e97f9ff2",
+      "size_bytes": 655,
+      "included_in_pages": [
+        {
+          "height": 41568,
+          "id_base58": "7yFNM62AZfwSURacXW6yq7mP5HVJPtw3MTJAiuMZFcc3qEpBZcUnsvW"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "AaxcXJPiGBA6aBi8bcf3YxSsa1GD2q56PYa2NCXR5buP8b8P7mZCckZ",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-AaxcXJPiGBA6aBi8bcf3YxSsa1GD2q56PYa2NCXR5buP8b8P7mZCckZ.jam",
+      "sha256": "0aebe505e9949a7e83c7faccbd8aebf48774a05176e06bccb55a48f4168a5502",
+      "size_bytes": 628,
+      "included_in_pages": [
+        {
+          "height": 19996,
+          "id_base58": "3nHWEpZNFvwBn3V9pS8Tr7wdDMicafh2hv1mp7zVY1PcXi2EKbP5pC6"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "Am7WjxdiB3oddMmEbbgvKL81S1zfeNQ2Tm5S2guXVQFdJkzCS6bFDET",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-Am7WjxdiB3oddMmEbbgvKL81S1zfeNQ2Tm5S2guXVQFdJkzCS6bFDET.jam",
+      "sha256": "f9f453759670ebf0625e24572978cbc07126bad469e97f8a991761f5e372aca5",
+      "size_bytes": 629,
+      "included_in_pages": [
+        {
+          "height": 20011,
+          "id_base58": "2uJm8FV6v4pF1Wf8HC3KkU1Xek1BTYX8z44YaSHR8D73BaF45AAsqKH"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 1,
+      "id_base58": "BXBC1jZdjnq6AieKHbe8DTzHHwaeY3shUnpsV1h262pQWBriv4cXhPv",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [
+        0
+      ],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v1-BXBC1jZdjnq6AieKHbe8DTzHHwaeY3shUnpsV1h262pQWBriv4cXhPv.jam",
+      "sha256": "11f9a43a2eed8c62a3d45f497c12293d95629678f2013fa4ea5cb57bad39d76c",
+      "size_bytes": 539,
+      "included_in_pages": [
+        {
+          "height": 65500,
+          "id_base58": "4dr8f3hWcQfgSMUrKRcNb1Z4nwzECbbUuqDYUp8G4WF6G5ocFXzPp2"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 1,
+      "id_base58": "Ct2TSemkdbEQJtNiKnY8LTN5tp4SVnS6bNeeAbpJZx6zQq2UrXfFSJq",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [
+        1
+      ],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v1-Ct2TSemkdbEQJtNiKnY8LTN5tp4SVnS6bNeeAbpJZx6zQq2UrXfFSJq.jam",
+      "sha256": "a2caa66937b1ca72e72b1e92ecfc3d2a0b4aa5e00edaea8c9d64cc9c035fee8e",
+      "size_bytes": 1226,
+      "included_in_pages": [
+        {
+          "height": 148899,
+          "id_base58": "BmVfeTxDLbFbnrAuY4ao9GRyDBoNF4KxG5uuPGxwEtYcBYgwfTXgP1U"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "DPg6aV3nLjN5NjFZC2yDS3iSPr6tvp4r2cDqJrDsGSHDvBGiuniubZg",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-DPg6aV3nLjN5NjFZC2yDS3iSPr6tvp4r2cDqJrDsGSHDvBGiuniubZg.jam",
+      "sha256": "5c963f16cc9b2d09c99567ca5e88a3752d1d9318953273e92fa5e6d282c1e824",
+      "size_bytes": 623,
+      "included_in_pages": [
+        {
+          "height": 37349,
+          "id_base58": "2pW3xuKtpUGKvnSZMt2ixXkJJTdPYLBBELTyDdJyV6AETvcmn9Jvyc9"
+        }
+      ]
+    },
+    {
+      "kind": "transaction",
+      "consensus_version": 0,
+      "id_base58": "DRwh67nLxmoXcXSJNxm7KE5vEUZnsSHjaapHvVYJk5h53A46oxhvWnk",
+      "height": null,
+      "pow_version": null,
+      "transaction_count": null,
+      "tx_ids_base58": null,
+      "spend_versions": [],
+      "inputs_or_spends_count": 1,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-25",
+      "validation": "raw-transaction-peek",
+      "file": "transaction-v0-DRwh67nLxmoXcXSJNxm7KE5vEUZnsSHjaapHvVYJk5h53A46oxhvWnk.jam",
+      "sha256": "7f5a9bb32c844449969aa8bf1d8fb7ddaf92f9f9b0bbff18dc293aa09cc5b04e",
+      "size_bytes": 631,
+      "included_in_pages": [
+        {
+          "height": 20010,
+          "id_base58": "3XXKFadvj43y2knEiRAhKbjs8Jy3yZTPajNtgEJWRJRCTrK9nmazdTj"
+        }
+      ]
+    }
+  ]
+}

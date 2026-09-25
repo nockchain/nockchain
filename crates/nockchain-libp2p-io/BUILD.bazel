@@ -112,7 +112,10 @@ rust_test(
     crate = ":nockchain-libp2p-io",
     data = [
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
-    ],
+    ] + glob([
+        "tests/fixtures/peer_v3/*.jam",
+        "tests/fixtures/peer_v3/manifest.json",
+    ]),
     deps = [
         "//crates/chaff",
         "//crates/kernels/dumb:kernels-open-dumb",
@@ -136,7 +139,10 @@ rust_test_with_miri(
     crate = ":nockchain-libp2p-io",
     data = [
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
-    ],
+    ] + glob([
+        "tests/fixtures/peer_v3/*.jam",
+        "tests/fixtures/peer_v3/manifest.json",
+    ]),
     deps = [
         "//crates/chaff",
         "//crates/kernels/dumb:kernels-open-dumb",
