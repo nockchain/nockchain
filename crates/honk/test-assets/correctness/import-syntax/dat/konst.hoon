@@ -1,0 +1,2 @@
+/+  *alpha
+[%konst +(alpha-val)]

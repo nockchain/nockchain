@@ -4,7 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use chumsky::Parser;
 use hatch::ast::hoon as ast;
 use hatch::native_parser;
-use hatch::utils::LineMap;
+use hatch::runes::{parse_import_header, ImportDirective, ImportTaut};
+use hatch::utils::{LineMap, IMPORT_RUNE_TAILS};
 use num_bigint::BigUint;
 
 use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
@@ -199,7 +200,7 @@ impl NativeImportResolver {
 
         for import in imports.iter().rev() {
             let dep_path = self.resolve_import(path, import.kind, import.suffix.as_str())?;
-            let dep_expr = if import.kind == ImportKind::Bar {
+            let dep_expr = if import.kind == ImportKind::Bar && !is_hoon_leaf(&dep_path) {
                 data_import_expr(dep_path.as_path())?
             } else {
                 self.parse(dep_path.as_path())?
@@ -230,28 +231,12 @@ impl NativeImportResolver {
         imports
             .into_iter()
             .map(|import| {
-                let kind = match import.kind {
-                    ImportKind::Bar => {
-                        // `/*` data imports must declare a mark honk supports.
-                        // Only `%jam` (raw jammed-noun inclusion) is
-                        // implemented; reject others rather than silently
-                        // importing them as generic data.
-                        match import.mark.as_deref() {
-                            Some("jam") => NativeImportKind::Data,
-                            other => {
-                                return Err(CompilerError::UnsupportedExpr(format!(
-                                    "/* import `{}` uses mark {} which honk does not support (only %jam)",
-                                    import.suffix,
-                                    other
-                                        .map(|m| format!("%{m}"))
-                                        .unwrap_or_else(|| "<none>".to_string()),
-                                )));
-                            }
-                        }
-                    }
-                    _ => NativeImportKind::Hoon,
-                };
                 let path = self.resolve_import(path, import.kind, import.suffix.as_str())?;
+                let kind = if import.kind == ImportKind::Bar && !is_hoon_leaf(&path) {
+                    NativeImportKind::Data
+                } else {
+                    NativeImportKind::Hoon
+                };
                 Ok(ResolvedNativeImport {
                     kind,
                     face: import.face,
@@ -414,192 +399,70 @@ fn vendored_hoon_sys_path() -> Option<PathBuf> {
 }
 
 fn parse_leading_imports(source: &str) -> Result<Vec<ScopedImport>> {
-    let mut imports = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
-    let mut index = 0usize;
-
-    while index < lines.len() {
-        let line = lines[index];
-        let trimmed = line.trim_start();
-
-        if trimmed.is_empty() || trimmed.starts_with("::") {
-            index += 1;
-            continue;
-        }
-        if !trimmed.starts_with('/') {
-            break;
-        }
-
-        let mut chars = trimmed.chars();
-        let _slash = chars.next();
-        let Some(rune) = chars.next() else {
-            break;
-        };
-        // A leading `/` whose rune is not an import rune ends the import
-        // block (e.g. the body starts). `/?` (Ford kelvin pin) and `/%`
-        // (propagating build) are import-block runes honk handles
-        // explicitly below.
-        if !matches!(rune, '-' | '+' | '=' | '*' | '#' | '?' | '%') {
-            break;
-        }
-
-        let mut clause = chars.as_str().trim().to_string();
-        index += 1;
-
-        while index < lines.len() {
-            let continuation = lines[index];
-            if continuation.starts_with(' ') || continuation.starts_with('\t') {
-                let continuation = continuation.trim();
-                if !continuation.is_empty() && !continuation.starts_with("::") {
-                    if !clause.is_empty() {
-                        clause.push(' ');
-                    }
-                    clause.push_str(continuation);
-                }
-                index += 1;
-                continue;
-            }
-            break;
-        }
-
-        match rune {
-            '=' => imports.push(parse_raw_import_clause(clause.as_str())?),
-            '*' => imports.push(parse_bar_import_clause(clause.as_str())?),
-            '+' => imports.extend(parse_import_clause(ImportKind::Lib, clause.as_str())?),
-            '-' => imports.extend(parse_import_clause(ImportKind::Sur, clause.as_str())?),
-            '#' => imports.extend(parse_import_clause(ImportKind::Dat, clause.as_str())?),
-            // `/?` pins the Ford kelvin version; it is not an import. Accept
-            // and ignore it rather than silently treating it as data.
-            '?' => {
-                tracing::debug!(clause = %clause, "ignoring /? Ford version pin");
-            }
+    // The same grammar hatch uses to skip the header, which is hoonc's
+    // `+pile-rule`: separators and continuations are `gap`/`gaw`, so imports
+    // may span lines and carry comments anywhere whitespace is allowed.
+    let header = parse_import_header(source);
+    let body = &source[header.body_start..];
+    let mut body_chars = body.chars();
+    if body_chars.next() == Some('/') {
+        if let Some(rune) = body_chars
+            .next()
+            .filter(|rune| IMPORT_RUNE_TAILS.contains(*rune))
+        {
+            let line = body.lines().next().unwrap_or(body);
             // `/%` (propagating build) is a real Ford rune honk does not
             // implement; reject rather than silently dropping it.
-            '%' => {
+            if rune == '%' {
                 return Err(CompilerError::UnsupportedExpr(format!(
-                    "/% imports are not supported by honk: `/%{clause}`"
+                    "/% imports are not supported by honk: `{line}`"
                 )));
             }
-            _ => unreachable!("rune gated by matches! above"),
+            return Err(CompilerError::Parse(format!(
+                "malformed /{rune} import: `{line}`"
+            )));
         }
     }
 
-    Ok(imports)
-}
-
-fn parse_raw_import_clause(clause: &str) -> Result<ScopedImport> {
-    let token = strip_inline_comment(clause).trim();
-    let malformed = || {
-        CompilerError::Parse(format!(
-            "malformed /= import clause: `/={clause}` (expected `face suffix`)"
-        ))
+    let tauts = |kind: ImportKind, tauts: Vec<ImportTaut>| {
+        tauts.into_iter().map(move |taut| ScopedImport {
+            kind,
+            face: taut.face,
+            mark: None,
+            suffix: taut.name,
+        })
     };
-    if token.is_empty() {
-        return Err(malformed());
-    }
-
-    let mut parts = token.split_whitespace();
-    let face = parts.next().ok_or_else(malformed)?;
-    let suffix = parts.next().ok_or_else(malformed)?;
-    if parts.next().is_some() {
-        return Err(malformed());
-    }
-    let face = if face == "*" {
-        None
-    } else {
-        Some(face.to_string())
-    };
-    Ok(ScopedImport {
-        kind: ImportKind::Raw,
-        face,
-        mark: None,
-        suffix: suffix.to_string(),
-    })
-}
-
-fn parse_bar_import_clause(clause: &str) -> Result<ScopedImport> {
-    let token = strip_inline_comment(clause).trim();
-    let malformed = || {
-        CompilerError::Parse(format!(
-            "malformed /* import clause: `/*{clause}` (expected `face mark suffix`)"
-        ))
-    };
-    if token.is_empty() {
-        return Err(malformed());
-    }
-
-    let mut parts = token.split_whitespace();
-    let face = parts.next().ok_or_else(malformed)?;
-    let mark = parts.next().ok_or_else(malformed)?;
-    let suffix = parts.next().ok_or_else(malformed)?;
-    if parts.next().is_some() {
-        return Err(malformed());
-    }
-    let face = if face == "*" {
-        None
-    } else {
-        Some(face.to_string())
-    };
-    Ok(ScopedImport {
-        kind: ImportKind::Bar,
-        face,
-        mark: Some(mark.trim_start_matches('%').to_string()),
-        suffix: suffix.to_string(),
-    })
-}
-
-fn parse_import_clause(kind: ImportKind, clause: &str) -> Result<Vec<ScopedImport>> {
     let mut imports = Vec::new();
-    for item in clause.split(',') {
-        let token = strip_inline_comment(item.trim());
-        if token.is_empty() {
-            continue;
-        }
-
-        if let Some(rest) = token.strip_prefix('*') {
-            let suffix = rest.trim();
-            if suffix.is_empty() {
-                return Err(CompilerError::Parse(format!(
-                    "malformed import clause item `{token}` (empty `*` suffix)"
-                )));
-            }
-            imports.push(ScopedImport {
-                kind,
-                face: None,
+    for directive in header.directives {
+        match directive {
+            // `/?` pins the Ford kelvin version; it is not an import.
+            ImportDirective::Kelvin => {}
+            ImportDirective::Sur(items) => imports.extend(tauts(ImportKind::Sur, items)),
+            ImportDirective::Lib(items) => imports.extend(tauts(ImportKind::Lib, items)),
+            ImportDirective::Dat(items) => imports.extend(tauts(ImportKind::Dat, items)),
+            ImportDirective::Raw { face, path } => imports.push(ScopedImport {
+                kind: ImportKind::Raw,
+                face,
                 mark: None,
-                suffix: suffix.to_string(),
-            });
-        } else if let Some((face, suffix)) = token.split_once('=') {
-            let face = face.trim();
-            let suffix = suffix.trim();
-            if face.is_empty() || suffix.is_empty() {
-                return Err(CompilerError::Parse(format!(
-                    "malformed import clause item `{token}` (expected `face=suffix`)"
-                )));
-            }
-            imports.push(ScopedImport {
-                kind,
-                face: Some(face.to_string()),
-                mark: None,
-                suffix: suffix.to_string(),
-            });
-        } else {
-            imports.push(ScopedImport {
-                kind,
-                face: Some(token.to_string()),
-                mark: None,
-                suffix: token.to_string(),
-            });
+                suffix: format!("/{}", path.join("/")),
+            }),
+            ImportDirective::Bar { face, mark, path } => imports.push(ScopedImport {
+                kind: ImportKind::Bar,
+                face: Some(face),
+                mark: Some(mark),
+                suffix: format!("/{}", path.join("/")),
+            }),
         }
     }
     Ok(imports)
 }
 
-fn strip_inline_comment(token: &str) -> &str {
-    match token.find("::") {
-        Some(idx) => token[..idx].trim(),
-        None => token,
-    }
+/// hoonc's `+is-hoon`: a leaf whose file name contains `.hoon` is compiled as
+/// Hoon, whatever mark a `/*` import names. Every other leaf is `$octs`.
+pub fn is_hoon_leaf(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".hoon"))
 }
 
 fn data_import_expr(path: &Path) -> Result<ast::Hoon> {
@@ -1122,6 +985,86 @@ mod tests {
         let source = "/*  blocks  /jams/x/jam\n|%\n--\n";
         let err = parse_leading_imports(source).expect_err("malformed /* must error");
         assert!(matches!(err, CompilerError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn keeps_imports_after_a_comment_inside_a_comma_list() {
+        // hoonc separates list items with `,` then `gaw`, which may hold a
+        // comment and a newline. Stripping the comment after joining the
+        // lines dropped `*beta` silently.
+        let source = "/+  *alpha,  ::  first\n    *beta\n[alpha-val beta-val]\n";
+        let imports = parse_leading_imports(source).expect("imports parse");
+        let names: Vec<_> = imports
+            .iter()
+            .map(|import| import.suffix.as_str())
+            .collect();
+        assert_eq!(names, ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn continues_a_comma_list_onto_an_unindented_line() {
+        let source = "/+  *alpha,\n*beta\n[alpha-val beta-val]\n";
+        let imports = parse_leading_imports(source).expect("imports parse");
+        let names: Vec<_> = imports
+            .iter()
+            .map(|import| import.suffix.as_str())
+            .collect();
+        assert_eq!(names, ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn indented_import_line_starts_a_new_directive() {
+        let source = "/-  *types\n  /+  *alpha\nalpha-val\n";
+        let imports = parse_leading_imports(source).expect("imports parse");
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0].kind, ImportKind::Sur);
+        assert_eq!(imports[1].kind, ImportKind::Lib);
+        assert_eq!(imports[1].suffix, "alpha");
+    }
+
+    #[test]
+    fn rejects_single_space_after_import_rune() {
+        // hoonc's `gap` needs two spaces, a newline or a comment.
+        let err = parse_leading_imports("/+ alpha\nalpha-val\n").expect_err("single space");
+        assert!(matches!(err, CompilerError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn bar_import_kind_follows_the_leaf_name_not_the_mark() {
+        // hoonc ignores the `/*` mark: a leaf whose name contains `.hoon` is
+        // compiled and anything else becomes `$octs`.
+        let deps = temp_path("bar-marks").with_extension("");
+        fs::create_dir_all(deps.join("lib")).expect("lib dir");
+        fs::create_dir_all(deps.join("dat")).expect("dat dir");
+        fs::create_dir_all(deps.join("app")).expect("app dir");
+        fs::write(deps.join("lib/alpha.hoon"), "|%  ++  alpha-val  1  --\n").expect("lib");
+        fs::write(deps.join("dat/note.txt"), "note\n").expect("note");
+        fs::write(deps.join("dat/blob.jam"), [1u8, 2, 3]).expect("blob");
+        let entry = deps.join("app/entry.hoon");
+        fs::write(
+            &entry,
+            concat!(
+                "/*  al  %hoon  /lib/alpha/hoon\n", "/*  src  %jam  /lib/alpha/hoon\n",
+                "/*  note  %txt  /dat/note/txt\n", "/*  blob  %jam  /dat/blob/jam\n",
+                "[al src note blob]\n",
+            ),
+        )
+        .expect("entry");
+
+        let imports = super::resolve_native_imports(&entry, &deps, ScopeMode::Standard)
+            .expect("imports resolve");
+        let kinds: Vec<_> = imports.iter().map(|import| import.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                super::NativeImportKind::Hoon,
+                super::NativeImportKind::Hoon,
+                super::NativeImportKind::Data,
+                super::NativeImportKind::Data,
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&deps);
     }
 
     #[test]
