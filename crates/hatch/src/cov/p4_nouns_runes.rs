@@ -1387,9 +1387,11 @@ fn kettis_doc_on_a_cell_face_and_sail_utf8_attribute() {
     assert!(matches!(h, Hoon::KetTis(..)), "{h:?}");
 
     // Pins the behavior recorded in coverage/p4/divergent/p4_sail_attr_utf8:
-    // the two UTF-8 bytes of "é" become a single beer char (hoonc keeps two).
+    // the tape lexer yields the two UTF-8 bytes of "é" as two woofs, but
+    // runes/sail.rs re-encodes each byte as a code point (hoonc keeps the
+    // bytes).
     let Hoon::Xray(manx) = parse_one(";div(title \"h\u{e9}\");\n") else {
         panic!("expected sail");
     };
-    assert_eq!(manx.g.a[0].1.len(), 2, "{:?}", manx.g.a[0].1);
+    assert_eq!(manx.g.a[0].1.len(), 3, "{:?}", manx.g.a[0].1);
 }

@@ -5073,10 +5073,31 @@ pub fn soil<'src>(
         .map(|h| Woof::Hoon(Hoon::ColTar(h)))
         .boxed();
 
+    //  hoonc parses the bytes of the source, so a non-ASCII character is one
+    //  tape element per byte of its UTF-8 encoding (++prn admits every byte
+    //  from 0x80 up).
+    let text_bytes = |c: char| {
+        let mut encoded = [0; 4];
+        c.encode_utf8(&mut encoded)
+            .bytes()
+            .map(|b| Woof::ParsedAtom(ParsedAtom::Small(b as u128)))
+            .collect::<Vec<Woof>>()
+    };
+
+    //  \HH hex escape (++bix:ab: two ++six digits, so lowercase only)
+    let hex_escape = || {
+        let six = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'));
+        six.clone().then(six).map(|(a, b)| {
+            let hx = format!("{}{}", a, b);
+            let byte = u8::from_str_radix(&hx, 16).expect("hex tape escape was validated");
+            byte as char
+        })
+    };
+
     // non-control 32-256, excluding DEL, {,  ", \
     let wide_char = any().filter(|c: &char| {
         let x = *c as u32;
-        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '"' && *c != '\\') || (x >= 0x80 && x <= 0xFF)
+        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '"' && *c != '\\') || x >= 0x80
     });
 
     //
@@ -5091,34 +5112,26 @@ pub fn soil<'src>(
                 just("\\").to('\\'),
                 just("\"").to('\"'),
                 just("{").to('{'),
-                // \HH hex escape
-                any()
-                    .filter(|c: &char| c.is_ascii_hexdigit())
-                    .then(any().filter(|c: &char| c.is_ascii_hexdigit()))
-                    .map(|(a, b)| {
-                        let hx = format!("{}{}", a, b);
-                        let byte =
-                            u8::from_str_radix(&hx, 16).expect("hex tape escape was validated");
-                        byte as char
-                    }),
+                hex_escape(),
             )))
-            .map(|c: char| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+            .map(|c: char| vec![Woof::ParsedAtom(ParsedAtom::Small(c as u128))]),
         //
         //  {hoon}
         //
-        sump.clone(),
+        sump.clone().map(|w| vec![w]),
         ///
-        wide_char.map(|c| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+        wide_char.map(text_bytes),
     ))
     .repeated()
-    .collect::<Vec<Woof>>()
+    .collect::<Vec<Vec<Woof>>>()
+    .map(|chunks| chunks.into_iter().flatten().collect::<Vec<Woof>>())
     .delimited_by(just("\""), just("\""))
     .labelled("Tape");
 
     // non-control 32-256, excluding DEL, {,  \
     let tall_char = any().filter(|c: &char| {
         let x = *c as u32;
-        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '\\') || (x >= 0x80 && x <= 0xFF)
+        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '\\') || x >= 0x80
     });
 
     // let tall_tape_line_break =
@@ -5134,27 +5147,19 @@ pub fn soil<'src>(
             .ignore_then(choice((
                 just("\\").to('\\'),
                 just("{").to('{'),
-                // \HH hex escape
-                any()
-                    .filter(|c: &char| c.is_ascii_hexdigit())
-                    .then(any().filter(|c: &char| c.is_ascii_hexdigit()))
-                    .map(|(a, b)| {
-                        let hx = format!("{}{}", a, b);
-                        let byte =
-                            u8::from_str_radix(&hx, 16).expect("hex tape escape was validated");
-                        byte as char
-                    }),
+                hex_escape(),
             )))
-            .map(|c: char| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+            .map(|c: char| vec![Woof::ParsedAtom(ParsedAtom::Small(c as u128))]),
         //
-        tall_char.map(|c| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+        tall_char.map(text_bytes),
         //
         //  {hoon}
         //
-        sump,
+        sump.map(|w| vec![w]),
     ))
     .repeated()
-    .collect::<Vec<Woof>>();
+    .collect::<Vec<Vec<Woof>>>()
+    .map(|chunks| chunks.into_iter().flatten().collect::<Vec<Woof>>());
 
     let prefix_spaces = just(' ').repeated();
 
@@ -5337,12 +5342,17 @@ pub fn constant<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, Coi
         .labelled("Constant<%foo>")
 }
 
-pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
-    let empty_triple_quoted = just("'''")
-        .then_ignore(newline())
-        .then_ignore(just("'''"))
-        .to(cord_chars_to_atom(Vec::new()));
+//  ++gon: a \ / continuation inside a cord or ++hex digits; the whitespace
+//  between is ++gay, an optional gap
+fn gon<'src>() -> impl Parser<'src, &'src str, (), Err<'src>> {
+    just("\\")
+        .ignore_then(gap().or_not())
+        .ignore_then(just("/"))
+        .ignored()
+        .labelled("Multiline Separator")
+}
 
+pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     //  \\, \' and \AA where A is a hex digit. Escapes produce bytes, not
     //  Unicode scalar values: `\d7` is one byte while a literal `×` is the two
     //  bytes of its UTF-8 encoding.
@@ -5375,17 +5385,11 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
             encoded[..len].to_vec()
         });
 
-    let gon = just("\\") // multiline separator
-        .ignore_then(gap())
-        .ignore_then(just("/"))
-        .ignored()
-        .labelled("Cord Multiline Separator");
-
     let char_in_singled_quoted = choice((escape, raw_char)).labelled("Cord Character");
 
+    //  (more gon qit): a continuation only separates two characters
     let single_quoted = char_in_singled_quoted
-        .then_ignore(gon.or_not())
-        .repeated()
+        .separated_by(gon().or_not())
         .collect::<Vec<Vec<u8>>>()
         .delimited_by(just("'"), just("'"))
         .map(|chunks| cord_bytes_to_atom(chunks.into_iter().flatten()));
@@ -5401,7 +5405,14 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
             }
             return 0 as usize;
         })
-        .then_ignore(vul().or(newline()));
+        //  ++qut hed: a comment after at least one space, or a newline
+        .then_ignore(
+            just(' ')
+                .repeated()
+                .at_least(1)
+                .ignore_then(vul())
+                .or(newline()),
+        );
 
     let triple_quoted_close = newline()
         .ignore_then(just(' ').repeated().count())
@@ -5473,7 +5484,7 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
         })
         .map(cord_chars_to_atom);
 
-    choice((empty_triple_quoted, triple_quoted, single_quoted)).labelled("Cord")
+    choice((triple_quoted, single_quoted)).labelled("Cord")
 }
 
 pub fn increment<'src>(
@@ -5822,41 +5833,41 @@ fn wick(s: &str) -> Option<String> {
 }
 
 pub fn urx<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
+    //  (cook tuft (ifix [sig dot] hex)): ++hex is (most gon hit), and ++tuft
+    //  encodes every 32-bit lane of the value, not just the low one
     let hex_escape = any()
         .filter(|c: &char| c.is_ascii_hexdigit())
-        .repeated()
+        .separated_by(gon().or_not())
         .at_least(1)
         .collect::<String>()
         .delimited_by(just('~'), just('.'))
         .map(|hex_str: String| {
             let big = BigUint::from_str_radix(&hex_str, 16).unwrap_or_default();
-            let value_32 = big.iter_u32_digits().next().unwrap_or(0); // low 32 bits
-
-            let tuft_result = tuft(&ParsedAtom::Small(value_32 as u128));
-
-            match tuft_result {
-                ParsedAtom::Small(n) => n,
-                ParsedAtom::Big(_) => panic!("tuft overflow"),
+            let encoded = tuft(&ParsedAtom::from_biguint(big));
+            if encoded.is_zero() {
+                Vec::new()
+            } else {
+                encoded.to_biguint().to_bytes_le()
             }
         });
 
     let special = choice((
-        just("~~").to(b'~' as u128),
-        just("~.").to(b'.' as u128),
-        just('.').to(b' ' as u128),
+        just("~~").to(vec![b'~']),
+        just("~.").to(vec![b'.']),
+        just('.').to(vec![b' ']),
     ));
 
     let ascii = any()
         .filter(|c: &char| c.is_ascii_digit() || c.is_ascii_lowercase() || *c == '-' || *c == '_')
-        .map(|c| c as u128);
+        .map(|c| vec![c as u8]);
 
     let token = choice((hex_escape, special, ascii));
 
-    token
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<u128>>()
-        .map(|chars: Vec<u128>| rap(3, &chars))
+    //  ++urx is a star: ~~ and ~- alone are the empty @t and @c
+    token.repeated().collect::<Vec<Vec<u8>>>().map(|chunks| {
+        let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
+        ParsedAtom::from_biguint(BigUint::from_bytes_le(&bytes))
+    })
 }
 
 fn atom_shl(a: &ParsedAtom, bits: usize) -> ParsedAtom {
@@ -5963,13 +5974,10 @@ pub fn tuft(atom: &ParsedAtom) -> ParsedAtom {
         bytes.push((0b1000_0000 | (b & 0x3f)) as u8);
     }
 
-    // rap 3: pack bytes little-endian into @t
-    let mut acc: u128 = 0;
-    for (i, byte) in bytes.iter().enumerate() {
-        acc |= (*byte as u128) << (i * 8);
-    }
-
-    ParsedAtom::Small(acc)
+    // rap 3: pack bytes little-endian into @t. A zero byte (from an empty
+    // lane below a nonzero one) has no width, so rap drops it.
+    bytes.retain(|&byte| byte != 0);
+    ParsedAtom::from_biguint(BigUint::from_bytes_le(&bytes))
 }
 // --- Extract low byte as u8 ---
 fn atom_to_u8(atom: &ParsedAtom) -> u8 {
@@ -5979,100 +5987,63 @@ fn atom_to_u8(atom: &ParsedAtom) -> u8 {
     }
 }
 
-// --- UTF-8 continuation byte check ---
-fn is_continuation(b: u8) -> bool {
-    b & 0xC0 == 0x80
-}
-
-// --- teff: UTF-8 leading byte → length (1–4) ---
-fn teff(atom: &ParsedAtom) -> usize {
+// --- teff: UTF-8 leading byte → length (1–4), as ++teff ---
+// None where ++teff crashes: a zero low byte under nonzero bytes, or a
+// control byte other than newline.
+fn teff(atom: &ParsedAtom) -> Option<usize> {
     let b = atom_to_u8(atom);
     if b == 0 {
-        return 0;
+        return atom.is_zero().then_some(0);
     }
-    if b <= 0x7F {
-        1
-    } else if b <= 0xDF {
-        2
-    } else if b <= 0xEF {
-        3
-    } else if b <= 0xF4 {
-        4
-    } else {
-        1
-    } // invalid → skip 1 byte
+    if b < 32 && b != 10 {
+        return None;
+    }
+    Some(match b {
+        0..=127 => 1,
+        128..=223 => 2,
+        224..=239 => 3,
+        _ => 4,
+    })
 }
 
-// --- Decode one UTF-8 codepoint ---
-fn decode_one_utf8(atom: &ParsedAtom, len: usize) -> u32 {
+// --- One ++taft step: the code point bits of a `len`-byte character,
+// cut out without validation ---
+fn taft_cut(atom: &ParsedAtom, len: usize) -> u32 {
+    let byte = |i: usize| atom_to_u8(&rsh(3, i, atom)) as u32;
     match len {
-        1 => atom_to_u8(atom) as u32,
-        2 => {
-            let b0 = atom_to_u8(atom);
-            let b1 = atom_to_u8(&rsh(3, 1, atom));
-            if !is_continuation(b1) {
-                return 0xFFFD;
-            }
-            let cp = ((b0 & 0x1F) as u32) << 6 | (b1 & 0x3F) as u32;
-            if cp < 0x80 {
-                0xFFFD
-            } else {
-                cp
-            }
+        1 => byte(0) & 0x7f,
+        2 => (byte(0) & 0x1f) << 6 | byte(1) & 0x3f,
+        3 => (byte(0) & 0x0f) << 12 | (byte(1) & 0x3f) << 6 | byte(2) & 0x3f,
+        _ => {
+            (byte(0) & 0x07) << 18 | (byte(1) & 0x3f) << 12 | (byte(2) & 0x3f) << 6 | byte(3) & 0x3f
         }
-        3 => {
-            let b0 = atom_to_u8(atom);
-            let b1 = atom_to_u8(&rsh(3, 1, atom));
-            let b2 = atom_to_u8(&rsh(3, 2, atom));
-            if !is_continuation(b1) || !is_continuation(b2) {
-                return 0xFFFD;
-            }
-            let cp = ((b0 & 0x0F) as u32) << 12 | ((b1 & 0x3F) as u32) << 6 | (b2 & 0x3F) as u32;
-            if cp < 0x800 || (0xD800..=0xDFFF).contains(&cp) {
-                0xFFFD
-            } else {
-                cp
-            }
-        }
-        4 => {
-            let b0 = atom_to_u8(atom);
-            let b1 = atom_to_u8(&rsh(3, 1, atom));
-            let b2 = atom_to_u8(&rsh(3, 2, atom));
-            let b3 = atom_to_u8(&rsh(3, 3, atom));
-            if !is_continuation(b1) || !is_continuation(b2) || !is_continuation(b3) {
-                return 0xFFFD;
-            }
-            let cp = ((b0 & 0x07) as u32) << 18
-                | ((b1 & 0x3F) as u32) << 12
-                | ((b2 & 0x3F) as u32) << 6
-                | (b3 & 0x3F) as u32;
-            if !(0x1_0000..=0x10_FFFF).contains(&cp) {
-                0xFFFD
-            } else {
-                cp
-            }
-        }
-        _ => 0xFFFD,
     }
 }
 
-// @t (UTF-8 atom) -> @c (UTF-32 packed atom)
-pub fn taft(atom: &ParsedAtom) -> ParsedAtom {
+// @t (UTF-8 atom) -> @c (UTF-32 packed atom), as ++taft. Surrogates and code
+// points above U+10FFFF are kept. None where ++taft crashes: ++teff rejects a
+// byte, or a character does not survive the round trip through ++tuft
+// (malformed or overlong UTF-8).
+pub fn taft(atom: &ParsedAtom) -> Option<ParsedAtom> {
     let mut codepoints = Vec::new();
     let mut current = atom.clone();
 
     loop {
-        let len = teff(&current);
+        let len = teff(&current)?;
         if len == 0 {
             break;
         }
-        let cp = decode_one_utf8(&current, len);
+        let cp = taft_cut(&current, len);
+        // ?>  =((tuft c) (end [3 b] a))
+        if tuft(&ParsedAtom::Small(cp as u128)).to_biguint() != end(3, len, &current).to_biguint() {
+            return None;
+        }
         codepoints.push(cp);
         current = rsh(3, len, &current); // shift by `len` bytes
     }
 
     // Pack into @c: each u32 in 32-bit lane, LSB-first (rap 5)
-    if codepoints.is_empty() {
+    Some(if codepoints.is_empty() {
         ParsedAtom::Small(0)
     } else if codepoints.len() <= 4 {
         let mut acc: u128 = 0;
@@ -6086,7 +6057,7 @@ pub fn taft(atom: &ParsedAtom) -> ParsedAtom {
             acc |= BigUint::from(cp) << (i * 32);
         }
         ParsedAtom::from_biguint(acc)
-    }
+    })
 }
 
 pub fn binary_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
@@ -9001,9 +8972,13 @@ fn wood_go(a: &ParsedAtom) -> Vec<u128> {
         return Vec::new();
     }
 
-    let b = teff(a);
-    let c_atom = taft(&end(3, b, a));
-    let c = c_atom.to_u32().expect("cord byte should fit in u32");
+    //  hoonc's ++wood crashes where ++teff or ++taft do; render the raw bits
+    //  of such a character instead
+    let b = teff(a).unwrap_or(1);
+    let c = match taft(&end(3, b, a)) {
+        Some(c_atom) => c_atom.to_u32().expect("cord byte should fit in u32"),
+        None => taft_cut(a, b),
+    };
     let mut d = wood_go(&rsh(3, b, a));
 
     // alnum or '-'
@@ -10962,9 +10937,12 @@ pub fn crub<'src>() -> impl Parser<'src, &'src str, Coin, Err<'src>> {
         just('~')
             .ignore_then(urx())
             .map(|atom| Coin::Dime("t".to_string(), atom)),
-        just('-')
-            .ignore_then(urx())
-            .map(|atom| Coin::Dime("c".to_string(), taft(&atom))),
+        just('-').ignore_then(urx()).try_map(|atom, span| {
+            //  ++taft crashes on text it cannot round-trip (~-~1., ~-~200000.)
+            taft(&atom)
+                .map(|c| Coin::Dime("c".to_string(), c))
+                .ok_or_else(|| Rich::custom(span, "invalid UTF-8 in @c knot"))
+        }),
     ))
 }
 

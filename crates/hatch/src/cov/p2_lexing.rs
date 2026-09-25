@@ -801,6 +801,15 @@ fn wide_tapes_decode_escapes_and_interpolation() {
         soil_parse(r#""a{ }b""#).is_err(),
         "unparseable interpolation"
     );
+    // hoonc parses bytes: a non-ASCII character is one element per UTF-8
+    // byte, whatever its code point
+    let w = soil_parse("\"\u{e9}\u{20ac}\u{1f600}\"").unwrap();
+    let want: Vec<u128> = "\u{e9}\u{20ac}\u{1f600}".bytes().map(u128::from).collect();
+    assert_eq!(woof_bytes(&w), want);
+    // \HH escapes take lowercase hex only (++bix:ab reads ++six digits)
+    assert_eq!(woof_bytes(&soil_parse(r#""\e9""#).unwrap()), vec![0xe9]);
+    assert!(soil_parse(r#""\4A""#).is_err(), "uppercase hex escape");
+    assert!(soil_parse(r#""\E9""#).is_err(), "uppercase hex escape");
 }
 
 #[test]
@@ -838,6 +847,13 @@ fn tall_tapes_strip_the_block_indent() {
         soil_parse("\"\"\"\n\\q\n\"\"\"").is_err(),
         "unknown tall escape"
     );
+    assert!(
+        soil_parse("\"\"\"\n\\4A\n\"\"\"").is_err(),
+        "uppercase tall hex escape"
+    );
+    let w = soil_parse("\"\"\"\n\u{e9}\u{20ac}\n\"\"\"").unwrap();
+    let want: Vec<u128> = "\u{e9}\u{20ac}".bytes().map(u128::from).collect();
+    assert_eq!(woof_bytes(&w), want, "UTF-8 bytes in a tall tape");
     // a whitespace-only line shorter than the block indent is rejected (as
     // hoonc does)
     assert!(soil_parse("  \"\"\"\n  a\n \n  \"\"\"").is_err());
@@ -869,6 +885,14 @@ fn cord_parse(src: &str) -> Result<BigUint, String> {
 fn cords_decode_escapes_and_continuations() {
     assert_eq!(cord_parse(r"'a\\b\'c\41'").unwrap(), cord_atom("a\\b'cA"));
     assert_eq!(cord_parse("'foo\\\n  /bar'").unwrap(), cord_atom("foobar"));
+    // ++gon is bas gay fas: the gap is optional ...
+    assert_eq!(cord_parse(r"'ab\/cd'").unwrap(), cord_atom("abcd"));
+    // ... but a single space is not a gap
+    assert!(cord_parse(r"'ab\ /cd'").is_err());
+    // (more gon qit): a continuation only separates two characters
+    assert!(cord_parse("'ab\\\n  /'").is_err(), "trailing continuation");
+    assert!(cord_parse(r"'\/ab'").is_err(), "leading continuation");
+    assert_eq!(cord_parse(r"'a\\/b'").unwrap(), cord_atom("a\\/b"));
     assert!(
         cord_parse("'a\tb'").is_err(),
         "control characters are not cord text"
@@ -888,13 +912,27 @@ fn triple_quoted_cords_strip_the_block_indent() {
         cord_parse("  '''\n  one\n two\n  '''").is_err(),
         "inconsistent indent"
     );
-    // a blank content line alone yields the empty cord; so does a block with
-    // no content line at all (hoonc agrees: coverage/p2/p2_text.hoon)
+    // a blank content line alone yields the empty cord; so does a
+    // whitespace-only one (hoonc agrees: coverage/p2/p2_text.hoon)
     assert_eq!(cord_parse("  '''\n\n  '''").unwrap(), BigUint::zero());
     // a whitespace-only line shorter than the block indent is rejected (as
     // hoonc does)
     assert!(cord_parse("  '''\n  a\n \n  '''").is_err());
     assert_eq!(cord_parse("  '''\n  \n  '''").unwrap(), BigUint::zero());
+    // ++qut needs a line between the delimiters: an empty block is rejected
+    // at any column
+    assert!(cord_parse("'''\n'''").is_err());
+    assert!(cord_parse("  '''\n  '''").is_err());
+    // the opening ''' may carry a comment after at least one space
+    assert_eq!(
+        cord_parse("  '''  :: note\n  abc\n  '''").unwrap(),
+        cord_atom("abc")
+    );
+    assert!(cord_parse("  ''':: note\n  abc\n  '''").is_err());
+    assert!(
+        cord_parse("  '''  \n  abc\n  '''").is_err(),
+        "trailing space"
+    );
 }
 
 #[test]
@@ -1054,6 +1092,19 @@ fn urx_builds_cords_from_escapes() {
     assert_eq!(u("~~~."), cord_atom("~."));
     assert_eq!(u("~2605."), cord_atom("\u{2605}"));
     assert_eq!(u("~e9.~1f600."), cord_atom("\u{e9}\u{1f600}"));
+    // ++tuft encodes every 32-bit lane of a wide escape; rap drops the zero
+    // byte of an empty lane
+    assert_eq!(u("~100000041."), big(0x0141));
+    assert_eq!(u("~4100000000."), big(0x41));
+    assert_eq!(u("a~0.b"), cord_atom("ab"));
+    // ++urx is a star, so the empty knot is the empty cord
+    assert_eq!(u(""), big(0));
+    assert_eq!(sand_atom(&parse_expr("~~")), ("t".to_string(), big(0)));
+    assert_eq!(sand_atom(&parse_expr("~-")), ("c".to_string(), big(0)));
+    // hex escapes read ++hex, whose digits may be split by ++gon
+    assert_eq!(u(r"~4\/1."), cord_atom("A"));
+    assert_eq!(u("~4\\\n  /1."), cord_atom("A"));
+    assert!(urx().parse(r"~4\/.").into_result().is_err());
 }
 
 #[test]
@@ -1062,13 +1113,13 @@ fn tuft_and_taft_convert_between_utf32_and_utf8() {
         let cp = s.chars().next().unwrap() as u128;
         assert_eq!(tuft(&ParsedAtom::Small(cp)).to_biguint(), cord_atom(s));
         assert_eq!(
-            atom_u128(&taft(&ParsedAtom::from_biguint(cord_atom(s)))),
+            atom_u128(&taft(&ParsedAtom::from_biguint(cord_atom(s))).unwrap()),
             cp
         );
     }
-    assert_eq!(taft(&ParsedAtom::Small(0)), ParsedAtom::Small(0));
+    assert_eq!(taft(&ParsedAtom::Small(0)), Some(ParsedAtom::Small(0)));
     // more than four code points needs a big atom
-    let five = taft(&ParsedAtom::from_biguint(cord_atom("abcde")));
+    let five = taft(&ParsedAtom::from_biguint(cord_atom("abcde"))).unwrap();
     let want = "abcde"
         .chars()
         .enumerate()
@@ -1076,7 +1127,8 @@ fn tuft_and_taft_convert_between_utf32_and_utf8() {
             acc + (big(c as u128) << (32 * i))
         });
     assert_eq!(five.to_biguint(), want);
-    // malformed UTF-8 (unreachable from urx) decodes defensively to U+FFFD
+    // malformed UTF-8 fails ++taft's round trip through ++tuft, and ++teff
+    // refuses control bytes (hoonc crashes on both)
     for bytes in [
         vec![0xc3u8, 0x41],
         vec![0xc0, 0x80],
@@ -1086,14 +1138,29 @@ fn tuft_and_taft_convert_between_utf32_and_utf8() {
         vec![0xf0, 0x90, 0x80, 0x41],
         vec![0xe0, 0x80, 0x80],
         vec![0xf0, 0x41, 0x80, 0x80],
+        vec![0xf8, 0x80, 0x80, 0x80],
+        vec![0xc3],
+        vec![0x01],
+        vec![0x00, 0x41],
     ] {
         let got = taft(&ParsedAtom::from_biguint(BigUint::from_bytes_le(&bytes)));
-        assert_eq!(atom_u128(&got) & 0xffff_ffff, 0xfffd, "{bytes:x?}");
+        assert_eq!(got, None, "{bytes:x?}");
     }
+    // surrogates and code points above U+10FFFF survive the round trip
+    for cp in [0xd800u128, 0xdfff, 0x11_0000, 0x14_0000, 0x1f_ffff] {
+        let utf8 = tuft(&ParsedAtom::Small(cp));
+        assert_eq!(taft(&utf8).map(|c| atom_u128(&c)), Some(cp), "{cp:x}");
+    }
+    assert_eq!(atom_u128(&taft(&ParsedAtom::Small(0x0a)).unwrap()), 0x0a);
     // @c literals go through urx then taft
     let (aura, atom) = sand_atom(&parse_expr("~-~2605.a"));
     assert_eq!((aura.as_str(), atom), ("c", big(0x2605 | (0x61 << 32))));
     assert_eq!(sand_atom(&parse_expr("~-~0.")).1, big(0));
+    assert_eq!(sand_atom(&parse_expr("~-~d800.")).1, big(0xd800));
+    assert_eq!(sand_atom(&parse_expr("~-~140000.")).1, big(0x14_0000));
+    for src in ["~-~1.", "~-~200000.", "~-~100000041."] {
+        assert!(parse_fails(src), "{src} does not round-trip through ++taft");
+    }
 }
 
 #[test]
