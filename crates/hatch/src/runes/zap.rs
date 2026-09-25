@@ -183,16 +183,7 @@ pub fn zapwut<'src>(
     hoon: impl ParserExt<'src, Hoon>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
-        .ignore_then(
-            decimal_number()
-                .map(|n| ZpwtArg::ParsedAtom(n))
-                .or(decimal_number()
-                    .then_ignore(gap())
-                    .then(decimal_number())
-                    .delimited_by(just("["), just("]"))
-                    .map(|(s1, s2)| ZpwtArg::Pair(s1, s2)))
-                .map(|p| p),
-        )
+        .ignore_then(zpwt_arg())
         .then_ignore(gap())
         .then(hoon.clone())
         .map(|(p, q)| Hoon::ZapWut(p, Box::new(q)))
@@ -201,16 +192,43 @@ pub fn zapwut<'src>(
 pub fn zapwut_wide<'src>(
     hoon_wide: impl ParserExt<'src, Hoon>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    decimal_number()
-        .map(|n| ZpwtArg::ParsedAtom(n))
-        .or(decimal_number()
-            .then_ignore(just(' '))
-            .then(decimal_number())
-            .delimited_by(just("["), just("]"))
-            .map(|(s1, s2)| ZpwtArg::Pair(s1, s2)))
-        .map(|p| p)
+    zpwt_arg()
         .then_ignore(just(' '))
         .then(hoon_wide.clone())
         .delimited_by(just('('), just(')'))
         .map(|(p, q)| Hoon::ZapWut(p, Box::new(q)))
+}
+
+/// The version argument of `!?` (hoon-138 `++hinh`): `dem` or
+/// `[dem dem]`, the pair always separated by a single space.
+fn zpwt_arg<'src>() -> impl Parser<'src, &'src str, ZpwtArg, Err<'src>> {
+    choice((
+        dem().map(ZpwtArg::ParsedAtom),
+        dem()
+            .then_ignore(just(' '))
+            .then(dem())
+            .delimited_by(just('['), just(']'))
+            .map(|(p, q)| ZpwtArg::Pair(p, q)),
+    ))
+}
+
+/// hoon-138 `++dem`: plain decimal digits, without `.` grouping, optionally
+/// split across lines by `\`, a gap, and `/`. Yields the digits with
+/// leading zeros stripped.
+fn dem<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
+    let dit = any().filter(|c: &char| c.is_ascii_digit());
+    let gon = just('\\').then(gap().or_not()).then(just('/')).ignored();
+    dit.then(
+        gon.or_not()
+            .ignore_then(dit)
+            .repeated()
+            .collect::<Vec<char>>(),
+    )
+    .map(|(first, rest)| {
+        let digits: String = std::iter::once(first).chain(rest).collect();
+        match digits.trim_start_matches('0') {
+            "" => "0".to_string(),
+            trimmed => trimmed.to_string(),
+        }
+    })
 }

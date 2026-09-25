@@ -356,6 +356,7 @@ pub fn bucpam_wide<'src>(
     spec_wide: impl ParserExt<'src, Spec>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     spec_hoon_wide(hoon_wide.clone(), spec_wide.clone())
+        .delimited_by(just('('), just(')'))
         .map(|(p, q)| Hoon::KetCol(Box::new(Spec::BucPam(Box::new(p), q))))
 }
 
@@ -804,5 +805,7 @@ pub fn bucpam_spec_wide<'src>(
     hoon_wide: impl ParserExt<'src, Hoon>,
     spec_wide: impl ParserExt<'src, Spec>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> {
-    spec_hoon_wide(hoon_wide.clone(), spec_wide.clone()).map(|(p, q)| Spec::BucPam(Box::new(p), q))
+    spec_hoon_wide(hoon_wide.clone(), spec_wide.clone())
+        .delimited_by(just('('), just(')'))
+        .map(|(p, q)| Spec::BucPam(Box::new(p), q))
 }

@@ -416,15 +416,18 @@ fn roundtrip_sig_mic_tis_wut_zap_forms() {
 }
 
 #[test]
-fn zapwut_encoding_uses_tagged_digit_cords() {
-    // Pins the current encoding recorded as a divergence in
-    // coverage/p4/divergent/p4_zpwt_encoding.hoon: hoonc stores the bare
-    // atom 138, hatch stores [%atom '138'].
+fn zapwut_encoding_uses_bare_version_atoms() {
+    // hoon-138 `p=$@(p=@ [p=@ q=@])`: !?(138 x) is [%zpwt 138 x] and
+    // !?([140 130] x) is [%zpwt [140 130] x].
     let (mut slab, noun) = encode(&Hoon::ZapWut(ZpwtArg::ParsedAtom(s("138")), b(ax(1))));
-    let cord = Atom::from_ubig(&mut slab, &UBig::from(0x38_33_31u32)).as_noun();
-    let arg = T(&mut slab, &[D(tas!(b"atom")), cord]);
     let axis = T(&mut slab, &[D(0), D(1)]);
-    let expected = T(&mut slab, &[D(tas!(b"zpwt")), arg, axis]);
+    let expected = T(&mut slab, &[D(tas!(b"zpwt")), D(138), axis]);
+    assert!(noun_eq(&slab, noun, expected));
+
+    let (mut slab, noun) = encode(&Hoon::ZapWut(ZpwtArg::Pair(s("140"), s("130")), b(ax(1))));
+    let axis = T(&mut slab, &[D(0), D(1)]);
+    let pair = T(&mut slab, &[D(140), D(130)]);
+    let expected = T(&mut slab, &[D(tas!(b"zpwt")), pair, axis]);
     assert!(noun_eq(&slab, noun, expected));
 }
 
@@ -884,19 +887,23 @@ fn tuna_decoding_falls_back_to_manx_for_untagged_items() {
 
 #[test]
 fn zpwt_arg_and_hoon_decoders_reject_unknown_tags() {
+    // a zpwt version is an atom or a pair of atoms
     let err = decode_tagged(tas!(b"zpwt"), |sl| {
-        let arg = T(sl, &[D(tas!(b"zzzz")), D(0)]);
+        let inner = T(sl, &[D(1), D(2)]);
+        let arg = T(sl, &[inner, D(0)]);
         let h = T(sl, &[D(0), D(1)]);
         T(sl, &[arg, h])
     })
     .unwrap_err();
-    assert!(err.contains("zpwt_arg: unknown tag"), "{err}");
-    // hoonc's bare-atom version form is not accepted by the hatch decoder
-    assert!(decode_tagged(tas!(b"zpwt"), |sl| {
-        let h = T(sl, &[D(0), D(1)]);
-        T(sl, &[D(138), h])
-    })
-    .is_err());
+    assert!(err.contains("parsed_atom"), "{err}");
+    assert_eq!(
+        decode_tagged(tas!(b"zpwt"), |sl| {
+            let h = T(sl, &[D(0), D(1)]);
+            T(sl, &[D(138), h])
+        })
+        .unwrap(),
+        Hoon::ZapWut(ZpwtArg::ParsedAtom(s("138")), b(ax(1)))
+    );
     let err = decode_tagged(tas!(b"zzzz"), |_| D(0)).unwrap_err();
     assert!(err.contains("unknown tag") && err.contains("zzzz"), "{err}");
     let slab: NounSlab = NounSlab::new();
@@ -1275,6 +1282,91 @@ fn sail_attribute_values_become_beers() {
     ));
 }
 
+#[test]
+fn sail_call_mode_mcts_and_attributes() {
+    // `;%` (%call) as a child and at the top
+    let Hoon::Xray(manx) = parse_one(";div\n  ;%  f\n  ;p;\n==\n") else {
+        panic!("expected sail");
+    };
+    assert!(
+        matches!(
+            manx.c.as_slice(),
+            [Tuna::TunaTail(TunaTail::Call(Hoon::Wing(f))), Tuna::Manx(_)]
+                if *f == wing("f")
+        ),
+        "{:?}",
+        manx.c
+    );
+    assert!(matches!(
+        parse_one(";%  f\n"),
+        Hoon::MicTis(items) if matches!(items.as_slice(), [Tuna::TunaTail(TunaTail::Call(_))])
+    ));
+    // `;=` (%mcts), and a nested `;=` spliced into its parent's children
+    assert!(matches!(
+        parse_one(";=  ;p;  ;q;  ==\n"),
+        Hoon::MicTis(items) if matches!(items.as_slice(), [Tuna::Manx(_), Tuna::Manx(_)])
+    ));
+    assert_eq!(parse_one(";=;\n"), Hoon::MicTis(vec![]));
+    let Hoon::Xray(manx) = parse_one(";div\n  ;=  ;p;  ;q;  ==\n  ;r;\n==\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(manx.c.len(), 3, "{:?}", manx.c);
+    // hoon-138 has no wide `;=`
+    assert!(parse_src("(add ;=; 1)\n").is_err());
+    // a namespaced attribute name (mane a_b)
+    let Hoon::Xray(manx) = parse_one(";foo(baz_qux \"x\");\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(manx.g.a[0].0, Mane::TagSpace(s("baz"), s("qux")));
+    // the #id comes before the .classes, and tall `=name  value` lines
+    // follow the tag head
+    let Hoon::Xray(manx) = parse_one(";div#x.y\n  =title  \"t\"\n  ;p;\n==\n") else {
+        panic!("expected sail");
+    };
+    let names: Vec<_> = manx.g.a.iter().map(|(name, _)| name.clone()).collect();
+    assert_eq!(
+        names,
+        vec![Mane::Tag(s("id")), Mane::Tag(s("class")), Mane::Tag(s("title"))]
+    );
+    assert_eq!(manx.c.len(), 1, "{:?}", manx.c);
+    assert!(parse_src(";div.y#x;\n").is_err());
+}
+
+#[test]
+fn sigbuc_wide_sigzap_wide_bucpam_and_zapwut_forms() {
+    for src in ["~$  %foo  5\n", "~$(%foo 5)\n"] {
+        assert!(
+            matches!(parse_one(src), Hoon::SigBuc(ref t, _) if t == "foo"),
+            "{src}"
+        );
+    }
+    assert!(parse_src("~$(foo 5)\n").is_err());
+    assert_eq!(
+        parse_one("~!(a b)\n"),
+        Hoon::SigZap(b(Hoon::Wing(wing("a"))), b(Hoon::Wing(wing("b"))))
+    );
+    assert!(matches!(
+        parse_one("$&(@ |=(a=@ a))\n"),
+        Hoon::KetCol(spec) if matches!(*spec, Spec::BucPam(..))
+    ));
+    let h = parse_one("^-($&(@ |=(a=@ a)) 5)\n");
+    assert!(format!("{h:?}").contains("BucPam("), "{h:?}");
+    // `!?` (++hinh): plain decimal digits; the pair takes a single space
+    for (src, want) in [
+        ("!?  138  5\n", ZpwtArg::ParsedAtom(s("138"))),
+        ("!?(0138 5)\n", ZpwtArg::ParsedAtom(s("138"))),
+        ("!?  [139 137]  5\n", ZpwtArg::Pair(s("139"), s("137"))),
+        ("!?([139 137] 5)\n", ZpwtArg::Pair(s("139"), s("137"))),
+    ] {
+        assert!(
+            matches!(parse_one(src), Hoon::ZapWut(ref arg, _) if *arg == want),
+            "{src}"
+        );
+    }
+    assert!(parse_src("!?  [139  137]  5\n").is_err());
+    assert!(parse_src("!?(1.000 5)\n").is_err());
+}
+
 // ---------------------------------------------------------------------------
 // parser builders that the main grammar never wires in
 // ---------------------------------------------------------------------------
@@ -1453,12 +1545,19 @@ fn kettis_doc_on_a_cell_face_and_sail_utf8_attribute() {
     let h = parse_one("^=  [a b]  ::  pair doc\n[1 2]\n");
     assert!(matches!(h, Hoon::KetTis(..)), "{h:?}");
 
-    // Pins the behavior recorded in coverage/p4/divergent/p4_sail_attr_utf8:
-    // the tape lexer yields the two UTF-8 bytes of "é" as two woofs, but
-    // runes/sail.rs re-encodes each byte as a code point (hoonc keeps the
-    // bytes).
-    let Hoon::Xray(manx) = parse_one(";div(title \"h\u{e9}\");\n") else {
-        panic!("expected sail");
+    // hoonc keeps the two UTF-8 bytes of "é" as two beer chars (a beer char
+    // cord holds a byte as the char with that code point), the same as the
+    // \c3\a9 escapes; the bytes survive the hoon noun round trip
+    let chars = |text: &str| {
+        text.chars()
+            .map(|c| Beer::Char(c.to_string()))
+            .collect::<Vec<_>>()
     };
-    assert_eq!(manx.g.a[0].1.len(), 3, "{:?}", manx.g.a[0].1);
+    for src in [";div(title \"h\u{e9}\");\n", ";div(title \"h\\c3\\a9\");\n"] {
+        let Hoon::Xray(manx) = parse_one(src) else {
+            panic!("expected sail");
+        };
+        assert_eq!(manx.g.a[0].1, chars("h\u{c3}\u{a9}"), "{src}");
+        roundtrip(Hoon::Xray(manx));
+    }
 }

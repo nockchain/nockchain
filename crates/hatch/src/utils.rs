@@ -2702,12 +2702,14 @@ pub fn open(gen: Hoon) -> Hoon {
         }
 
         Hoon::ZapWut(arg, q) => {
-            const HOON_VERSION: u64 = 138; // hardcoded...
-
+            //  hoon-138: an atom p admits hoon-version <= p, a pair [p q]
+            //  admits q <= hoon-version <= p.
+            let hoon_version = BigUint::from(138u32);
+            let version = |s: &str| BigUint::from_str(s).ok();
             let version_ok = match &arg {
-                ZpwtArg::ParsedAtom(s) => s.parse::<u64>().map_or(false, |v| HOON_VERSION <= v),
-                ZpwtArg::Pair(min_s, max_s) => match (min_s.parse::<u64>(), max_s.parse::<u64>()) {
-                    (Ok(min), Ok(max)) => min <= HOON_VERSION && HOON_VERSION <= max,
+                ZpwtArg::ParsedAtom(p) => version(p).is_some_and(|p| hoon_version <= p),
+                ZpwtArg::Pair(p, q) => match (version(p), version(q)) {
+                    (Some(p), Some(q)) => hoon_version <= p && hoon_version >= q,
                     _ => false,
                 },
             };
@@ -13672,18 +13674,18 @@ fn term_or_pair_to_noun(slab: &mut NounSlab, top: &TermOrPair) -> Noun {
     }
 }
 
+//  hoon-138 `p=$@(p=@ [p=@ q=@])`: the version numbers as bare atoms.
 fn zpwt_arg_to_noun(slab: &mut NounSlab, arg: &ZpwtArg) -> Noun {
+    fn version_to_noun(slab: &mut NounSlab, s: &str) -> Noun {
+        let value = BigUint::from_str(s).expect("!? version is decimal digits");
+        atom_to_noun(slab, &ParsedAtom::from_biguint(value))
+    }
     match arg {
-        ZpwtArg::ParsedAtom(s) => {
-            let tag = D(tas!(b"atom"));
-            let s_noun = cord_to_noun(slab, s);
-            T(slab, &[tag, s_noun])
-        }
-        ZpwtArg::Pair(s1, s2) => {
-            let tag = D(tas!(b"pair"));
-            let s1_noun = cord_to_noun(slab, s1);
-            let s2_noun = cord_to_noun(slab, s2);
-            T(slab, &[tag, s1_noun, s2_noun])
+        ZpwtArg::ParsedAtom(p) => version_to_noun(slab, p),
+        ZpwtArg::Pair(p, q) => {
+            let p_noun = version_to_noun(slab, p);
+            let q_noun = version_to_noun(slab, q);
+            T(slab, &[p_noun, q_noun])
         }
     }
 }
@@ -14454,19 +14456,14 @@ fn noun_to_tyre(noun: NounHandle<'_>) -> Result<Vec<(String, Hoon)>, String> {
 }
 
 fn noun_to_zpwt_arg(noun: NounHandle<'_>) -> Result<ZpwtArg, String> {
+    fn version(noun: NounHandle<'_>) -> Result<String, String> {
+        Ok(noun_to_parsed_atom(noun)?.to_biguint().to_string())
+    }
+    if noun.as_atom().is_ok() {
+        return Ok(ZpwtArg::ParsedAtom(version(noun)?));
+    }
     let cell = noun.as_cell().map_err(|_| "zpwt_arg")?;
-    let tag = noun_to_direct(cell.head())?;
-    if tag == tas!(b"atom") {
-        return Ok(ZpwtArg::ParsedAtom(noun_to_cord(cell.tail())?));
-    }
-    if tag == tas!(b"pair") {
-        let r = cell.tail().as_cell().map_err(|_| "zpwt pair")?;
-        return Ok(ZpwtArg::Pair(
-            noun_to_cord(r.head())?,
-            noun_to_cord(r.tail())?,
-        ));
-    }
-    Err(format!("zpwt_arg: unknown tag {tag}"))
+    Ok(ZpwtArg::Pair(version(cell.head())?, version(cell.tail())?))
 }
 
 fn noun_to_mane(noun: NounHandle<'_>) -> Result<Mane, String> {
@@ -14482,6 +14479,11 @@ fn noun_to_mane(noun: NounHandle<'_>) -> Result<Mane, String> {
 
 fn noun_to_beer(noun: NounHandle<'_>) -> Result<Beer, String> {
     if let Ok(_) = noun.as_atom() {
+        //  a beer char is one text byte, held as the char with that code
+        //  point (see runes/sail.rs); a lone non-ASCII byte is not UTF-8
+        if let Some(byte @ 0x80..) = noun_to_parsed_atom(noun)?.to_u8() {
+            return Ok(Beer::Char(char::from(byte).to_string()));
+        }
         return Ok(Beer::Char(noun_to_cord(noun)?));
     }
     let cell = noun.as_cell().map_err(|_| "beer")?;

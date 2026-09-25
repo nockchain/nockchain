@@ -1478,9 +1478,8 @@ fn open_zpwt_rejects_a_pair_excluding_the_version() {
 }
 
 #[test]
-#[ignore = "hoon-138 accepts !?([p q] x) when q <= 138 <= p; hatch reads the pair as \
-            [min max] (utils.rs ~2695); see coverage/p1/divergent/p1_zpwt_pair_order.hoon"]
 fn open_zpwt_pair_is_upper_bound_first() {
+    // hoon-138 accepts !?([p q] x) when q <= hoon-version <= p
     assert_eq!(
         open(Hoon::ZapWut(
             ZpwtArg::Pair("140".to_string(), "130".to_string()),
@@ -1488,6 +1487,15 @@ fn open_zpwt_pair_is_upper_bound_first() {
         )),
         ax(1)
     );
+}
+
+#[test]
+#[should_panic(expected = "hoon-version")]
+fn open_zpwt_rejects_a_lower_bound_first_pair() {
+    open(Hoon::ZapWut(
+        ZpwtArg::Pair("130".to_string(), "140".to_string()),
+        b(ax(1)),
+    ));
 }
 
 // ---------------------------------------------------------------------------

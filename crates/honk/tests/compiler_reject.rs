@@ -125,8 +125,20 @@ fn rejection_probes_all_rejected() {
             Err(_) => continue,
             Ok(expr) => expr,
         };
-        if ut.mint_noun(sut, gol, &expr).is_ok() {
-            accepted.push(name);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ut.mint_noun(sut, gol, &expr).is_ok()
+        }));
+        match outcome {
+            Ok(true) => accepted.push(name),
+            Ok(false) => {}
+            // hatch's `open` crashes on some hoons, as hoon-138's does (e.g.
+            // p1_zpwt_pair_reversed: a `!?` version out of range), and the
+            // honk binary reports that as a failed compile. The panic may
+            // leave `ut` inconsistent, so continue with a fresh one.
+            Err(_) => {
+                drop(ut);
+                ut = Ut::new(&mut slab);
+            }
         }
     }
     assert!(
