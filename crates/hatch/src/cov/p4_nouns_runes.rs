@@ -1235,7 +1235,10 @@ fn buc_wide_and_irregular_spec_forms() {
     // `=a=@` names the face `a-atom`, as hoonc does
     // (coverage/regressions/p4_buctis_prefixed_autoname.hoon).
     let h = parse_one("^-([=a=@ b=@] [1 2])\n");
-    assert!(format!("{h:?}").contains("BucTis(Term(\"a-atom\")"), "{h:?}");
+    assert!(
+        format!("{h:?}").contains("BucTis(Term(\"a-atom\")"),
+        "{h:?}"
+    );
     // `=*`: a spec with no autoname cannot be named
     assert!(parse_src("^-([=* b=@] [1 2])\n").is_err());
     // a `%` spec constant that is not a dime
