@@ -274,11 +274,25 @@ test_suite(
     ],
 )
 
+# Everything the "type probe parity" CI job runs: curated probes, compiler
+# fixtures, the rejection corpus, the coverage probe packages, and the
+# correctness regressions.
 test_suite(
     name = "all_parity_test",
     tests = [
         ":type_probe_parity_test",
         ":fixture_parity_test",
         ":rejection_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p1:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p2:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p3:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p4:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c1:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c2:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c3:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c4:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c5:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c6:coverage_parity_test",
+        "//crates/honk/test-assets:correctness_regression_parity_test",
     ],
 )
