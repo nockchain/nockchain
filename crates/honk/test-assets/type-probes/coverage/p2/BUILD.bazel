@@ -5,9 +5,9 @@ package(default_visibility = ["//visibility:public"])
 # Coverage probes: each `*.hoon` here is compiled by hoonc and honk
 # (--arbitrary, empty deps) and the jams must be byte-identical. Probes in
 # `divergent/` pin known divergences and are tagged manual until fixed.
-PROBES = [f[:-len(".hoon")] for f in glob(["*.hoon"])]
+PROBES = [f[:-len(".hoon")] for f in glob(["*.hoon"], allow_empty = True)]
 
-DIVERGENT = [f[:-len(".hoon")] for f in glob(["divergent/*.hoon"])]
+DIVERGENT = [f[:-len(".hoon")] for f in glob(["divergent/*.hoon"], allow_empty = True)]
 
 [
     hoon_library(
