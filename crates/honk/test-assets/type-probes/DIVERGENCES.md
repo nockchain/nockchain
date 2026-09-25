@@ -1,8 +1,8 @@
 # hoonc divergences found by the coverage work
 
 Each entry was a source program where honk (or its parser, hatch) disagreed
-with hoonc. All of them are fixed. Their probes now run in CI
-with the type probe parity suite: byte-identical builds in `coverage/regressions/` (or the
+with hoonc. All of them are fixed. Their probes now run in CI with the type
+probe parity suite: byte-identical builds in `coverage/regressions/` (or the
 `coverage/c6` import pairings), programs both compilers reject in `reject/`
 (`REJECTION_PROBES`), and two native-only rejections (`divergent_bunt`,
 `wash_gain_loop`) where hoonc never terminates.
