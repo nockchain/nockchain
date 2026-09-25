@@ -122,8 +122,10 @@ Atoms, axes and nouns:
   `fork_set_options`. Defensive against malformed type nouns.
 - L12363-12364 [UP]: the same error on the pop side, which re-reads a node the
   push side already checked.
-- B12338T, L12339-12341 [UP]: the million-node budget of `fork_set_options`.
-  Defensive; no test builds a fork set that large.
+- B12338T, L12339-12341 [P]: the million-node budget of `fork_set_options`.
+  Defensive. A unit test reaches it with a shared-subtree DAG, but a fork
+  built from source is a treap with one node per distinct member type, so it
+  would need a million different types.
 - B12192T, L12193 [P]: `type_tag_kind` on a void core payload. `ty_core` is its
   only production caller, and the native constructors collapse a void payload
   first.
@@ -187,9 +189,6 @@ One rejection has no hoonc verdict:
   off.
 - B10362c4T [P]: the reversed-pair hold guard in `miss_dext_uncached`. It needs
   mutually recursive molds through `redo`.
-- B10362c4F [U]: the same guard with the new ref equal to an earlier sut but a
-  different sut (a three-hold cycle). The parity corpus reaches it; no unit
-  test builds that cycle yet.
 - L10859, B10857F, B10857c2F (`seen_hold`), L10883-10884, B10880F, B10880c2F,
   B10886F (`unsee_hold`) [UP]: a `peek` seen-hold bucket holding a different
   (hold, axis) pair. That needs a collision of the combined hash.
@@ -203,17 +202,3 @@ One rejection has no hoonc verdict:
   L11891-11892, L11896 [P]: `dor`, the tie-break of `gor_mug` and `mor_mug`. It
   runs only when two treap keys have equal mugs, so which arms run depends on
   hash collisions in the compiled programs.
-
-## Not yet covered
-
-- L10023 [P]: a wash skin in `lose`. `gain` rejects a wash skin, so `lose`
-  meets one only where `gain` skips it, for example the tail of a cell skin
-  whose head gains `%void`. No parity probe exercises it yet.
-- B10125T, L10126 [UP]: `lose_cell_skin` on a core ref with the term `noun` as
-  the tail skin, where the payload survives `lose` of the head skin. No test
-  exercises it yet.
-- B12665F [UP]: `is_noun_term_skin` on a term tail skin other than `noun`
-  (gain or lose of a cell skin on a core ref). No test exercises it yet.
-- L12634 [P]: `peel` with `Way::Free` on a non-gold core, as when a `?#` cell
-  skin is tested against an iron, zinc or lead core. No parity probe exercises
-  it yet.

@@ -244,6 +244,22 @@ fn c3_skin_core_refs() {
 }
 
 #[test]
+fn c3_skin_core_term_tails() {
+    // Losing `@` from the payload leaves it, and the term tail `noun` keeps
+    // the core.
+    assert!(skin_ok("=/(q |.(a) =/(noun * ?:(?#([@ noun] q) !! q)))").starts_with("[%core "));
+    // Any other term tail is a spec: gain refines the core as a cell with
+    // the tail gained from %noun, and lose crops the tail from %noun, which
+    // leaves %void here.
+    let prelude = "=>  |%  +$  any  *  --  =+  ^*(a=*)  =/  q  |.(a)  ";
+    let (gained, _) =
+        mint_src(&format!("{prelude}?:(?#([* any] q) q !!)")).unwrap_or_else(|err| panic!("{err}"));
+    assert!(gained.starts_with("[%cell [[%cell "), "{gained}");
+    let lost = mint_src(&format!("{prelude}?:(?#([@ any] q) !! q)")).expect_err("vain");
+    assert!(lost.contains("mint-vain"), "{lost}");
+}
+
+#[test]
 fn c3_skin_name_term_and_over() {
     assert!(skin_ok("?:(?#(num b) b !!)").starts_with("[%hint "));
     assert_eq!(
@@ -523,6 +539,20 @@ fn c3_miss_covers_core_fork_constant_and_hold_cases() {
         assert!(ut.miss(p.clone(), q.clone()).unwrap());
         assert!(!ut.miss(p.clone(), p).unwrap());
         let _ = r;
+    });
+}
+
+#[test]
+fn c3_miss_three_hold_cycle() {
+    with_ut(|ut| {
+        // miss(p, b) records (p, b), expands p to [p @] and b to [c @], and
+        // then meets (c, p): p is an earlier sut but c is not its ref, so the
+        // seen guard does not answer and the walk goes on through c.
+        let (_, p, _) = cyclic_types(ut);
+        let b = play_ty(
+            ut, "=>  |%  +$  b  $@(%b [c @])  +$  c  $@(%c [c @])  --  ^*(b)",
+        );
+        assert!(ut.miss(p, b).unwrap());
     });
 }
 
@@ -1516,4 +1546,18 @@ fn c3_const_bool_formula_and_cell_type() {
     assert_eq!(show(&slab, n), "%void");
     let (n, _) = cell_type_n(&mut cx, &mut slab, (atom, an), (void, vn)).unwrap();
     assert_eq!(show(&slab, n), "%void");
+}
+
+#[test]
+fn c3_fork_set_options_stops_at_its_node_budget() {
+    // A shared-subtree DAG whose tree expansion has 2^21 - 1 nodes, past the
+    // 1_000_000-node budget, built from 42 cells.
+    let mut slab: NounSlab = NounSlab::new();
+    let mut node = D(0);
+    for level in 0..21u64 {
+        let branches = T(&mut slab, &[node, node]);
+        node = T(&mut slab, &[D(level), branches]);
+    }
+    let err = noun_err(fork_set_options(node, &slab.noun_space()));
+    assert!(err.contains("node budget"), "{err}");
 }
