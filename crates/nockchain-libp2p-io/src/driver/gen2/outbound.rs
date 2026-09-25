@@ -38,8 +38,10 @@ pub(super) async fn handle_outbound_response(
         let state_guard = driver_state.lock().await;
         state_guard.outbound_request_context(request_id).cloned()
     };
-    let response_bytes = match req_res_message_encoded_bytes(&response) {
-        Ok(bytes) => bytes,
+    // Account for the normalized protobuf representation after discarded/merged
+    // fields. The codec independently caps the complete physical inbound frame.
+    let response_bytes = match crate::v3::encode_response(&response) {
+        Ok(body) => body.len().saturating_add(4),
         Err(err) => {
             warn!(
                 peer = %peer,
@@ -47,7 +49,7 @@ pub(super) async fn handle_outbound_response(
                 error = %err,
                 "Failed to encode req-res response for peer stats"
             );
-            0
+            usize::MAX
         }
     };
     let response_item_count = match &response {
@@ -786,14 +788,14 @@ impl ResponseComposition {
 }
 
 fn response_envelope_encoded_bytes(envelope: &ResponseEnvelope) -> usize {
-    match req_res_message_encoded_bytes(envelope) {
+    match crate::v3::response_envelope_encoded_len(envelope) {
         Ok(bytes) => bytes,
         Err(err) => {
             trace!(
                 error = %err,
                 "Failed to encode response envelope for bundle composition stats"
             );
-            0
+            usize::MAX
         }
     }
 }
@@ -830,19 +832,14 @@ async fn record_batch_result_response_hint(
 }
 
 fn batch_result_item_response_bytes(item_id: u32, envelope: &ResponseEnvelope) -> usize {
-    match batch_result_encoded_bytes(&[BatchResultItem {
-        item_id,
-        status: BatchResultStatus::Result,
-        error: None,
-        envelope: Some(envelope.clone()),
-    }]) {
+    match response_envelope_result_encoded_bytes(item_id, envelope) {
         Ok(bytes) => bytes,
         Err(err) => {
             trace!(
                 error = %err,
                 "Failed to encode batch result item for response-size hint"
             );
-            response_envelope_encoded_bytes(envelope)
+            usize::MAX
         }
     }
 }

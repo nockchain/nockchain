@@ -14,6 +14,34 @@ remote peers <-> QUIC/libp2p <-> nockchain-libp2p-io <-> NockApp effects/pokes
 
 It transports blocks and chain data but does not decide their validity or fork-choice weight.
 
+## Peer protocol v3
+
+The request/response protocol is `/nockchain-3-req-res` over the existing
+libp2p QUIC transport. Each request and response has one four-byte big-endian
+length prefix, one protobuf body, and EOF. The receiver finishes the frame
+before decoding or dispatching it. There is no v2 fallback; deployment requires
+the coordinated rollout described in the draft
+[Ecclesia specification](../../changelog/protocol/018-ecclesia.md).
+
+The [peer schemas](proto/README.md) describe complete transactions and both
+page versions. Generated Prost messages stay inside `src/v3`: checked Rust
+constructors enforce presence, variants, numeric domains, collection
+uniqueness, and relationships before constructing consensus nouns. Arbitrary
+consensus noun fields use a checked, flat node table. No peer field contains JAM.
+
+The existing driver still accepts internal JAM messages during this migration.
+The inbound adapter creates those bytes locally from checked values. The
+outbound adapter checks that the typed representation reconstructs the exact
+local message, so it cannot silently change consensus data or the request PoW
+preimage. PoW retains sender/receiver binding and uses v3 domain separators;
+it does not commit to protobuf serialization. Kernel consensus checks still
+establish transaction and block validity.
+
+Protobuf's normal merge and unknown-field rules apply. Validation sees the
+completed DTO, and only the checked interpretation reaches the driver. The
+build enforces the schema restrictions in `build_support/schema.rs`; schema
+compatibility checks and domain tests must accompany future changes.
+
 ## Maintained invariants
 
 - Peer input is untrusted and bounded before it can consume unbounded memory, work, or queue capacity.

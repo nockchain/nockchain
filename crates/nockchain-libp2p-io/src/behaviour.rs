@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 
-use libp2p::request_response::cbor;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{
@@ -11,6 +10,7 @@ use libp2p::{
 use crate::config::LibP2PConfig;
 use crate::ip_block::{self, PeerExclusions};
 use crate::messages::{NockchainRequest, NockchainResponse};
+use crate::v3::codec::ProtobufCodec;
 
 pub(crate) fn request_response_protocols(
     _libp2p_config: &LibP2PConfig,
@@ -23,13 +23,14 @@ pub(crate) fn request_response_protocols(
 
 pub(crate) fn build_request_response_behaviour(
     libp2p_config: &LibP2PConfig,
-) -> cbor::Behaviour<NockchainRequest, NockchainResponse> {
+) -> request_response::Behaviour<ProtobufCodec> {
     let request_response_config = request_response::Config::default()
         .with_max_concurrent_streams(libp2p_config.request_response_max_concurrent_streams())
         .with_request_timeout(libp2p_config.request_response_timeout());
-    let request_response_codec = cbor::codec::Codec::default()
-        .set_request_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64)
-        .set_response_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64);
+    let request_response_codec = ProtobufCodec::new(
+        libp2p_config.gen2_batch_max_bytes() as u64,
+        libp2p_config.gen2_batch_max_bytes() as u64,
+    );
 
     request_response::Behaviour::with_codec(
         request_response_codec,
@@ -61,7 +62,7 @@ pub(crate) struct NockchainBehaviour {
     /// Peer store for tracking peer information (including addresses)
     pub peer_store: libp2p::peer_store::Behaviour<libp2p::peer_store::memory_store::MemoryStore>,
     /// Actual comms with custom connection handler that keeps connections alive
-    pub request_response: cbor::Behaviour<NockchainRequest, NockchainResponse>,
+    pub request_response: request_response::Behaviour<ProtobufCodec>,
 }
 
 impl NockchainBehaviour {
@@ -182,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_response_supports_only_gen2() {
+    fn request_response_supports_only_v3() {
         let protocols = request_response_protocols(&LibP2PConfig::default());
 
         assert_eq!(protocols.len(), 1);

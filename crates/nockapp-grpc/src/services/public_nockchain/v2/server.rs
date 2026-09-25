@@ -515,6 +515,7 @@ impl NockchainMetricsServer {
             TransportPeerReqResGeneration::Unknown => PeerReqResGeneration::Unspecified,
             TransportPeerReqResGeneration::Gen1 => PeerReqResGeneration::Gen1,
             TransportPeerReqResGeneration::Gen2 => PeerReqResGeneration::Gen2,
+            TransportPeerReqResGeneration::Gen3 => PeerReqResGeneration::Gen3,
         }
     }
 
@@ -2304,7 +2305,7 @@ mod tests {
             collected_at_unix_ms: 42,
             peers: vec![TransportPeerStatsEntry {
                 peer_id: "peer-1".to_string(),
-                protocol_generation: TransportPeerReqResGeneration::Gen2,
+                protocol_generation: TransportPeerReqResGeneration::Gen3,
                 request_count: 7,
                 bytes_sent: 128,
                 bytes_received: 512,
@@ -2336,7 +2337,7 @@ mod tests {
         assert_eq!(stats.peers[0].peer_id, "peer-1");
         assert_eq!(
             stats.peers[0].protocol_generation,
-            PeerReqResGeneration::Gen2 as i32
+            PeerReqResGeneration::Gen3 as i32
         );
         assert_eq!(stats.peers[0].request_count, 7);
         assert_eq!(stats.peers[0].bytes_received, 512);

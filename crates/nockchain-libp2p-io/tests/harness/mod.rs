@@ -117,7 +117,7 @@ pub fn default_test_config() -> LibP2PConfig {
 }
 
 pub fn expected_outbound_generation(_config: &LibP2PConfig) -> &'static str {
-    "gen2"
+    "gen3"
 }
 
 pub fn expected_common_protocol(local: &LibP2PConfig, remote: &LibP2PConfig) -> Option<String> {
@@ -936,4 +936,27 @@ fn describe_response(response: &NockchainResponse) -> &'static str {
         NockchainResponse::Result { .. } => "result",
         NockchainResponse::BatchResult { .. } => "batch-result",
     }
+}
+
+pub fn valid_tx_envelope(
+    seed: u64,
+    payload_len: usize,
+) -> nockchain_libp2p_io::test_support::ResponseEnvelope {
+    use nockchain_libp2p_io::test_support::{
+        base58_for_tip5_seed, jam_heard_tx_response, ResponseEnvelope,
+    };
+    ResponseEnvelope::heard_tx(
+        base58_for_tip5_seed(seed),
+        jam_heard_tx_response(seed, payload_len),
+    )
+}
+
+pub fn valid_block_envelope(height: u64) -> nockchain_libp2p_io::test_support::ResponseEnvelope {
+    use nockchain_libp2p_io::test_support::{
+        base58_for_tip5_seed, jam_heard_block_response, ResponseEnvelope,
+    };
+    ResponseEnvelope::heard_block(
+        base58_for_tip5_seed(10_000 + height),
+        jam_heard_block_response(height, &[]),
+    )
 }
