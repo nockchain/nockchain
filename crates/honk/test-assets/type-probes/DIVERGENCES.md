@@ -1,7 +1,7 @@
 # hoonc divergences found by the coverage work
 
 Each entry was a source program where honk (or its parser, hatch) disagreed
-with hoonc. All but those under Open are fixed. Their probes now run in CI
+with hoonc. All of them are fixed. Their probes now run in CI
 with the type probe parity suite: byte-identical builds in `coverage/regressions/` (or the
 `coverage/c6` import pairings), programs both compilers reject in `reject/`
 (`REJECTION_PROBES`), and two native-only rejections (`divergent_bunt`,
@@ -12,10 +12,7 @@ row here until it is fixed.
 
 ## Open
 
-| # | Divergence | Probe |
-|---|---|---|
-| 36 | hatch does not implement sail markdown (`++cram`): bare text lines among a tall element's children | `coverage/p4/divergent/p4_sail_cram` |
-| 37 | In a tall `;"""` block, a `"""` line indented deeper than the opener ends the block in honk; hoonc reads it as text | none yet |
+None.
 
 ## Type checker (`crates/honk/src/native/ut`)
 
@@ -55,6 +52,8 @@ row here until it is fixed.
 | 27 | Under `!:`, a plain doc above `=/` anchored the spot differently | same |
 | 34 | hatch did not parse the sail `;p: text` form | hatch: port hoon-138's ++sail grammar |
 | 35 | hatch did not parse the sail `/"url"` and `@"url"` tag shorthands (and a dozen other sail forms) | same |
+| 36 | hatch did not implement sail markdown (`++cram`) | hatch: port hoon-138's ++cram sail markdown |
+| 37 | In a tall `;"""` block, a deeper-indented `"""` line ended the block; hoonc reads it as text | same |
 
 ## Import pipeline (`crates/honk/src/pipeline.rs`, CLI)
 
