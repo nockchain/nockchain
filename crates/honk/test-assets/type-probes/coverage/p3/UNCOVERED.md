@@ -6,15 +6,6 @@ Gaps in the range: lines missed only by unit tests 2, only by the parity corpus 
 
 Tags: `U` = unit tests miss it, `P` = the parity corpus misses it, `UP` = both. `B<line>T`/`F` are branch outcomes; `c2`/`c3` mark later operands of `&&`/`||`. Unit tests are in `crates/hatch/src/cov/p3_atoms_specs.rs`; probes are in this directory.
 
-## Not yet covered
-
-- `wood_crashes` malformed UTF-8 L9117, B9116T (P; unit-tested): uncovered: no probe uses a `~~` path knot whose escape encodes to bytes `++taft` rejects, such as `/~~~200000.` (above U+10FFFF).
-- `w_ne` digits 36-63 L9230, L9232, L9234, B9229T, B9231T, B9233T (P; unit-tested): uncovered: no probe renders a `@uw` path segment with a digit above `z` yet (`p3_path_unsigned` and `regressions/p3_path_uw` use `0` and `1`).
-- Wide `~0` blobs (P; unit-tested): `atom_to_bits` Big arm L11024, L11026-11031, L11034, `rub_atom` payloads over 128 bits L10968-10972, L10974-10975, B10957F, B10970T/F, `atom_bit_len` Big arm L10869, `atom_get_bit` Big arm L10876-10882 and B10880T. uncovered: no test exercises it yet. `base32_to_atom` returns a bignum, so any `~0` blob wider than 128 bits reaches `atom_to_bits`, one holding an atom wider than 128 bits reaches `rub_atom`, and such a blob in a path segment is re-jammed through `atom_bit_len` and `atom_get_bit`.
-- `skip_plain_doc_before_equals_slash_start` scan body L11951-11952, L11967-11970, L11973-11974, L11976, B11941F, B11947F, B11950T, B11959F, B11962F, B11965F, B11973T/F (UP): uncovered: no test exercises it yet. The walked-back `start` always sits on an anchoring doccord (`expand_gap_start` only walks back to one) or on a code line with a trailing doccord, so the scan returns on its first line (a code line, or a doccord that anchors) before it can see a blank or plain doc line.
-- `rend_crashes` `%blob` arm L9099 (U): uncovered: no unit test checks a `~0` blob path knot yet (the parity corpus reaches it).
-- `unanchor_hoon_spot` fallthrough L11625 (U): uncovered: no unit test exercises it yet (the parity corpus reaches it).
-
 ## Rejected by both compilers (P; unit-tested unless noted)
 
 Reject probes in `type-probes/reject/` count toward parity, so these stay uncovered until a reject probe uses the input.
@@ -55,6 +46,8 @@ Reject probes in `type-probes/reject/` count toward parity, so these stay uncove
 - `wrap_spec_with_trace` nested spot L11711, B11708F (UP): no spec parser re-wraps a traced spec with a different span.
 - `arm_body_start_from_header` L11722, L11740, L11742-11755, L11758-11760, L11763-11783, L11786-11789, L11794 and its branch outcomes B11721T, B11721c2T, B11730F, B11730c3T, B11737F, and every outcome from B11743 through B11786 (P; unit-tested), plus `chumsky_spot_to_hoon_spot` L11984 (P): no parser span starts on a `++`/`+$` header (arm bodies start after the gap), is empty, starts at EOF, or follows tab indentation (hoon gaps have no tabs), so only direct span calls reach it. L11791 (UP) needs a span that ends past the source.
 - `non_doc_start_after_leading_doc_span` L11805-11806, L11821, L11823-11834, L11836-11857, L11859-11871, L11873-11881, L11883-11885, L11887, L11890 and every branch outcome from B11804F through B11884F except B11836c2F (P; unit-tested): parser spans always start at a token, never at a `::` doc line or leading whitespace. B11836c2F (UP): the block is entered only for a blank line or a line starting `::`, so the second `:` check cannot fail.
+- `skip_plain_doc_before_equals_slash_start` scan body L11951-11952, L11967-11970, L11974, B11947F, B11950T, B11959F, B11962F, B11965F, B11973T (UP): the scan starts on the line of the walked-back `start`, and `expand_gap_start` only walks back to a doccord that anchors, either a comment line or the trailing comment of the code line above the gap. So the first scanned line is the binder's own line (the loop never runs), a code line, or a line that opens with an anchoring doccord, and the loop returns on it before it can see a blank or plain doc line.
+- `skip_plain_doc_before_equals_slash_start` empty scan L11973, L11976, B11941F, B11973F (P; unit-tested): `start` lands on the binder's own line only when the span starts at the end of a `=/` line whose trailing larg doc anchors the doc block below it. Parser spans start at tokens, never at a line end.
 - `skip_plain_doc_before_equals_slash_start` first-line and EOF edges L11921, B11905F, B11909F, B11916F, B11920T, B11925F (P; unit-tested): they need the `=/`, its doc, or the line above the doc on the first line of the file, where every probe keeps its header comment, or a span starting at EOF.
 
 ## Diagnostics only

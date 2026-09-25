@@ -1522,6 +1522,35 @@ fn spans_after_plain_docs_between_tisfas() {
     // but five aces make neither a larg nor a smol doc
     let src = "=/  a  1\n::     plain\n=/  b  2\nb\n";
     assert_eq!(spot_start(src, at(src, "=/  b"), src.len()), (3, 1));
+    // a span starting at the end of a `=/` line, before a larg doc block,
+    // walks back to that line's own trailing larg doc: there is no doc line
+    // between the start and the binder to scan
+    let src = "=/  z  0\n=/  a  1  ::    larg\n::    two\n=/  b  2\nb\n";
+    let raw = at(src, "::    larg\n") + "::    larg".len();
+    assert_eq!(spot_start(src, raw, src.len()), (2, 11));
+}
+
+#[test]
+fn named_tiki_aliases_are_untraced_wings() {
+    // `?@(b=a ...)` expands to `=*  b  a  ?@(b ...)` in the parser. The
+    // alias value is a bare wing, not a %dbug, so unanchor_hoon_spot has no
+    // spot to move and leaves it alone.
+    let parsed = parse_with("?@(b=a b -.b)", vec!["p3".into()], true)
+        .unwrap_or_else(|e| panic!("should parse: {e}"));
+    let mut node = &parsed;
+    let (p, q) = loop {
+        match node {
+            Hoon::TisSig(items) if items.len() == 1 => node = &items[0],
+            Hoon::Dbug(_, inner) => node = inner,
+            Hoon::TisTar(_, p, q) => break (p, q),
+            other => panic!("expected =*, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        **p,
+        Hoon::Wing(vec![crate::ast::hoon::Limb::Term("a".into())])
+    );
+    assert!(matches!(**q, Hoon::WutPat(..)), "{q:?}");
 }
 
 #[test]
@@ -1541,4 +1570,8 @@ fn path_knots_reject_what_wood_crashes_on() {
     assert!(!crashes("ta", 1));
     assert!(!crashes("c", 0x2603));
     assert!(!crashes("ud", 1));
+    //  ++rend renders a ~0 blob without ++wood
+    assert!(!rend_crashes(&Coin::Blob(NounExpr::ParsedAtom(
+        ParsedAtom::Small(1)
+    ))));
 }

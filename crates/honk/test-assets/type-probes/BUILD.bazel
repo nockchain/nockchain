@@ -245,6 +245,7 @@ REJECTION_PROBES = [
     "p3_dr_frac_uppercase",
     "p3_is_leading_zero_group",
     "p3_is_uppercase_hex",
+    "p3_path_knot_bad_utf8",
     "p3_path_knot_control",
     "p3_path_many_knot_bad_escape",
     "p3_path_many_knot_control",
