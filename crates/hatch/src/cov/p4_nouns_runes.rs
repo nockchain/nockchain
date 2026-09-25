@@ -1795,3 +1795,214 @@ fn obsolete_buc_leaf_forms_parse_as_leaf_hoons() {
     //  +scat only takes a %$ coin; hoonc falls back to +rump and fails too
     assert!(parse_src("($._1_2__ 1)").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// sail markdown (hoon-138 ++cram) and `"""` block edges
+// ---------------------------------------------------------------------------
+
+/// The children of a `;>` block holding `lines`, each indented two spaces.
+fn cram_kids(lines: &[&str]) -> Vec<Tuna> {
+    let mut src = s(";>\n");
+    for line in lines {
+        if !line.is_empty() {
+            src.push_str("  ");
+            src.push_str(line);
+        }
+        src.push('\n');
+    }
+    match parse_one(&src) {
+        Hoon::Xray(manx) if manx.g.n == Mane::Tag(s("div")) => manx.c,
+        other => panic!("{src:?}: expected a `;>` block, got {other:?}"),
+    }
+}
+
+fn cram_fails(lines: &[&str]) -> bool {
+    let mut src = s(";>\n");
+    for line in lines {
+        src.push_str("  ");
+        src.push_str(line);
+        src.push('\n');
+    }
+    parse_src(&src).is_err()
+}
+
+/// The text of every text node under `kids`, in order.
+fn cram_text(kids: &[Tuna]) -> String {
+    let mut out = String::new();
+    for kid in kids {
+        if let Tuna::Manx(manx) = kid {
+            if manx.g.n == Mane::Tag(s("")) {
+                for (_, beers) in &manx.g.a {
+                    for beer in beers {
+                        if let Beer::Char(c) = beer {
+                            out.push_str(c);
+                        }
+                    }
+                }
+            }
+            out.push_str(&cram_text(&manx.c));
+        }
+    }
+    out
+}
+
+fn tag_names(kids: &[Tuna]) -> Vec<String> {
+    kids.iter()
+        .map(|kid| match kid {
+            Tuna::Manx(Manx {
+                g: Marx {
+                    n: Mane::Tag(name), ..
+                },
+                ..
+            }) => name.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn sail_markdown_inline_forms() {
+    // italics, an embed, images with and without alt text, a hoon
+    // constant, and a `++arm` name with a digit, `-` and `:`
+    let kids = cram_kids(&["_i_ {<5>} ![alt](p.png) ![](q.png) 0x1f ++arm-2:core end"]);
+    let [Tuna::Manx(p)] = kids.as_slice() else {
+        panic!("{kids:?}");
+    };
+    assert_eq!(p.g.n, Mane::Tag(s("p")));
+    assert!(matches!(p.c[2], Tuna::TunaTail(_)), "{:?}", p.c);
+    let imgs: Vec<_> =
+        p.c.iter()
+            .filter_map(|kid| match kid {
+                Tuna::Manx(manx) if manx.g.n == Mane::Tag(s("img")) => Some(manx.g.a.len()),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(imgs, vec![2, 1]);
+    let codes: Vec<_> =
+        p.c.iter()
+            .filter_map(|kid| match kid {
+                Tuna::Manx(manx) if manx.g.n == Mane::Tag(s("code")) => Some(cram_text(&manx.c)),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(codes, vec![s("0x1f"), s("++arm-2:core")]);
+    // a `0` not followed by a letter or digit is text
+    let kids = cram_kids(&["a 0 b"]);
+    assert_eq!(kids, vec![element("p", vec![text_node("a 0 b ")])]);
+    // trailing spaces are dropped from a line
+    let kids = cram_kids(&["text   "]);
+    assert_eq!(kids, vec![element("p", vec![text_node("text ")])]);
+    // a tab inside a `*` or backtick span makes the last paragraph fail to
+    // parse, and hoon-138 drops it
+    for span in ["*a\tb*", "`a\tb`"] {
+        let kids = cram_kids(&["kept", "", span]);
+        assert_eq!(
+            kids,
+            vec![element("p", vec![text_node("kept ")])],
+            "{span:?}"
+        );
+    }
+}
+
+#[test]
+fn sail_markdown_heading_ids_skip_embeds_and_read_links() {
+    let kids = cram_kids(&["# One *b* {<5>} [l](u) ![](p.png)"]);
+    let [Tuna::Manx(h1)] = kids.as_slice() else {
+        panic!("{kids:?}");
+    };
+    assert_eq!(h1.g.n, Mane::Tag(s("h1")));
+    let [(Mane::Tag(id), beers)] = h1.g.a.as_slice() else {
+        panic!("{:?}", h1.g.a);
+    };
+    assert_eq!(id, "id");
+    let id: String = beers
+        .iter()
+        .map(|beer| match beer {
+            Beer::Char(c) => c.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(id, "one-b--l--");
+}
+
+#[test]
+fn sail_markdown_containers() {
+    // a fenced code block, a `;` sail line, and a paragraph over two lines
+    let kids = cram_kids(&["```", "code", "  indented", "", "```", ";p: sail", "two", "lines"]);
+    assert_eq!(tag_names(&kids), vec!["pre", "p", "p"]);
+    assert_eq!(cram_text(&kids[0..1]), "code\n  indented\n\n");
+    assert_eq!(cram_text(&kids[2..]), "two lines ");
+    // unordered and ordered lists, nested, closed by a new kind of item
+    // or by text
+    let kids = cram_kids(&[
+        "- one", "  - nested", "", "back", "", "- two", "", "+ first", "  + inner", "", "+ second",
+        "", "after",
+    ]);
+    assert_eq!(tag_names(&kids), vec!["ul", "p", "ul", "ol", "p"]);
+    // block quotes, one per `>` line
+    let kids = cram_kids(&["> quoted", "> more", "", "after"]);
+    assert_eq!(tag_names(&kids), vec!["blockquote", "blockquote", "p"]);
+    // verse: each stanza is a `div`, each line a `p`
+    let kids = cram_kids(&[
+        "intro", "", "        first line", "        second line", "", "        next stanza", "",
+        "after",
+    ]);
+    assert_eq!(tag_names(&kids), vec!["p", "div", "div", "p"]);
+    let Tuna::Manx(stanza) = &kids[1] else {
+        unreachable!()
+    };
+    assert_eq!(tag_names(&stanza.c), vec!["p", "p"]);
+    assert_eq!(cram_text(&stanza.c), "first line\nsecond line\n");
+    // `#` not followed by a space does not open a heading
+    let kids = cram_kids(&["#hoon first"]);
+    assert_eq!(kids, vec![element("p", vec![text_node("#hoon first ")])]);
+    // markdown children of an element end at a blank line before `==`
+    let Hoon::Xray(manx) = parse_one(";div\n  text\n\n==\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(manx.c, vec![element("p", vec![text_node("text ")])]);
+}
+
+#[test]
+fn sail_markdown_indentation_errors() {
+    // an outdent into the middle of a list item's indentation (++back)
+    assert!(cram_fails(&["- item", "", " x"]));
+    // a line indented 2 columns past its container (columns-advanced)
+    assert!(cram_fails(&["text", "  more"]));
+    // a non-space inside a list item's indentation (expected-indent)
+    assert!(cram_fails(&["- item", "  ---", " x"]));
+    // a markdown line running to the end of the file (unterminated-line)
+    assert!(parse_src(";>\n  text").is_err());
+    assert!(parse_src(";>\n  text\n").is_ok());
+    // a paragraph that fails to parse, ended by an item rather than a
+    // blank line
+    assert!(cram_fails(&["a\tb", "- item"]));
+    assert!(!cram_fails(&["a b", "- item"]));
+}
+
+#[test]
+fn sail_empty_cord_and_quote_block_edges() {
+    // `;p:''`: a text node with no text
+    let Hoon::Xray(manx) = parse_one(";p:''\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(manx.c, vec![text_node("")]);
+    // a `"""` block whose first line is empty
+    assert_eq!(
+        parse_one(";\"\"\"\n\n first\n \"\"\"\n"),
+        Hoon::MicTis(vec![text_node("\nfirst\n")])
+    );
+    // a later line indented partway to the `"""` (hoon-138 ++inde)
+    assert!(parse_src(";div\n  ;\"\"\"\n   a\n  b\n   \"\"\"\n==\n").is_err());
+    assert!(parse_src(";div\n  ;\"\"\"\n   a\n   b\n   \"\"\"\n==\n").is_ok());
+}
+
+#[test]
+fn buctis_irregular_prefixes_an_empty_autoname() {
+    // `=a=$` and `=a=$.foo` autoname to %$, so the name is `a-`
+    // (cat 3 'a' '-')
+    for src in ["$:(=a=$ b=@)\n", "$:(=a=$.foo b=@)\n"] {
+        let h = format!("{:?}", parse_one(src));
+        assert!(h.contains("Term(\"a-\")"), "{src}: {h}");
+    }
+}
