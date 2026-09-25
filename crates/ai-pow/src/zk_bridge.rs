@@ -8686,7 +8686,6 @@ mod tests {
 
         prove_and_verify_tiled_full(&ctx, &params, TEST_NONCE, &target, 0, 0, |_| {}, None)
             .expect("honest k=1088 proof must verify");
-
     }
 
     /// **Producer-planting / position-permutation
