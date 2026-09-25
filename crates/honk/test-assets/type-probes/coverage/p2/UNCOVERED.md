@@ -19,8 +19,10 @@ later conditions on that line. "Unit-tested" means
   prelude and build wrappers drive the doc-anchoring code, and no probe can
   reach a doc shape they lack. The `helps(...)` unit tests cover these
   instead:
-  - `chapters`: B4809T, 4810, B4855T, 4856, and the
-    `attach_help_to_bartis_tail` fallback at 4747.
+  - `hoon_tail_has_help`: B4731T, B4734T, B4735T (an arm doc that a
+    child of `%-`, `%+` or `?:` already carries as a postfix doc).
+  - `chapters`: B4809T, 4810, B4834T, 4835, B4855T, 4856, B4869T, 4870,
+    and the `attach_help_to_bartis_tail` fallback at 4747.
   - `strip_doc_spaces`: B6375c2F.
   - `help_before_with_target_options`: B6585T, 6586, B6600T, 6601, B6615F,
     B6618F, 6626.
@@ -167,8 +169,6 @@ B8015c3T.
   non-zero", and hoonc fails too.
 - B5659T, 5660 `cha_fa` (a character outside the base58 alphabet) and
   B5737F, 5740 `den_fa` (a bad checksum): malformed `0c` literals.
-- B6054T, 6055 `taft`: text that does not survive the round trip through
-  `++tuft`, such as `~-~200000.`. hoon-138's `++taft` crashes on it.
 - 8333 `posh` failure; 8347 `nusk` re-parse failure.
 
 ## Unreachable from source (P; unit-tested)
@@ -179,9 +179,11 @@ so these float paths never run from source:
 
 - 3682-3683 `swr` `d`/`u`; 3712-3713, 3715 `rau` non-nearest modes; in
   `lug`, 3826-3835 (floor and ceiling on a mantissa shifted out entirely),
-  3886 (`Floor`), B3905F and 3905-3907 (`Ceiling`).
+  3886 (`Floor`), B3905T, B3905F, B3905c2T, B3905c2F and 3905-3907
+  (`Ceiling`).
 - `d == %i`: B3805T, 3806, B3960T, 3961-3965 (`lug`); B4081T, 4082 (`xpd`).
-- `d == %f`: B3976F, 3978, 3980, 3995 (`lug`).
+- `d == %f`: B3976F, 3978, 3980, 3982-3984, 3986-3993, B3986T, B3986F,
+  3995 (`lug`).
 - 3697 `fli` NaN: `fli` only flips `lug` results, which are never NaN.
 - B4062T, 4063 `bex(0)`: every caller passes a width or precision of at
   least 5.
@@ -199,6 +201,11 @@ so these float paths never run from source:
 Other paths:
 
 - 3702-3708 `zer` and 5302-5310 `concatanate`: no callers.
+- B5911T, 5912 `atom_shr` shifting a `Small` atom by 128 bits or more: its
+  only caller is `rsh`, and every `rsh` call shifts by at most 64 bits
+  (`rip`, `trip` and the `@p` renderer by one byte, `taft`, `tuft`,
+  `den_fa` and the `++wood` helpers by up to 4 bytes, `yell` by 64). The
+  generic `fe`, which shifts by an atom's width, has no callers.
 - B5608T, 5609 `apply_sign` on a `Big` zero magnitude: every literal
   magnitude is either `Small` or a `Big` above `u128::MAX`
   (`hexadecimal_number` requires a nonzero lead digit, and the other literal
@@ -212,27 +219,3 @@ Other paths:
 - B8071F, 8073, B8096c2T, 8097 `expand_gap_start` at the end of the source,
   on whitespace, or after a `::` lead on the token's own line: spans never
   start there.
-
-## Not yet covered by a test
-
-- B3905T, B3905c2T, B3905c2F `lug` ceiling rounding with no dropped bits
-  (UP): uncovered: no unit test exercises it yet, and literal parsing never
-  rounds up.
-- 3982-3984, 3986-3993, B3986T, B3986F `lug` `%f` flush of a finite result
-  (UP): uncovered: no caller passes `%f`, and the one unit test that does
-  overflows to infinity.
-- B4731T, B4734T, B4735T `hoon_tail_has_help`, and B4834T, 4835, B4869T, 4870
-  `chapters` (UP): doc combinations where the arm body already carries the
-  identical help on a child of `%-`, `%.`, `=+`, `%+`, `?.` or `?:`, with a
-  postfix help (4834) or a linked prefix help (4869). No known source form
-  produces them.
-- B4976T `chapters` duplicate `$` arm (P): uncovered: no parity probe writes
-  `++  $` twice yet.
-- B5840c3F, B5840c4F, B5840c5T `wick` on `-` (P): uncovered: no parity probe
-  puts a `-` in a `._..__` element (such as `._--1__`) yet.
-- B5911T, 5912 `atom_shr` shifting a `Small` atom by 128 bits or more (P):
-  uncovered: no parity probe reaches it yet.
-- B6014c2F `teff` on a newline byte (P): uncovered: no parity probe has one
-  yet (a `~-~a.` knot would).
-- B6507T, 6508 `hair_offset` on the first line of a `with_origin` map (U):
-  uncovered: no unit test exercises it yet. Parity covers it.

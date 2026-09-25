@@ -496,6 +496,15 @@ fn lug_rounds_exact_products_to_even() {
 }
 
 #[test]
+fn lug_ceiling_bumps_only_inexact_results() {
+    // 16 = 10000b drops one zero bit of an exact product: nothing to round
+    assert_eq!(mul4(0, 16, 'u', 'd'), ffin(true, 1, 8));
+    // 1/7: the quotient 18 = 10010b also drops a zero bit, but the nonzero
+    // remainder makes it inexact, so the ceiling rounds up
+    assert_eq!(div4(0, 1, 7, 'u', 'd'), ffin(true, -6, 10));
+}
+
+#[test]
 fn lug_flushes_values_below_the_minimum_exponent() {
     // quotient 21 (5 bits) lands wholly below v: q = 16 > m
     assert_eq!(div4(-20, 1, 3, 'z', 'd'), ffin(true, 0, 0), "floor to zero");
@@ -535,8 +544,11 @@ fn lug_overflow_and_denormal_modes() {
     assert_eq!(mul4(30, 8, 'n', 'i'), ffin(true, 30, 8));
     // %i widens a short exact mantissa to full precision (xpd)
     assert_eq!(mul4(0, 3, 'n', 'i'), ffin(true, -2, 12));
-    // %f leaves an infinity alone
+    // %f leaves an infinity alone, keeps a full-precision finite result, and
+    // flushes a denormal one to zero
     assert_eq!(mul4(30, 8, 'n', 'f'), F::Inf(true));
+    assert_eq!(mul4(0, 17, 'n', 'f'), ffin(true, 1, 8));
+    assert_eq!(mul4(-9, 1, 'n', 'f'), ffin(true, 0, 0));
     // %d widens a short exact mantissa only down to the minimum exponent
     assert_eq!(mul4(-9, 1, 'n', 'd'), ffin(true, -10, 2));
 }
@@ -1361,6 +1373,35 @@ fn linemap_spots_shift_tall_tape_lines() {
     assert_eq!(LineMap::new("a\nb").pint(2..3).p, (2, 1));
 }
 
+#[test]
+fn traced_glued_children_on_the_first_line_keep_their_spots() {
+    // unanchor_spot_start reads each glued `?^` child's spot back into a byte
+    // offset (hair_offset); these sit on the map's first line, already at
+    // their tokens
+    let src = "?^  a  1  2";
+    let linemap = Arc::new(LineMap::new(src));
+    let mut node = crate::native_parser(vec!["t".into(), "x.hoon".into()], true, linemap)
+        .parse(src)
+        .into_result()
+        .unwrap_or_else(|e| panic!("{src:?} should parse: {e:?}"));
+    let node = loop {
+        match node {
+            Hoon::TisSig(mut items) if items.len() == 1 => node = items.remove(0),
+            Hoon::Dbug(_, inner) => node = *inner,
+            other => break other,
+        }
+    };
+    let Hoon::WutKet(_, q, r) = node else {
+        panic!("expected ?^, got {node:?}");
+    };
+    let start = |h: &Hoon| match h {
+        Hoon::Dbug(spot, _) => spot.q.p,
+        other => panic!("expected a traced child, got {other:?}"),
+    };
+    assert_eq!(start(&q), (1, 8));
+    assert_eq!(start(&r), (1, 11));
+}
+
 // ---------------------------------------------------------------------------
 // doc comments (docs-on parses; entry files are parsed docs-off by honk, so
 // these anchors are only exercised here and by the prelude)
@@ -1810,6 +1851,40 @@ fn arm_docs_are_not_duplicated_onto_a_body_that_has_them() {
     assert_eq!(
         helps("|%\n::  +a: one\n::  +b: two\n++  a  1  ::  post\n--\n"),
         vec![r#"[[["funk" "a"] ~] "one" ~]"#, r#"[0 "post" ~]"#]
+    );
+}
+
+#[test]
+fn arm_docs_already_on_a_rune_child_are_not_repeated() {
+    // the arm-tail detail equals a postfix doc on the first child of `%-`
+    // or `%+`, or on the second child of `%+` or `?:`
+    for (src, doc) in [
+        ("++  a\n  %-  (add 1 2)  ::  in p\n  3\n", "in p"),
+        ("++  a\n  %+  (add 1 2)  ::  in p\n  3\n  4\n", "in p"),
+        ("++  a\n  %+  add\n  (add 1 2)  ::  in q\n  4\n", "in q"),
+        ("++  a\n  ?:  &\n  (add 1 2)  ::  in q\n  4\n", "in q"),
+    ] {
+        let src = format!("|%\n::  +a: tail\n::  pre\n::\n::    {doc}\n{src}--\n");
+        assert_eq!(
+            helps(&src),
+            vec![r#"[[["funk" "a"] ~] "tail" ~]"#.to_string(), format!("[0 {doc:?} ~]")],
+            "{src:?}"
+        );
+    }
+    // an unlinked prefix doc beside a postfix or scye doc on the arm name,
+    // equal to a body child's postfix doc
+    assert_eq!(
+        helps("|%\n::    same\n++  a  ::    scye\n  %-  add\n  (add 1 2)  ::  same\n--\n"),
+        vec![r#"[0 "scye" ~]"#, r#"[0 "same" ~]"#]
+    );
+    assert_eq!(
+        helps("|%\n::    same\n++  a  ::  post\n  %-  add\n  (add 1 2)  ::  same\n--\n"),
+        vec![r#"[[["funk" "a"] ~] "post" ~]"#, r#"[0 "same" ~]"#]
+    );
+    // a linked prefix doc equal to the arm's postfix doc
+    assert_eq!(
+        helps("|%\n::  +a: same\n++  a  ::  same\n  1\n--\n"),
+        vec![r#"[[["funk" "a"] ~] "same" ~]"#]
     );
 }
 
