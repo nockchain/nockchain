@@ -12,51 +12,10 @@ current source.
 
 ### Unit-only gaps [U] (covered by parity)
 
-- `main` L604: the worker-panic arm. One both-reject probe in the parity
-  corpus panics the honk worker; no unit test panics it.
 - `compile_entry` L2359-2363: unreachable, because `compile_path_uncached`
   with `keep_product` always returns a product. Its single parity hit is a
   counter artifact: LLVM derives this arm's count by subtraction, and the
   compile that panics the worker (L604) unwinds through the match.
-- `compile_path_uncached` L2498: an import without a face (`*`). Parity
-  covers it; no unit test compiles a faceless import yet.
-- `compile_path_uncached` L2515, 2521-2526, 2571-2578; B2512F B2570T: the
-  pinned `/dat/softed-constraints.hoon` override (`native_value_override`).
-  Parity reaches it through corpus builds that import the pinned module; no
-  unit test compiles that module natively yet.
-- `compile_path_uncached` L2536-2537, B2533T, `kick_vase_trap_value` L2729,
-  2731-2734, 2736-2744, 2746, and `eval_vase_trap` L2748-2753: a `/dat` node
-  kicked while it is built (`eval_vase_trap` also serves the override above).
-  `c6_dat_eager` and `c6_dat_core` cover it in parity; no unit test builds a
-  `/dat` node yet.
-- `mint_honc_prelude_chunked` B3358F: the untraced chunked prelude mint. A
-  native-parity build in the corpus covers it; the unit test runs it with
-  `NATIVE_HOON_TRACE` set.
-
-### Not yet covered [UP]
-
-- `run` L652: a batch entry whose dependency tree fails
-  `check_dependency_tree`. Uncovered: no test exercises it yet (the
-  single-entry route is tested).
-- `run` L700: `--dump-native-wrapper-assets` with a prelude that fails to
-  build (the canonical prelude always builds). Uncovered: no test exercises
-  it yet.
-- `parse_prelude_hoon` L925: a prelude that fails to parse. Uncovered: no
-  test exercises it yet.
-- `jam_product` L3075, 3077, 3079-3080 and `compile_batch_with_shared_prelude`
-  L1449: a standard-mode entry whose product cannot be slammed with the
-  `@uvI` directory hash (not a gate). hoonc's `shot` wrapper mints the same
-  slam, so both compilers reject it. Uncovered: no test exercises it yet.
-- `initialize_exact_wrappers` L1671; B1668F B1668c2F: `--dump-wrapper-assets`
-  with a non-canonical prelude that still provides hoonc's wrapper stdlib
-  (`vase`, `trap`, `ut`), or with `HONK_NATIVE_PARITY` (a full native
-  self-mint of hoon-138, about 14GB RSS). Uncovered: no test exercises it
-  yet.
-- `compile_wrapper_gate` B2004F, `compile_wrapper_expression` L2034, B2031F,
-  and `compile_wrapper_gate_exact` B2061F: wrapper compiles with dbug off,
-  reached only by `--dump-wrapper-assets --no-dbug`, an unsupported
-  combination whose batteries could not match the native ones. Uncovered: no
-  test exercises it yet.
 
 ### Unreachable, dead, defensive, or diagnostics-only [UP]
 
@@ -159,7 +118,8 @@ current source.
   B373T/F B385T/F; `run` L624-625, 627, 629-632, 634-635, 646-651, 705-712;
   B623T B629T/F B645T B704T (including a whole batch delegated to hoonc);
   `check_dependency_tree` L790-792, 832, 908; B789T B790T/F B907T (manifest
-  directory lists and the memo shared by batch entries);
+  directory lists and the memo shared by batch entries); `run` L652 (a batch
+  entry whose dependency tree fails `check_dependency_tree`);
   `compile_batch_with_shared_prelude` L1427-1436, 1441-1448, 1450-1454,
   1456-1458, 1460-1462; B1451T/F; `jam_product` L3047-3052;
   `jam_dynock_output_native` L3562-3568, B3563T/F; and the manifest
@@ -195,41 +155,46 @@ current source.
   B682T B694T; `parse_inline_wrapper` L936-939, 941; `hoonc_wrapper_source`
   L968-975, B971T/F; `hoonc_standard_output_source` (every gap in
   L977-1007); `hoonc_dir_hash_source` (every gap in L1009-1045);
-  `hoonc_wrapper_wer` L1054-1056; `build_context_with_dynamic_wrapper_prelude`
-  (every P gap in L1312-1425); `initialize_exact_wrappers` L1635-1641,
-  1643-1651, 1653-1655, 1657-1659, 1661-1662, 1667-1669, 1674-1676,
-  1678-1693, 1695, 1697-1698; B1668T B1668c2T B1681T B1691T;
-  `compile_wrapper_gate_maybe_exact` L1700-1708, 1710;
-  `compile_exact_wrapper_gates` (every P gap in L1712-1897);
+  `hoonc_wrapper_wer` L1054-1056;
+  `build_context_with_dynamic_wrapper_prelude` (every P gap in L1312-1425);
+  `initialize_exact_wrappers` L1635-1641, 1643-1651, 1653-1655, 1657-1659,
+  1661-1662, 1667-1669, 1671, 1674-1676, 1678-1693, 1695, 1697-1698;
+  B1668T/F B1668c2T/F B1681T B1691T (L1671 and the F outcomes keep the
+  minted prelude formula, for a non-canonical prelude or under
+  `HONK_NATIVE_PARITY`); `compile_wrapper_gate_maybe_exact` L1700-1708,
+  1710; `compile_exact_wrapper_gates` (every P gap in L1712-1897);
   `extract_exact_wrapper_batteries` (every P gap in L1899-2001);
-  `compile_wrapper_gate` L2003-2006, 2008, 2010-2021, 2023-2027; B2004T
-  B2004c2T/F B2005T/F; `compile_wrapper_expression` L2029-2032, 2036-2047,
-  2049-2053, B2031T; `compile_wrapper_gate_exact` L2055-2063, 2065,
-  2067-2078, 2080-2084; B2061T B2061c2T/F B2062T/F; `mint_with_subject_type`
-  L2599-2602; `exact_mint_gun` L2774-2784; `slam_wrapper_gate` L2840-2846,
-  2848-2858, 2865, 2869-2871, 2874-2879, B2865F; `dump_exact_wrapper_assets`
-  (every P gap in L3119-3171); `dump_native_wrapper_assets` L3173-3196,
-  3199-3200; `jam_noun_in_fresh_slab` L3202-3206; `evaluate_honc_isolated`
-  L3403-3409, 3411-3416, 3418-3430, 3433-3436, 3438; `trap_battery`
-  L3628-3634; `jam_slab_noun` L3926-3929; `slam_gate_formula` L4527-4533.
+  `compile_wrapper_gate` L2003-2006, 2008, 2010-2021, 2023-2027; B2004T/F
+  B2004c2T/F B2005T/F; `compile_wrapper_expression` L2029-2032, 2034,
+  2036-2047, 2049-2053, B2031T/F; `compile_wrapper_gate_exact` L2055-2063,
+  2065, 2067-2078, 2080-2084; B2061T/F B2061c2T/F B2062T/F (L2034 and B2004F
+  B2031F B2061F are `--dump-wrapper-assets --no-dbug`; hoonc has no
+  `--no-dbug`); `mint_with_subject_type` L2599-2602; `exact_mint_gun`
+  L2774-2784; `slam_wrapper_gate` L2840-2846, 2848-2858, 2865, 2869-2871,
+  2874-2879, B2865F; `dump_exact_wrapper_assets` (every P gap in
+  L3119-3171); `dump_native_wrapper_assets` L3173-3196, 3199-3200;
+  `jam_noun_in_fresh_slab` L3202-3206; `evaluate_honc_isolated` L3403-3409,
+  3411-3416, 3418-3430, 3433-3436, 3438; `trap_battery` L3628-3634;
+  `jam_slab_noun` L3926-3929; `slam_gate_formula` L4527-4533.
 - Non-canonical preludes and `--sut-jam`. hoonc has only its own hoon.hoon,
   so a non-canonical prelude has no reference, and `--sut-jam` with the
   canonical subject type gives the default build
-  (`c6_cli_subject_type_override_and_relative_output`): `run` L729 (a
-  prelude that fails to build); `build_context_with_shared_prelude` L1178,
-  1285; B1168F B1183T B1183c2F B1187F B1198F B1273T B1278F; `data_vase`
-  L2661-2665, 2667-2668, B2652F; `local_octs_type` L3582-3588;
-  `ty_atom_local` B3910T; `seed_honc_type_with_ut` L3233, B3229F;
-  `peel_transparent` L3252-3253, B3251F (prelude shapes other than hoon-138
-  parsed with dbug off); `mint_honc_prelude_chunked` L3297, B3296F (a
-  prelude that is not `=<`); `mint_honc_formula_with_ut` L3391-3400, B3387F
-  (the whole-prelude route for a non-`=<` prelude or `NATIVE_HOON_NO_CHUNK`,
-  whose artifact differs from the chunked one, an open bug listed in
-  DIVERGENCES.md); `extract_subject_type_root` L4137, 4143-4145; B4136T
-  B4139F B4141F; `prelude_type_from_subject_type` L4150-4151;
-  `type_cell_parts` L4162, B4161T; `looks_like_type_noun` L4173, 4176,
-  4185-4193; B4172T B4175F; `type_tag_atom_text` L4204, 4210; B4203T B4206T
-  B4208F B4208c2T/F.
+  (`c6_cli_subject_type_override_and_relative_output`): `run` L729 and, for
+  `--dump-native-wrapper-assets`, L700 (a prelude that fails to build);
+  `parse_prelude_hoon` L925 (a prelude that fails to parse);
+  `build_context_with_shared_prelude` L1178, 1285; B1168F B1183T B1183c2F
+  B1187F B1198F B1273T B1278F; `data_vase` L2661-2665, 2667-2668, B2652F;
+  `local_octs_type` L3582-3588; `ty_atom_local` B3910T;
+  `seed_honc_type_with_ut` L3233, B3229F; `peel_transparent` L3252-3253,
+  B3251F (prelude shapes other than hoon-138 parsed with dbug off);
+  `mint_honc_prelude_chunked` L3297, B3296F (a prelude that is not `=<`);
+  `mint_honc_formula_with_ut` L3391-3400, B3387F (the whole-prelude route
+  for a non-`=<` prelude or `NATIVE_HOON_NO_CHUNK`, whose artifact differs
+  from the chunked one, an open bug listed in DIVERGENCES.md);
+  `extract_subject_type_root` L4137, 4143-4145; B4136T B4139F B4141F;
+  `prelude_type_from_subject_type` L4150-4151; `type_cell_parts` L4162,
+  B4161T; `looks_like_type_noun` L4173, 4176, 4185-4193; B4172T B4175F;
+  `type_tag_atom_text` L4204, 4210; B4203T B4206T B4208F B4208c2T/F.
 - Debug environment variables and tracing (diagnostics-only):
   `build_context_with_shared_prelude` L1215, 1225-1229, 1246-1250,
   1252-1253, 1257, 1259; B1214T B1224T B1227T/F B1245T B1247T/F B1249T
@@ -249,7 +214,12 @@ current source.
   `unreachable-bad-path` and `unreachable-cycle` trees under `reject/`,
   verified by Bazel against hoonc but not replayed for coverage.
   `check_dependency_tree` L823, B822T: an empty file in the tree, which
-  hangs hoonc, so there is no hoonc verdict. `eval_formula_noun_in_context`
+  hangs hoonc, so there is no hoonc verdict. `jam_product` L3075, 3077,
+  3079-3080 (a standard-mode entry that is not a gate, so the `@uvI`
+  directory hash cannot be slammed into it) is the `standard-not-gate` tree
+  under `reject/`, likewise not replayed, and
+  `compile_batch_with_shared_prelude` L1449 is the same failure in a batch.
+  `eval_formula_noun_in_context`
   L4319-4320, 4322-4323, B4320F: an evaluation that crashes (no parity probe
   has a crashing `/dat` node).
 - Defensive checks: `catch_nock_panic` L4539-4554 (a panic inside Nock
@@ -272,15 +242,6 @@ current source.
   directory walk produces neither.
 
 ## pipeline.rs
-
-### Not yet covered [UP]
-
-- `vul` B511c2F: a DEL (127) byte inside a header comment. Uncovered: no
-  test exercises it yet.
-- `stap` L582, B581c2T: an import path with a trailing `/`. Uncovered: no
-  test exercises it yet.
-- `reject_leftover_import` L706, B705F: a file that ends in a lone `/` right
-  after its import header. Uncovered: no test exercises it yet.
 
 ### Unreachable, defensive, or test-only [UP]
 
