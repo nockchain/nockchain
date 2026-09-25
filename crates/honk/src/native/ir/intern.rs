@@ -6,7 +6,6 @@
 //! are interned bottom-up; child IDs make shallow hashing and exact comparison
 //! constant-time with respect to descendant depth. Exact Hoon nouns retained by
 //! leaves and forks remain the serialization witnesses at noun boundaries.
-#![allow(dead_code)]
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -25,20 +24,17 @@ use crate::native::identity::*;
 use crate::native::noun::{noun_eq, noun_pair};
 use crate::native::ut::keys::*;
 
-/// Decode a type noun into the native IR AND intern it in one O(n) pass, using a
-/// persistent pointer-identity `memo` so the noun DAG (and anything carried over
-/// from a prior call) is walked at most once. Structurally-equal-but-pointer-
-/// distinct subtrees — the duplicated embedded subjects of subject-deepening —
-/// are collapsed by the table to one shared `Rc`. This is the O(n) construction
-/// primitive the native-mint port is built on (the combinator O(n²) trap was
-/// re-parsing per call with no shared memo; this shares one).
+/// Decode a type noun into native IR and intern it in one pass. The
+/// pointer-identity `memo` persists across calls, so each noun node is walked at
+/// most once per compile. Structurally equal but pointer-distinct subtrees (the
+/// duplicated subjects of subject deepening) collapse to one canonical handle.
 fn intern_type_noun(
     table: &mut TypeTable,
     memo: &mut InternMemo,
     noun: Noun,
     space: &NounSpace,
 ) -> Result<Rc<Type>> {
-    // %void / %noun are bare atom cords — directs, no memo needed.
+    // `%void` and `%noun` are direct atom cords and skip the memo.
     if let Ok(atom) = noun.in_space(space).as_atom() {
         if atom.eq_bytes(b"void") {
             return Ok(table.intern_shallow(Type::Void));
@@ -50,8 +46,7 @@ fn intern_type_noun(
             "native type IR: unknown atom type tag".into(),
         ));
     }
-    // SAFETY: `noun` is a live, in-`space` slab noun; `as_raw` only reads its
-    // identity word (used purely as a memo key, never dereferenced).
+    // The identity word is a memo key only and is never dereferenced.
     let raw_addr = NounIdentity::of(noun);
     if let Some(rc) = memo.get(&raw_addr) {
         return Ok(Rc::clone(rc));
@@ -123,24 +118,16 @@ fn pair(n: Noun, space: &NounSpace) -> Result<(Noun, Noun)> {
 }
 
 // ---------------------------------------------------------------------------
-// Live native-mint construction-port harness (flag-gated by HONK_NATIVE_TYPES).
+// Per-compile hash-consing table.
 //
-// This is the first real step of the construction port: as `mint` builds each
-// core's type noun, we build the corresponding interned native type into one
-// PERSISTENT table (shared pointer-memo across the whole compile). It runs
-// alongside the noun path (which stays the live oracle), so it is additive and
-// safe, and it measures the thing the whole migration turns on: how much the
-// intern table collapses the mint-time type duplication (subject-deepening).
-//
-// Single-thread, single-compile harness — call `live_reset` at compile start.
+// Every native type is interned into one table owned by the compile's
+// `Context`, so structurally equal types share one canonical handle.
 // ---------------------------------------------------------------------------
 
-/// The `intern_type_noun`/`native_of` decode memo: source-noun-address ->
-/// canonical interned `Rc<Type>`. Its KEYS are slab addresses; with the frame
-/// arena retired the compile slab never reclaims a frame, so an address is never
-/// recycled within a compile and an entry can never go stale (its source noun
-/// stays live for the whole compile). The memo therefore just accumulates for the
-/// life of the `Context` (one compile) — a plain map, no frame-scoped eviction.
+/// Decode memo for `intern_type_noun` and `native_of`, from source noun
+/// identity to the canonical interned type. The compile slab never reclaims
+/// memory, so a source address is never reused within a compile and an entry
+/// never goes stale. Entries accumulate for the life of the `Context`.
 struct InternMemo {
     map: HashMap<NounIdentity, Rc<Type>>,
 }
@@ -166,8 +153,6 @@ impl InternMemo {
 struct LiveIntern {
     table: TypeTable,
     memo: InternMemo,
-    cores: u64,
-    next_report: u64,
 }
 
 impl LiveIntern {
@@ -175,50 +160,34 @@ impl LiveIntern {
         LiveIntern {
             table: TypeTable::new(),
             memo: InternMemo::new(),
-            cores: 0,
-            next_report: 100_000,
         }
     }
 }
 
-/// Owned per-compile native-IR state.
+/// Per-compile native IR state, owned by `Ut` as its `cx` field.
 ///
-/// Consolidates every per-compile native-IR cache that used to be a module
-/// thread-local (the hash-cons core `live`, the encode memos, the boundary
-/// caches, and the content-keyed decode / fork caches) into one struct OWNED by
-/// `Ut` (as the `cx` field). The surface free functions in this module take
-/// `&mut Context` / `&Context`; a fresh `Ut` gets a fresh `Context`, which gives
-/// each compile an isolated cache universe (replacing the old per-compile
-/// `live_reset`).
-///
-/// `new` starts every field empty (and `live` is eagerly constructed, replacing
-/// the former thread-local's lazy `Option<LiveIntern>` + `get_or_insert_with`).
-/// Dropping the owning `Ut` drops this context and every handle together; the
-/// arena is deliberately not reset while `TypeRef` handles may be live.
+/// Holds the hash-consing table, the encode memos, and the native boundary
+/// caches. Each `Ut` gets a fresh `Context`, so compiles never share cache
+/// entries. Dropping the owning `Ut` drops this context and every handle into
+/// it together; the table is never reset while `TypeRef` handles may be live.
 pub struct Context {
-    // --- LIVE (hash-cons core): was `static LIVE: RefCell<Option<LiveIntern>>` ---
-    // `LiveIntern` bundles `table: TypeTable`, `memo: InternMemo`, `cores`,
-    // `next_report`. It was `Option` only so a thread-local could lazily create it
-    // via `get_or_insert_with(LiveIntern::new)`; an owned `Context` creates it
-    // eagerly in `new`, so the `Option` is unnecessary.
     live: LiveIntern,
 
-    // --- encode memos ---
-    to_noun_memo: HashMap<TypeId, Noun>,   // was TO_NOUN_MEMO
-    leaf_memo: HashMap<JamIdentity, Noun>, // was LEAF_MEMO
+    // Encode memos.
+    to_noun_memo: HashMap<TypeId, Noun>,
+    leaf_memo: HashMap<JamIdentity, Noun>,
 
-    // --- native boundary caches ---
-    nest_cache: HashMap<TypeBinaryKey<TypeId>, bool>, // NEST_CACHE
-    core_mint_cache: HashMap<CoreMintKey, (Rc<Type>, FormulaId)>, // CORE_MINT_CACHE
-    mint_cache: HashMap<MintKey<TypeId>, (Rc<Type>, FormulaId)>, // MINT_CACHE
-    mull_cache: HashMap<MullKey, (Rc<Type>, Rc<Type>)>, // MULL_CACHE
-    fuse_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>, // FUSE_CACHE
-    crop_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<FishKey, FormulaId>,          // FISH_CACHE
+    // Boundary caches keyed by canonical type IDs.
+    nest_cache: HashMap<TypeBinaryKey<TypeId>, bool>,
+    core_mint_cache: HashMap<CoreMintKey, (Rc<Type>, FormulaId)>,
+    mint_cache: HashMap<MintKey<TypeId>, (Rc<Type>, FormulaId)>,
+    mull_cache: HashMap<MullKey, (Rc<Type>, Rc<Type>)>,
+    fuse_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>,
+    crop_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>,
+    fish_cache: HashMap<FishKey, FormulaId>,
 
-    // --- native_of content-keyed decode cache + fork cache ---
-    native_of_mug_memo: HashMap<NounMug, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
-    fork_cache: HashMap<Vec<TypeId>, Rc<Type>>,          // FORK_CACHE
+    // Content-keyed `native_of` decode cache; mug buckets are compared exactly.
+    native_of_mug_memo: HashMap<NounMug, Vec<Rc<Type>>>,
 
     // Sorted, deduplicated hold legs reachable from each canonical type.
     // Computed bottom-up over the arena DAG once per distinct TypeId.
@@ -239,7 +208,6 @@ impl Context {
             crop_cache: HashMap::new(),
             fish_cache: HashMap::new(),
             native_of_mug_memo: HashMap::new(),
-            fork_cache: HashMap::new(),
             legset_memo: HashMap::new(),
         }
     }
@@ -256,19 +224,6 @@ fn canonical_id(ty: &Rc<Type>) -> TypeId {
     ty.arena_id()
 }
 
-static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// Look up a fork by its sorted, deduplicated canonical option IDs.
-/// Equal option sets reuse the same interned fork for the lifetime of `cx`.
-pub fn fork_cache_lookup(cx: &Context, key: &[TypeId]) -> Option<Rc<Type>> {
-    cx.fork_cache.get(key).cloned()
-}
-
-/// Store a fork keyed by its sorted, deduplicated canonical option IDs.
-pub fn fork_cache_store(cx: &mut Context, key: Vec<TypeId>, fork: Rc<Type>) {
-    cx.fork_cache.insert(key, fork);
-}
-
 /// Look up the sorted, deduplicated hold legs reachable from a canonical type.
 pub fn legset_memo_lookup(cx: &Context, id: TypeId) -> Option<SharedRc<[FanLegId]>> {
     cx.legset_memo.get(&id).cloned()
@@ -279,9 +234,8 @@ pub fn legset_memo_store(cx: &mut Context, id: TypeId, legs: SharedRc<[FanLegId]
     cx.legset_memo.insert(id, legs);
 }
 
-/// Content-keyed `native_of` fast path (see `Context::native_of_mug_memo`).
-/// Returns the memoized candidate `Rc`s for a noun mug (a tiny bucket;
-/// collisions are rare).
+/// Content-keyed `native_of` fast path: returns the types recorded for a noun
+/// mug. Callers compare each candidate exactly.
 pub fn native_of_mug_candidates(cx: &Context, mug: NounMug) -> Vec<Rc<Type>> {
     cx.native_of_mug_memo.get(&mug).cloned().unwrap_or_default()
 }
@@ -295,9 +249,8 @@ pub fn native_of_mug_insert(cx: &mut Context, mug: NounMug, rc: Rc<Type>) {
     }
 }
 
-/// Look up a native `core_mint` result by canonical (sut, gol) IDs + the
-/// preserved semantic key fields (tomes_sig, vet, poly, fan, arm_epoch,
-/// placeholder). Returns the native (core type, formula) directly — no `native_of`.
+/// Look up a native `core_mint` result by canonical (sut, gol) IDs plus the
+/// arm-map signature, vet, poly, fan, arm epoch, and placeholder signature.
 #[allow(clippy::too_many_arguments)]
 pub fn core_mint_cache_lookup(
     cx: &Context,
@@ -351,9 +304,8 @@ pub fn core_mint_cache_store(
     cx.core_mint_cache.insert(key, (core_type, formula));
 }
 
-/// Look up a native `mint` result by canonical (sut, gol) IDs + the preserved
-/// semantic key fields (vet, gen_sig, fan, arm_epoch, placeholder). Returns the
-/// native (type, formula) directly — no `native_of`.
+/// Look up a native `mint` result by canonical (sut, gol) IDs plus vet, the
+/// gene signature, fan, arm epoch, and placeholder signature.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_cache_lookup(
     cx: &Context,
@@ -403,9 +355,8 @@ pub fn mint_cache_store(
     cx.mint_cache.insert(key, (ty, formula));
 }
 
-/// Look up a native `mull` result by canonical (sut, gol, dox) IDs + the
-/// preserved semantic key fields (vet, gen_sig, fan, arm_epoch, placeholder).
-/// Returns the native (p type, q type) directly — no `native_of`.
+/// Look up a native `mull` result by canonical (sut, gol, dox) IDs plus vet,
+/// the gene signature, fan, arm epoch, and placeholder signature.
 #[allow(clippy::too_many_arguments)]
 pub fn mull_cache_lookup(
     cx: &Context,
@@ -495,7 +446,6 @@ pub fn nest_cache_store(
 }
 
 /// Look up a native `fuse` result by canonical (sut, ref) IDs + (vet, fan).
-/// Returns the native result type directly — no `native_of`.
 pub fn fuse_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
@@ -531,7 +481,6 @@ pub fn fuse_cache_store(
 }
 
 /// Look up a native `crop` result by canonical (sut, ref) IDs + (vet, fan).
-/// Returns the native result type directly — no `native_of`.
 pub fn crop_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
@@ -567,7 +516,6 @@ pub fn crop_cache_store(
 }
 
 /// Look up a native `fish` result by canonical subject ID + (axis, vet, fan).
-/// Returns the cached canonical formula ID directly.
 pub fn fish_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
@@ -585,8 +533,7 @@ pub fn fish_cache_lookup(
         .copied()
 }
 
-/// Store a native `fish` result by canonical subject ID +
-/// (axis, vet, fan).
+/// Store a native `fish` result by canonical subject ID + (axis, vet, fan).
 pub fn fish_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
@@ -604,7 +551,12 @@ pub fn fish_cache_store(
     cx.fish_cache.insert(key, result);
 }
 
-/// Whether the live native-type harness is on (`HONK_NATIVE_TYPES`), cached.
+#[cfg(test)]
+static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether `HONK_NATIVE_TYPES` is set. Test constructors then cross-check each
+/// native type against the noun they build.
+#[cfg(test)]
 pub fn live_enabled() -> bool {
     use std::sync::atomic::Ordering;
     match LIVE_ENABLED.load(Ordering::Relaxed) {
@@ -618,47 +570,36 @@ pub fn live_enabled() -> bool {
     }
 }
 
-/// Memoized `Type::to_noun` for the flip bridges: lower a canonical native type to
-/// a noun, caching by interned `Rc` pointer so repeated lowerings (the hot
-/// `*_noun` bridges on big deepened types) are O(1) instead of O(type). SOUND
-/// because flip natives are interned (the table holds them for the whole compile,
-/// so the address is stable + not reused) and the bridges always lower into the
-/// one compile slab; reset per compile via `live_reset`.
+/// Memoized `Type::to_noun`: lower a canonical native type to a noun, caching by
+/// type ID so repeated lowerings of large deepened types are O(1). IDs are unique
+/// within a `Context`, and callers always lower into the one compile slab, so a
+/// cached noun stays valid for the life of the `Context`.
 pub fn live_to_noun(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) -> Noun {
     let ptr = canonical_id(native);
     if let Some(noun) = cx.to_noun_memo.get(&ptr).copied() {
         return noun;
     }
-    // Stack guard: this per-node recursion descends as deep as the type and runs
-    // INSIDE other deep recursions (redo/repo, reached via `native_of_cached`'s
-    // verify). Without growing the stack a deep recursive type overflows the guard
-    // page (SIGBUS on macOS, no Rust panic). `maybe_grow` is a cheap pointer
-    // compare when headroom remains; 64MB chunks dwarf any real type depth.
+    // This recursion descends as deep as the type and runs inside other deep
+    // recursions (redo/repo, via `native_of_cached`'s verify). Without growing the
+    // stack, a deep recursive type overflows the guard page (SIGBUS on macOS, not a
+    // Rust panic). `maybe_grow` is a pointer compare when headroom remains.
     let noun = stacker::maybe_grow(32 * 1024, 64 * 1024 * 1024, || {
         live_to_noun_node(cx, native, dst)
     });
-    // The node-built noun is already resident in the compile slab `dst` (the frame
-    // arena was retired, so there is no base region to relocate to). The memo keeps
-    // it live for the whole compile.
+    // The noun already lives in the compile slab `dst`, so the memo stores it as is.
     cx.to_noun_memo.insert(ptr, noun);
     noun
 }
 
-/// One node of `live_to_noun`'s memoized recursion (split out so the `maybe_grow`
-/// stack guard wraps each level). See `live_to_noun`.
+/// One node of `live_to_noun`'s recursion, split out so `maybe_grow` wraps each
+/// level.
 fn live_to_noun_node(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) -> Noun {
-    // PERF (RT-05): lower the IMMEDIATE children through `live_to_noun` /
-    // `live_leaf_to_noun` (both per-pointer memoized) rather than the bare
-    // recursive `Type::to_noun`, which re-materializes the WHOLE subtree fresh.
-    // Recursive type children (a `%core`'s shared `context` = the deepening
-    // subject, often the entire stdlib subject) are one canonical `Rc` shared by
-    // many ancestors; the bare walk re-lowered — and re-cued the Jammed battery
-    // `rest`/`garb`/`gene` leaves — once per ancestor, so a handful of mints over
-    // a big subject cost seconds. Routing children through the memo lowers each
-    // distinct node (and each Jammed leaf) exactly once per compile; jam output is
-    // structure-only so byte-exactness is unchanged. Mirrors `Type::to_noun`'s
-    // node shapes exactly (which stays the pure, slab-agnostic oracle form).
-    let noun = match &**native {
+    // Children go through the memoized `live_to_noun`/`live_leaf_to_noun` rather
+    // than the recursive `Type::to_noun`, which rebuilds the whole subtree. A
+    // `%core`'s `context` is often the whole stdlib subject, shared by many
+    // ancestors; the memo lowers each distinct node and cues each jammed leaf once
+    // per compile. Node shapes match `Type::to_noun`, the slab-agnostic reference.
+    match &**native {
         Type::Void => D(tas("void")),
         Type::Noun => D(tas("noun")),
         Type::Atom { aura, bits } => {
@@ -704,25 +645,17 @@ fn live_to_noun_node(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) ->
             let g = live_leaf_to_noun(&mut *cx, gene, dst);
             T(dst, &[D(tas("hold")), s, g])
         }
-    };
-    // The built node cell lives in the compile slab `dst`; children are already
-    // resident there via their own `live_to_noun`/`live_leaf_to_noun`. The caller
-    // (`live_to_noun`) does the memo insert that keeps it live for the compile.
-    noun
+    }
 }
 
-/// Intern a single native node through the owned per-compile table (`cx.live`) —
-/// the ONE canonical pointer-identity universe shared by all native-shadow
-/// construction (so `intern_shallow`'s children-by-`Rc`-pointer hashing stays
-/// valid). Children must already be canonical `Rc<Type>` from this same table.
-/// Works regardless of `HONK_NATIVE_TYPES` (the flag only gates the measurement
-/// hook); it is only ever CALLED on the native-shadow path.
+/// Intern one native node in the compile's type table. Children must already be
+/// canonical handles from the same table, because `intern_shallow` hashes and
+/// compares them by identity.
 pub fn live_intern(cx: &mut Context, node: Type) -> Rc<Type> {
     cx.live.table.intern_shallow(node)
 }
 
-/// Native-only cell constructor (collapse-aware): `cell(void,_)`/`cell(_,void)` ->
-/// void, else `Cell`. For flipped producers that hold native children directly.
+/// Collapse-aware native `%cell`: `cell(void,_)` and `cell(_,void)` -> void.
 pub fn cons_cell(cx: &mut Context, head: Rc<Type>, tail: Rc<Type>) -> Rc<Type> {
     if matches!(&*head, Type::Void) || matches!(&*tail, Type::Void) {
         return live_intern(cx, Type::Void);
@@ -739,8 +672,8 @@ pub fn cons_noun(cx: &mut Context) -> Rc<Type> {
 }
 
 /// Collapse-aware native `%core`: `core(void,_)` -> void (mirrors ty_core_n).
-/// The coil is carried decomposed: tiny `garb`/bounded `rest` as leaves and the
-/// `context` (deepening subject) as a SHARED native `Rc<Type>`.
+/// The coil is carried decomposed, with `context` (the deepening subject) as a
+/// shared canonical type.
 pub fn cons_core(
     cx: &mut Context,
     payload: Rc<Type>,
@@ -780,9 +713,8 @@ pub fn cons_hint(cx: &mut Context, head: Leaf, payload: Rc<Type>) -> Rc<Type> {
     }
 }
 
-/// The O(n) fallback for a not-yet-threaded child: decode `noun` to its canonical
-/// native `Rc<Type>` via the shared memoized walk. One shared `(table, memo)`
-/// means each noun node is walked at most once per compile.
+/// Decode `noun` to its canonical native type through the shared memoized walk,
+/// so each noun node is walked at most once per compile.
 pub fn native_of(cx: &mut Context, noun: Noun, space: &NounSpace) -> Result<Rc<Type>> {
     intern_type_noun(&mut cx.live.table, &mut cx.live.memo, noun, space)
 }
@@ -795,26 +727,21 @@ pub fn live_leaf_from_noun(cx: &mut Context, noun: Noun, space: &NounSpace) -> L
     cx.live.table.intern_live_leaf(noun, space)
 }
 
-/// Memoized leaf lowering for the flipped consumers: lower a carried `Leaf`
-/// (core coil, fork set, hold gene, atom aura/bits, face tool, hint head) to a
-/// noun for the still-noun leaf helpers (coil_parts/fork_set_options/garb_*/fitz),
-/// caching `Jammed` leaves by their `Arc` pointer so repeated lowerings on the hot
-/// recursive paths are O(1). Reset per compile via `live_reset`.
+/// Memoized leaf lowering: lower a carried `Leaf` (core coil rest, fork set, hold
+/// gene, atom aura/bits, face tool, hint head) to a noun for the noun-based leaf
+/// helpers, caching `Jammed` leaves by `Arc` pointer so repeated lowerings are O(1).
 pub fn live_leaf_to_noun(cx: &mut Context, leaf: &Leaf, dst: &mut NounSlab) -> Noun {
     match leaf {
         Leaf::Direct(_) => leaf.to_noun(dst),
-        // The cue elimination: a raw leaf's noun already lives in THIS compile's
-        // `dst` slab (built there during minting, kept live for the whole compile),
-        // so return it as-is — no copy, no cue.
+        // A raw leaf's noun already lives in the compile slab, so it needs no copy
+        // or cue.
         Leaf::Noun(n, _) => *n,
         Leaf::Jammed(arc, _) => {
             let ptr = JamIdentity(std::sync::Arc::as_ptr(arc) as *const u8 as usize);
             if let Some(noun) = cx.leaf_memo.get(&ptr).copied() {
                 return noun;
             }
-            // Cued into the compile slab `dst` and kept live for the whole compile
-            // by the memo (the frame arena was retired, so there is no base region
-            // to relocate to).
+            // Cued into the compile slab once and reused for the rest of the compile.
             let noun = leaf.to_noun(dst);
             cx.leaf_memo.insert(ptr, noun);
             noun
@@ -822,8 +749,8 @@ pub fn live_leaf_to_noun(cx: &mut Context, leaf: &Leaf, dst: &mut NounSlab) -> N
     }
 }
 
-/// Live byte-exact oracle: panic unless `to_noun(native)` jams identically to the
-/// `noun` it shadows. The per-node validation for the construction port.
+/// Test oracle: panic unless `to_noun(native)` jams identically to `noun`.
+#[cfg(test)]
 pub fn assert_native_eq(noun: Noun, native: &Rc<Type>, space: &NounSpace) {
     let mut a: NounSlab = NounSlab::new();
     a.copy_into(noun, space);
@@ -855,7 +782,7 @@ pub struct TypeTable {
     /// handles point at them.
     #[allow(clippy::vec_box)]
     slots: Vec<Box<TypeSlot<Type>>>,
-    /// Total node-constructions seen by `intern` (the un-shared structural size).
+    /// Total node constructions seen by `intern_node` (the unshared structural size).
     pub interned_calls: u64,
     /// Distinct canonical nodes retained (the hash-consed size).
     pub distinct: u64,
@@ -963,9 +890,7 @@ impl TypeTable {
         self.intern_node(node)
     }
 
-    /// Intern a single node whose children are ALREADY canonical (interned).
-    /// O(1) amortized. Used by the memoized decode-and-intern walk
-    /// ([`intern_type_noun`]) which interns bottom-up itself.
+    /// Intern a single node whose children are already canonical. O(1) amortized.
     pub fn intern_shallow(&mut self, node: Type) -> Rc<Type> {
         self.intern_node(node)
     }
@@ -994,11 +919,11 @@ impl TypeTable {
     }
 }
 
-/// Shallow structural hash: variant + children by canonical `Rc` pointer + leaf
+/// Shallow structural hash: variant + children by canonical type ID + leaf
 /// content. Valid only when children are already interned (bottom-up). A fork's
-/// adaptive `options`/`options_seen` state is deliberately excluded: both are
-/// pure caches of the exact `set` witness, and interior mutation must never
-/// change a key after insertion into `TypeTable`.
+/// adaptive `options`/`options_seen` state is excluded: both are caches of the
+/// exact `set` witness, and interior mutation must never change a key after
+/// insertion into `TypeTable`.
 fn node_hash(t: &Type) -> NodeHash {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
@@ -1168,9 +1093,8 @@ mod tests {
         assert_eq!(noun.arena_id(), TypeId(1));
     }
 
-    // The subject-deepening fix in miniature: a fully-duplicated balanced cell
-    // tree of depth D has 2^(D+1)-1 structural nodes but only D+1 distinct after
-    // hash-consing — O(2^n) → O(n).
+    // A fully duplicated balanced cell tree of depth D has 2^(D+1)-1 structural
+    // nodes but only D+1 distinct nodes after hash-consing.
     #[test]
     fn hash_consing_collapses_duplicated_structure() {
         fn build(tab: &mut TypeTable, depth: u32) -> Rc<Type> {

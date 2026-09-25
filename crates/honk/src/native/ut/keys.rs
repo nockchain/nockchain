@@ -1,4 +1,4 @@
-//! Named memo keys. Field order retains the original tuple hashing order.
+//! Named memo keys. Each key hashes like the tuple of its fields in declaration order.
 
 use num_bigint::BigUint;
 
@@ -51,7 +51,7 @@ pub struct CoreMintKey {
 }
 
 /// Native caches use exact TypeIds; noun-boundary buckets use NounMugs and
-/// retain their structural equality checks before accepting a hit.
+/// check structural equality before accepting a hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MintKey<T> {
     pub subject: T,
@@ -159,7 +159,7 @@ pub struct FoldKey {
     pub formula: super::FormulaId,
 }
 
-/// Existing xor bucket for a hold noun and an axis noun; compared exactly on hit.
+/// Bucket key for a (hold, axis) pair: the xor of their mugs. Hits are compared exactly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct HoldAxisHash(pub(super) u32);

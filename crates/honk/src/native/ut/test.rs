@@ -749,8 +749,8 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     let mut ut = Ut::new(&mut slab);
     ut.set_vet(false);
     let mull_gen_sig = HoonSignature(u64::from(ut.noun_mug_cached(mull_gen).0));
-    // The mull cache is native-keyed (C8/C-final); native_of the noun sut/gol/ref
-    // for the mull_cache_store/lookup calls (the other caches stay noun-keyed).
+    // The mull cache takes native types, so lift sut/gol/ref with native_of for
+    // it; the other caches exercised here are noun-keyed.
     let space = ut.slab.noun_space();
     let sut_n = crate::native::ir::intern::native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = crate::native::ir::intern::native_of(&mut ut.cx, gol, &space).expect("native gol");
@@ -800,31 +800,29 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
 
     // Whether the active leg is reachable from each cache's subject decides
     // partition-vs-collapse under the scope-precise fan key:
-    //   - mint/mull/redo/nest subject = `sut` (a %core, NO holds) -> unreachable
-    //     -> scoped key stays 0 -> the fan-empty entries HIT.
+    //   - mint/mull/redo/nest subject = `sut` (a %core, no holds) -> unreachable
+    //     -> scoped key stays 0 -> the fan-empty entries hit.
     //   - rest subject = `rest_sut` = hold(rest_cache_inner, rest_cache_hoon),
-    //     whose ONLY leg differs from the active (rest_inner, rest_hoon) leg ->
-    //     also unreachable -> scoped key stays 0 -> HIT.
-    // Under the old whole-active key, all of these MISS (the active leg changes
-    // the key regardless of reachability). Both kernels are byte-exact with the
-    // scoped key, so the collapse is the correct semantics.
-    // redo, rest, crop, fuse are scope-keyed (STEP 2); mint, mull, fish, core_mint,
-    // nest are scope-keyed too (STEP 3). The mint/mull/nest lookups below use the
-    // *noun* boundary helpers (`mint_boundary_lookup_exact`, the noun nest_mug),
-    // which stay on the whole-active key, so they still partition; the native
-    // `mull_cache_lookup` is scope-keyed and collapses.
+    //     whose only leg differs from the active (rest_inner, rest_hoon) leg ->
+    //     also unreachable -> scoped key stays 0 -> hit.
+    // Under the whole-active key all of these miss, because the active leg
+    // changes the key regardless of reachability. A leg that is unreachable from
+    // the subject cannot affect its resolution, so the collapse is sound.
+    // The production boundary caches use the scoped key. The test-only helpers
+    // `mint_boundary_lookup_exact` and `nest_mug_lookup` use the whole-active
+    // key, so they still partition; mull/redo/rest collapse.
     let scoped = Ut::scoped_fan_enabled();
     let first_inner_context_key = ut
         .with_rest_leg(rest_inner, rest_hoon, |ut| {
             let inner_context_key = ut.hold_repo_fan_context_key();
             assert_ne!(inner_context_key, FanContextId(0));
-            // mint_boundary_lookup_exact uses the noun whole-active key -> MISS.
+            // mint_boundary_lookup_exact uses the noun whole-active key -> miss.
             assert!(ut
                 .mint_boundary_lookup_exact(sut, gol, mint_gen)
                 .expect("inner mint boundary lookup")
                 .is_none());
-            // native mull_cache_lookup is scope-keyed; sut is a %core (no holds)
-            // so the active leg is unreachable -> scoped key 0 -> HIT when scoped.
+            // mull_cache_lookup is scope-keyed; sut is a %core (no holds), so the
+            // active leg is unreachable -> scoped key 0 -> hit when scoped.
             assert_eq!(
                 ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
                     .expect("inner mull boundary lookup")
@@ -843,7 +841,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
                     .is_some(),
                 scoped
             );
-            // nest_mug_lookup uses the noun whole-active key -> always MISS here.
+            // nest_mug_lookup uses the noun whole-active key -> always a miss here.
             assert_eq!(
                 ut.nest_mug_lookup(sut, ref_type)
                     .expect("inner nest mug lookup"),
@@ -886,9 +884,9 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     ut.with_rest_leg(rest_inner, rest_hoon, |ut| {
         let inner_context_key = ut.hold_repo_fan_context_key();
         assert_eq!(inner_context_key, first_inner_context_key);
-        // Same active leg. mint_boundary_lookup_exact + nest_mug use the noun
-        // whole-active key -> MISS; the native mull/redo/rest are scope-keyed and
-        // collapse (active leg unreachable from their subjects) -> HIT when scoped.
+        // Same active leg. mint_boundary_lookup_exact and nest_mug_lookup use the
+        // noun whole-active key -> miss; mull/redo/rest are scope-keyed and
+        // collapse (active leg unreachable from their subjects) -> hit when scoped.
         assert!(ut
             .mint_boundary_lookup_exact(sut, gol, mint_gen)
             .expect("repeat inner mint boundary lookup")
@@ -1141,36 +1139,32 @@ fn active_rest_fan_context_partitions_rest_boundary() {
 
     // Whole-active key (scoped_fan_enabled() == false): the entry was stored
     // under an active leg (fan_context_key != 0); outside any fan scope the key
-    // carries 0, so the lookup MISSES — the rest boundary partitions by fan.
+    // carries 0, so the lookup misses and the rest boundary partitions by fan.
     //
-    // Scope-precise key (the default): `rest_sut` = hold(inner,hoon). The store
-    // happened with the (inner,hoon) leg active. Whether the scoped key is 0 or
-    // the leg's subset, the SAME scope governs every lookup whose active set
-    // contains exactly that one reachable leg, and an unreachable extra leg never
-    // changes it. So the entry serves back under any active set that agrees on
-    // rest_sut's reachable legs — the collapse this approach intends. Both
-    // kernels are byte-exact with the scoped key.
+    // Scope-precise key (the default): `rest_sut` = hold(inner,hoon), stored with
+    // the (inner,hoon) leg active. The key depends only on which active legs are
+    // reachable from `rest_sut`, and an unreachable extra leg never changes it,
+    // so the entry serves back under any active set that agrees on rest_sut's
+    // reachable legs.
     let scoped = Ut::scoped_fan_enabled();
     assert_eq!(ut.hold_repo_fan_context_key(), FanContextId(0));
     let outside = ut
         .rest_boundary_lookup(rest_sut, legs_noun)
         .expect("rest boundary lookup outside fan");
     if scoped {
-        // Test-only note: `with_rest_leg` activates via the (inner,hoon)-keyed
-        // leg intern, while reachable_legs uses the hold-keyed intern; for this
-        // synthetic `rest_sut` those assign distinct ids, so the store's
-        // (active ∩ reachable) intersection is empty -> scoped key 0, the same
-        // as the empty-active outside key -> the entry serves back. (In
-        // production both activation and reachable_legs use the hold-keyed
-        // intern, so ids agree; the collapse is keyed correctly, proven by the
-        // byte-exact kernels.)
+        // `with_rest_leg` activates via the (inner,hoon)-keyed leg intern, while
+        // reachable_legs uses the hold-keyed intern. For this synthetic
+        // `rest_sut` those assign distinct ids, so the store's (active ∩
+        // reachable) intersection is empty -> scoped key 0, the same as the
+        // empty-active outside key -> the entry serves back. In production,
+        // `repo_hold` also activates via the hold-keyed intern, so the ids agree.
         let c = outside.expect("scoped: store collapsed to 0, outside lookup hits");
         assert!(noun_eq(c, cached, &ut.slab.noun_space()).expect("scoped outside noun_eq"));
     } else {
         assert!(outside.is_none());
     }
 
-    // Re-entering the SAME leg restores the same fan_context_key (and the same
+    // Re-entering the same leg restores the same fan_context_key (and the same
     // scoped key), so the entry stored under it hits in both modes.
     ut.with_rest_leg(inner, hoon, |ut| {
         let context_key = ut.hold_repo_fan_context_key();
@@ -1186,12 +1180,11 @@ fn active_rest_fan_context_partitions_rest_boundary() {
     })
     .expect("same rest leg should reuse context");
 
-    // A DIFFERENT (nested) leg set activates an EXTRA leg (outer) on top of the
-    // original. The whole-active fan_context_key changes, so by the old
-    // (whole-active) key the entry stored under the original leg misses. Under
-    // the scope-precise key the extra `outer` leg is NOT reachable from
-    // `rest_sut`, so it cannot change rest_sut's resolution — the scoped key is
-    // the same as under the original leg alone and the entry correctly HITS.
+    // A nested leg set activates an extra leg (`outer`) on top of the original.
+    // The whole-active fan_context_key changes, so under the whole-active key the
+    // entry stored under the original leg misses. The `outer` leg is not
+    // reachable from `rest_sut`, so it cannot change rest_sut's resolution; the
+    // scoped key matches the original leg's and the entry hits.
     ut.with_rest_leg(outer_inner, outer_hoon, |ut| {
         ut.with_rest_leg(inner, hoon, |ut| {
             let context_key = ut.hold_repo_fan_context_key();
@@ -1408,8 +1401,8 @@ fn gain_atom_skin_hold_guard_is_structural() {
     assert!(!unsafe { hold_a.raw_equals(&hold_b) });
 
     let mut ut = Ut::new(&mut slab);
-    // hold_a/hold_b are structurally equal: interning collapses them to ONE Rc,
-    // so seeding the native ptr-id guard with hold_a guards hold_b too.
+    // hold_a/hold_b are structurally equal, so interning gives them one type ID
+    // and seeding the guard with hold_a guards hold_b too.
     let sut = native_of(&mut ut.cx, sut_noun, &ut.slab.noun_space()).expect("native sut");
     let hold_a_n = native_of(&mut ut.cx, hold_a, &ut.slab.noun_space()).expect("native hold_a");
     let hold_b_n = native_of(&mut ut.cx, hold_b, &ut.slab.noun_space()).expect("native hold_b");
@@ -2066,7 +2059,6 @@ fn strict_play_limb_dollar_is_not_subject_alias() {
     let mut slab = NounSlab::new();
     let sut = ty_noun(&mut slab);
     let mut ut = Ut::new(&mut slab);
-    // play family takes a native subject now (C-final.2).
     let sut = crate::native::ir::intern::native_of(&mut ut.cx, sut, &ut.slab.noun_space())
         .expect("native sut");
 
@@ -2603,8 +2595,7 @@ fn redo_sint_reference_hold_respects_hod_flag() {
     let reference = ty_hold(&mut slab, held, hoon_noun);
     let mut ut = Ut::new(&mut slab);
 
-    // redo_sint is native (the redo SCC flip): lift the noun args to native and
-    // assert on the native enum variant the tag used to denote.
+    // redo_sint takes native types, so lift the noun args with native_of.
     let space = ut.slab.noun_space();
     let payload_n = native_of(&mut ut.cx, payload, &space).expect("native payload");
     let reference_n = native_of(&mut ut.cx, reference, &space).expect("native reference");
@@ -2816,8 +2807,8 @@ fn musk_mack_core_cache_reuses_runtime_copy() {
             .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
             .expect("cached core copy");
 
-        // The copy shares structure: every cell of the core gets its own
-        // cache entry ([[1 2] [3 4]] = root + two leaves).
+        // The shared copy caches every cell it copies: [[1 2] [3 4]] is the root
+        // plus two child cells.
         assert_eq!(ut.musk.mack_core_cache_raw.len(), 3);
         assert!(!first.raw_equals(&core));
         assert!(first.raw_equals(&second));
@@ -2912,8 +2903,8 @@ fn musk_mack_recovers_when_call_core_copy_exhausts_eval_stack() {
 fn musk_rejects_a_self_recursive_partial_arm() {
     let mut slab = NounSlab::new();
     // A partial core whose battery immediately kicks itself. The payload is
-    // blocked, so op 9 follows the seminoun arm path and rediscovers the exact
-    // same (subject, formula) pair. This is the minimal shape behind a mold
+    // blocked, so op 9 follows the seminoun arm path and rediscovers the same
+    // (subject, formula) pair. This is the minimal shape behind a mold
     // with a divergent recursive bunt.
     let formula = T(&mut slab, &[D(9), D(2), D(0), D(1)]);
     let mut ut = Ut::new(&mut slab);
@@ -2932,12 +2923,12 @@ fn musk_rejects_a_self_recursive_partial_arm() {
     );
 }
 
-// Validates the Step-2 chunked prelude mint mechanism on a small `=>` chain:
+// Checks `mint_tisgar_chain_chunked` on a small `=>` chain:
 // `=> |%(a 1) => |%(b a) b` exercises cross-layer name resolution (arm `b`
 // resolves `a` from the prior layer's subject; the body resolves `b`). The
-// chunked driver mints each layer in a fresh Ut (dropping per-layer resolvers),
-// so a byte-identical result proves cross-layer resolution survives without the
-// per-layer lazy resolvers — the correctness crux for bounding the native mint.
+// chunked driver mints each layer in a fresh Ut, dropping the per-layer lazy
+// resolvers, so a byte-identical result shows cross-layer resolution does not
+// depend on them. Chunking is what bounds memory for the native prelude mint.
 #[test]
 fn chunked_tisgar_chain_matches_monolithic_mint() {
     use std::path::Path;
@@ -2978,11 +2969,10 @@ fn chunked_tisgar_chain_matches_monolithic_mint() {
     );
 }
 
-// Mints a multi-arm core that exercises the hard cases: cross-arm references
-// (arm `b` resolves sibling `a`, arm `c` resolves `a` and `b` through the lazy
-// resolver), and a recursive trap (`|-`/`$`) inside `c` that drives `%hold`/
-// fan-leg interning. Must mint deterministically run-to-run (a fresh `Context`
-// per compile gives each an isolated cache universe).
+// Mints a multi-arm core with cross-arm references (arm `b` resolves sibling
+// `a`, arm `c` resolves `a` and `b` through the lazy resolver) and a recursive
+// trap (`|-`/`$`) inside `c` that drives `%hold`/fan-leg interning. The output
+// must be identical run-to-run; each compile gets a fresh `Context` and caches.
 #[test]
 fn core_mint_deterministic() {
     use std::path::Path;
@@ -3019,25 +3009,25 @@ fn core_mint_deterministic() {
     );
 }
 
-// FAST repro of the dumb-kernel `poly:$` failure:
+// Fast repro of the dumb-kernel `poly:$` failure:
 //   "native mint: find failed for wing [Parent(0, None), Axis(12)]" (way=Rite).
 //
-// The wing `[Parent(0,None), Axis(12)]` is synthesised ONLY by `lower_censig`
-// (mod.rs:2548) for the FIRST (non-last) argument of a multi-arg cen-sig
-// (`~(arm core a b ...)`): `wing_axe = peg(6,2) = 12`. `fond` (find.rs) resolves
-// `Axis(12)` first via `peek`, then applies the nameless `Parent(0,None)` via
-// `fond_name`. When `peek(sut, Rite, 12u64)` returns `NTy::Void`, the nameless-parent
-// walk returns `Pony::Void` and `find` errors.
+// Only `lower_censig` (mod.rs) builds the wing `[Parent(0,None), Axis(12)]`, for
+// the first (non-last) argument of a multi-arg cen-sig (`~(arm core a b ...)`):
+// `wing_axe = peg(6,2) = 12`. `fond` (find.rs) resolves `Axis(12)` first via
+// `peek`, then applies the nameless `Parent(0,None)` via `fond_name`. When
+// `peek(sut, Rite, 12u64)` returns `NTy::Void`, the nameless-parent walk returns
+// `Pony::Void` and `find` errors.
 //
-// This source mints in <1ms (no prelude / no 153s dumb compile) and currently
-// FAILS with exactly that error. A correct peek/fond fix should make it mint OK;
-// flip the assertion to `is_ok()` to use it as a fix gate.
+// This source mints in under 1ms (no prelude, unlike the 153s dumb-kernel
+// compile) and fails with that error. A peek/fond fix should make it mint; the
+// assertion then flips to `is_ok()`.
 #[test]
 fn repro_censig_two_arg_wing_find_failure() {
     use std::path::Path;
 
     // Door (`|_ s=@`) with a 2-arg arm `f`, called via `~(f d 1 2)`. The arm body
-    // uses only its own sample, so NO stdlib is needed.
+    // uses only its own sample, so no stdlib is needed.
     let src = "=/  d  |_  s=@\n++  f  |=  [x=@ y=@]  [x y s]\n--\n~(f d 1 2)";
 
     let gen = crate::pipeline::parse_native_hoon_source_without_docs(
@@ -3061,11 +3051,11 @@ fn repro_censig_two_arg_wing_find_failure() {
     );
 }
 
-// Reproduces the shape of stdlib `turn`/`add-all`: a wet `|-` loop whose subject
-// carries a binding referenced via `$(a a, b b)` — stresses cross-arm type reuse.
-// Mints against a BARE %noun subject (no prelude) and must mint deterministically
-// run-to-run. This caught the cross-compile intern-table aliasing that the
-// per-compile `Context` (fresh per `Ut`) fixed.
+// Reproduces the shape of stdlib `turn`/`add-all`: a `|-` loop whose subject
+// carries bindings referenced via `$(a a, b b)`, which stresses cross-arm type
+// reuse. Mints against a bare %noun subject (no prelude) and must be identical
+// run-to-run. This catches cross-compile intern-table aliasing, which a fresh
+// `Context` per `Ut` prevents.
 #[test]
 fn wet_gate_function_sample_mint_deterministic() {
     use std::path::Path;

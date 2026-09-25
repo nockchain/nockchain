@@ -17,7 +17,7 @@ pub fn cons<A: NounAllocator>(allocator: &mut A, head: Noun, tail: Noun) -> Resu
 
 pub fn comb<A: NounAllocator>(allocator: &mut A, mal: Noun, buz: Noun) -> Result<Noun> {
     let space = allocator.noun_space();
-    // Match hoon-138 ++comb check order exactly.
+    // Match hoon-138 ++comb check order.
     //
     // Check 1: mal = [0 a] where a != 0
     if let Some(a) = axis_formula_value(mal, &space)? {

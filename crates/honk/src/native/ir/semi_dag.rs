@@ -1,9 +1,9 @@
 //! Native, compile-local representation of Honk's seminoun lattice.
 //!
 //! The Hoon definition represents every abstract value as a noun pair whose
-//! mask is itself a recursive noun tree. Musk used to rebuild and immediately
-//! decode those trees at every Nock step. This arena preserves the same four
-//! semantic states behind compact IDs and hash-conses them for exact memo keys.
+//! mask is itself a recursive noun tree. This arena holds the same four semantic
+//! states behind compact IDs and hash-conses them for exact memo keys, so musk
+//! need not rebuild and decode mask trees at each Nock step.
 
 use num_bigint::BigUint;
 

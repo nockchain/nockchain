@@ -197,11 +197,10 @@ pub fn cell_tail(noun: Noun, space: &NounSpace) -> Result<Noun> {
     Ok(cell.tail().noun())
 }
 
-/// Structural deep equality of two `space`-resident nouns. Shared (lives here,
-/// not in `ut`, so the IR `Leaf` impls can use it) iterative form: a fast
-/// pointer-identity check, a mug pre-filter (cheap quick-reject that dominates
-/// in memo scans), then an iterative deep compare (no recursion — deep hoon-138
-/// type nouns would otherwise blow the Rust stack).
+/// Structural deep equality of two `space`-resident nouns: a pointer-identity
+/// check, a mug pre-filter (the common quick reject in memo scans), then an
+/// iterative deep compare, since deep hoon-138 type nouns would overflow the Rust
+/// stack under recursion.
 pub fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
     // Pointer-identical nouns are the common case in memo scans; answer before
     // allocating the traversal stack below. Likewise reject on the root mugs
@@ -215,7 +214,6 @@ pub fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
     if a_mug != b_mug {
         return Ok(false);
     }
-    // Avoid recursion: deep type/hoon nouns (hoon-138) can otherwise blow the Rust stack.
     let mut stack: Vec<(Noun, Noun)> = Vec::with_capacity(64);
     let mut seen_cell_pairs: Option<FastHashSet<(NounIdentity, NounIdentity)>> = None;
     let mut cell_pairs_checked = 0usize;
@@ -266,7 +264,7 @@ pub fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
                     continue;
                 }
             }
-            // Postorder: push tail then head so head is compared first.
+            // Push tail then head so the head is compared first.
             let (left_head, left_tail) = left_cell.head_tail();
             let (right_head, right_tail) = right_cell.head_tail();
             stack.push((left_tail.noun(), right_tail.noun()));
@@ -279,8 +277,7 @@ pub fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
 }
 
 /// Iterative mug of `noun`, caching mugs on allocated nouns (cells and indirect
-/// atoms). Avoids deep recursion and repeatedly re-hashing giant type structures
-/// (hoon-138). Shared here so `noun_eq` (and `ut`) can use it.
+/// atoms) so giant hoon-138 type nouns are neither recursed into nor rehashed.
 pub fn slab_mug(noun: Noun, space: &NounSpace) -> u32 {
     let mut stack = vec![noun];
     while let Some(current) = stack.pop() {

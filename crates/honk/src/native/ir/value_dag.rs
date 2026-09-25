@@ -172,11 +172,6 @@ impl ValueArena {
     }
 
     #[inline]
-    pub fn id_for_noun(&self, noun: Noun) -> Option<ValueId> {
-        self.by_raw.get(&Self::raw(noun)).copied()
-    }
-
-    #[inline]
     pub fn noun(&self, id: ValueId) -> Noun {
         self.entry(id).noun
     }

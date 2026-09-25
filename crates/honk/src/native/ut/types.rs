@@ -136,9 +136,8 @@ where
 
 #[derive(Clone)]
 pub struct BranSemiCacheEntry {
-    // Native re-key (Phase-2 tail): the bran subject + the active hold scope are
-    // interned native types, matched by `NRc::ptr_eq`. The output is a compact
-    // identity in the compile-local native seminoun arena.
+    // The bran subject and the active hold scope are interned native types,
+    // matched by `NRc::ptr_eq`. `semi` is an ID in the compile-local seminoun arena.
     pub sut: NRc<NTy>,
     pub seen_holds: Vec<NRc<NTy>>,
     pub semi: SemiId,
@@ -162,16 +161,6 @@ impl Default for BoundaryMemoSet {
     }
 }
 
-impl BoundaryMemoSet {
-    /// Drop noun-boundary results; future calls recompute them in their context.
-    pub fn clear(&mut self) {
-        self.mint.clear();
-        self.redo.clear();
-        self.rest.clear();
-        self.nest.clear();
-    }
-}
-
 pub struct HoldMemoSet {
     pub hold_type_raw: RawMemoMap<HoldKey<NounIdentity>, Noun>,
     pub hold_type: BucketMemo<HoldKey<NounMug>, HoldTypeCacheEntry>,
@@ -183,14 +172,6 @@ impl Default for HoldMemoSet {
             hold_type_raw: Default::default(),
             hold_type: Default::default(),
         }
-    }
-}
-
-impl HoldMemoSet {
-    /// Drop every memoized hold repo/type result (see `BoundaryMemoSet::clear`).
-    pub fn clear(&mut self) {
-        self.hold_type_raw.clear();
-        self.hold_type.clear();
     }
 }
 
@@ -489,11 +470,10 @@ impl NestTypeInterner {
 }
 
 /// Ordered recursion guard whose ID domain cannot change after construction.
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use honk::native::identity::NestNounId;
-/// use honk::native::ir::ty::TypeId;
 /// use honk::native::ut::types::NestSeenSet;
-/// let mut native = NestSeenSet::<TypeId>::new();
+/// let mut native: NestSeenSet = NestSeenSet::new();
 /// native.insert_id(NestNounId::default());
 /// ```
 #[derive(Clone)]
@@ -818,10 +798,9 @@ pub enum Vair {
     Zinc,
 }
 
-// ATOMIC FLIP (C6+C9): the wing-navigation Port/Palo/Opal/Pony carriers now hold
-// NATIVE type values (`NRc<NTy>`). The FORMULA slot (Synthetic.formula) and the
-// arm-spec foot (`Opal::Arm.arms[].1`) stay `Noun` — those are nock formulas /
-// hoon arm-specs, not types.
+// The wing-navigation carriers Port/Palo/Opal/Pony hold native types.
+// `Synthetic.formula` is a formula-arena ID, and the arm foot
+// (`Opal::Arm.arms[].1`) is a noun holding the poly and the hoon arm-spec.
 #[derive(Clone, Debug)]
 pub enum Port {
     Palo(Palo),
@@ -896,10 +875,9 @@ pub struct LazyResolverArmEntry {
 
 #[derive(Clone, Debug)]
 pub struct LazyResolverContext {
-    // ATOMIC FLIP perf: the lazy core is the NATIVE deepening core (the interned
-    // Rc threaded from mint_core). It is heap-resident (not slab) so it needs no
-    // relocation, and it shares pointer identity with the in-progress entries
-    // pushed during the same core's arm builds.
+    // The native deepening core built in `mint_core`. It lives in the type
+    // arena, not the slab, so it needs no relocation, and it shares pointer
+    // identity with the in-progress entries pushed while its arms build.
     pub core_type: NRc<NTy>,
     pub poly: Poly,
     pub arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
@@ -910,10 +888,8 @@ pub struct LazyResolverContext {
 #[derive(Clone, Debug)]
 pub struct ArmInProgressEntry {
     pub key: Arc<str>,
-    // ATOMIC FLIP perf: the in-progress core is the NATIVE deepening core (the
-    // interned Rc threaded down from mint_core), not a re-lifted noun. Cross-arm
-    // cycle detection compares interned Rc identity (see
-    // arm_goal_for_hoon_in_progress) instead of noun structural equality.
+    // The native deepening core from `mint_core`. Cross-arm cycle detection
+    // (`arm_goal_for_hoon_in_progress`) compares it by interned pointer.
     pub core: NRc<NTy>,
     pub hoon: Noun,
     pub goal: NRc<NTy>,

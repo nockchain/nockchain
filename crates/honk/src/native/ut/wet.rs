@@ -2,16 +2,14 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct RedoState {
-    /// Subject-side face TOOLS accumulated descending through `%face`s on the
-    /// SUBJECT side (`NTy::Face.tool`).
+    /// Face tools collected while descending through subject `%face`s.
     hos: Vec<NLeaf>,
-    /// Reference-side face TOOL stacks (one stack per surviving fork branch),
-    /// accumulated by `redo_sint` descending through `%face`s on the REFERENCE.
+    /// Reference face-tool stacks, one per surviving fork branch, pushed by
+    /// `redo_sint` as it descends through reference `%face`s.
     wec: Vec<Vec<NLeaf>>,
-    /// The %hold recursion-cut set: visited `(subject, reference)` pairs, by
-    /// interned `Rc` identity (every redo-produced type is interned via
-    /// `cons_*`/`repo`/`peek`/`native_of`, so structural equality == pointer
-    /// equality).
+    /// %hold recursion-cut set of visited `(subject, reference)` pairs, compared
+    /// by pointer. Every redo-produced type is interned (`cons_*`, `repo`,
+    /// `peek`, `native_of`), so pointer equality is structural equality.
     gil: Vec<(NRc<NTy>, NRc<NTy>)>,
 }
 
@@ -43,8 +41,7 @@ impl<'a> Ut<'a> {
         hod: bool,
     ) -> Result<bool> {
         // Strip %face/%hint (and %hold under `hod`) wrappers to reach the base
-        // tag, then accept only matching base kinds (cell/atom/core). Mirrors the
-        // old noun `unwrapped_tag`, reading the native enum directly.
+        // tag, then accept only matching base kinds (cell/atom/core).
         #[derive(PartialEq, Clone, Copy)]
         enum Base {
             Cell,
@@ -90,10 +87,10 @@ impl<'a> Ut<'a> {
         }
         let space = self.slab.noun_space();
         for (entry_sut, entry_dox, entry_hoon) in self.fire_wet_rib.iter() {
-            // sut/dox are interned natives: ptr-identity IS structural identity.
+            // sut and dox are interned, so pointer equality is structural equality.
             if NRc::ptr_eq(entry_sut, sut)
                 && NRc::ptr_eq(entry_dox, dox)
-                && (unsafe { entry_hoon.as_raw() } == unsafe { hoon_noun.as_raw() }
+                && (unsafe { entry_hoon.raw_equals(&hoon_noun) }
                     || noun_eq(*entry_hoon, hoon_noun, &space)?)
             {
                 return Ok(true);
@@ -128,7 +125,6 @@ impl<'a> Ut<'a> {
                     "native mint: fire-wet arm ast missing: {err}"
                 ))
             })?;
-            // mull is native (C7); wet_core/dox are already native.
             let noun_goal_n = cons_noun(&mut self.cx);
             let _ = self.mull(wet_core, noun_goal_n, dox, hoon_ast.as_ref())?;
             Ok(())
@@ -157,13 +153,13 @@ impl<'a> Ut<'a> {
         subject_faces: &[NLeaf],
         reference_faces: &[NLeaf],
     ) -> Result<Vec<NLeaf>> {
-        // hoon-138 ++dear: `(weld hos (slag lip har))` in innermost-first stack
-        // order, applied leaf-outward by ++done — REFERENCE faces nest OUTSIDE
-        // the subject's own. Our stacks are outermost-first (push on descent)
-        // and redo_done wraps with .rev() (last element innermost), so the
-        // equivalent forward merge is reference ++ subject, dropping the
-        // overlap where the subject's outermost faces coincide with the
-        // reference's innermost (subject prefix == reference suffix here).
+        // hoon-138 `++dear` builds `(weld hos (slag lip har))` in innermost-first
+        // order and `++done` wraps from the leaf outward, so reference faces nest
+        // outside the subject's. These stacks are outermost-first (pushed on
+        // descent) and `redo_done` wraps in reverse, so the equivalent merge is
+        // reference ++ subject, minus the longest overlap where the subject's
+        // outermost faces equal the reference's innermost (subject prefix ==
+        // reference suffix).
         let mut overlap = 0usize;
         let max_overlap = cmp::min(subject_faces.len(), reference_faces.len());
         for candidate in 0..=max_overlap {
@@ -227,8 +223,8 @@ impl<'a> Ut<'a> {
     }
 
     fn redo_subject_hold_in_fan(&mut self, hold: &NRc<NTy>) -> Result<bool> {
-        // The leg-id intern is still noun-keyed (deferred re-key): lower the
-        // hold + its inner subject / gene gate ONLY to compute the leg-id key.
+        // The leg-id intern is noun-keyed, so lower the hold, its subject, and its
+        // gene only to compute the key.
         let NTy::Hold { subject, gene } = &**hold else {
             return Ok(false);
         };
@@ -246,10 +242,8 @@ impl<'a> Ut<'a> {
         if let Some(cached) = self.redo_boundary_lookup(payload, reference)? {
             return Ok(cached);
         }
-        // BOUNDARY: decode payload + reference to native ONCE here; the per-level
-        // redo recursion is entirely native (no Type<->Noun round-trips inside);
-        // lower the result ONCE on the way out. The redo_boundary cache stays
-        // noun-keyed at this entry.
+        // Decode payload and reference once, run the native redo, and lower the
+        // result once. The `redo_boundary` cache is noun-keyed.
         let payload_n = self.native_of_cached(payload)?;
         let reference_n = self.native_of_cached(reference)?;
         let result_n = self.redo_dext(payload_n, reference_n, RedoState::default())?;
@@ -330,16 +324,11 @@ impl<'a> Ut<'a> {
                         self.redo_sint(sut.clone(), reduced_ref, true, next_state)?;
                     return self.redo_done(sut, &fan_state);
                 }
-                // RT-05 recursion-cut: hoon-138 ++redo:dext keys its %hold loop set
-                // on the ORIGINAL reference ([sut ref]); honk only tracked the
-                // post-`sint` `reduced_ref`, which changes every level, so the
-                // recursive back-edge never matched and the hold unrolled forever.
-                // Track BOTH so a repeated (sut, ref) closes the cycle: the cut
-                // returns the unchanged %hold, `play` reproduces the identical hold
-                // type, and the fork mug-set collapses it (matching ++rest).
-                // Identity is by interned `Rc` pointer: every redo-produced type is
-                // interned via cons_*/repo/peek/native_of, so ptr_eq == structural
-                // equality.
+                // Recursion cut (the `gil` check in hoon-138 `++redo:dext`). The
+                // post-`sint` reference can change at every level, so `gil` records
+                // both it and the original reference. A repeated (sut, ref) pair
+                // returns the unchanged %hold, `play` reproduces the same hold type,
+                // and the fork set collapses it (matching `++rest`).
                 if self.redo_gil_contains(&next_state.gil, &sut, &reduced_ref)?
                     || self.redo_gil_contains(&next_state.gil, &sut, &reference)?
                 {
