@@ -9,17 +9,14 @@ are missed only by unit tests (U), 152 lines and 52 branches are missed only
 by the parity corpus (P), and 95 lines and 43 branches are missed by both (UP).
 `L` rows are lines never run; `B` rows are branch outcomes never taken (`T` or
 `F`, with `c2` for the second condition of the same `if`). The parity corpus
-holds only programs both compilers accept, so every rejection path is at least
-P.
+also compiles the rejection probes in `../../reject/`, so a rejection path is
+covered there once a reject probe reaches it.
 
 ## Error edges
 
 | Gaps | Tag | Reason |
 |---|---|---|
 | L5636 (`lazy_resolver_compile_arm`), L7621 (`mint_core`), L7934, L7981 (lazy-resolver arm-map walkers), L9314 (`burp_type`) | UP | Defensive: the callee fails only on a malformed noun (an axis of 0, a map or type noun that does not decode, a duplicate arm axis). |
-| L5142 (`type_test_formula_on_axis_inner`) | UP | Rejection path: a cell type whose head fails to fish (`fish-core`, `fish-loop`), which hoon-138's `++fish` rejects too. Uncovered: no test exercises it yet. |
-| L8037, L8043, L8053, L8056 (`build_tomes_battery_from_maps`), L8193 (`build_arms_battery_from_map`) | UP | Rejection path: an arm that fails to compile in a non-root chapter, or in the left subtree of an arm-map node with two children. Uncovered: no test exercises it yet. |
-| L8641, L8719 (`nest_inner_impl`), L8807 (`nest_sint`), L8904, L8915, L8930 (`nest_core`), L9015 (`nest_meet`), L9063, L9076 (`nest_deep_tomes`), L9138, L9151 (`nest_deep_arms`) | UP | Err edge of a recursive `nest`. Apart from malformed input, `nest` fails only when a `%hold` expansion or a deep-compared arm fails to play. Uncovered: no test exercises it yet. |
 
 ## Skins (`?#`, `ar:fish`)
 
@@ -36,7 +33,7 @@ P.
 |---|---|---|
 | L5454, B5453 T (`semi_blocks_root_blocked` cache hit) | P | Performance cache only: the only caller, `semi_noun_blocked_encoded`, memoizes its own result. |
 | L5490, B5489 T | P | Unreachable in practice: resolver-ID wraparound needs 2^64 IDs. |
-| L5591, B5584 F (`lazy_resolver_resolve_axis`) | P | A resolver ID with no registered context (only `mull_lazy_resolver_id` makes one, for cores built by `mull`). Uncovered: no parity probe exercises it yet. |
+| L5591, B5584 F (`lazy_resolver_resolve_axis`) | P | Defensive: every resolver ID honk makes is registered when its lazy root is built (`mint_core`, and `mull_mile` since #NEW-c2), so only a decoded type noun could carry an unknown one. |
 | L5602, B5601 F; L5605, B5604 T; L5619-5622, B5618 F, B5619 T (`lazy_resolver_compile_arm` guards) | P | Unreachable in production: the only caller, `lazy_resolver_resolve_axis`, has just checked that the ID is registered, the axis is not cached, and the axis is an arm. |
 | L5608, B5607 T; L5639-5642, B5630 T, B5639 T; L7214-7219, B7211 T, B7212 F, B7216 T/F (`arm_goal_for_hoon_in_progress`) | P | A `^~` fold inside an arm that needs that same arm's formula. hoon-138's `++laze` recurses without bound on such code, so hoonc gives no verdict to compare. |
 | L5616, B5600 F | UP | Dead: the block before the `else` always returns early or yields `Some`. |
@@ -123,7 +120,6 @@ P.
 |---|---|---|
 | L8518-8520 | P | Defensive: fork options requested for a non-fork. |
 | L8537, B8531 F | UP | Dead: an `unreachable!()` after re-matching the same enum. |
-| L8742, B8741 T (`nest_inner_impl`) | P | Degenerate `sut` (hoon-138's `seg` check in `++nest`): a `%hold` whose expansion reaches itself again without passing through a cell answers no. Uncovered: no parity probe exercises it yet. |
 | L8866, L8875 (`nest_core` with a non-core) | P | Defensive: the only caller dispatches on core/core pairs. |
 | L9157-9162, L9164-9169 (`nest_deep_arms`) | P | Defensive: an arm gene that does not decode. |
 | L9198, B9197 c2 T (`wrap-core`) | P | Rejected by both compilers: re-wrapping a non-gold core with `^\|` or `^&` (hoonc fails in `++wrap`). |

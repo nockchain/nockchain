@@ -193,7 +193,17 @@ test_suite(
 # Run it locally with:
 #   bazel test //crates/honk/test-assets/type-probes:reject_rest_loop_alias_test
 REJECTION_PROBES = [
+    "c2_battery_left_chapter",
+    "c2_battery_right_chapter",
+    "c2_fish_core_head",
     "c2_mull_lazy_arm_fold",
+    "c2_nest_cell_fork_hold",
+    "c2_nest_core_context_hold",
+    "c2_nest_core_payload_hold",
+    "c2_nest_core_ref_payload_hold",
+    "c2_nest_deep_arm_hold",
+    "c2_nest_fork_option_hold",
+    "c2_nest_hold_loop",
     "c3_lose_cell_core_base_tail",
     "c4_fond_void_tail",
     "c6_header_comment_del",

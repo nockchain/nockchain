@@ -1823,3 +1823,79 @@ fn nest_probes_mint_with_and_without_spots() {
         mint_probe_source(src, true);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rejections that the reject probes check against hoonc
+// ---------------------------------------------------------------------------
+
+/// Mints a reject probe (a `|%` file) against a `%noun` subject and returns
+/// the error.
+fn reject_probe_err(src: &str, dbug: bool) -> String {
+    let gen = crate::pipeline::parse_native_hoon_source_without_docs(
+        FsPath::new("c2-reject.hoon"),
+        src,
+        Vec::new(),
+        dbug,
+    )
+    .unwrap_or_else(|err| panic!("parse probe: {err:?}"));
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+    let sut = ty_noun(&mut *ut.slab);
+    let gol = ty_noun(&mut *ut.slab);
+    ut.set_vet(true);
+    match ut.mint_noun(sut, gol, &gen) {
+        Ok(_) => panic!("probe should fail:\n{src}"),
+        Err(err) => format!("{err:?}"),
+    }
+}
+
+#[test]
+fn fish_rejects_a_core_in_a_cell_head() {
+    let err = reject_probe_err(
+        include_str!("../../../../test-assets/type-probes/reject/c2_fish_core_head.hoon"),
+        true,
+    );
+    assert!(err.contains("fish-core"), "{err}");
+}
+
+#[test]
+fn arm_errors_leave_every_battery_subtree() {
+    // The chapter and arm treaps put the failing arm under one-child and
+    // two-child nodes on both sides (see the probe comments).
+    for src in [
+        include_str!("../../../../test-assets/type-probes/reject/c2_battery_left_chapter.hoon"),
+        include_str!("../../../../test-assets/type-probes/reject/c2_battery_right_chapter.hoon"),
+    ] {
+        let err = reject_probe_err(src, true);
+        assert!(err.contains("zzz"), "{err}");
+    }
+}
+
+#[test]
+fn nest_propagates_hold_and_arm_play_failures() {
+    // Each mold holds a %hold or an arm that fails to play; nest reaches it
+    // through a cell head and a reference fork, a fork option, a core's
+    // context and payload on either side, gold variance, and the deep arm
+    // comparison.
+    for src in [
+        include_str!("../../../../test-assets/type-probes/reject/c2_nest_cell_fork_hold.hoon"),
+        include_str!("../../../../test-assets/type-probes/reject/c2_nest_fork_option_hold.hoon"),
+        include_str!("../../../../test-assets/type-probes/reject/c2_nest_core_payload_hold.hoon"),
+        include_str!(
+            "../../../../test-assets/type-probes/reject/c2_nest_core_ref_payload_hold.hoon"
+        ),
+        include_str!("../../../../test-assets/type-probes/reject/c2_nest_core_context_hold.hoon"),
+        include_str!("../../../../test-assets/type-probes/reject/c2_nest_deep_arm_hold.hoon"),
+    ] {
+        for dbug in [false, true] {
+            let err = reject_probe_err(src, dbug);
+            assert!(err.contains("zzz"), "{err}");
+        }
+    }
+    // A hold that expands to itself answers no, so the cast fails.
+    let err = reject_probe_err(
+        include_str!("../../../../test-assets/type-probes/reject/c2_nest_hold_loop.hoon"),
+        true,
+    );
+    assert!(err.contains("mint-nice"), "{err}");
+}
