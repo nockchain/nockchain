@@ -2735,7 +2735,7 @@ fn crop_hold_seen_is_scoped_to_branch() {
 }
 
 #[test]
-fn mull_wthx_does_not_call_skin_match_static() {
+fn mull_wthx_does_not_call_fish() {
     let mut slab = NounSlab::new();
     let atom = ty_atom(&mut slab, "$", None);
     let sut_tail = ty_noun(&mut slab);
@@ -2747,9 +2747,9 @@ fn mull_wthx_does_not_call_skin_match_static() {
         vec![Limb::Axis((2u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
-    ut.skin_match_static_calls = 0;
+    ut.skin_fish_calls = 0;
     ut.mull_noun(sut, gol, dox, &gen).expect("mull");
-    assert_eq!(ut.skin_match_static_calls, 0);
+    assert_eq!(ut.skin_fish_calls, 0);
 }
 
 #[test]

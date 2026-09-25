@@ -399,7 +399,7 @@ pub struct Ut<'a> {
     pub arm_key_term_cache: HashMap<NounIdentity, Arc<str>>,
     pub arm_key_term_cache_order: VecDeque<NounIdentity>,
     #[cfg(test)]
-    pub skin_match_static_calls: usize,
+    pub skin_fish_calls: usize,
     #[cfg(test)]
     pub stack_guard_calls: usize,
 }
@@ -2152,7 +2152,7 @@ impl<'a> Ut<'a> {
             arm_key_term_cache: HashMap::new(),
             arm_key_term_cache_order: VecDeque::new(),
             #[cfg(test)]
-            skin_match_static_calls: 0,
+            skin_fish_calls: 0,
             #[cfg(test)]
             stack_guard_calls: 0,
         }
@@ -5053,123 +5053,28 @@ impl<'a> Ut<'a> {
         skin: &Skin,
         wing: &WingType,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // The skin matchers take noun types, so the hit type and subject are lowered.
-        let (hit_ty, axis) = self.fend(sut.clone(), Way::Read, wing)?;
-        let hit_ty = live_to_noun(&mut self.cx, &hit_ty, self.slab);
-        let static_match = self.skin_match_static(hit_ty, skin)?;
-        let formula = if let Some(matches) = static_match {
-            self.formula_quote(D(if matches { 0 } else { 1 }))
-        } else {
-            let sut_noun = live_to_noun(&mut self.cx, &sut, self.slab);
-            self.skin_test_formula(sut_noun, axis, skin)?
-        };
+        // hoon-138: `=+  fid=(fend %read [[%& 1] q.gen])` then
+        // `(~(fish ar p.fid p.gen) q.fid)`. The `[%& 1]` limb turns an arm into
+        // its core as a leg.
+        let (ref_ty, axis) = self.fend(sut.clone(), Way::Read, &wthx_wing(wing))?;
+        let formula = self.skin_test_formula(ref_ty, sut.clone(), axis, skin)?;
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let ty = self.nice(sut, gol, bool_ty)?;
         Ok((ty, formula))
     }
 
-    fn base_match_static(&mut self, ty: Noun, base: &BaseType) -> Result<Option<bool>> {
-        match base {
-            BaseType::NounExpr => Ok(Some(true)),
-            BaseType::Void => Ok(Some(false)),
-            BaseType::Cell => {
-                let head = Skin::Base(BaseType::NounExpr);
-                let tail = Skin::Base(BaseType::NounExpr);
-                self.cell_skin_match_static(ty, &head, &tail)
-            }
-            BaseType::Flag => {
-                let bool_ty = ty_bool(self.slab);
-                if self.nest_noun(bool_ty, ty)? {
-                    return Ok(Some(true));
-                }
-                let head = ty_noun(self.slab);
-                let tail = ty_noun(self.slab);
-                let cell_ty = ty_cell(self.slab, head, tail);
-                if self.nest_noun(cell_ty, ty)? {
-                    return Ok(Some(false));
-                }
-                Ok(None)
-            }
-            BaseType::Atom(_) => {
-                let atom_ty = ty_atom(self.slab, "$", None);
-                if self.nest_noun(atom_ty, ty)? {
-                    return Ok(Some(true));
-                }
-                let head = ty_noun(self.slab);
-                let tail = ty_noun(self.slab);
-                let cell_ty = ty_cell(self.slab, head, tail);
-                if self.nest_noun(cell_ty, ty)? {
-                    return Ok(Some(false));
-                }
-                Ok(None)
-            }
-            BaseType::Null => {
-                let exact = ty_atom(self.slab, "$", Some(D(0)));
-                if self.nest_noun(exact, ty)? {
-                    Ok(Some(true))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+    /// `(~(nest ut [%atom %$ value]) | ref)`, as `++fish:ar` asks it.
+    fn fish_nests_atom(&mut self, ref_: NRc<NTy>, value: Option<Noun>) -> Result<bool> {
+        let atom = ty_atom(self.slab, "$", value);
+        let atom = native_of(&mut self.cx, atom, &self.slab.noun_space())?;
+        self.nest(atom, ref_)
     }
 
-    fn cell_skin_match_static(
-        &mut self,
-        ty: Noun,
-        head: &Skin,
-        tail: &Skin,
-    ) -> Result<Option<bool>> {
-        let atom_ty = ty_atom(self.slab, "$", None);
-        if self.nest_noun(atom_ty, ty)? {
-            return Ok(Some(false));
-        }
-
-        let cell_head = ty_noun(self.slab);
-        let cell_tail = ty_noun(self.slab);
-        let cell_ty = ty_cell(self.slab, cell_head, cell_tail);
-        let known_cell = self.nest_noun(cell_ty, ty)?;
-
-        let head_ty = self.peek_noun(ty, Way::Free, 2u64)?;
-        let tail_ty = self.peek_noun(ty, Way::Free, 3u64)?;
-        let head_match = self.skin_match_static(head_ty, head)?;
-        let tail_match = self.skin_match_static(tail_ty, tail)?;
-
-        if known_cell {
-            Ok(match (head_match, tail_match) {
-                (Some(h), Some(t)) => Some(h && t),
-                (Some(false), _) | (_, Some(false)) => Some(false),
-                _ => None,
-            })
-        } else if matches!(head_match, Some(false)) || matches!(tail_match, Some(false)) {
-            Ok(Some(false))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn skin_match_static(&mut self, ty: Noun, skin: &Skin) -> Result<Option<bool>> {
-        #[cfg(test)]
-        {
-            self.skin_match_static_calls = self.skin_match_static_calls.saturating_add(1);
-        }
-        match skin {
-            Skin::Dbug(_, inner) => self.skin_match_static(ty, inner),
-            Skin::Help(_, inner) => self.skin_match_static(ty, inner),
-            Skin::Name(_, inner) => self.skin_match_static(ty, inner),
-            Skin::Base(base) => self.base_match_static(ty, base),
-            Skin::Leaf(_aura, atom) => {
-                let value = parsed_atom_to_noun(self.slab, atom);
-                let exact = ty_atom(self.slab, "$", Some(value));
-                if self.nest_noun(exact, ty)? {
-                    Ok(Some(true))
-                } else {
-                    Ok(None)
-                }
-            }
-            Skin::Cell(head, tail) => self.cell_skin_match_static(ty, head.as_ref(), tail.as_ref()),
-            _ => Ok(None),
-        }
+    /// `(~(nest ut [%cell %noun %noun]) | ref)`, as `++fish:ar` asks it.
+    fn fish_nests_cell(&mut self, ref_: NRc<NTy>) -> Result<bool> {
+        let noun = cons_noun(&mut self.cx);
+        let cell = cons_cell(&mut self.cx, noun.clone(), noun);
+        self.nest(cell, ref_)
     }
 
     fn mint_wtts(
@@ -5183,33 +5088,6 @@ impl<'a> Ut<'a> {
         //   [%wtts p=spec q=wing] => [%fits ~(example ax p) q]
         let example = self.spec_example_cached(spec);
         self.mint_fits(sut, gol, example.as_ref(), wing)
-    }
-
-    fn base_test_formula(&mut self, base: &BaseType, slot: FormulaId) -> Result<FormulaId> {
-        match base {
-            BaseType::NounExpr => Ok(self.formula_quote(D(0))),
-            BaseType::Void => Ok(self.formula_quote(D(1))),
-            BaseType::Cell => Ok(self.formula_op(NockOpcode::CELL, &[slot])),
-            BaseType::Atom(_) => {
-                let test = self.formula_op(NockOpcode::CELL, &[slot]);
-                let false_formula = self.formula_quote(D(1));
-                let true_formula = self.formula_quote(D(0));
-                Ok(self.formula_cond(test, false_formula, true_formula))
-            }
-            BaseType::Null => {
-                let zero = self.formula_quote(D(0));
-                Ok(self.formula_op(NockOpcode::EQUAL, &[zero, slot]))
-            }
-            BaseType::Flag => {
-                let zero = self.formula_quote(D(0));
-                let one = self.formula_quote(D(1));
-                let eq_zero = self.formula_op(NockOpcode::EQUAL, &[slot, zero]);
-                let eq_one = self.formula_op(NockOpcode::EQUAL, &[slot, one]);
-                let atom_test = self.base_test_formula(&BaseType::Atom("$".to_string()), slot)?;
-                let flag_value_test = self.formula_flor(eq_zero, eq_one);
-                Ok(self.formula_flan(atom_test, flag_value_test))
-            }
-        }
     }
 
     fn type_test_formula_on_axis<A: Into<BigUint>>(
@@ -5295,71 +5173,116 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn skin_test_formula(&mut self, sut: Noun, axis: BigUint, skin: &Skin) -> Result<FormulaId> {
-        let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
-        if let Some(matches) = self.skin_match_static(ref_type, skin)? {
-            return Ok(self.formula_quote(D(if matches { 0 } else { 1 })));
+    /// hoon-138 `++fish:ar`: a formula testing the noun at `axis`, of type
+    /// `ref_`, against `skin`. `%over` and `%spec` skins resolve in `sut`;
+    /// `%over` swaps `sut` for the wing's type and pegs the axis but keeps `ref_`.
+    fn skin_test_formula(
+        &mut self,
+        ref_: NRc<NTy>,
+        sut: NRc<NTy>,
+        axis: BigUint,
+        skin: &Skin,
+    ) -> Result<FormulaId> {
+        #[cfg(test)]
+        {
+            self.skin_fish_calls = self.skin_fish_calls.saturating_add(1);
         }
-
-        let slot = self.formula_slot(axis.clone());
         match skin {
-            Skin::Base(BaseType::Flag) => {
-                let atom_skin = Skin::Base(BaseType::Atom("$".to_string()));
-                let atom_test = self.skin_test_formula(sut, axis.clone(), &atom_skin)?;
-                let zero = self.formula_quote(D(0));
-                let one = self.formula_quote(D(1));
-                let eq_zero = self.formula_op(NockOpcode::EQUAL, &[slot, zero]);
-                let eq_one = self.formula_op(NockOpcode::EQUAL, &[slot, one]);
-                let flag_value_test = self.formula_flor(eq_zero, eq_one);
-                Ok(self.formula_flan(atom_test, flag_value_test))
-            }
-            Skin::Base(base) => self.base_test_formula(base, slot),
-            Skin::Leaf(_aura, atom) => {
-                let value = parsed_atom_to_noun(self.slab, atom);
-                let const_val = self.formula_quote(value);
-                Ok(self.formula_op(NockOpcode::EQUAL, &[const_val, slot]))
-            }
-            Skin::Cell(head, tail) => {
-                let is_cell = self.formula_op(NockOpcode::CELL, &[slot]);
-                let head_axis = peg_axis_big(axis.clone(), 2)?;
-                let tail_axis = peg_axis_big(axis, 3)?;
-                let head_test = self.skin_test_formula(sut, head_axis, head)?;
-                let tail_test = self.skin_test_formula(sut, tail_axis, tail)?;
-                let both = self.formula_arena.and(head_test, tail_test);
-                let false_formula = self.formula_quote(D(1));
-                Ok(self.formula_cond(is_cell, both, false_formula))
-            }
-            Skin::Dbug(_, inner) => self.skin_test_formula(sut, axis, inner),
-            Skin::Help(_, inner) => self.skin_test_formula(sut, axis, inner),
-            Skin::Name(_, inner) => self.skin_test_formula(sut, axis, inner),
-            Skin::Over(wing, inner) => {
-                let rel_axis = self.resolve_wing_axis_noun(sut, wing)?;
-                let axis = peg_axis_big_pair(axis, &rel_axis)?;
-                self.skin_test_formula(sut, axis, inner)
-            }
-            Skin::Spec(spec, inner) => {
-                let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
-                let example = self.spec_example_cached(spec);
-                let hit = self.play_noun(sut, example.as_ref())?;
-                if !self.nest_noun(hit, ref_type)? {
-                    return Err(CompilerError::Noun("native mint: wthx spec".to_string()));
-                }
-                self.skin_test_formula(sut, axis, inner)
-            }
-            Skin::Wash(_) => Ok(self.formula_quote(D(0))),
             Skin::Term(name) => {
-                // Canonical `ar` treats an atomic skin as a `%spec` skin whose
-                // spec is a like-reference to that term and whose inner skin is
-                // `%noun`.  Do not resolve the term directly with `find`: in a
-                // gate such as `|=  a=pair  ?#(pair a)`, direct lookup can see
-                // the sample/core namespace rather than the mold spec path and
-                // incorrectly reject a statically valid test.
+                // An atomic skin is `spec+[[%like [skin]~ ~] [%base %noun]]`.
+                // Do not resolve the term directly with `find`: in a gate such
+                // as `|=  a=pair  ?#(pair a)`, direct lookup can see the
+                // sample/core namespace rather than the mold spec path.
                 let wing = vec![Limb::Term(name.clone())];
                 let spec = Spec::Like(wing, Vec::new());
                 let converted =
                     Skin::Spec(Box::new(spec), Box::new(Skin::Base(BaseType::NounExpr)));
-                self.skin_test_formula(sut, axis, &converted)
+                self.skin_test_formula(ref_, sut, axis, &converted)
             }
+            Skin::Base(base) => match base {
+                BaseType::Cell => {
+                    let noun = || Box::new(Skin::Base(BaseType::NounExpr));
+                    let cell = Skin::Cell(noun(), noun());
+                    self.skin_test_formula(ref_, sut, axis, &cell)
+                }
+                BaseType::Flag => {
+                    let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
+                    if self.nest(bool_ty, ref_.clone())? {
+                        return Ok(self.formula_quote(D(0)));
+                    }
+                    let atom_skin = Skin::Base(BaseType::Atom("$".to_string()));
+                    let atom_test = self.skin_test_formula(ref_, sut, axis.clone(), &atom_skin)?;
+                    let slot = self.formula_slot(axis);
+                    let yes = self.formula_quote(D(0));
+                    let no = self.formula_quote(D(1));
+                    let eq_yes = self.formula_op(NockOpcode::EQUAL, &[slot, yes]);
+                    let eq_no = self.formula_op(NockOpcode::EQUAL, &[slot, no]);
+                    let value_test = self.formula_flor(eq_yes, eq_no);
+                    Ok(self.formula_flan(atom_test, value_test))
+                }
+                BaseType::NounExpr => Ok(self.formula_quote(D(0))),
+                BaseType::Null => {
+                    let leaf = Skin::Leaf("n".to_string(), ParsedAtom::Small(0));
+                    self.skin_test_formula(ref_, sut, axis, &leaf)
+                }
+                BaseType::Void => Ok(self.formula_quote(D(1))),
+                BaseType::Atom(_) => {
+                    if self.fish_nests_atom(ref_.clone(), None)? {
+                        return Ok(self.formula_quote(D(0)));
+                    }
+                    if self.fish_nests_cell(ref_)? {
+                        return Ok(self.formula_quote(D(1)));
+                    }
+                    let slot = self.formula_slot(axis);
+                    let is_cell = self.formula_op(NockOpcode::CELL, &[slot]);
+                    Ok(self.formula_flip(is_cell))
+                }
+            },
+            Skin::Cell(head, tail) => {
+                if self.fish_nests_atom(ref_.clone(), None)? {
+                    return Ok(self.formula_quote(D(1)));
+                }
+                let is_cell = if self.fish_nests_cell(ref_.clone())? {
+                    self.formula_quote(D(0))
+                } else {
+                    let slot = self.formula_slot(axis.clone());
+                    self.formula_op(NockOpcode::CELL, &[slot])
+                };
+                let head_ref = self.peek(ref_.clone(), Way::Free, 2u64)?;
+                let head_axis = peg_axis_big(axis.clone(), 2)?;
+                let head_test = self.skin_test_formula(head_ref, sut.clone(), head_axis, head)?;
+                let tail_ref = self.peek(ref_, Way::Free, 3u64)?;
+                let tail_axis = peg_axis_big(axis, 3)?;
+                let tail_test = self.skin_test_formula(tail_ref, sut, tail_axis, tail)?;
+                let both = self.formula_flan(head_test, tail_test);
+                Ok(self.formula_flan(is_cell, both))
+            }
+            Skin::Leaf(_aura, atom) => {
+                let value = parsed_atom_to_noun(self.slab, atom);
+                if self.fish_nests_atom(ref_, Some(value))? {
+                    return Ok(self.formula_quote(D(0)));
+                }
+                let const_val = self.formula_quote(value);
+                let slot = self.formula_slot(axis);
+                Ok(self.formula_op(NockOpcode::EQUAL, &[const_val, slot]))
+            }
+            Skin::Dbug(_, inner) => self.skin_test_formula(ref_, sut, axis, inner),
+            Skin::Help(_, inner) => self.skin_test_formula(ref_, sut, axis, inner),
+            Skin::Name(_, inner) => self.skin_test_formula(ref_, sut, axis, inner),
+            Skin::Over(wing, inner) => {
+                let (wing_ty, wing_axis) = self.fend(sut, Way::Read, wing)?;
+                let axis = peg_axis_big_pair(axis, &wing_axis)?;
+                self.skin_test_formula(ref_, wing_ty, axis, inner)
+            }
+            Skin::Spec(spec, inner) => {
+                let example = self.spec_example_cached(spec);
+                let hit = self.play(sut.clone(), example.as_ref())?;
+                if !self.nest(hit, ref_.clone())? {
+                    return Err(CompilerError::Noun("native mint: wthx spec".to_string()));
+                }
+                self.skin_test_formula(ref_, sut, axis, inner)
+            }
+            Skin::Wash(_) => Ok(self.formula_quote(D(0))),
         }
     }
 
@@ -9774,7 +9697,14 @@ impl<'a> Ut<'a> {
                 }
                 self.fuse(ref_, hit)
             }
-            Skin::Wash(_) => Ok(ref_),
+            // hoon-138 `ar:gain` `%wash` recurses on the same skin with
+            // `(~(play ut ref) [%wing ~])`, which never terminates (hoonc hangs
+            // and writes no artifact), so reject it instead.
+            Skin::Wash(_) => Err(CompilerError::Noun(
+                "gain-wash: a wash skin (,) cannot be used as a ?: condition \
+                 (hoon-138 ar:gain recurses forever)"
+                    .to_string(),
+            )),
         }
     }
 
@@ -9895,10 +9825,11 @@ impl<'a> Ut<'a> {
                 if matches!(&*head_ty, NTy::Void) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                // hoon-138 `ar:gain` preserves a core only for the generic cell skin tail
-                // (`[%cell head %noun]`). More specific tail skins refine the core as an
-                // ordinary cell and must not leave the arm namespace available.
-                if matches!(tail, Skin::Base(BaseType::NounExpr)) {
+                // hoon-138 `ar:gain` keeps the core only when the tail skin is the
+                // term `%noun` (`=(%noun ^skin.skin)`), not the base `[%base %noun]`.
+                // Any other tail refines the core as an ordinary cell and must not
+                // leave the arm namespace available.
+                if is_noun_term_skin(tail) {
                     Ok(cons_core(&mut self.cx, head_ty, garb, context, rest))
                 } else {
                     let noun = cons_noun(&mut self.cx);
@@ -10191,7 +10122,7 @@ impl<'a> Ut<'a> {
                     return Ok(cons_void(&mut self.cx));
                 }
                 // hoon-138 `ar:lose` uses the same core-vs-cell split as `ar:gain` here.
-                if matches!(tail, Skin::Base(BaseType::NounExpr)) {
+                if is_noun_term_skin(tail) {
                     Ok(cons_core(&mut self.cx, head_ty, garb, context, rest))
                 } else {
                     let noun = cons_noun(&mut self.cx);
@@ -10199,11 +10130,10 @@ impl<'a> Ut<'a> {
                     Ok(cons_cell(&mut self.cx, head_ty, tail_ty))
                 }
             }
-            NTy::Face { tool, inner } => {
-                let tool = tool.clone();
+            // hoon-138 `ar:lose` `%cell` strips the face: `[%face *]  $(ref q.ref)`.
+            NTy::Face { inner, .. } => {
                 let inner = inner.clone();
-                let inner = self.lose_cell_skin(sut, inner, head, tail, seen)?;
-                Ok(cons_face(&mut self.cx, tool, inner))
+                self.lose_cell_skin(sut, inner, head, tail, seen)
             }
             NTy::Fork { .. } => {
                 let options = self.fork_options_native(&ref_)?;
@@ -11046,6 +10976,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Noun-bridged `peek`: lifts `sut`, runs native `peek`, lowers the result.
+    #[cfg(test)]
     fn peek_noun<A: Into<BigUint>>(&mut self, sut: Noun, way: Way, axis: A) -> Result<Noun> {
         let native = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let r = self.peek(native, way, axis)?;
@@ -11403,9 +11334,10 @@ impl<'a> Ut<'a> {
 
             // ---- Aura test: %wthx ----
             Hoon::WutHax(_skin, wing) => {
-                // fend from both perspectives.
-                let (new_type, new_axis) = self.fend(sut.clone(), Way::Read, wing)?;
-                let (old_type, old_axis) = self.fend(dox.clone(), Way::Read, wing)?;
+                // fend `[[%& 1] q.gen]` from both perspectives.
+                let wing = wthx_wing(wing);
+                let (new_type, new_axis) = self.fend(sut.clone(), Way::Read, &wing)?;
+                let (old_type, old_axis) = self.fend(dox.clone(), Way::Read, &wing)?;
 
                 // Assert axes match
                 if new_axis != old_axis {
@@ -12728,6 +12660,21 @@ fn peg_axis_big_pair(mut a: BigUint, b: &BigUint) -> Result<BigUint> {
 #[track_caller]
 fn peg_axis_big(a: BigUint, b: u64) -> Result<BigUint> {
     peg_axis_big_pair(a, &BigUint::from(b))
+}
+
+/// hoon-138 `ar` tests a cell skin's tail with `=(%noun ^skin.skin)`: only the
+/// term skin `noun`, never `[%base %noun]`.
+fn is_noun_term_skin(skin: &Skin) -> bool {
+    matches!(skin, Skin::Term(name) if name == "noun")
+}
+
+/// hoon-138 `%wthx` resolves `[[%& 1] q.gen]`: the leading axis-1 limb turns an
+/// arm into its core as a leg.
+fn wthx_wing(wing: &WingType) -> WingType {
+    let mut out = Vec::with_capacity(wing.len() + 1);
+    out.push(Limb::Axis((1u64).into()));
+    out.extend(wing.iter().cloned());
+    out
 }
 
 fn tend_big(vein: &[Option<BigUint>]) -> Result<BigUint> {

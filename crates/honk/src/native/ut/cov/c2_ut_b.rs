@@ -305,11 +305,34 @@ fn fish_of_void_example_is_constant_false() {
 }
 
 // ---------------------------------------------------------------------------
-// Skins (`?#` static matching and test formulas)
+// Skins (`?#` test formulas, hoon-138 `++fish:ar`)
 // ---------------------------------------------------------------------------
 
+/// `++fish:ar` for `skin` on a noun of type `ref_` at axis 6, in a `%noun` subject.
+fn fish_at6(ut: &mut Ut, ref_: Noun, skin: &Skin) -> Noun {
+    let ref_ = to_native(ut, ref_);
+    let sut = cons_noun(&mut ut.cx);
+    let id = ut
+        .skin_test_formula(ref_, sut, BigUint::from(6u32), skin)
+        .expect("fish");
+    formula(ut, id)
+}
+
+/// `Some(b)` when `fish_at6` folds to the constant `[%1 b]`.
+fn fish_const(ut: &mut Ut, ref_: Noun, skin: &Skin) -> Option<bool> {
+    let fol = fish_at6(ut, ref_, skin);
+    let space = ut.slab.noun_space();
+    if is_const_bool_formula(fol, true, &space) {
+        Some(true)
+    } else if is_const_bool_formula(fol, false, &space) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 #[test]
-fn skin_static_matching_covers_every_base_and_wrapper() {
+fn skin_fish_folds_static_tests_for_every_base_and_wrapper() {
     let mut slab = NounSlab::new();
     let noun = ty_noun(&mut slab);
     let atom = ty_atom(&mut slab, "ud", None);
@@ -318,90 +341,120 @@ fn skin_static_matching_covers_every_base_and_wrapper() {
     let mut ut = Ut::new(&mut slab);
 
     assert_eq!(
-        ut.base_match_static(noun, &BaseType::Void).unwrap(),
+        fish_const(&mut ut, noun, &Skin::Base(BaseType::Void)),
         Some(false)
     );
     assert_eq!(
-        ut.base_match_static(zero, &BaseType::Null).unwrap(),
+        fish_const(&mut ut, zero, &Skin::Base(BaseType::Null)),
         Some(true)
     );
-    assert_eq!(ut.base_match_static(atom, &BaseType::Null).unwrap(), None);
+    assert_eq!(fish_const(&mut ut, atom, &Skin::Base(BaseType::Null)), None);
 
+    // A cell skin on an atom ref is [%1 |].
     let cell_skin = Skin::Cell(
         Box::new(Skin::Base(BaseType::NounExpr)),
         Box::new(Skin::Base(BaseType::NounExpr)),
     );
-    assert_eq!(ut.skin_match_static(atom, &cell_skin).unwrap(), Some(false));
+    assert_eq!(fish_const(&mut ut, atom, &cell_skin), Some(false));
 
     let at = || Box::new(Skin::Base(BaseType::Atom("$".to_string())));
     let help = NounExpr::ParsedAtom(ParsedAtom::Small(0));
     assert_eq!(
-        ut.skin_match_static(atom, &Skin::Dbug(spot(), at()))
-            .unwrap(),
+        fish_const(&mut ut, atom, &Skin::Dbug(spot(), at())),
         Some(true)
     );
     assert_eq!(
-        ut.skin_match_static(atom, &Skin::Help(help, at())).unwrap(),
+        fish_const(&mut ut, atom, &Skin::Help(help, at())),
         Some(true)
     );
     assert_eq!(
-        ut.skin_match_static(atom, &Skin::Name("x".to_string(), at()))
-            .unwrap(),
+        fish_const(&mut ut, atom, &Skin::Name("x".to_string(), at())),
         Some(true)
     );
     let leaf = Skin::Leaf("$".to_string(), ParsedAtom::Small(7));
-    assert_eq!(ut.skin_match_static(seven, &leaf).unwrap(), Some(true));
-    assert_eq!(ut.skin_match_static(atom, &leaf).unwrap(), None);
-    assert_eq!(ut.skin_match_static(atom, &Skin::Wash(0)).unwrap(), None);
+    assert_eq!(fish_const(&mut ut, seven, &leaf), Some(true));
+    assert_eq!(fish_const(&mut ut, atom, &leaf), None);
+    assert_eq!(fish_const(&mut ut, atom, &Skin::Wash(0)), Some(true));
 
     // %flag: statically true on a flag, false on a cell, unknown on an atom.
     let flag = ty_bool(&mut *ut.slab);
     let cell = ty_cell(&mut *ut.slab, noun, noun);
-    assert_eq!(
-        ut.base_match_static(flag, &BaseType::Flag).unwrap(),
-        Some(true)
-    );
-    assert_eq!(
-        ut.base_match_static(cell, &BaseType::Flag).unwrap(),
-        Some(false)
-    );
-    assert_eq!(ut.base_match_static(atom, &BaseType::Flag).unwrap(), None);
+    let flag_skin = Skin::Base(BaseType::Flag);
+    assert_eq!(fish_const(&mut ut, flag, &flag_skin), Some(true));
+    assert_eq!(fish_const(&mut ut, cell, &flag_skin), Some(false));
+    assert_eq!(fish_const(&mut ut, atom, &flag_skin), None);
 
     // Cell skins: a statically false half decides, known cell or not.
     let at_skin = Skin::Base(BaseType::Atom("$".to_string()));
     let pair_of_atoms = Skin::Cell(Box::new(at_skin.clone()), Box::new(at_skin.clone()));
     let cell_head = ty_cell(&mut *ut.slab, cell, noun);
-    assert_eq!(
-        ut.skin_match_static(cell_head, &pair_of_atoms).unwrap(),
-        Some(false)
-    );
+    assert_eq!(fish_const(&mut ut, cell_head, &pair_of_atoms), Some(false));
     let cell_atom = ty_cell(&mut *ut.slab, cell, atom);
-    assert_eq!(
-        ut.skin_match_static(cell_atom, &pair_of_atoms).unwrap(),
-        Some(false)
-    );
+    assert_eq!(fish_const(&mut ut, cell_atom, &pair_of_atoms), Some(false));
     let maybe = ty_fork(&mut *ut.slab, vec![atom, cell_head]);
-    assert_eq!(
-        ut.skin_match_static(maybe, &pair_of_atoms).unwrap(),
-        Some(false)
-    );
+    assert_eq!(fish_const(&mut ut, maybe, &pair_of_atoms), Some(false));
+    let atoms = ty_cell(&mut *ut.slab, atom, atom);
+    assert_eq!(fish_const(&mut ut, atoms, &pair_of_atoms), Some(true));
+}
+
+#[test]
+fn skin_fish_cell_tests_fold_with_flan() {
+    let mut slab = NounSlab::new();
+    let noun = ty_noun(&mut slab);
+    let atom = ty_atom(&mut slab, "ud", None);
+    let mut ut = Ut::new(&mut slab);
+    let at_skin = || Box::new(Skin::Base(BaseType::Atom("$".to_string())));
+    let noun_skin = || Box::new(Skin::Base(BaseType::NounExpr));
+
+    // A ref known to be a cell drops the [%3 %0 axis] test: `[@ @]` on `[@ *]`
+    // is just the tail's atom test.
+    let known = ty_cell(&mut *ut.slab, atom, noun);
+    let fol = fish_at6(&mut ut, known, &Skin::Cell(at_skin(), at_skin()));
+    let s = &mut *ut.slab;
+    let slot13 = T(s, &[D(0), D(13)]);
+    let is_cell13 = T(s, &[D(3), slot13]);
+    let no = T(s, &[D(1), D(1)]);
+    let yes = T(s, &[D(1), D(0)]);
+    let expected = T(s, &[D(6), is_cell13, no, yes]);
+    assert!(noun_is(ut.slab, fol, expected), "known cell");
+
+    // A statically true tail folds away (flan head [%1 &]) = head, with no %6
+    // for the conjunction.
+    let fol = fish_at6(&mut ut, noun, &Skin::Cell(at_skin(), noun_skin()));
+    let s = &mut *ut.slab;
+    let slot6 = T(s, &[D(0), D(6)]);
+    let is_cell6 = T(s, &[D(3), slot6]);
+    let slot12 = T(s, &[D(0), D(12)]);
+    let is_cell12 = T(s, &[D(3), slot12]);
+    let head = T(s, &[D(6), is_cell12, no, yes]);
+    let expected = T(s, &[D(6), is_cell6, head, no]);
+    assert!(noun_is(ut.slab, fol, expected), "static tail");
 }
 
 #[test]
 fn skin_test_formula_builds_dynamic_tests() {
     let mut slab = NounSlab::new();
-    // Subject [a=@ud b=*]: an atom at axis 2 and a noun at axis 3.
-    let a = ty_atom(&mut slab, "ud", None);
-    let a = ty_face(&mut slab, "a", a);
-    let b = ty_noun(&mut slab);
+    // Subject [a=@ud b=[c=@ d=*]].
+    let a_ty = ty_atom(&mut slab, "ud", None);
+    let a = ty_face(&mut slab, "a", a_ty);
+    let c = ty_atom(&mut slab, "$", None);
+    let c = ty_face(&mut slab, "c", c);
+    let d = ty_noun(&mut slab);
+    let d = ty_face(&mut slab, "d", d);
+    let b = ty_cell(&mut slab, c, d);
     let b = ty_face(&mut slab, "b", b);
     let sut = ty_cell(&mut slab, a, b);
+    let seven_ty = ty_atom(&mut slab, "$", Some(D(7)));
     let mut ut = Ut::new(&mut slab);
+    let sut = to_native(&mut ut, sut);
+    let a = to_native(&mut ut, a);
+    let a_ty = to_native(&mut ut, a_ty);
+    let seven_ty = to_native(&mut ut, seven_ty);
 
     // %leaf on a non-exact atom: [%5 [%1 7] [%0 2]].
     let leaf = Skin::Leaf("$".to_string(), ParsedAtom::Small(7));
     let id = ut
-        .skin_test_formula(sut, BigUint::from(2u32), &leaf)
+        .skin_test_formula(a.clone(), sut.clone(), BigUint::from(2u32), &leaf)
         .expect("leaf");
     let fol = formula(&mut ut, id);
     let s = &mut *ut.slab;
@@ -421,36 +474,16 @@ fn skin_test_formula_builds_dynamic_tests() {
     ];
     for skin in wrapped.iter() {
         let id = ut
-            .skin_test_formula(sut, BigUint::from(2u32), skin)
+            .skin_test_formula(a.clone(), sut.clone(), BigUint::from(2u32), skin)
             .expect("wrapper");
         let fol = formula(&mut ut, id);
         assert!(noun_is(ut.slab, fol, expected), "{skin:?} is transparent");
     }
 
-    // A statically false skin at the tested axis folds to [%1 |].
-    let cell_sut = {
-        let noun = ty_noun(&mut *ut.slab);
-        let pair = ty_cell(&mut *ut.slab, noun, noun);
-        ty_cell(&mut *ut.slab, pair, noun)
-    };
-    let at_skin = Skin::Base(BaseType::Atom("$".to_string()));
-    let id = ut
-        .skin_test_formula(cell_sut, BigUint::from(2u32), &at_skin)
-        .expect("static");
-    let fol = formula(&mut ut, id);
-    assert!(is_const_bool_formula(fol, false, &ut.slab.noun_space()));
-
-    // %wash is always [%1 &].
-    let id = ut
-        .skin_test_formula(sut, BigUint::from(3u32), &Skin::Wash(1))
-        .expect("wash");
-    let fol = formula(&mut ut, id);
-    assert!(is_const_bool_formula(fol, true, &ut.slab.noun_space()));
-
-    // %over pegs the wing axis onto the tested axis.
+    // %over resolves its wing in `sut`, pegs the axis, and keeps `ref`.
     let over = Skin::Over(vec![Limb::Axis(3u64.into())], Box::new(leaf.clone()));
     let id = ut
-        .skin_test_formula(sut, BigUint::from(1u32), &over)
+        .skin_test_formula(a_ty.clone(), sut.clone(), BigUint::from(1u32), &over)
         .expect("over");
     let fol = formula(&mut ut, id);
     let s = &mut *ut.slab;
@@ -458,6 +491,32 @@ fn skin_test_formula_builds_dynamic_tests() {
     let slot3 = T(s, &[D(0), D(3)]);
     let expected3 = T(s, &[D(5), seven, slot3]);
     assert!(noun_is(ut.slab, fol, expected3), "%over retargets the test");
+    let id = ut
+        .skin_test_formula(seven_ty, sut.clone(), BigUint::from(1u32), &over)
+        .expect("over exact");
+    let fol = formula(&mut ut, id);
+    assert!(
+        is_const_bool_formula(fol, true, &ut.slab.noun_space()),
+        "%over tests the kept ref, not the type at the pegged axis"
+    );
+
+    // Nested %over skins resolve the inner wing in the outer wing's type.
+    let nested = Skin::Over(
+        vec![Limb::Term("b".to_string())],
+        Box::new(Skin::Over(
+            vec![Limb::Term("c".to_string())],
+            Box::new(leaf.clone()),
+        )),
+    );
+    let id = ut
+        .skin_test_formula(a_ty.clone(), sut.clone(), BigUint::from(1u32), &nested)
+        .expect("nested over");
+    let fol = formula(&mut ut, id);
+    let s = &mut *ut.slab;
+    let seven = T(s, &[D(1), D(7)]);
+    let slot6 = T(s, &[D(0), D(6)]);
+    let expected6 = T(s, &[D(5), seven, slot6]);
+    assert!(noun_is(ut.slab, fol, expected6), "nested %over");
 
     // A %spec whose example does not nest the tested type is rejected.
     let spec = Skin::Spec(
@@ -465,26 +524,21 @@ fn skin_test_formula_builds_dynamic_tests() {
         Box::new(Skin::Base(BaseType::NounExpr)),
     );
     let err = ut
-        .skin_test_formula(sut, BigUint::from(2u32), &spec)
+        .skin_test_formula(a, sut, BigUint::from(2u32), &spec)
         .expect_err("cell spec on an atom");
     assert!(format!("{err:?}").contains("wthx spec"));
 }
 
 #[test]
-fn base_test_formula_noun_void_and_flag() {
+fn skin_fish_noun_void_and_flag() {
     let mut slab = NounSlab::new();
+    let noun = ty_noun(&mut slab);
     let mut ut = Ut::new(&mut slab);
-    let slot = ut.formula_slot_u64(6);
-    let id = ut
-        .base_test_formula(&BaseType::NounExpr, slot)
-        .expect("noun");
-    let fol = formula(&mut ut, id);
+    let fol = fish_at6(&mut ut, noun, &Skin::Base(BaseType::NounExpr));
     assert!(is_const_bool_formula(fol, true, &ut.slab.noun_space()));
-    let id = ut.base_test_formula(&BaseType::Void, slot).expect("void");
-    let fol = formula(&mut ut, id);
+    let fol = fish_at6(&mut ut, noun, &Skin::Base(BaseType::Void));
     assert!(is_const_bool_formula(fol, false, &ut.slab.noun_space()));
-    let id = ut.base_test_formula(&BaseType::Flag, slot).expect("flag");
-    let fol = formula(&mut ut, id);
+    let fol = fish_at6(&mut ut, noun, &Skin::Base(BaseType::Flag));
     // The flag test guards with an atom check, then compares against 0 and 1.
     let slot6 = T(&mut *ut.slab, &[D(0), D(6)]);
     let is_cell = T(&mut *ut.slab, &[D(3), slot6]);
@@ -492,6 +546,17 @@ fn base_test_formula_noun_void_and_flag() {
     let one = T(&mut *ut.slab, &[D(1), D(1)]);
     let eq_one = T(&mut *ut.slab, &[D(5), slot6, one]);
     assert!(contains(ut.slab, fol, eq_one));
+}
+
+#[test]
+fn wthx_on_an_arm_tests_its_core() {
+    // hoon-138 fends `[[%& 1] wing]`, so an arm resolves to its core as a leg.
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+    let (_ty, fol) = mint_in(&mut ut, "|%  ++  foo  5  --", "?#(@ foo)").expect("?# arm");
+    assert!(is_const_bool_formula(fol, false, &ut.slab.noun_space()));
+    let (_ty, fol) = mint_in(&mut ut, "|%  ++  foo  5  --", "?#(^ foo)").expect("?# arm");
+    assert!(is_const_bool_formula(fol, true, &ut.slab.noun_space()));
 }
 
 // ---------------------------------------------------------------------------

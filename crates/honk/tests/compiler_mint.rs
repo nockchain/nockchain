@@ -2899,15 +2899,17 @@ a(q 3)"#,
 q.a"#,
         ),
         (
-            "wthx-core-generic-cell-tail-preserves-arms",
+            // hoon-138 `ar:gain` keeps a core only for the term tail `%noun`.
+            "wthx-core-noun-term-tail-preserves-arms",
             r#"|=  x=@
+=/  noun  *
 =+  ^=  a
   =>  7
   |%
   ++  foo  1
   --
 ^-  @
-?:  ?#([@ *] a)
+?:  ?#([@ noun] a)
   foo.a
 !!"#,
         ),
@@ -3056,6 +3058,22 @@ a(r 3)"#, "find failed",
 ^-  @
 ?>  ?=(%foo a)
 q.a"#, "find failed",
+        ),
+        (
+            // A `[%base %noun]` tail (`*`) gains a plain cell, so the arms are
+            // gone (hoonc: find.foo.a).
+            "wthx-core-base-noun-tail-drops-arms",
+            r#"|=  x=@
+=+  ^=  a
+  =>  7
+  |%
+  ++  foo  1
+  --
+^-  @
+?:  ?#([@ *] a)
+  foo.a
+!!"#,
+            "find failed",
         ),
         (
             "wthx-core-cell-gain-drops-arms",

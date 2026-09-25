@@ -8,7 +8,7 @@ coverage run. `hot.rs`, `identity.rs` and `keys.rs` have no gaps.
 
 Unit tests: `crates/honk/src/native/ut/cov/c4_ut_sub.rs` and
 `crates/honk/tests/cov_c4_ir_roundtrip.rs`. Probes: `c4_find_walk`,
-`c4_find_tune`, `c4_goal_hold`. Divergence: `divergent/c4_wthx_arm_fend.hoon`.
+`c4_find_tune`, `c4_goal_hold`. Fixed divergence: `../regressions/c4_wthx_arm_fend.hoon`.
 
 Where this ledger says "both reject", the case was checked with
 `probe-diag.sh`: hoonc fails with the same crash as honk.
@@ -17,10 +17,10 @@ Where this ledger says "both reject", the case was checked with
 
 - L19-30, L226-227 [P]: a face name that is not valid text. Parsed faces are
   always terms, so only malformed input reaches this. Unit-tested.
-- L78 [P]: `fend` on an arm port. The only source path to it is the `?#`
-  divergence (`divergent/c4_wthx_arm_fend.hoon`). hoon-138 mints `%wthx` with
-  `(fend %read [[%& 1] q.gen])`, which turns the arm into a leg on its core.
-  Blocked by that divergence.
+- L78 [P]: `fend` on an arm port. `?#` now fends `[[%& 1] q.gen]` like
+  hoon-138, which turns the arm into a leg on its core
+  (`../regressions/c4_wthx_arm_fend.hoon`), so only an `%over` skin naming an
+  arm reaches it, and hoon-138's `++fish` crashes there too.
 - L80 [P]: `fend` on a synthetic port (fend-fragment). Both reject
   (`=*  w  [y y]` then `?#(^ w)`). Unit-tested.
 - L124, L125 [P]: `fond` whose tail search is void or unmatched. `find` then

@@ -193,6 +193,7 @@ test_suite(
 # Run it locally with:
 #   bazel test //crates/honk/test-assets/type-probes:reject_rest_loop_alias_test
 REJECTION_PROBES = [
+    "c3_lose_cell_core_base_tail",
     "core_cast_arms",
     "door_sample_nest",
     "edit_arm_tack",
@@ -260,6 +261,25 @@ sh_test(
     ],
 )
 
+# A wash skin (,) as a ?: condition sends hoon-138's ar:gain into infinite
+# recursion, so hoonc never finishes; like divergent_bunt it is native-only.
+sh_test(
+    name = "reject_wash_gain_loop_native_test",
+    size = "small",
+    srcs = ["native_rejection_test.sh"],
+    args = [
+        "$(rootpath //crates/honk:honk)",
+        "$(rootpath //hoon/common:hoon.hoon)",
+        "$(rootpath reject/wash_gain_loop.hoon)",
+        "gain-wash",
+    ],
+    data = [
+        "reject/wash_gain_loop.hoon",
+        "//crates/honk:honk",
+        "//hoon/common:hoon.hoon",
+    ],
+)
+
 [
     sh_test(
         name = "reject_{}_test".format(name),
@@ -284,7 +304,10 @@ sh_test(
 
 test_suite(
     name = "rejection_parity_test",
-    tests = [":reject_divergent_bunt_native_test"] + [
+    tests = [
+        ":reject_divergent_bunt_native_test",
+        ":reject_wash_gain_loop_native_test",
+    ] + [
         "reject_{}_test".format(name)
         for name in REJECTION_PROBES
         # explicitly listed suite members override the manual tag, so the

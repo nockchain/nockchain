@@ -586,6 +586,7 @@ impl<'a> Ut<'a> {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn resolve_wing_axis(&mut self, sut: NRc<NTy>, wing: &WingType) -> Result<BigUint> {
         if wing.is_empty() {
             return Ok(BigUint::from(1u32));
@@ -595,6 +596,7 @@ impl<'a> Ut<'a> {
     }
 
     /// `resolve_wing_axis` for a noun subject, lifted to native first.
+    #[cfg(test)]
     pub(super) fn resolve_wing_axis_noun(&mut self, sut: Noun, wing: &WingType) -> Result<BigUint> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.resolve_wing_axis(sut_n, wing)

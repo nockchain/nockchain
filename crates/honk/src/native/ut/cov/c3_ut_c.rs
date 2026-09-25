@@ -214,6 +214,14 @@ fn c3_skin_cell_refinement() {
     assert!(skin_ok("?:(?#(^ u) u !!)").starts_with("[%hint "));
     assert!(skin_ok("?:(?#(^ k) k !!)").starts_with("[%hint "));
     assert!(skin_ok("?:(?#(^ v) !! v)").starts_with("[%hint "));
+    // `ar:lose` `%cell` strips a faced sub-ref: losing `^` from `q=@` leaves
+    // a bare `@`.
+    let lost = skin_ok("?:(?#([@ ^] c) !! c)");
+    assert!(
+        lost.contains("[%cell [[%face [%p [%atom [0 0]]]] [%atom [0 0]]]]"),
+        "{lost}"
+    );
+    assert!(!lost.contains("[%face [%q "), "{lost}");
 }
 
 #[test]
@@ -225,6 +233,11 @@ fn c3_skin_core_refs() {
     // the core as a plain cell; a void head gains %void.
     assert!(skin_ok("=/(q |.(a) ?:(?#([* @] q) q !!))").starts_with("[%cell [[%cell "));
     assert!(skin_ok("=/(q |.(a) ?:(?#([@ @] q) !! q))").starts_with("[%cell [[%cell "));
+    // Only the term tail `noun` keeps the core; `^` (a `[%base %noun]` tail)
+    // gains a plain cell, and loses the tail from %noun, which is %void.
+    assert!(skin_ok("=/(q |.(a) =/(noun * ?:(?#([* noun] q) q !!)))").starts_with("[%core "));
+    assert!(skin_ok("=/(q |.(a) ?:(?#(^ q) q !!))").starts_with("[%cell [[%cell "));
+    assert!(skin_err("=/(q |.(a) ?:(?#([@ *] q) !! %foo))").contains("mint-vain"));
     // ?= with fork and faced refs crop a core through crop_sint.
     assert!(skin_ok("=/(q |.(a) ?:(?=(?(%a %b) q) !! q))").starts_with("[%core "));
     assert!(skin_ok("=/(q |.(a) ?:(?=(x=@ q) !! q))").starts_with("[%core "));
@@ -335,11 +348,10 @@ fn c3_gain_lose_base_skins_not_built_by_flay() {
         let t = ut.lose_skin(sut.clone(), noun.clone(), &help).unwrap();
         assert_eq!(lower(ut, &t), CELL_NOUN);
 
-        // %wash leaves the ref alone on both sides.
-        let t = ut
-            .gain_skin(sut.clone(), noun.clone(), &Skin::Wash(0))
-            .unwrap();
-        assert_eq!(lower(ut, &t), "%noun");
+        // %wash: hoon-138 `ar:gain` recurses forever (hoonc hangs), so honk
+        // rejects it; `ar:lose` leaves the ref alone.
+        let err = noun_err(ut.gain_skin(sut.clone(), noun.clone(), &Skin::Wash(0)));
+        assert!(err.contains("gain-wash"), "{err}");
         let t = ut
             .lose_skin(sut.clone(), noun.clone(), &Skin::Wash(0))
             .unwrap();
