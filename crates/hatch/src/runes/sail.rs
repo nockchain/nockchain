@@ -1,17 +1,143 @@
+//  Sail, hoon-138 `++sail`: after a `;`, a tall-form (`++tall-top`) or
+//  wide-form (`++wide-top`) XML template. A node becomes `[%xray manx]`, a
+//  node list `[%mcts marl]`. Markdown (`++cram`: `;>`, and bare text lines
+//  among an element's tall children) is not supported.
+
+use std::sync::Arc;
+
 use chumsky::prelude::*;
 
 use crate::ast::hoon::*;
 use crate::utils::*;
 
-fn inline_space<'src>() -> impl Parser<'src, &'src str, (), Err<'src>> {
-    one_of(" \t").repeated().ignored()
+type Boxed<'src, O> = chumsky::Boxed<'src, 'src, &'src str, O, Err<'src>>;
+
+/// A node or a node list, hoon-138 `(each tuna marl)`.
+#[derive(Clone)]
+enum Top {
+    One(Tuna),
+    Many(Marl),
 }
 
-fn inline_space1<'src>() -> impl Parser<'src, &'src str, (), Err<'src>> {
-    one_of(" \t").repeated().at_least(1).ignored()
+/// An element of `++quote-innards`: a text byte, an embedded node, or, in a
+/// `"""` block, a newline with the count of spaces that follow it.
+#[derive(Clone)]
+enum Innard {
+    Byte(u8),
+    Tuna(Tuna),
+    Newline(usize),
 }
 
-fn mixed_case_symbol<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
+fn drop_top(top: Top) -> Marl {
+    match top {
+        Top::One(tuna) => vec![tuna],
+        Top::Many(marl) => marl,
+    }
+}
+
+fn join_tops(tops: Vec<Top>) -> Marl {
+    tops.into_iter().flat_map(drop_top).collect()
+}
+
+//  hoon-138 keeps one beer char per text byte. A beer char cord stores a
+//  byte as the char with that code point.
+fn byte_beer(byte: u8) -> Beer {
+    Beer::Char(char::from(byte).to_string())
+}
+
+fn utf8_bytes(c: char) -> Vec<u8> {
+    let mut buf = [0u8; 4];
+    c.encode_utf8(&mut buf).as_bytes().to_vec()
+}
+
+/// The bytes of a cord (`++trip`).
+fn cord_bytes(atom: &ParsedAtom) -> Vec<u8> {
+    let big = atom.to_biguint();
+    if big == 0u32.into() {
+        Vec::new()
+    } else {
+        big.to_bytes_le()
+    }
+}
+
+//  A woof atom holds text bytes; split any multi-byte one rather than
+//  reading it as a Unicode scalar.
+fn woof_to_beers(woof: Woof) -> Vec<Beer> {
+    match woof {
+        Woof::ParsedAtom(atom) => atom
+            .to_biguint()
+            .to_bytes_le()
+            .into_iter()
+            .map(byte_beer)
+            .collect(),
+        Woof::Hoon(hoon) => vec![Beer::Hoon(hoon)],
+    }
+}
+
+/// `++hopefully-quote`: the text of a tape, else the hoon itself.
+fn hoon_to_beers(hoon: Hoon) -> Vec<Beer> {
+    match hoon {
+        Hoon::Knit(woofs) => woofs.into_iter().flat_map(woof_to_beers).collect(),
+        other => vec![Beer::Hoon(other)],
+    }
+}
+
+fn text_beers(text: &str) -> Vec<Beer> {
+    text.bytes().map(byte_beer).collect()
+}
+
+/// `;/(tape)`: a text node, `[[%$ [%$ tape] ~] ~]`.
+fn text_node(bytes: &[u8]) -> Tuna {
+    let text = Mane::Tag(String::new());
+    Tuna::Manx(Manx {
+        g: Marx {
+            n: text.clone(),
+            a: vec![(text, bytes.iter().copied().map(byte_beer).collect())],
+        },
+        c: vec![],
+    })
+}
+
+/// `++collapse-chars`: runs of text bytes become text nodes. In tall form
+/// the last run loses its trailing spaces and gains a newline.
+fn collapse_chars(innards: Vec<Innard>, tall: bool) -> Marl {
+    let mut out = Vec::new();
+    let mut run: Vec<u8> = Vec::new();
+    for innard in innards {
+        match innard {
+            Innard::Byte(byte) => run.push(byte),
+            Innard::Newline(_) => run.push(b'\n'),
+            Innard::Tuna(tuna) => {
+                if !run.is_empty() {
+                    out.push(text_node(&run));
+                    run.clear();
+                }
+                out.push(tuna);
+            }
+        }
+    }
+    if tall {
+        while run.last() == Some(&b' ') {
+            run.pop();
+        }
+        run.push(b'\n');
+    }
+    if !run.is_empty() {
+        out.push(text_node(&run));
+    }
+    out
+}
+
+/// `++apex`: a node is `%xray`, a node list `%mcts`.
+fn apex(top: Top) -> Hoon {
+    match top {
+        Top::One(Tuna::Manx(manx)) => Hoon::Xray(manx),
+        Top::One(tuna) => Hoon::MicTis(vec![tuna]),
+        Top::Many(marl) => Hoon::MicTis(marl),
+    }
+}
+
+fn mixed_case_symbol<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> + Clone {
     any()
         .filter(|c: &char| c.is_ascii_alphabetic())
         .then(
@@ -29,7 +155,8 @@ fn mixed_case_symbol<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> 
         .labelled("Sail Symbol")
 }
 
-fn mane_parser<'src>() -> impl Parser<'src, &'src str, Mane, Err<'src>> {
+/// `++a-mane`: `name` or `space_name`.
+fn mane_parser<'src>() -> impl Parser<'src, &'src str, Mane, Err<'src>> + Clone {
     mixed_case_symbol()
         .then(just('_').ignore_then(mixed_case_symbol()).or_not())
         .map(|(base, suffix)| match suffix {
@@ -38,228 +165,365 @@ fn mane_parser<'src>() -> impl Parser<'src, &'src str, Mane, Err<'src>> {
         })
 }
 
-//  hoon-138 keeps one beer char per text byte. A beer char cord stores a
-//  byte as the char with that code point, so split any multi-byte woof atom
-//  into its bytes rather than reading it as a Unicode scalar.
-fn woof_to_beers(woof: Woof) -> Vec<Beer> {
-    match woof {
-        Woof::ParsedAtom(atom) => atom
-            .to_biguint()
-            .to_bytes_le()
-            .into_iter()
-            .map(|byte| Beer::Char(char::from(byte).to_string()))
-            .collect(),
-        Woof::Hoon(hoon) => vec![Beer::Hoon(hoon)],
-    }
+/// `++tuna-mode`
+fn tuna_mode<'src>() -> impl Parser<'src, &'src str, fn(Hoon) -> TunaTail, Err<'src>> + Clone {
+    choice((
+        just('-').to(TunaTail::Tape as fn(Hoon) -> TunaTail),
+        just('+').to(TunaTail::Manx as fn(Hoon) -> TunaTail),
+        just('*').to(TunaTail::Marl as fn(Hoon) -> TunaTail),
+        just('%').to(TunaTail::Call as fn(Hoon) -> TunaTail),
+    ))
 }
 
-fn hoon_to_beers(hoon: Hoon) -> Vec<Beer> {
-    match hoon {
-        Hoon::Knit(woofs) => woofs.into_iter().flat_map(woof_to_beers).collect(),
-        other => vec![Beer::Hoon(other)],
-    }
-}
-
-fn string_to_beers(value: String) -> Vec<Beer> {
-    value.chars().map(|ch| Beer::Char(ch.to_string())).collect()
-}
-
-fn class_attr<'src>() -> impl Parser<'src, &'src str, (Mane, Vec<Beer>), Err<'src>> {
-    just('.')
-        .ignore_then(symbol())
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .map(|classes| {
-            let value = classes.join(" ");
-            (Mane::Tag("class".to_string()), string_to_beers(value))
-        })
-}
-
-fn id_attr<'src>() -> impl Parser<'src, &'src str, (Mane, Vec<Beer>), Err<'src>> {
-    just('#')
-        .ignore_then(symbol())
-        .map(|id| (Mane::Tag("id".to_string()), string_to_beers(id)))
-}
-
-fn attr_pair<'src>(
-    hoon_wide: impl ParserExt<'src, Hoon>,
-) -> impl Parser<'src, &'src str, (Mane, Vec<Beer>), Err<'src>> {
-    mane_parser()
-        .then_ignore(inline_space1())
-        .then(hoon_wide)
-        .map(|(name, value)| (name, hoon_to_beers(value)))
-}
-
-//  hoon-138 ++tall-attrs: `=name  value` lines after a tall tag head
-fn tall_attrs<'src>(
-    hoon_wide: impl ParserExt<'src, Hoon>,
-) -> impl Parser<'src, &'src str, Mart, Err<'src>> {
-    gap()
-        .then(just('='))
-        .ignore_then(mane_parser())
-        .then_ignore(gap())
-        .then(hoon_wide)
-        .map(|(name, value)| (name, hoon_to_beers(value)))
-        .repeated()
-        .collect::<Vec<_>>()
-}
-
-fn paren_attrs<'src>(
-    hoon_wide: impl ParserExt<'src, Hoon>,
-) -> impl Parser<'src, &'src str, Mart, Err<'src>> {
-    let separator = just(',').then(inline_space()).ignored();
-    attr_pair(hoon_wide)
-        .separated_by(separator)
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(just('('), just(')'))
-}
-
-fn tag_head<'src>(
-    hoon_wide: impl ParserExt<'src, Hoon>,
-) -> impl Parser<'src, &'src str, Marx, Err<'src>> {
-    //  hoon-138 ++tag-head: the #id comes before the .classes
-    mane_parser()
-        .then(id_attr().or_not())
-        .then(class_attr().or_not())
-        .then(paren_attrs(hoon_wide).or_not())
-        .map(|(((name, id_attr), class_attr), extra_attrs)| {
-            let mut attrs = Vec::new();
-            if let Some(attr) = id_attr {
-                attrs.push(attr);
-            }
-            if let Some(attr) = class_attr {
-                attrs.push(attr);
-            }
-            if let Some(mut rest) = extra_attrs {
-                attrs.append(&mut rest);
-            }
-            Marx { n: name, a: attrs }
-        })
-}
-
-fn braced_hoon<'src>(
-    hoon_wide: impl ParserExt<'src, Hoon>,
-) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    let items = hoon_wide
-        .separated_by(inline_space1())
-        .at_least(1)
-        .collect::<Vec<_>>();
-
-    inline_space()
-        .ignore_then(items)
-        .then_ignore(inline_space())
-        .delimited_by(just('{'), just('}'))
-        .map(Hoon::ColTar)
-}
-
-fn wrapped_elems<'src>(
-    hoon_wide: impl ParserExt<'src, Hoon>,
-) -> impl Parser<'src, &'src str, Marl, Err<'src>> {
-    braced_hoon(hoon_wide).map(|hoon| vec![Tuna::TunaTail(TunaTail::Tape(hoon))])
-}
-
-#[derive(Clone, Copy)]
-enum TunaMode {
-    Tape,
-    Manx,
-    Marl,
-    Call,
-}
-
-fn tuna_tail<'src>(
-    hoon: impl ParserExt<'src, Hoon>,
-) -> impl Parser<'src, &'src str, Tuna, Err<'src>> {
-    let mode = choice((
-        just('-').to(TunaMode::Tape),
-        just('+').to(TunaMode::Manx),
-        just('*').to(TunaMode::Marl),
-        just('%').to(TunaMode::Call),
-    ));
-
-    mode.then_ignore(gap()).then(hoon).map(|(mode, hoon)| {
-        let tail = match mode {
-            TunaMode::Tape => TunaTail::Tape(hoon),
-            TunaMode::Manx => TunaTail::Manx(hoon),
-            TunaMode::Marl => TunaTail::Marl(hoon),
-            TunaMode::Call => TunaTail::Call(hoon),
-        };
-        Tuna::TunaTail(tail)
+/// `++bix:ab`: two lowercase hex digits.
+fn hex_byte<'src>() -> impl Parser<'src, &'src str, u8, Err<'src>> + Clone {
+    let six = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'));
+    six.then(six).map(|(hi, lo)| {
+        (hi.to_digit(16).expect("hex digit") * 16 + lo.to_digit(16).expect("hex digit")) as u8
     })
 }
 
-//  The children following a tag head or `;=`.
-fn tag_tail<'src>(
-    hoon: impl ParserExt<'src, Hoon>,
-    hoon_wide: impl ParserExt<'src, Hoon>,
-    manx: impl ParserExt<'src, Manx>,
-    tail: impl ParserExt<'src, Marl>,
-) -> impl Parser<'src, &'src str, Marl, Err<'src>> {
-    //  a nested `;=` list is spliced into its parent's children
-    let tail_item = just(';').ignore_then(choice((
-        tuna_tail(hoon.clone()).map(|tuna| vec![tuna]),
-        manx.clone().map(|manx| vec![Tuna::Manx(manx)]),
-        just('=').ignore_then(tail),
-    )));
+/// `++prn`: a character of non-control bytes.
+fn is_prn(c: char) -> bool {
+    c >= ' ' && c != '\u{7f}'
+}
 
-    let tall_children = gap()
-        .ignore_then(tail_item.then_ignore(gap()).repeated().collect::<Vec<_>>())
-        .then_ignore(just("=="))
-        .map(|items| items.into_iter().flatten().collect());
+/// `++sump`: `{hoon hoon ...}` as `%cltr`.
+fn sump<'src>(hoon_wide: Boxed<'src, Hoon>) -> Boxed<'src, Hoon> {
+    hoon_wide
+        .separated_by(just(' '))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just('{'), just('}'))
+        .map(Hoon::ColTar)
+        .boxed()
+}
 
-    let inline_children = choice((
+/// `++quote-innards`. In tall form `"` is text; outside a `"""` block
+/// (`lin`) there are no newlines.
+fn quote_innards<'src>(
+    inline_embed: Boxed<'src, Tuna>,
+    tall: bool,
+    lin: bool,
+) -> Boxed<'src, Vec<Innard>> {
+    let escape = just('\\')
+        .ignore_then(choice((
+            one_of("-+*%;{\\\"").map(|c: char| c as u8),
+            hex_byte(),
+        )))
+        .map(|byte| vec![Innard::Byte(byte)]);
+    let embed = inline_embed.map(|tuna| vec![Innard::Tuna(tuna)]);
+    let text = any()
+        .filter(move |c: &char| is_prn(*c) && *c != '\\' && *c != '{' && (tall || *c != '"'))
+        .map(|c| utf8_bytes(c).into_iter().map(Innard::Byte).collect());
+    let item = if lin {
+        choice((escape, embed, text)).boxed()
+    } else {
+        //  a newline and the next line's indentation, unless that line
+        //  closes the block
+        let newline = just('\n')
+            .ignore_then(just(' ').repeated().count())
+            .then_ignore(just("\"\"\"").not())
+            .map(|spaces| vec![Innard::Newline(spaces)]);
+        choice((escape, embed, text, newline)).boxed()
+    };
+    item.repeated()
+        .collect::<Vec<Vec<Innard>>>()
+        .map(|chunks| chunks.into_iter().flatten().collect())
+        .boxed()
+}
+
+/// Resolve a `"""` block's indentation as hoon-138 `++inde` does: every line
+/// is indented at least as far as the opening `"""` (that much is dropped)
+/// or is empty, and the closing `"""` is indented exactly that far.
+fn dedent_block(
+    lev: usize,
+    first: usize,
+    innards: Vec<Innard>,
+    close: usize,
+) -> Result<Vec<Innard>, &'static str> {
+    let spaces = |count: usize| std::iter::repeat(Innard::Byte(b' ')).take(count - lev);
+    //  a line may also be empty: its newline is followed by another
+    let next_is_newline = |i: usize| matches!(innards.get(i), Some(Innard::Newline(_)) | None);
+    let indented = |count: usize, i: usize| count >= lev || (count == 0 && next_is_newline(i));
+    if close != lev {
+        return Err("the closing \"\"\" of a sail block is not aligned with the opening");
+    }
+    if !indented(first, 0) {
+        return Err("a line of a sail block is indented less than its \"\"\"");
+    }
+    let mut out = Vec::with_capacity(innards.len());
+    if first >= lev {
+        out.extend(spaces(first));
+    }
+    for (i, innard) in innards.iter().enumerate() {
+        match innard {
+            Innard::Newline(count) => {
+                if !indented(*count, i + 1) {
+                    return Err("a line of a sail block is indented less than its \"\"\"");
+                }
+                out.push(Innard::Byte(b'\n'));
+                if *count >= lev {
+                    out.extend(spaces(*count));
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    Ok(out)
+}
+
+/// `++wide-quote`: `"text"`, or a `"""` block.
+fn wide_quote<'src>(
+    inline_embed: Boxed<'src, Tuna>,
+    tall: bool,
+    linemap: Arc<LineMap>,
+) -> Boxed<'src, Marl> {
+    let single = just("\"\"\"")
+        .not()
+        .ignore_then(
+            quote_innards(inline_embed.clone(), tall, true).delimited_by(just('"'), just('"')),
+        )
+        .map(move |innards| collapse_chars(innards, tall));
+    let open = just("\"\"\"").map_with(move |_, extra| {
+        let span: SimpleSpan = extra.span();
+        linemap.raw_column(span.start)
+    });
+    let indent = just(' ').repeated().count();
+    let block = open
+        .then_ignore(just('\n'))
+        .then(indent)
+        .then(quote_innards(inline_embed, tall, false))
+        .then(just('\n').ignore_then(indent).then_ignore(just("\"\"\"")))
+        .try_map(move |(((lev, first), innards), close), span| {
+            dedent_block(lev, first, innards, close)
+                .map(|innards| collapse_chars(innards, tall))
+                .map_err(|msg| Rich::custom(span, msg))
+        });
+    choice((single, block)).boxed()
+}
+
+/// The sail parsers `(tall-top, wide-top)`, each run after the leading `;`.
+fn sail_parsers<'src>(
+    hoon: Boxed<'src, Hoon>,
+    hoon_wide: Boxed<'src, Hoon>,
+    linemap: Arc<LineMap>,
+) -> (Boxed<'src, Top>, Boxed<'src, Top>) {
+    let mut wide_top = Recursive::declare();
+    let mut tall_top = Recursive::declare();
+
+    let sump = sump(hoon_wide.clone());
+
+    //  ++wide-attrs: `(name value, name value)`
+    let attribute = mane_parser()
+        .then_ignore(just(' '))
+        .then(hoon_wide.clone())
+        .map(|(name, value)| (name, hoon_to_beers(value)));
+    let wide_attrs = attribute
+        .separated_by(just(", "))
+        .collect::<Vec<_>>()
+        .delimited_by(just('('), just(')'))
+        .or_not()
+        .map(Option::unwrap_or_default)
+        .boxed();
+
+    //  ++tag-head: name, #id, .classes, /"href" or @"src", then attributes
+    let id = just('#')
+        .ignore_then(symbol())
+        .map(|id| (Mane::Tag("id".to_string()), text_beers(&id)));
+    let classes = just('.')
+        .ignore_then(symbol())
+        .repeated()
+        .collect::<Vec<_>>()
+        .map(|classes| {
+            (!classes.is_empty()).then(|| {
+                (
+                    Mane::Tag("class".to_string()),
+                    text_beers(&classes.join(" ")),
+                )
+            })
+        });
+    let link = choice((just('/').to("href"), just('@').to("src")))
+        .then(soil(hoon_wide.clone(), linemap.clone()))
+        .map(|(name, woofs)| {
+            let beers = woofs.into_iter().flat_map(woof_to_beers).collect();
+            (Mane::Tag(name.to_string()), beers)
+        });
+    let tag_head = mane_parser()
+        .then(id.or_not())
+        .then(classes)
+        .then(link.or_not())
+        .then(wide_attrs.clone())
+        .map(|((((name, id), class), link), attrs)| {
+            let mut mart: Mart = [id, class, link].into_iter().flatten().collect();
+            mart.extend(attrs);
+            Marx { n: name, a: mart }
+        })
+        .boxed();
+
+    //  ++wide-inner-top, ++wide-elems, ++wide-paren-elems
+    let wide_inner_top = choice((
+        wide_top.clone(),
+        tuna_mode()
+            .then(hoon_wide.clone())
+            .map(|(mode, hoon)| Top::One(Tuna::TunaTail(mode(hoon)))),
+    ))
+    .boxed();
+    let wide_elems = just(' ')
+        .ignore_then(wide_inner_top.clone())
+        .repeated()
+        .collect::<Vec<_>>()
+        .map(join_tops);
+    let wide_paren_elems = wide_inner_top
+        .separated_by(just(' '))
+        .collect::<Vec<_>>()
+        .delimited_by(just('('), just(')'))
+        .map(join_tops)
+        .boxed();
+
+    //  ++bracketed-elem and ++inline-embed
+    let bracketed_elem = tag_head
+        .clone()
+        .then(wide_elems)
+        .delimited_by(just('{'), just('}'))
+        .map(|(g, c)| Manx { g, c });
+    let inline_embed = choice((
+        just(';').ignore_then(bracketed_elem).map(Tuna::Manx),
+        tuna_mode()
+            .then(sump.clone())
+            .map(|(mode, hoon)| Tuna::TunaTail(mode(hoon))),
+        sump.map(|hoon| Tuna::TunaTail(TunaTail::Tape(hoon))),
+    ))
+    .boxed();
+
+    //  ++wrapped-elems and ++wide-tail
+    let cord_node = cord(linemap.clone()).map(|atom| vec![text_node(&cord_bytes(&atom))]);
+    let wrapped_elems = choice((
+        wide_paren_elems.clone(),
+        cord_node,
+        wide_top.clone().map(drop_top),
+    ))
+    .boxed();
+    let wide_tail = choice((
+        just(':').ignore_then(wrapped_elems.clone()),
         just(';').to(Vec::new()),
-        just(':')
-            .ignore_then(inline_space())
-            .ignore_then(wrapped_elems(hoon_wide.clone())),
+        empty().to(Vec::new()),
     ));
 
-    choice((inline_children, tall_children))
-}
-
-fn sail_parser<'src>(
-    hoon: impl ParserExt<'src, Hoon>,
-    hoon_wide: impl ParserExt<'src, Hoon>,
-    tall: bool,
-) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    let mut manx = Recursive::declare();
-    let mut tail = Recursive::declare();
-    manx.define(
-        tag_head(hoon_wide.clone())
-            .then(tall_attrs(hoon_wide.clone()))
-            .then(tail.clone())
-            .map(|((mut head, attrs), children)| {
-                head.a.extend(attrs);
-                Manx {
-                    g: head,
-                    c: children,
-                }
-            })
-            .boxed(),
+    //  ++wide-top
+    wide_top.define(
+        choice((
+            wide_quote(inline_embed.clone(), false, linemap.clone()).map(Top::Many),
+            wide_paren_elems.map(Top::Many),
+            tag_head
+                .clone()
+                .then(wide_tail)
+                .map(|(g, c)| Top::One(Tuna::Manx(Manx { g, c }))),
+        ))
+        .boxed(),
     );
-    tail.define(tag_tail(hoon.clone(), hoon_wide, manx.clone(), tail.clone()).boxed());
 
-    let marl_tail = tuna_tail(hoon).map(|tuna| Hoon::MicTis(vec![tuna]));
-    let top = choice((manx.map(Hoon::Xray), marl_tail));
-    if tall {
-        //  `;=` (%mcts): a list of nodes, tall form only
-        choice((top, just('=').ignore_then(tail).map(Hoon::MicTis))).boxed()
-    } else {
-        top.boxed()
-    }
+    //  ++tall-tail and ++tall-kids
+    let top_level = just(';').ignore_then(tall_top.clone());
+    let tall_kids = top_level
+        .separated_by(gap())
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(join_tops);
+    let tall_tail = choice((
+        just(';').to(Vec::new()),
+        just(':').ignore_then(wrapped_elems),
+        just(": ")
+            .ignore_then(quote_innards(inline_embed.clone(), true, true))
+            .map(|innards| collapse_chars(innards, false)),
+        gap()
+            .ignore_then(tall_kids)
+            .then_ignore(gap())
+            .then_ignore(just("==")),
+    ))
+    .boxed();
+
+    //  ++tall-attrs and ++tall-elem
+    let tall_attrs = gap()
+        .then(just('='))
+        .ignore_then(mane_parser())
+        .then_ignore(gap())
+        .then(hoon_wide.clone())
+        .map(|(name, value)| (name, hoon_to_beers(value)))
+        .repeated()
+        .collect::<Vec<_>>();
+    let tall_elem = tag_head
+        .then(tall_attrs)
+        .then(tall_tail.clone())
+        .map(|((mut g, attrs), c)| {
+            g.a.extend(attrs);
+            Manx { g, c }
+        });
+
+    //  ++script-or-style and ++script-style-tail: `;` lines of raw text
+    let script_or_style = choice((just("script"), just("style")))
+        .then(wide_attrs)
+        .map(|(name, a)| Marx {
+            n: Mane::Tag(name.to_string()),
+            a,
+        });
+    let raw_line = just(';').ignore_then(choice((
+        just(' ').ignore_then(
+            any()
+                .filter(|c: &char| is_prn(*c))
+                .repeated()
+                .collect::<String>()
+                .map(|line| text_node(line.as_bytes())),
+        ),
+        empty().to(text_node(b"\n")),
+    )));
+    let script_style_tail = gap()
+        .ignore_then(raw_line.separated_by(gap()).at_least(1).collect::<Vec<_>>())
+        .then_ignore(gap())
+        .then_ignore(just("=="));
+
+    //  ++tall-top
+    tall_top.define(
+        choice((
+            just(' ')
+                .repeated()
+                .at_least(1)
+                .ignore_then(quote_innards(inline_embed.clone(), true, true))
+                .map(|innards| Top::Many(collapse_chars(innards, true))),
+            script_or_style
+                .then(script_style_tail)
+                .map(|(g, c)| Top::One(Tuna::Manx(Manx { g, c }))),
+            tall_elem.map(|manx| Top::One(Tuna::Manx(manx))),
+            wide_quote(inline_embed, true, linemap).map(Top::Many),
+            just('=').ignore_then(tall_tail).map(Top::Many),
+            tuna_mode()
+                .then_ignore(gap())
+                .then(hoon)
+                .map(|(mode, hoon)| Top::Many(vec![Tuna::TunaTail(mode(hoon))])),
+            empty().to(Top::Many(vec![text_node(b"\n")])),
+        ))
+        .boxed(),
+    );
+
+    (tall_top.boxed(), wide_top.boxed())
 }
 
+/// Tall-form sail (hoon-138 `apex:(sail &)`), after the leading `;`.
 pub fn sail_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     hoon_wide: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    sail_parser(hoon, hoon_wide, true)
+    let (tall_top, _) = sail_parsers(hoon.boxed(), hoon_wide.boxed(), linemap);
+    tall_top.map(apex)
 }
 
+/// Wide-form sail (hoon-138 `apex:(sail |)`), after the leading `;`.
 pub fn sail_wide<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     hoon_wide: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    sail_parser(hoon, hoon_wide, false)
+    let (_, wide_top) = sail_parsers(hoon.boxed(), hoon_wide.boxed(), linemap);
+    wide_top.map(apex)
 }

@@ -6418,6 +6418,14 @@ impl LineMap {
                 if trimmed.starts_with(b"\"\"\"") {
                     in_tall_tape = true;
                     tall_indent = indent;
+                } else if trimmed.len() > 3
+                    && trimmed.ends_with(b"\"\"\"")
+                    && matches!(trimmed[trimmed.len() - 4], b';' | b':')
+                {
+                    //  a sail `"""` block (`;"""`, `;p:"""`): its lines are
+                    //  indented as far as the `"""`
+                    in_tall_tape = true;
+                    tall_indent = indent + trimmed.len() - 3;
                 }
             } else if indent == tall_indent && trimmed.starts_with(b"\"\"\"") {
                 in_tall_tape = false;
@@ -6451,6 +6459,16 @@ impl LineMap {
         }
 
         ((line + 1) as u64, col)
+    }
+
+    /// The byte column of `byte` within its line, from 0, without the
+    /// column offsets of tall-tape lines.
+    pub fn raw_column(&self, byte: usize) -> usize {
+        let line = match self.starts.binary_search(&byte) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        byte - self.starts[line]
     }
 
     #[inline(always)]
@@ -14468,7 +14486,8 @@ fn noun_to_zpwt_arg(noun: NounHandle<'_>) -> Result<ZpwtArg, String> {
 
 fn noun_to_mane(noun: NounHandle<'_>) -> Result<Mane, String> {
     if let Ok(_) = noun.as_atom() {
-        return Ok(Mane::Tag(noun_to_term(noun)?));
+        //  a text node's mane is %$, which `open` must lower to 0, not '$'
+        return Ok(Mane::Tag(noun_to_cord(noun)?));
     }
     let cell = noun.as_cell().map_err(|_| "mane")?;
     Ok(Mane::TagSpace(

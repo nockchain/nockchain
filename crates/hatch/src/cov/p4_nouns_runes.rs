@@ -1332,6 +1332,119 @@ fn sail_call_mode_mcts_and_attributes() {
     assert!(parse_src(";div.y#x;\n").is_err());
 }
 
+/// `;/(text)`: a sail text node.
+fn text_node(text: &str) -> Tuna {
+    let beers = text.chars().map(|c| Beer::Char(c.to_string())).collect();
+    Tuna::Manx(Manx {
+        g: Marx {
+            n: Mane::Tag(s("")),
+            a: vec![(Mane::Tag(s("")), beers)],
+        },
+        c: vec![],
+    })
+}
+
+/// The sail in wide position `(f <src>)`.
+fn wide_sail(src: &str) -> Hoon {
+    match parse_one(&format!("(f {src})\n")) {
+        Hoon::CenCol(_, mut args) if args.len() == 1 => args.remove(0),
+        other => panic!("{src:?}: {other:?}"),
+    }
+}
+
+#[test]
+fn sail_text_links_scripts_and_blocks() {
+    // `;p: text` keeps `"`, embeds `{}`, and reads escapes as bytes
+    let Hoon::Xray(manx) = parse_one(";p: say \"hi\" {a} \\3b\\-\n") else {
+        panic!("expected sail");
+    };
+    assert!(
+        matches!(
+            manx.c.as_slice(),
+            [t1, Tuna::TunaTail(TunaTail::Tape(Hoon::ColTar(_))), t2]
+                if *t1 == text_node("say \"hi\" ") && *t2 == text_node(" ;-")
+        ),
+        "{:?}",
+        manx.c
+    );
+    // `; text` lines drop trailing spaces and end in a newline; a bare `;`
+    // is a newline node, as a child and as a whole hoon
+    let Hoon::Xray(manx) = parse_one(";div\n  ; a line  \n  ;\n==\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(manx.c, vec![text_node("a line\n"), text_node("\n")]);
+    assert_eq!(parse_one(";\n"), Hoon::MicTis(vec![text_node("\n")]));
+    // `/"url"` and `@"url"` are the href and src attributes
+    let Hoon::Xray(manx) = parse_one(";a/\"x\"(title \"t\");\n") else {
+        panic!("expected sail");
+    };
+    let names: Vec<_> = manx.g.a.iter().map(|(name, _)| name.clone()).collect();
+    assert_eq!(names, vec![Mane::Tag(s("href")), Mane::Tag(s("title"))]);
+    let Hoon::Xray(manx) = parse_one(";img@\"y\";\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(
+        manx.g.a,
+        vec![(Mane::Tag(s("src")), vec![Beer::Char(s("y"))])]
+    );
+    // `;script` and `;style` take `;` lines of raw text
+    let Hoon::Xray(manx) = parse_one(";script\n  ; x = \"{a}\";\n  ;\n==\n") else {
+        panic!("expected sail");
+    };
+    assert_eq!(manx.g.n, Mane::Tag(s("script")));
+    assert_eq!(manx.c, vec![text_node("x = \"{a}\";"), text_node("\n")]);
+    // a `"""` block drops the indentation of its `"""` and keeps blank lines
+    assert_eq!(
+        parse_one(";\"\"\"\n first\n  second\n\n \"\"\"\n"),
+        Hoon::MicTis(vec![text_node("first\n second\n\n")])
+    );
+    assert!(parse_src(";\"\"\"\n first\n  \"\"\"\n").is_err());
+    assert!(parse_src(";\"\"\"\nfirst\n \"\"\"\n").is_err());
+    // wide forms: a quote, `:` with a cord, and a parenthesized list
+    assert_eq!(
+        wide_sail(";\"a{b}c\""),
+        Hoon::MicTis(vec![
+            text_node("a"),
+            Tuna::TunaTail(TunaTail::Tape(Hoon::ColTar(vec![Hoon::Wing(wing("b"))]))),
+            text_node("c"),
+        ])
+    );
+    let Hoon::Xray(manx) = wide_sail(";div:'c'") else {
+        panic!("expected sail");
+    };
+    assert_eq!(manx.c, vec![text_node("c")]);
+    assert!(matches!(
+        wide_sail(";(\"a\" b -c)"),
+        Hoon::MicTis(items) if matches!(
+            items.as_slice(),
+            [_, Tuna::Manx(_), Tuna::TunaTail(TunaTail::Tape(_))]
+        )
+    ));
+    // a tall hoon takes only tall-form sail, and a tall element needs a tail
+    assert!(parse_src(";div\n").is_err());
+    assert!(parse_src(";div\n==\n").is_err());
+    // attributes are separated by `, `
+    assert!(parse_src(";div(a \"b\",c \"d\");\n").is_err());
+    // the `;` runes still come first
+    assert!(matches!(parse_one(";:(add 1 2)\n"), Hoon::MicCol(..)));
+    // a text node's mane %$ survives the noun round trip and opens to 0
+    let Tuna::Manx(text) = text_node("x") else {
+        unreachable!()
+    };
+    roundtrip(Hoon::Xray(text.clone()));
+    let Hoon::Pair(head, _) = open(Hoon::Xray(text)) else {
+        panic!("expected a cell");
+    };
+    assert!(
+        matches!(
+            *head,
+            Hoon::Pair(ref name, _)
+                if **name == Hoon::Rock(s("tas"), NounExpr::ParsedAtom(ParsedAtom::Small(0)))
+        ),
+        "{head:?}"
+    );
+}
+
 #[test]
 fn sigbuc_wide_sigzap_wide_bucpam_and_zapwut_forms() {
     for src in ["~$  %foo  5\n", "~$(%foo 5)\n"] {

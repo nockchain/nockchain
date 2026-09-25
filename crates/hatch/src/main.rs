@@ -199,8 +199,8 @@ fn hoon_wide_parser<'src>(
         rune_branch!(
             ';',
             choice((
-                sail_wide(hoon.clone(), hoon_wide.clone()),
                 mic_runes_wide(hoon_wide.clone(), spec_wide.clone()),
+                sail_wide(hoon.clone(), hoon_wide.clone(), linemap.clone()),
             ))
         ),
         just('.')
@@ -370,15 +370,13 @@ pub fn hoon_parser<'src>(
                 hoon_wide_no_trace.clone()
             )
         ),
-        rune_branch_pair!(
+        //  hoon-138 `++tall`: the `;` runes, then tall-form sail only
+        rune_branch!(
             ';',
             choice((
-                sail_tall(hoon.clone(), hoon_wide.clone()),
                 mic_runes_tall(hoon.clone(), spec.clone()),
-            )),
-            choice((
-                sail_wide(hoon.clone(), hoon_wide.clone()),
                 mic_runes_wide(hoon_wide.clone(), spec_wide.clone()),
+                sail_tall(hoon.clone(), hoon_wide.clone(), linemap.clone()),
             ))
         ),
         rune_branch_pair!(
@@ -386,7 +384,8 @@ pub fn hoon_parser<'src>(
             dot_runes_tall(hoon.clone(), spec.clone()),
             dot_runes_wide(hoon_wide.clone(), spec_wide.clone())
         ),
-        hoon_wide.clone().boxed(),
+        //  wide-form sail is not a tall hoon
+        just(';').not().ignore_then(hoon_wide.clone()).boxed(),
         noun_tall(hoon.clone()).boxed(),
     ];
 
