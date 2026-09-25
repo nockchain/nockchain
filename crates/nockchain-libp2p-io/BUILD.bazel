@@ -1,5 +1,5 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
 load("//rules_rust_ext:defs.bzl", "rust_test_with_miri")
 
@@ -9,21 +9,95 @@ cargo_lint_sources()
 
 exports_files(["Cargo.toml"])
 
+filegroup(
+    name = "peer_v3_proto_files",
+    srcs = glob(["proto/**/*.proto"]),
+)
+
+rust_binary(
+    name = "peer_v3_codegen",
+    srcs = [
+        "build.rs",
+        "build_support/schema.rs",
+    ],
+    aliases = aliases(),
+    crate_root = "build.rs",
+    edition = "2021",
+    deps = crate_deps([
+        "prost-build",
+        "prost-types",
+    ]),
+)
+
+genrule(
+    name = "generate_peer_v3_proto",
+    srcs = [":peer_v3_proto_files"],
+    outs = [
+        "generated/nockchain.peer.v3.rs",
+        "generated/peer_v3_descriptor.bin",
+    ],
+    cmd = """
+    EXEC_ROOT=$$PWD
+    CODEGEN_BIN=$$(realpath $(location :peer_v3_codegen))
+    OUT_DIR=$$(dirname $(location generated/peer_v3_descriptor.bin))
+    mkdir -p $$OUT_DIR/proto
+    for f in $(SRCS); do \
+      rel=$$(echo $$f | sed -E 's|^.*/proto/||'); \
+      mkdir -p $$OUT_DIR/proto/$$(dirname $$rel); \
+      cp $$f $$OUT_DIR/proto/$$rel; \
+    done
+    cd $$OUT_DIR
+    PROTOC=$$EXEC_ROOT/$(execpath //tools/protoc:protoc) \
+    OUT_DIR=. $$CODEGEN_BIN
+    test -f nockchain.peer.v3.rs
+    test -f peer_v3_descriptor.bin
+    """,
+    tools = [
+        ":peer_v3_codegen",
+        "//tools/protoc",
+    ],
+)
+
 rust_library(
     name = "nockchain-libp2p-io",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
+    compile_data = [":generate_peer_v3_proto"],
     edition = "2021",
     proc_macro_deps = [
         "//crates/nockvm/rust/nockvm_macros",
         "//crates/noun-serde-derive",
     ] + all_crate_deps(proc_macro = True),
+    rustc_env = {
+        "OUT_DIR": "$${pwd}/$(BINDIR)/crates/nockchain-libp2p-io/generated",
+    },
     deps = [
         "//crates/nockapp",
+        "//crates/nockchain-math",
         "//crates/nockvm/rust/ibig",
         "//crates/nockvm/rust/nockvm",
         "//crates/noun-serde",
     ] + all_crate_deps(),
+)
+
+rust_test(
+    name = "peer_v3_schema_test",
+    size = "small",
+    srcs = [
+        "build_support/schema.rs",
+        "tests/peer_v3_schema.rs",
+    ],
+    aliases = aliases(),
+    compile_data = [":generate_peer_v3_proto"],
+    crate_root = "tests/peer_v3_schema.rs",
+    edition = "2021",
+    rustc_env = {
+        "OUT_DIR": "$${pwd}/$(BINDIR)/crates/nockchain-libp2p-io/generated",
+    },
+    deps = crate_deps([
+        "prost",
+        "prost-types",
+    ]),
 )
 
 # Unit tests for nockchain-libp2p-io
@@ -32,6 +106,8 @@ rust_test(
     size = "small",
     compile_data = [
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
+        "//crates/nockchain-types/jams:v0/raw-tx.jam",
+        "//crates/nockchain-types/jams:v1/raw-tx.jam",
     ],
     crate = ":nockchain-libp2p-io",
     data = [
@@ -54,6 +130,8 @@ rust_test_with_miri(
     size = "small",
     compile_data = [
         "//crates/nockchain-libp2p-io/testdata:req_res_gen2_cbor_vectors.json",
+        "//crates/nockchain-types/jams:v0/raw-tx.jam",
+        "//crates/nockchain-types/jams:v1/raw-tx.jam",
     ],
     crate = ":nockchain-libp2p-io",
     data = [

@@ -17,7 +17,6 @@ use crate::messages::{
 };
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::P2PState;
-use crate::tip5_util::TIP5_BASE58_MAX_CHARS;
 use crate::traffic_cop;
 
 #[derive(Debug)]
@@ -52,75 +51,11 @@ pub(crate) enum BatchItemExecutionOutcome {
     Backpressure,
 }
 
-/// Minimal envelope metadata needed to project encoded `BatchResultItem` size.
-#[derive(Clone, Debug)]
-pub(crate) enum BatchItemResponseEnvelopeEstimate {
-    HeardBlock { block_id_bytes_upper_bound: usize },
-    HeardBlockWithTxs { block_id_bytes_upper_bound: usize },
-    HeardBlockRangeWithTxs { block_count: usize },
-    HeardTx { tx_id: String },
-    HeardElders,
-}
-impl BatchItemResponseEnvelopeEstimate {
-    pub(crate) fn from_request(request: &NockchainDataRequest) -> Self {
-        match request {
-            NockchainDataRequest::BlockByHeight(_) => Self::HeardBlock {
-                block_id_bytes_upper_bound: TIP5_BASE58_MAX_CHARS,
-            },
-            NockchainDataRequest::BlockWithTxsByHeight(_) => Self::HeardBlockWithTxs {
-                block_id_bytes_upper_bound: TIP5_BASE58_MAX_CHARS,
-            },
-            NockchainDataRequest::EldersById(_, _, _) => Self::HeardElders,
-            NockchainDataRequest::RawTransactionById(tx_id, _) => Self::HeardTx {
-                tx_id: tx_id.clone(),
-            },
-            NockchainDataRequest::BlockRangeWithTxs { len, .. } => Self::HeardBlockRangeWithTxs {
-                block_count: usize::from(*len),
-            },
-        }
-    }
-
-    /// Build a synthetic envelope for local CBOR sizing only.
-    pub(crate) fn into_sizing_envelope(self, message: Vec<u8>) -> ResponseEnvelope {
-        match self {
-            Self::HeardBlock {
-                block_id_bytes_upper_bound,
-            } => ResponseEnvelope::heard_block("1".repeat(block_id_bytes_upper_bound), message),
-            Self::HeardBlockWithTxs {
-                block_id_bytes_upper_bound,
-            } => ResponseEnvelope::heard_block_with_txs(
-                "1".repeat(block_id_bytes_upper_bound),
-                message,
-                Vec::new(),
-                Vec::new(),
-            ),
-            Self::HeardBlockRangeWithTxs { block_count } => {
-                let block_message_each = if block_count == 0 {
-                    Vec::new()
-                } else {
-                    let chunk = message.len() / block_count.max(1);
-                    vec![0u8; chunk.max(1)]
-                };
-                let blocks = (0..block_count)
-                    .map(|i| crate::messages::BundledBlockWithTxs {
-                        block_id: format!("{:0>width$}", i, width = TIP5_BASE58_MAX_CHARS),
-                        block_message: serde_bytes::ByteBuf::from(block_message_each.clone()),
-                        tx_envelopes: Vec::new(),
-                        unincluded_tx_ids: Vec::new(),
-                    })
-                    .collect();
-                ResponseEnvelope::heard_block_range_with_txs(blocks)
-            }
-            Self::HeardTx { tx_id } => ResponseEnvelope::heard_tx(tx_id, message),
-            Self::HeardElders => ResponseEnvelope::heard_elders(message),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct BatchItemResponseEstimate {
     pub(crate) request_kind: &'static str,
-    pub(crate) envelope: BatchItemResponseEnvelopeEstimate,
+    /// Estimated complete singleton response size, including framing. This
+    /// remains a heuristic: an unseen payload may exceed an observed hint.
     pub(crate) message_bytes: usize,
     pub(crate) source: &'static str,
 }
@@ -739,22 +674,18 @@ pub(crate) fn batch_error_result(item_id: u32, error: BatchErrorClass) -> BatchR
     }
 }
 
-pub(crate) fn req_res_message_encoded_bytes<T: serde::Serialize>(
-    message: &T,
-) -> Result<usize, NockAppError> {
-    let mut encoded = Vec::new();
-    cbor4ii::serde::to_writer(&mut encoded, message).map_err(|err| {
-        NockAppError::OtherError(format!(
-            "failed to encode req-res message with wire codec: {err}"
-        ))
-    })?;
-    Ok(encoded.len())
-}
+/// Exact protobuf response size, including the four-byte stream frame prefix.
 pub(crate) fn batch_result_encoded_bytes(
     results: &[BatchResultItem],
 ) -> Result<usize, NockAppError> {
-    req_res_message_encoded_bytes(&NockchainResponse::BatchResult {
+    crate::v3::encode_response(&NockchainResponse::BatchResult {
         results: results.to_vec(),
+    })
+    .map(|body| body.len().saturating_add(4))
+    .map_err(|err| {
+        NockAppError::OtherError(format!(
+            "failed to encode req-res response with wire codec: {err}"
+        ))
     })
 }
 pub(crate) fn batch_results_fit(
@@ -762,6 +693,18 @@ pub(crate) fn batch_results_fit(
     max_response_bytes: usize,
 ) -> Result<bool, NockAppError> {
     Ok(batch_result_encoded_bytes(results)? <= max_response_bytes)
+}
+
+pub(crate) fn response_envelope_result_encoded_bytes(
+    item_id: u32,
+    envelope: &ResponseEnvelope,
+) -> Result<usize, NockAppError> {
+    batch_result_encoded_bytes(&[BatchResultItem {
+        item_id,
+        status: BatchResultStatus::Result,
+        error: None,
+        envelope: Some(envelope.clone()),
+    }])
 }
 
 pub(crate) fn batch_backpressure_results(items: &[BatchRequestItem]) -> Vec<BatchResultItem> {
@@ -780,20 +723,37 @@ pub(crate) fn request_kind_name(request: &NockchainDataRequest) -> &'static str 
     }
 }
 
-pub(crate) fn estimated_result_item(
-    item_id: u32,
+/// Project a response without constructing fake consensus payloads.
+///
+/// Observed hints describe a complete singleton response. Add that estimate to
+/// the exact size of completed results plus the backpressure tail, retaining
+/// both frame/envelope overheads as conservative planning headroom. A hint or
+/// configured fallback can still underpredict an unseen payload: only the
+/// exact protobuf check after execution authorizes returning a response.
+pub(crate) fn estimated_batch_result_bytes(
+    existing_results: &[BatchResultItem],
     estimate: &BatchItemResponseEstimate,
-) -> BatchResultItem {
-    let message = vec![0u8; estimate.message_bytes];
-    let envelope = estimate.envelope.clone().into_sizing_envelope(message);
-
-    BatchResultItem {
-        item_id,
-        status: BatchResultStatus::Result,
-        error: None,
-        envelope: Some(envelope),
-    }
+) -> Result<usize, NockAppError> {
+    let existing_bytes = if existing_results.is_empty() {
+        0
+    } else {
+        batch_result_encoded_bytes(existing_results)?
+    };
+    Ok(existing_bytes.saturating_add(estimate.message_bytes))
 }
+
+fn bounded_batch_results(
+    results: Vec<BatchResultItem>,
+    max_response_bytes: usize,
+) -> Result<Vec<BatchResultItem>, NockAppError> {
+    if !batch_results_fit(&results, max_response_bytes)? {
+        return Err(NockAppError::OtherError(String::from(
+            "batch response exceeds exact protobuf byte limit",
+        )));
+    }
+    Ok(results)
+}
+
 pub(crate) async fn estimate_batch_request_item_response(
     item: &BatchRequestItem,
     limits: ReqResRuntimeLimits,
@@ -812,7 +772,6 @@ pub(crate) async fn estimate_batch_request_item_response(
 
     Ok(Some(BatchItemResponseEstimate {
         request_kind: request_kind_name(&request),
-        envelope: BatchItemResponseEnvelopeEstimate::from_request(&request),
         message_bytes,
         source,
     }))
@@ -915,13 +874,9 @@ where
         let mut projected_batch_bytes = None;
         let item_estimate = estimate_item(item).await?;
         if let Some(estimate) = item_estimate.as_ref() {
-            let projected = estimated_result_item(item.item_id, estimate);
-            let projected_single_bytes =
-                batch_result_encoded_bytes(std::slice::from_ref(&projected))?;
-            let mut projected_candidate = results.clone();
-            projected_candidate.push(projected);
-            projected_candidate.extend(batch_backpressure_results(tail));
-            let projected_total_bytes = batch_result_encoded_bytes(&projected_candidate)?;
+            let projected_single_bytes = estimate.message_bytes;
+            let existing_results = batch_results_with_backpressure_tail(&results, tail);
+            let projected_total_bytes = estimated_batch_result_bytes(&existing_results, estimate)?;
             projected_item_bytes = Some(projected_single_bytes);
             projected_batch_bytes = Some(projected_total_bytes);
 
@@ -932,7 +887,7 @@ where
                     "estimated_budget_exhausted"
                 };
                 warn!(
-                    generation = "gen2",
+                    generation = "gen3",
                     item_id = item.item_id,
                     request_kind = estimate.request_kind,
                     estimate_source = estimate.source,
@@ -944,14 +899,17 @@ where
                     "Stopping batch before executing item because estimate exceeds response budget"
                 );
                 if projected_single_bytes > max_response_bytes {
-                    return Ok(batch_results_with_replacement_tail(
-                        &results,
-                        item,
-                        BatchErrorClass::TooLarge,
-                        tail,
-                    ));
+                    return bounded_batch_results(
+                        batch_results_with_replacement_tail(
+                            &results,
+                            item,
+                            BatchErrorClass::TooLarge,
+                            tail,
+                        ),
+                        max_response_bytes,
+                    );
                 }
-                return Ok(retryable_tail);
+                return bounded_batch_results(retryable_tail, max_response_bytes);
             }
         }
 
@@ -974,7 +932,7 @@ where
                         BatchErrorClass::TooLarge
                     };
                 warn!(
-                    generation = "gen2",
+                    generation = "gen3",
                     item_id = item.item_id,
                     projected_item_bytes,
                     projected_batch_bytes,
@@ -988,9 +946,10 @@ where
                     },
                     "Executed batch item exceeded response budget"
                 );
-                return Ok(batch_results_with_replacement_tail(
-                    &results, item, replacement_error, tail,
-                ));
+                return bounded_batch_results(
+                    batch_results_with_replacement_tail(&results, item, replacement_error, tail),
+                    max_response_bytes,
+                );
             }
             BatchItemExecutionOutcome::Failed(error) => {
                 let failed = batch_error_result(item.item_id, error);
@@ -1002,19 +961,22 @@ where
                     continue;
                 }
 
-                return Ok(batch_results_with_replacement_tail(
-                    &results,
-                    item,
-                    BatchErrorClass::Backpressure,
-                    tail,
-                ));
+                return bounded_batch_results(
+                    batch_results_with_replacement_tail(
+                        &results,
+                        item,
+                        BatchErrorClass::Backpressure,
+                        tail,
+                    ),
+                    max_response_bytes,
+                );
             }
             BatchItemExecutionOutcome::Backpressure => {
-                return Ok(retryable_tail);
+                return bounded_batch_results(retryable_tail, max_response_bytes);
             }
         }
     }
-    Ok(results)
+    bounded_batch_results(results, max_response_bytes)
 }
 
 pub(crate) async fn execute_batch_request_item(
@@ -1028,7 +990,7 @@ pub(crate) async fn execute_batch_request_item(
     if batch_request_item_too_large(item, limits) {
         warn!(
             peer = %peer,
-            generation = "gen2",
+            generation = "gen3",
             item_id = item.item_id,
             observed_bytes = item.message.len(),
             configured_cap = limits.gen2_item_max_bytes,

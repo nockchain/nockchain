@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-09-14
+Last Reviewed: 2026-09-25
 Canonical/Legacy: Canonical (protocol authority entrypoint for the nockchain repository)
 
 This is the canonical protocol index for the nockchain repository.
@@ -16,6 +16,7 @@ If protocol guidance conflicts with workflow or crate docs, this page and the li
 
 ## Current Release Track
 
+- Proposed peer protocol v3 transport cutover: [`018-ecclesia.md`](./changelog/protocol/018-ecclesia.md), version `0.1.18`, rollout-gated (`activation_height = 0`), target unset.
 - Proposed ZK-PoW `%5` and 70/30 puzzle allocation: [`017-anthropos.md`](./changelog/protocol/017-anthropos.md), version `0.1.17`, activation height `147500`, target unset.
 - Most recently activated dual proof-of-work upgrade: [`016-logos.md`](./changelog/protocol/016-logos.md), version `0.1.16`, activation height `126000`.
 - Proposed emergency proof/ASERT activation: [`015-zoe.md`](./changelog/protocol/015-zoe.md), version `0.1.15`, activation height `119400`, target `2026-08-06`.
@@ -31,6 +32,7 @@ Legend:
 
 | Seq | Codename                                 | Version | Status     | Activation Height | Activation Target | Spec                                                                                                  |
 | --- | ---------------------------------------- | ------- | ---------- | ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
+| 018 | Ecclesia                                 | 0.1.18  | draft      | 0                 | -                 | [`018-ecclesia.md`](./changelog/protocol/018-ecclesia.md)                                             |
 | 017 | Anthropos                                | 0.1.17  | draft      | 147500            | -                 | [`017-anthropos.md`](./changelog/protocol/017-anthropos.md)                                           |
 | 016 | Logos                                    | 0.1.16  | activated  | 126000            | -                 | [`016-logos.md`](./changelog/protocol/016-logos.md)                                                   |
 | 015 | Zoe                                      | 0.1.15  | draft      | 119400            | 2026-08-06        | [`015-zoe.md`](./changelog/protocol/015-zoe.md)                                                       |

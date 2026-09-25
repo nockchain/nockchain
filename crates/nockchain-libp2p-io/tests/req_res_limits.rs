@@ -13,7 +13,7 @@ use nockchain_libp2p_io::config::LibP2PConfig;
 use nockchain_libp2p_io::peer_stats::PeerReqResGeneration;
 use nockchain_libp2p_io::test_support::{
     BatchRequestItem, BatchResultItem, BatchResultStatus, NockchainRequest, NockchainResponse,
-    ReqResFailureObservabilityProbe, ResponseEnvelope,
+    ReqResFailureObservabilityProbe,
 };
 use serde_bytes::ByteBuf;
 
@@ -25,15 +25,12 @@ fn limited_gen2_config(max_bytes: usize) -> LibP2PConfig {
 }
 
 fn encoded_request_bytes(request: &NockchainRequest) -> usize {
-    cbor4ii::serde::to_vec(Vec::new(), request)
-        .expect("request should encode")
-        .len()
+    nockchain_libp2p_io::test_support::v3_request_wire_size(request).expect("request should encode")
 }
 
 fn encoded_response_bytes(response: &NockchainResponse) -> usize {
-    cbor4ii::serde::to_vec(Vec::new(), response)
+    nockchain_libp2p_io::test_support::v3_response_wire_size(response)
         .expect("response should encode")
-        .len()
 }
 
 fn timeout_gen2_config(timeout_secs: u64) -> LibP2PConfig {
@@ -53,10 +50,16 @@ async fn req_res_oversize_request_fails_on_codec_boundary() {
     let request = NockchainRequest::BatchRequest {
         pow: Default::default(),
         nonce: 0,
-        items: vec![BatchRequestItem {
-            item_id: 1,
-            message: ByteBuf::from(vec![0xAA; 256]),
-        }],
+        items: (1..=16)
+            .map(|item_id| BatchRequestItem {
+                item_id,
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(u64::from(
+                        item_id,
+                    )),
+                ),
+            })
+            .collect(),
     };
     let encoded_bytes = encoded_request_bytes(&request);
     assert!(encoded_bytes > max_bytes);
@@ -110,7 +113,9 @@ async fn req_res_oversize_response_fails_on_codec_boundary() {
         nonce: 0,
         items: vec![BatchRequestItem {
             item_id: 7,
-            message: ByteBuf::from(b"small-request".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(100),
+            ),
         }],
     };
     let response = NockchainResponse::BatchResult {
@@ -118,10 +123,7 @@ async fn req_res_oversize_response_fails_on_codec_boundary() {
             item_id: 7,
             status: BatchResultStatus::Result,
             error: None,
-            envelope: Some(ResponseEnvelope::heard_tx(
-                String::from("oversize-tx"),
-                vec![0xBB; 256],
-            )),
+            envelope: Some(harness::valid_tx_envelope(20, 256)),
         }],
     };
     let encoded_bytes = encoded_response_bytes(&response);
@@ -182,7 +184,9 @@ async fn req_res_malformed_top_level_request_bytes_fail_before_decode() {
         nonce: 0,
         items: vec![BatchRequestItem {
             item_id: 8,
-            message: ByteBuf::from(b"small-request".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(100),
+            ),
         }],
     };
     let malformed_request = vec![0xA1];
@@ -244,7 +248,9 @@ async fn req_res_malformed_top_level_response_bytes_fail_before_decode() {
         nonce: 0,
         items: vec![BatchRequestItem {
             item_id: 9,
-            message: ByteBuf::from(b"small-request".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(100),
+            ),
         }],
     };
     let malformed_response = vec![0xA1];
@@ -311,10 +317,16 @@ async fn req_res_oversize_request_recovery_with_small_followup() {
     let oversize_request = NockchainRequest::BatchRequest {
         pow: Default::default(),
         nonce: 0,
-        items: vec![BatchRequestItem {
-            item_id: 1,
-            message: ByteBuf::from(vec![0xAA; 256]),
-        }],
+        items: (1..=16)
+            .map(|item_id| BatchRequestItem {
+                item_id,
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(u64::from(
+                        item_id,
+                    )),
+                ),
+            })
+            .collect(),
     };
     assert!(encoded_request_bytes(&oversize_request) > max_bytes);
 
@@ -354,7 +366,9 @@ async fn req_res_oversize_request_recovery_with_small_followup() {
         nonce: 1,
         items: vec![BatchRequestItem {
             item_id: 2,
-            message: ByteBuf::from(b"tiny".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(101),
+            ),
         }],
     };
     let small_response = NockchainResponse::BatchResult {
@@ -362,7 +376,7 @@ async fn req_res_oversize_request_recovery_with_small_followup() {
             item_id: 2,
             status: BatchResultStatus::Result,
             error: None,
-            envelope: Some(ResponseEnvelope::heard_tx(String::from("small-tx"), b"ok")),
+            envelope: Some(harness::valid_tx_envelope(21, 0)),
         }],
     };
     assert!(encoded_request_bytes(&small_request) <= max_bytes);
@@ -425,7 +439,9 @@ async fn req_res_malformed_top_level_request_recovery_with_small_followup() {
         nonce: 0,
         items: vec![BatchRequestItem {
             item_id: 10,
-            message: ByteBuf::from(b"decode-me".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(102),
+            ),
         }],
     };
     let observation = run_request_until_outbound_failure_with_actions(
@@ -459,7 +475,9 @@ async fn req_res_malformed_top_level_request_recovery_with_small_followup() {
         nonce: 1,
         items: vec![BatchRequestItem {
             item_id: 11,
-            message: ByteBuf::from(b"tiny".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(101),
+            ),
         }],
     };
     let small_response = NockchainResponse::BatchResult {
@@ -467,7 +485,7 @@ async fn req_res_malformed_top_level_request_recovery_with_small_followup() {
             item_id: 11,
             status: BatchResultStatus::Result,
             error: None,
-            envelope: Some(ResponseEnvelope::heard_tx(String::from("small-tx"), b"ok")),
+            envelope: Some(harness::valid_tx_envelope(21, 0)),
         }],
     };
 
@@ -520,7 +538,9 @@ async fn req_res_oversize_response_recovery_with_small_followup() {
         nonce: 0,
         items: vec![BatchRequestItem {
             item_id: 7,
-            message: ByteBuf::from(b"small-request".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(100),
+            ),
         }],
     };
     let oversize_response = NockchainResponse::BatchResult {
@@ -528,10 +548,7 @@ async fn req_res_oversize_response_recovery_with_small_followup() {
             item_id: 7,
             status: BatchResultStatus::Result,
             error: None,
-            envelope: Some(ResponseEnvelope::heard_tx(
-                String::from("oversize-tx"),
-                vec![0xBB; 256],
-            )),
+            envelope: Some(harness::valid_tx_envelope(20, 256)),
         }],
     };
     assert!(encoded_response_bytes(&oversize_response) > max_bytes);
@@ -578,7 +595,9 @@ async fn req_res_oversize_response_recovery_with_small_followup() {
         nonce: 1,
         items: vec![BatchRequestItem {
             item_id: 8,
-            message: ByteBuf::from(b"tiny".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(101),
+            ),
         }],
     };
     let small_response = NockchainResponse::BatchResult {
@@ -586,7 +605,7 @@ async fn req_res_oversize_response_recovery_with_small_followup() {
             item_id: 8,
             status: BatchResultStatus::Result,
             error: None,
-            envelope: Some(ResponseEnvelope::heard_tx(String::from("small-tx"), b"ok")),
+            envelope: Some(harness::valid_tx_envelope(21, 0)),
         }],
     };
     assert!(encoded_request_bytes(&small_request) <= max_bytes);
@@ -649,7 +668,9 @@ async fn req_res_malformed_top_level_response_recovery_with_small_followup() {
         nonce: 0,
         items: vec![BatchRequestItem {
             item_id: 10,
-            message: ByteBuf::from(b"decode-me".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(102),
+            ),
         }],
     };
     let observation = run_request_until_outbound_failure_with_action(
@@ -681,7 +702,9 @@ async fn req_res_malformed_top_level_response_recovery_with_small_followup() {
         nonce: 1,
         items: vec![BatchRequestItem {
             item_id: 11,
-            message: ByteBuf::from(b"tiny".to_vec()),
+            message: ByteBuf::from(
+                nockchain_libp2p_io::test_support::jam_block_by_height_request(101),
+            ),
         }],
     };
     let small_response = NockchainResponse::BatchResult {
@@ -689,7 +712,7 @@ async fn req_res_malformed_top_level_response_recovery_with_small_followup() {
             item_id: 11,
             status: BatchResultStatus::Result,
             error: None,
-            envelope: Some(ResponseEnvelope::heard_tx(String::from("small-tx"), b"ok")),
+            envelope: Some(harness::valid_tx_envelope(21, 0)),
         }],
     };
 
@@ -759,11 +782,15 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
         items: vec![
             BatchRequestItem {
                 item_id: 1,
-                message: ByteBuf::from(b"gen2-timeout-item-1".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(103),
+                ),
             },
             BatchRequestItem {
                 item_id: 2,
-                message: ByteBuf::from(b"gen2-timeout-item-2".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(104),
+                ),
             },
         ],
     };
@@ -800,7 +827,7 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
         .iter()
         .find(|entry| entry.peer_id == responder_peer_id.to_base58())
         .expect("expected peer stats entry for responder");
-    assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
+    assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen3);
     assert_eq!(entry.request_count, 2);
     assert_eq!(entry.failure_count, 2);
     assert_eq!(entry.timeout_count, 2);
@@ -825,7 +852,9 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
             nonce: 1,
             items: vec![BatchRequestItem {
                 item_id: 7,
-                message: ByteBuf::from(b"gen2-timeout-followup".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(105),
+                ),
             }],
         },
         followup_response.clone(),
@@ -835,7 +864,7 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
     assert_eq!(observed, followup_response);
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("outbound failure"));
     assert!(rendered.contains("shape=batch-result"));
 }

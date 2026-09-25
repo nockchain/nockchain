@@ -1,0 +1,102 @@
+syntax = "proto3";
+package nockchain.peer.v3;
+
+import "nockchain/peer/v3/common.proto";
+
+// Wire transaction versions are consensus versions, independent of protocol v3.
+// All scalar fields with optional presence are required unless stated otherwise.
+// Every numeric scalar and limb must be less than the base-field modulus
+// 18446744069414584321. Embedded NounValue atoms must also be based.
+// Sets and maps use repeated entries so duplicate evidence survives decoding.
+// Their wire order is insignificant; duplicate keys/entries are invalid. The
+// receiver reconstructs canonical Hoon treaps before consensus interpretation.
+message Transaction {
+  oneof version {
+    TxLegacy legacy = 1;
+    TxV1 v1 = 2;
+  }
+}
+message TxLegacy {
+  Hash id = 1;
+  TxInputs inputs = 2;
+  TxTimeRange timelock_range = 3;
+  optional fixed64 total_fees = 4;
+}
+message TxV1 { Hash id = 1; TxSpends spends = 2; }
+message TxName { Hash first = 1; Hash last = 2; }
+message TxSource { Hash hash = 1; optional bool is_coinbase = 2; }
+// An absent bound means unbounded; a present zero remains a present zero.
+message TxTimeRange { optional fixed64 min = 1; optional fixed64 max = 2; }
+message TxTimeIntent { TxTimeRange absolute = 1; TxTimeRange relative = 2; }
+// Coordinates have exactly six base-field limbs each; infinity has explicit presence.
+message TxPubkey { repeated fixed64 x = 1; repeated fixed64 y = 2; optional bool infinity = 3; }
+// Each component has exactly eight base-field limbs.
+message TxSchnorrSignature { repeated fixed64 challenge = 1; repeated fixed64 signature = 2; }
+message TxSignatures { repeated TxSignatureEntry entries = 1; }
+message TxSignatureEntry { TxPubkey key = 1; TxSchnorrSignature value = 2; }
+message TxLegacyLock { optional fixed64 keys_required = 1; repeated TxPubkey pubkeys = 2; }
+message TxLegacyNote {
+  optional fixed64 origin_page = 1;
+  TxTimeIntent timelock = 2; // Absent means no timelock.
+  TxName name = 3;
+  TxLegacyLock lock = 4;
+  TxSource source = 5;
+  optional fixed64 assets = 6;
+}
+message TxInputs { repeated TxInputEntry entries = 1; }
+message TxInputEntry { TxName key = 1; TxLegacyInput value = 2; }
+message TxLegacyInput { TxLegacyNote note = 1; TxLegacySpend spend = 2; }
+message TxLegacySpend {
+  TxSignatures signature = 1; // Absent means unsigned; present empty is distinct.
+  TxLegacySeeds seeds = 2;
+  optional fixed64 fee = 3;
+}
+message TxLegacySeeds { repeated TxLegacySeed entries = 1; }
+message TxLegacySeed {
+  TxSource output_source = 1; // Absent means no output-source constraint.
+  TxLegacyLock recipient = 2;
+  TxTimeIntent timelock_intent = 3; // Absent means no timelock intent.
+  optional fixed64 gift = 4;
+  Hash parent_hash = 5;
+}
+message TxSpends { repeated TxSpendEntry entries = 1; }
+message TxSpendEntry { TxName key = 1; TxSpend value = 2; }
+message TxSpend { oneof kind { TxSpend0 legacy = 1; TxSpend1 witness = 2; } }
+message TxSpend0 { TxSignatures signature = 1; TxSeeds seeds = 2; optional fixed64 fee = 3; }
+message TxSpend1 { TxWitness witness = 1; TxSeeds seeds = 2; optional fixed64 fee = 3; }
+message TxSeeds { repeated TxSeed entries = 1; }
+message TxSeed {
+  TxSource output_source = 1; // Absent means no output-source constraint.
+  Hash lock_root = 2;
+  TxNoteData note_data = 3;
+  optional fixed64 gift = 4;
+  Hash parent_hash = 5;
+}
+// Consensus note-data is a map from a based @tas atom to an arbitrary based noun.
+// The numeric tag preserves every consensus value without UTF-8 normalization.
+message TxNoteData { repeated TxNoteDataEntry entries = 1; }
+message TxNoteDataEntry { optional fixed64 key = 1; NounValue value = 2; }
+message TxWitness {
+  TxLockMerkleProof lock_merkle_proof = 1;
+  TxPkhSignatures pkh = 2;
+  TxPreimages hax = 3;
+  // Consensus witness.tim is always the null atom, so no wire field represents it.
+}
+message TxPkhSignatures { repeated TxPkhSignatureEntry entries = 1; }
+message TxPkhSignatureEntry { Hash key = 1; TxPkhSignature value = 2; }
+message TxPkhSignature { TxPubkey pubkey = 1; TxSchnorrSignature signature = 2; }
+message TxPreimages { repeated TxPreimage entries = 1; }
+message TxPreimage { Hash key = 1; NounValue value = 2; }
+message TxLockMerkleProof {
+  oneof kind { TxLockMerkleBody stub = 1; TxLockMerkleBody full = 2; }
+}
+message TxLockMerkleBody { TxSpendCondition spend_condition = 1; optional fixed64 axis = 2; TxMerkleProof proof = 3; }
+message TxMerkleProof { Hash root = 1; repeated Hash path = 2; }
+message TxSpendCondition { repeated TxLockPrimitive primitives = 1; }
+message TxLockPrimitive {
+  oneof kind { TxPkh pkh = 1; TxTim tim = 2; TxHax hax = 3; TxBurn burn = 4; }
+}
+message TxPkh { optional fixed64 threshold = 1; repeated Hash hashes = 2; }
+message TxTim { TxTimeRange relative = 1; TxTimeRange absolute = 2; }
+message TxHax { repeated Hash hashes = 1; }
+message TxBurn {}

@@ -19,6 +19,7 @@ pub mod test_support; // Reusable req-res integration harness support
 pub mod tip5_util; // tip5 <> string conversion
 mod tracked_join_set; // Custom task set which allows tracking named tasks
 mod traffic_cop; // Network traffic prioritization
+mod v3; // Checked protobuf boundary for the peer protocol
 
 #[cfg(test)]
 mod cbor_tests;

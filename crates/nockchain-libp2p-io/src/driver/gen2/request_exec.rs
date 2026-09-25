@@ -62,7 +62,6 @@ struct RangeBundleCandidate {
     block_cache_slab: NounSlab,
     block: BundledBlockWithTxs,
     tx_cache_entries: Vec<(String, NounSlab)>,
-    message_bytes_hint: usize,
 }
 
 pub(crate) async fn execute_request_item(
@@ -355,7 +354,6 @@ pub(crate) async fn execute_request_item(
             let mut bundles: Vec<BundledBlockWithTxs> = Vec::with_capacity(prepared_entries.len());
             let mut block_cache_entries: Vec<(u64, NounSlab)> = Vec::new();
             let mut tx_cache_entries: Vec<(String, NounSlab)> = Vec::new();
-            let mut total_response_bytes: usize = 0;
 
             for entry in prepared_entries {
                 let candidate = prepare_range_bundle_candidate(entry, item_cap);
@@ -388,8 +386,6 @@ pub(crate) async fn execute_request_item(
                     block_cache_entries.push((candidate.height, candidate.block_cache_slab));
                     tx_cache_entries.extend(candidate.tx_cache_entries);
                 }
-                total_response_bytes =
-                    total_response_bytes.saturating_add(candidate.message_bytes_hint);
                 bundles.push(candidate.block);
             }
 
@@ -416,12 +412,13 @@ pub(crate) async fn execute_request_item(
                 }
             }
 
+            let response_bytes = response_envelope_result_encoded_bytes(u32::MAX, &envelope)?;
             driver_state.lock().await.record_response_message_hint(
                 &NockchainDataRequest::BlockRangeWithTxs {
                     start_height,
                     len: accepted_len,
                 },
-                total_response_bytes,
+                response_bytes,
             );
 
             return Ok(RequestExecutionOutcome::Result { envelope });
@@ -436,10 +433,11 @@ pub(crate) async fn execute_request_item(
             )))
         }
     };
+    let response_bytes = response_envelope_result_encoded_bytes(u32::MAX, &envelope)?;
     driver_state
         .lock()
         .await
-        .record_response_message_hint(&request_for_hint, envelope.message.len());
+        .record_response_message_hint(&request_for_hint, response_bytes);
 
     Ok(RequestExecutionOutcome::Result { envelope })
 }
@@ -512,7 +510,6 @@ fn prepare_range_bundle_candidate(
             unincluded_tx_ids,
         },
         tx_cache_entries,
-        message_bytes_hint: entry_total,
     }
 }
 
@@ -708,9 +705,10 @@ async fn complete_bundle_response(
     );
     envelope.validate()?;
 
+    let response_bytes = response_envelope_result_encoded_bytes(u32::MAX, &envelope)?;
     let mut state_guard = driver_state.lock().await;
     let request_for_hint = NockchainDataRequest::BlockWithTxsByHeight(height);
-    state_guard.record_response_message_hint(&request_for_hint, total_bytes);
+    state_guard.record_response_message_hint(&request_for_hint, response_bytes);
 
     Ok(RequestExecutionOutcome::Result { envelope })
 }
@@ -1064,6 +1062,9 @@ fn scry_some_slab(payload: NounHandle<'_>) -> NounSlab {
 #[cfg(test)]
 mod tests {
     use nockapp::noun::slab::NounSlab;
+    use nockapp::utils::make_tas;
+    use nockvm::noun::{NounAllocator, D, T};
+    use nockvm_macros::tas;
     use serde_bytes::ByteBuf;
 
     use crate::driver::gen2::request_exec::{
@@ -1071,18 +1072,47 @@ mod tests {
     };
     use crate::messages::{BundledBlockWithTxs, NockchainDataRequest};
 
-    fn range_candidate(height: u64, block_bytes: usize) -> RangeBundleCandidate {
+    fn range_candidate(height: u64, message_items: usize) -> RangeBundleCandidate {
+        let mut slab: NounSlab = NounSlab::new();
+        let digest = T(&mut slab, &[D(height + 1), D(0), D(0), D(0), D(0)]);
+        let parent = T(&mut slab, &[D(height), D(0), D(0), D(0), D(0)]);
+        let big_num = T(&mut slab, &[D(tas!(b"bn")), D(0)]);
+        let mut message = D(0);
+        for index in (0..message_items).rev() {
+            message = T(&mut slab, &[D(index as u64 + 1), message]);
+        }
+        let page = T(
+            &mut slab,
+            &[
+                D(1),
+                digest,
+                D(0),
+                parent,
+                D(0),
+                D(0),
+                D(0),
+                D(0),
+                big_num,
+                big_num,
+                D(height),
+                message,
+            ],
+        );
+        let tag = make_tas(&mut slab, "heard-block").as_noun();
+        let fact = T(&mut slab, &[tag, page]);
+        slab.set_root(fact);
+        let block_id = crate::tip5_util::tip5_hash_to_base58(digest, &slab.noun_space())
+            .expect("test block id should encode");
         RangeBundleCandidate {
             height,
             block_cache_slab: NounSlab::new(),
             block: BundledBlockWithTxs {
-                block_id: format!("block-{height}"),
-                block_message: ByteBuf::from(vec![0xAB; block_bytes]),
+                block_id,
+                block_message: ByteBuf::from(slab.jam().as_ref().to_vec()),
                 tx_envelopes: Vec::new(),
                 unincluded_tx_ids: Vec::new(),
             },
             tx_cache_entries: Vec::new(),
-            message_bytes_hint: block_bytes,
         }
     }
 

@@ -737,10 +737,9 @@ impl P2PState {
     }
 
     fn encoded_request_bytes(request: &NockchainRequest) -> u64 {
-        let mut encoded = Vec::new();
-        cbor4ii::serde::to_writer(&mut encoded, request)
-            .map(|_| encoded.len() as u64)
-            .unwrap_or(0)
+        crate::v3::encode_request(request)
+            .map(|encoded| (encoded.len() as u64).saturating_add(4))
+            .unwrap_or(u64::MAX)
     }
 
     fn peer_stats_snapshot(&self) -> PeerStatsSnapshot {
@@ -752,7 +751,7 @@ impl P2PState {
                 let stats = self.peer_stats.get(&peer_id).cloned().unwrap_or_default();
                 PeerStatsEntry {
                     peer_id: peer_id.to_base58(),
-                    protocol_generation: PeerReqResGeneration::Gen2,
+                    protocol_generation: PeerReqResGeneration::Gen3,
                     request_count: stats.request_count,
                     bytes_sent: stats.bytes_sent,
                     bytes_received: stats.bytes_received,
@@ -2973,7 +2972,6 @@ mod tests {
 
     use libp2p::core::transport::PortUse;
     use libp2p::core::{ConnectedPoint, Endpoint};
-    use libp2p::request_response;
     use libp2p::swarm::ConnectionId;
     use nockapp::noun::slab::NounSlab;
     use nockapp::AtomExt;
@@ -2981,9 +2979,10 @@ mod tests {
     use serde_bytes::ByteBuf;
 
     use super::*;
+    use crate::behaviour::build_request_response_behaviour;
     use crate::config::{LibP2PConfig, PeerExclusionConfig};
     use crate::ip_block::PeerExclusions;
-    use crate::messages::{BatchRequestItem, NockchainDataRequest, NockchainResponse};
+    use crate::messages::{BatchRequestItem, NockchainDataRequest};
     use crate::p2p_util::PeerIdExt;
 
     pub static LIBP2P_CONFIG: LazyLock<LibP2PConfig> = LazyLock::new(LibP2PConfig::default);
@@ -2994,14 +2993,7 @@ mod tests {
     }
 
     fn fresh_outbound_request_id() -> OutboundRequestId {
-        let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
-            request_response::cbor::Behaviour::new(
-                [(
-                    libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
-                    request_response::ProtocolSupport::Full,
-                )],
-                request_response::Config::default(),
-            );
+        let mut behaviour = build_request_response_behaviour(&LIBP2P_CONFIG);
         behaviour.send_request(
             &PeerId::random(),
             NockchainRequest::AuthenticatedGossip {
@@ -3198,16 +3190,7 @@ mod tests {
         );
         let mut state = P2PState::new(metrics, LIBP2P_CONFIG.seen_tx_clear_interval);
         let peer_id = PeerId::random();
-        let mut request_id_source: request_response::cbor::Behaviour<
-            NockchainRequest,
-            NockchainResponse,
-        > = request_response::cbor::Behaviour::new(
-            [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
-                request_response::ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        );
+        let mut request_id_source = build_request_response_behaviour(&LIBP2P_CONFIG);
         let single_request_id = request_id_source.send_request(
             &PeerId::random(),
             NockchainRequest::AuthenticatedGossip {
@@ -3527,7 +3510,7 @@ mod tests {
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry");
 
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen3);
         assert_eq!(entry.request_count, 1);
         assert!(entry.bytes_sent > 0);
         assert_eq!(entry.bytes_received, 256);
@@ -3635,7 +3618,7 @@ mod tests {
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry");
 
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen3);
         assert_eq!(entry.request_count, 1);
         assert_eq!(entry.bytes_received, 128);
         assert!(entry.average_round_trip_ms >= 15.0);
@@ -3691,7 +3674,7 @@ mod tests {
             .iter()
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry");
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen3);
         assert_eq!(entry.request_count, 1);
     }
 
@@ -3726,7 +3709,7 @@ mod tests {
         );
         assert_eq!(
             peer_stats_registry.snapshot().peers[0].protocol_generation,
-            PeerReqResGeneration::Gen2
+            PeerReqResGeneration::Gen3
         );
 
         state.lost_connection(first_connection_id);
@@ -3752,7 +3735,7 @@ mod tests {
             .iter()
             .find(|entry| entry.peer_id == peer_id.to_base58())
             .expect("expected peer stats entry after reconnect");
-        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
+        assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen3);
     }
 
     #[test]

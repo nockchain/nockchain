@@ -7,6 +7,7 @@ pub enum PeerReqResGeneration {
     Unknown,
     Gen1,
     Gen2,
+    Gen3,
 }
 
 #[derive(Debug, Clone, PartialEq)]
