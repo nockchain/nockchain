@@ -1846,9 +1846,8 @@ fn autoname_follows_hoon_138_autoname() {
 }
 
 #[test]
-#[ignore = "the parser spells @ as aura \"\", but autoname only maps \"$\" to %atom \
-            (utils.rs ~2999); see coverage/p1/divergent/p1_autoname_bare_atom.hoon"]
 fn autoname_names_a_bare_atom_atom() {
+    // the parser spells a bare @ as aura "", the desugarer as "$"
     assert_eq!(autoname(atom_spec("")), Some("atom".to_string()));
 }
 

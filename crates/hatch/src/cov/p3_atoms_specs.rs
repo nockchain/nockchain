@@ -1476,8 +1476,8 @@ fn spans_starting_at_doc_blocks() {
 #[test]
 fn spans_after_plain_docs_between_tisfas() {
     // skip_plain_doc_before_equals_slash_start: a plain doc between two =/
-    // binders is not the second binder's anchor; a +link naming the binder,
-    // a larg doc, or a non-doc line keeps the walked-back start.
+    // binders is not the second binder's anchor; a doccord (larg, or smol
+    // with any links) or a non-doc line keeps the walked-back start.
     let cases = [
         "=/  a  1\n::  plain\n=/  b  2\nb\n", "=/  a  1\n::  +b: names it\n=/  b  2\nb\n",
         "=/  a  1\n::    larg\n=/  b  2\nb\n", "=/  a  1\n::  one\n\n::  two\n=/  b  2\nb\n",
@@ -1515,8 +1515,11 @@ fn spans_after_plain_docs_between_tisfas() {
     // so does a larg doc
     let src = "=/  a  1\n::    larg\n=/  b  2\nb\n";
     assert_eq!(spot_start(src, at(src, "=/  b"), src.len()), (2, 1));
-    // a smol link naming something else is skipped like a plain doc (hoonc
-    // anchors at the doc: divergent/p3_spot_doc_link_before_tisfas.hoon)
+    // so does a smol link naming something else (it is still a doccord:
+    // regressions/p3_spot_doc_link_before_tisfas.hoon)
     let src = "=/  a  1\n::  +c: another\n=/  b  2\nb\n";
+    assert_eq!(spot_start(src, at(src, "=/  b"), src.len()), (2, 1));
+    // but five aces make neither a larg nor a smol doc
+    let src = "=/  a  1\n::     plain\n=/  b  2\nb\n";
     assert_eq!(spot_start(src, at(src, "=/  b"), src.len()), (3, 1));
 }

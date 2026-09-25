@@ -701,6 +701,26 @@ fn lower_micsig_rejects_empty_and_chains_each_rule() {
 }
 
 #[test]
+fn empty_term_face_is_the_zero_atom() {
+    // A zero-byte atom is malformed (normalizing it reads out of bounds), so
+    // the empty term, like `$`, is spelled 0.
+    let mut slab: NounSlab = NounSlab::new();
+    for term in ["", "$"] {
+        let noun = term_to_noun(&mut slab, term);
+        assert!(unsafe { noun.raw_equals(&D(0)) }, "{term:?}");
+    }
+    let face = |body: Hoon| {
+        Hoon::TisLus(
+            bx(Hoon::KetTis(Skin::Term(String::new()), bx(rock("ud", 5)))),
+            bx(body),
+        )
+    };
+    mint_gen_jam(&face(Hoon::Axis(2u64.into()))).expect("mint");
+    let err = mint_gen_jam(&face(Hoon::Limb("atom".to_string()))).unwrap_err();
+    assert!(err.contains("find failed"), "{err}");
+}
+
+#[test]
 fn prefix_signature_distinguishes_named_prefixes() {
     let none = Ut::prefix_signature(None);
     let foo = Ut::prefix_signature(Some("foo"));

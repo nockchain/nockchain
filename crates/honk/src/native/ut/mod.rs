@@ -4159,12 +4159,11 @@ impl<'a> Ut<'a> {
                 let formula = self.formula_quote(value);
                 Ok((ty, formula))
             }
-            Hoon::ZapZap | Hoon::Eror(_) => {
-                let ty = cons_void(&mut self.cx);
-                let ty = self.nice(sut, gol, ty)?;
-                let formula = self.formula_slot_u64(0);
-                Ok((ty, formula))
-            }
+            //  hoon-138 `[%zpzp ~]  [%void [%0 0]]`: no `nice`, which could
+            //  only succeed, but would expand (and so crash on) holds in `gol`
+            Hoon::ZapZap => Ok((cons_void(&mut self.cx), self.formula_slot_u64(0))),
+            //  hoon-138 `open` crashes on `%eror` with its tape as the trace
+            Hoon::Eror(msg) => Err(CompilerError::Noun(msg.clone())),
             Hoon::Dbug(spot, inner) => self.mint_dbug(sut, gol, spot, inner),
             Hoon::Note(note, inner) => self.mint_note(sut, gol, note, inner),
             Hoon::Lost(_) => self.mint_lost(sut, gol),
@@ -4476,7 +4475,8 @@ impl<'a> Ut<'a> {
                 }
                 Hoon::Rock(aura, expr) => Ok(self.play_rock(aura, expr)),
                 Hoon::Sand(aura, expr) => self.play_sand(aura, expr),
-                Hoon::ZapZap | Hoon::Eror(_) => Ok(cons_void(&mut self.cx)),
+                Hoon::ZapZap => Ok(cons_void(&mut self.cx)),
+                Hoon::Eror(msg) => Err(CompilerError::Noun(msg.clone())),
                 Hoon::Dbug(_, inner) => self.play_dbug(sut, inner),
                 Hoon::Note(note, inner) => self.play_note(sut, note, inner),
                 Hoon::Lost(_) => Ok(cons_void(&mut self.cx)),
@@ -11419,11 +11419,8 @@ impl<'a> Ut<'a> {
                 self.mull_beth(sut, gol, void_ty)
             }
 
-            // ---- Error sentinel ----
-            Hoon::Eror(_) => {
-                let void_ty = cons_void(&mut self.cx);
-                self.mull_beth(sut, gol, void_ty)
-            }
+            // ---- Error sentinel: hoon-138 `open` crashes on it ----
+            Hoon::Eror(msg) => Err(CompilerError::Noun(msg.clone())),
 
             // ---- Sugar forms lowered before mull ----
             // TisLus (=+) lowers to TisGar => handled above

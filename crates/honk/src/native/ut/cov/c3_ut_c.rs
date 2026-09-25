@@ -809,6 +809,22 @@ fn c3_mull_lost_and_vet_off() {
 }
 
 #[test]
+fn c3_eror_crashes_mint_play_and_mull_with_its_tape() {
+    // hoon-138 `open` crashes on %eror with its tape as the trace; nothing
+    // mints it as %void
+    with_ut(|ut| {
+        let noun = cons_noun(&mut ut.cx);
+        let eror = Hoon::Eror("duplicate arm: +x".to_string());
+        let minted = ut.mint(noun.clone(), noun.clone(), &eror).map(|_| ());
+        let played = ut.play(noun.clone(), &eror).map(|_| ());
+        let mulled = mull_types(ut, noun.clone(), noun.clone(), &eror);
+        for err in [noun_err(minted), noun_err(played), noun_err(mulled)] {
+            assert!(err.contains("duplicate arm: +x"), "{err}");
+        }
+    });
+}
+
+#[test]
 fn c3_mull_open_rejects_unopenable_gene() {
     with_ut(|ut| {
         let noun = cons_noun(&mut ut.cx);

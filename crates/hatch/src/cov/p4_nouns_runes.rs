@@ -728,6 +728,70 @@ fn tome_decoding_keeps_non_null_what() {
 }
 
 #[test]
+fn eror_encodes_its_message_as_a_tape() {
+    // [%eror p=tape], not a cord
+    let (mut slab, noun) = encode(&Hoon::Eror(s("ab")));
+    let tape = T(&mut slab, &[D(97), D(98), D(0)]);
+    let want = T(&mut slab, &[D(tas!(b"eror")), tape]);
+    assert!(noun_eq(&slab, noun, want));
+    assert!(decode_tagged(tas!(b"eror"), |_| D(97)).is_err());
+    assert!(decode_tagged(tas!(b"eror"), |sl| T(sl, &[D(0x100), D(0)])).is_err());
+}
+
+fn battery(src: &str) -> HashMap<String, Tome> {
+    match peel(&parse_one(src)) {
+        Hoon::BarCen(None, tomes) => tomes.clone(),
+        other => panic!("expected |%, got {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_arms_and_chapters_become_eror_arms() {
+    let eror = |m: &str| Hoon::Eror(s(m));
+    let is_eror = |h: &Hoon| matches!(h, Hoon::Eror(_));
+    // ++whap: an arm named twice in one chapter is one %eror arm
+    let t = battery("|%  ++  x  1  ++  y  2  ++  x  3  ++  x  4  --\n");
+    assert_eq!(t["$"].1.len(), 2);
+    assert_eq!(t["$"].1["x"], eror("duplicate arm: +x"));
+    assert!(!is_eror(&t["$"].1["y"]));
+    let t = battery("|%  ++  $  1  ++  $  2  --\n");
+    assert_eq!(t["$"].1["$"], eror("duplicate arm: +"));
+    let t = battery("|%  ++  a  1  +$  a  @  --\n");
+    assert_eq!(t["$"].1["a"], eror("duplicate arm: +a"));
+    // ++wisp: an arm named again in a later chapter is an %eror arm in the
+    // earlier chapter only
+    let t = battery("|%  +|  %aa  ++  x  1  +|  %bb  ++  x  2  --\n");
+    assert_eq!(t["aa"].1["x"], eror("duplicate arm: +x"));
+    assert!(!is_eror(&t["bb"].1["x"]));
+    // ++wisp: a chapter named again keeps the first chapter's doc and a lone
+    // %eror arm `$`
+    let t = battery(
+        "|%\n::    first doc\n+|  %aa\n++  x  1\n+|  %bb\n++  y  1\n+|  %aa\n++  z  1\n--\n",
+    );
+    assert_eq!(t.len(), 2);
+    assert_eq!(
+        t["aa"].1,
+        HashMap::from([(s("$"), eror("duplicate chapter: |aa"))])
+    );
+    assert!(!is_eror(&t["bb"].1["y"]));
+    let first = battery("|%\n::    first doc\n+|  %aa\n++  x  1\n--\n");
+    assert!(first["aa"].0.is_some());
+    assert_eq!(t["aa"].0, first["aa"].0);
+}
+
+#[test]
+fn buctis_irregular_autonames_and_prefixes() {
+    // hoon-138 +scad `=`: =@ names %atom; =a=@ud names (cat 3 'a' '-ud')
+    let h = format!("{:?}", parse_one("$:(=@ =a=@ud =b=@)\n"));
+    for name in ["atom", "a-ud", "b-atom"] {
+        assert!(h.contains(&format!("Term(\"{name}\")")), "{name}: {h}");
+    }
+    // without an autoname both forms fail
+    assert!(parse_src("$:(=* b=@)\n").is_err());
+    assert!(parse_src("$:(=a=* b=@)\n").is_err());
+}
+
+#[test]
 fn basetype_note_limb_decoders_reject_unknown_tags() {
     let err = decode_tagged(tas!(b"base"), |sl| T(sl, &[D(tas!(b"zzzz")), D(0)])).unwrap_err();
     assert!(err.contains("basetype: unknown cell tag"), "{err}");
@@ -1168,10 +1232,10 @@ fn buc_wide_and_irregular_spec_forms() {
     ));
     let h = parse_one("^-($:(a=@ b=@) [1 2])\n");
     assert!(format!("{h:?}").contains("BucCol("), "{h:?}");
-    // `=a=@` currently names the face `a`; hoonc names it `a-atom`
-    // (coverage/p4/divergent/p4_buctis_prefixed_autoname.hoon).
+    // `=a=@` names the face `a-atom`, as hoonc does
+    // (coverage/regressions/p4_buctis_prefixed_autoname.hoon).
     let h = parse_one("^-([=a=@ b=@] [1 2])\n");
-    assert!(format!("{h:?}").contains("BucTis(Term(\"a\")"), "{h:?}");
+    assert!(format!("{h:?}").contains("BucTis(Term(\"a-atom\")"), "{h:?}");
     // `=*`: a spec with no autoname cannot be named
     assert!(parse_src("^-([=* b=@] [1 2])\n").is_err());
     // a `%` spec constant that is not a dime

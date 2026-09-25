@@ -3010,8 +3010,9 @@ pub fn autoname(mod_spec: Spec) -> Option<String> {
     match mod_spec {
         Spec::Base(base) => match base {
             BaseType::Atom(aura) => {
-                if aura == "$" {
-                    //  how empty terms will be represented here in rust land?...
+                //  the empty aura `%$` is spelled "" by the aura parser (bare
+                //  `@`) and "$" by the desugarer
+                if aura == "$" || aura.is_empty() {
                     Some("atom".to_string())
                 } else {
                     Some(aura)
@@ -4964,22 +4965,35 @@ pub fn chapters<'src>(
         .then_ignore(just("--"))
         .map(
             |chapters_vec: Vec<(Option<(String, Option<NounExpr>)>, Vec<(String, Hoon)>)>| {
-                let mut map_term_tome = HashMap::new();
-                for (opt_label, arms_vec) in chapters_vec {
+                //  hoon-138 ++whap and ++wisp fold from the last arm and the
+                //  last chapter: an arm named again later in its chapter, or in
+                //  any later chapter, becomes an %eror arm, and a chapter
+                //  named again later becomes a lone %eror arm `$` (the build
+                //  fails only if that arm is ever minted or played).
+                let dup = |sigil: &str, name: &str| {
+                    let name = if name == "$" { "" } else { name };
+                    Hoon::Eror(format!("duplicate {sigil}{name}"))
+                };
+                let mut map_term_tome: HashMap<String, Tome> = HashMap::new();
+                let mut later_arms: HashSet<String> = HashSet::new();
+                for (opt_label, arms_vec) in chapters_vec.into_iter().rev() {
                     let (key, what) = opt_label.unwrap_or_else(|| ("$".to_string(), None));
-                    // hoon.hoon repeats chapter labels (`+| %containers`, etc.) across layers.
-                    // Treat these as append-to-existing rather than overwriting the previous chapter.
-                    let tome = map_term_tome
-                        .entry(key)
-                        .or_insert_with(|| (what.clone(), HashMap::new()));
-                    if tome.0.is_none() {
-                        tome.0 = what;
+                    let mut arms: HashMap<String, Hoon> = HashMap::new();
+                    for (name, hoon) in arms_vec.into_iter().rev() {
+                        let hoon = if arms.contains_key(&name) || later_arms.contains(&name) {
+                            dup("arm: +", &name)
+                        } else {
+                            hoon
+                        };
+                        arms.insert(name, hoon);
                     }
-                    for (name, hoon) in arms_vec {
-                        // If an arm is redefined within a later chunk of the same chapter, keep the
-                        // last definition (matches typical "last wins" parse behavior).
-                        tome.1.insert(name, hoon);
-                    }
+                    later_arms.extend(arms.keys().cloned());
+                    let arms = if map_term_tome.contains_key(&key) {
+                        HashMap::from([("$".to_string(), dup("chapter: |", &key))])
+                    } else {
+                        arms
+                    };
+                    map_term_tome.insert(key, (what, arms));
                 }
                 map_term_tome
             },
@@ -11794,18 +11808,6 @@ fn skip_plain_doc_before_equals_slash_start(
     if bytes.get(raw_cursor) != Some(&b'=') || bytes.get(raw_cursor + 1) != Some(&b'/') {
         return start;
     }
-    let mut name_cursor = raw_cursor + 2;
-    while name_cursor < bytes.len() && matches!(bytes[name_cursor], b' ' | b'\t') {
-        name_cursor += 1;
-    }
-    let name_start = name_cursor;
-    while name_cursor < bytes.len()
-        && (bytes[name_cursor].is_ascii_alphanumeric() || bytes[name_cursor] == b'-')
-    {
-        name_cursor += 1;
-    }
-    let raw_name = (name_cursor > name_start).then_some(&bytes[name_start..name_cursor]);
-
     let mut doc_line_start = start.min(bytes.len());
     while doc_line_start > 0 && bytes[doc_line_start - 1] != b'\n' {
         doc_line_start -= 1;
@@ -11850,21 +11852,13 @@ fn skip_plain_doc_before_equals_slash_start(
         }
 
         let mut content = cursor + 2;
-        let mut spaces = 0usize;
         while content < line_end && bytes[content] == b' ' {
-            spaces += 1;
             content += 1;
         }
         if content < line_end {
-            if let Some(name) = raw_name {
-                let after_plus = content + 1;
-                if bytes.get(content) == Some(&b'+')
-                    && bytes.get(after_plus..after_plus + name.len()) == Some(name)
-                {
-                    return start;
-                }
-            }
-            if spaces >= 4 {
+            //  a doccord (`++larg`/`++smol`, whatever it links to) is parsed
+            //  as the binder's prefix doc, so the span keeps it
+            if doccord_comment_anchors(&bytes[cursor..line_end]) {
                 return start;
             }
             saw_plain_doc = true;
@@ -12177,7 +12171,9 @@ fn hoon_to_noun_uncached(slab: &mut NounSlab, hoon: &Hoon) -> Noun {
             T(slab, &[D(tas!(b"dbug")), spot_noun, h_noun])
         }
         Eror(msg) => {
-            let msg_noun = cord_to_noun(slab, msg);
+            //  [%eror p=tape]
+            let chars = msg.bytes().map(|b| D(b as u64)).collect();
+            let msg_noun = list_to_noun(slab, chars);
             T(slab, &[D(tas!(b"eror")), msg_noun])
         }
         Hand(typ, nock) => {
@@ -14789,7 +14785,16 @@ pub fn noun_to_hoon(noun: NounHandle<'_>) -> Result<Hoon, String> {
         ));
     }
     if tag == tas!(b"eror") {
-        return Ok(Hoon::Eror(noun_to_cord(tail)?));
+        let bytes = noun_to_list(tail, |c| {
+            let byte = c.as_atom().ok().and_then(|a| a.as_direct().ok());
+            match byte.map(|d| d.data()) {
+                Some(b) if b <= 0xff => Ok(b as u8),
+                _ => Err("eror: expected a tape".to_string()),
+            }
+        })?;
+        return Ok(Hoon::Eror(
+            String::from_utf8(bytes).map_err(|e| format!("eror: invalid UTF-8: {e}"))?,
+        ));
     }
     if tag == tas!(b"hand") {
         let r = tail.as_cell().map_err(|_| "hand")?;

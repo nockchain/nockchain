@@ -615,21 +615,18 @@ pub fn buctis_irregular<'src>(
                 tis_symbol_tis_spec, // =foo=bar
                 tis_spec,            // =bar
             )))
-            .try_map(|(name, spec), span| match name {
-                Some(n) => {
-                    // no autoname needed
-                    let term = n;
+            // hoon-138 +scad `=`: the name is the autoname, prefixed with
+            // `foo-` for `=foo=spec`; either form fails without an autoname
+            .try_map(|(name, spec), span| match autoname(spec.clone()) {
+                None => Err(Rich::custom(span, "cannot name spec")),
+                Some(auto_term) => {
+                    let term = match name {
+                        // (cat 3 foo (cat 3 '-' term)); %$ is the empty cord
+                        Some(prefix) if auto_term == "$" => format!("{prefix}-"),
+                        Some(prefix) => format!("{prefix}-{auto_term}"),
+                        None => auto_term,
+                    };
                     Ok(Spec::BucTis(Skin::Term(term), Box::new(spec)))
-                }
-                None => {
-                    // need autoname
-                    match autoname(spec.clone()) {
-                        None => Err(Rich::custom(span, "cannot name spec")),
-                        Some(auto_term) => Ok(Spec::BucTis(
-                            Skin::Term(auto_term.to_string()),
-                            Box::new(spec),
-                        )),
-                    }
                 }
             }),
     ))
