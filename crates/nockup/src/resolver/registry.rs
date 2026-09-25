@@ -15,6 +15,7 @@ pub struct RegistryEntry {
     pub path: Option<String>, // Path in repo to fetch from (e.g., "pkg/arvo/sys")
     pub install_path: Option<String>, // Path to install to (e.g., "sys")
     pub file: Option<String>, // Specific file to extract (e.g., "zuse.hoon")
+    pub git_ref: Option<String>, // Registry-pinned ref (tag or commit) used for "latest"/"*"
 }
 
 /// Typhoon registry TOML format structures
@@ -67,6 +68,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/sys".to_string()),
             install_path: Some("sys".to_string()),
             file: Some("zuse.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -77,6 +79,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/sys".to_string()),
             install_path: Some("sys".to_string()),
             file: Some("lull.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -87,6 +90,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/sys".to_string()),
             install_path: Some("sys".to_string()),
             file: Some("hoon.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -97,6 +101,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/sys".to_string()),
             install_path: Some("sys".to_string()),
             file: Some("arvo.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -109,6 +114,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("map.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -119,6 +125,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("bits.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -129,6 +136,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("list.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -139,6 +147,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("maplist.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -149,6 +158,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("math.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -159,6 +169,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("mapset.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -169,6 +180,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("set.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -179,6 +191,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: Some("pkg/arvo/lib".to_string()),
             install_path: Some("lib".to_string()),
             file: Some("tiny.hoon".to_string()),
+            git_ref: None,
         },
     );
 
@@ -190,6 +203,7 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
             path: None,
             install_path: None,
             file: None,
+            git_ref: None,
         },
     );
 
@@ -274,6 +288,7 @@ pub async fn lookup(name: &str) -> Option<RegistryEntry> {
                     path: Some(format!("{}/{}", workspace.root_path, package.path)),
                     install_path: Some(package.path.clone()),
                     file: Some(package.file.clone()),
+                    git_ref: Some(workspace.git_ref.clone()),
                 };
                 return Some(entry);
             }
@@ -302,10 +317,15 @@ pub async fn get_dependencies(name: &str) -> Vec<String> {
 }
 
 /// Convert a registry entry to a GitSpec with version info
-pub fn to_git_spec(entry: &RegistryEntry, tag: Option<String>, branch: Option<String>) -> GitSpec {
+pub fn to_git_spec(
+    entry: &RegistryEntry,
+    commit: Option<String>,
+    tag: Option<String>,
+    branch: Option<String>,
+) -> GitSpec {
     GitSpec {
         url: entry.git_url.clone(),
-        commit: None,
+        commit,
         tag,
         branch,
         path: entry.path.clone(),

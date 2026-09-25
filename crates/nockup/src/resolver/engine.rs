@@ -121,8 +121,20 @@ impl Resolver {
             .await
             .context("Failed to fetch git repository")?;
 
-        // Determine exact commit
-        let commit = self.get_exact_commit(&git_spec).await?;
+        // Determine exact commit (expanding an abbreviated one, e.g. a short-SHA
+        // registry pin, from the checkout so the lockfile records the full hash)
+        let mut commit = self.get_exact_commit(&git_spec).await?;
+        if commit.len() < 40 {
+            let out = tokio::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_path)
+                .output()
+                .await
+                .context("Failed to read checked-out commit")?;
+            if out.status.success() {
+                commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            }
+        }
 
         println!(
             "    {} Commit: {}",
@@ -145,8 +157,21 @@ impl Resolver {
             );
         }
 
-        // Validate all requested source files exist
-        let source_files = self.validate_source_files(&source_dir, spec)?;
+        // Validate all requested source files exist; a registry package with no
+        // manifest `files` list falls back to the single file the registry names.
+        let mut source_files = self.validate_source_files(&source_dir, spec)?;
+        if source_files.is_empty() {
+            if let Some(ref file) = git_spec.file {
+                if !source_dir.join(file).exists() {
+                    anyhow::bail!(
+                        "Registry file '{}' not found in package at {}",
+                        file,
+                        source_dir.display()
+                    );
+                }
+                source_files.push(file.clone());
+            }
+        }
 
         // Check for transitive dependencies (look for hoon.toml in fetched repo)
         let transitive_deps = self
@@ -216,7 +241,8 @@ impl Resolver {
                     .as_ref()
                     .map(|f| f.iter().map(|s| format!("{}.hoon", s)).collect()),
                 _ => None,
-            };
+            }
+            .or_else(|| git_spec.file.clone().map(|f| vec![f]));
 
             return Ok(Some(ResolvedPackage {
                 name: name.to_string(),
@@ -233,60 +259,52 @@ impl Resolver {
         Ok(None)
     }
 
+    /// Build a GitSpec for a registry package at the requested version.
+    ///
+    /// An explicit commit/tag/branch/kelvin wins. For "latest"/"*" -- which is
+    /// also what transitive dependencies request -- use the ref the registry
+    /// pins for the package's workspace, so a dependency closure matches the
+    /// sources the registry's dependency lists were derived from. Without a
+    /// pin, fall back to the default branch.
+    async fn registry_git_spec(&self, name: &str, version: &str) -> Result<GitSpec> {
+        let entry = registry::lookup(name).await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Package '{}' not found in registry. \
+                Use full git spec with 'git' field.",
+                name
+            )
+        })?;
+        let (commit, tag, branch) = match VersionSpec::parse(version)? {
+            VersionSpec::Kelvin(k) => (None, Some(format!("{}k", k)), None),
+            VersionSpec::Tag(t) => (None, Some(t), None),
+            VersionSpec::Branch(b) => (None, None, Some(b)),
+            VersionSpec::Commit(c) => (Some(c), None, None),
+            VersionSpec::Semver(ref req) if req == &semver::VersionReq::STAR => {
+                match entry.git_ref.as_deref() {
+                    // A pin may name a tag (e.g. urbit "408k-2") or a commit.
+                    Some(r)
+                        if self
+                            .git_fetcher
+                            .resolve_tag(&entry.git_url, r)
+                            .await
+                            .is_ok() =>
+                    {
+                        (None, Some(r.to_string()), None)
+                    }
+                    Some(r) => (Some(r.to_string()), None, None),
+                    None => (None, None, None),
+                }
+            }
+            VersionSpec::Semver(_) => (None, Some(version.to_string()), None),
+        };
+        Ok(registry::to_git_spec(&entry, commit, tag, branch))
+    }
+
     /// Convert DependencySpec to GitSpec
     async fn dep_spec_to_git_spec(&self, spec: &DependencySpec, name: &str) -> Result<GitSpec> {
         match spec {
-            DependencySpec::Simple(version) => {
-                // Try to look up in registry
-                if let Some(entry) = registry::lookup(name).await {
-                    // Parse the version spec to extract tag/branch/commit
-                    let version_spec = VersionSpec::parse(version)?;
-                    let (tag, branch) = match version_spec {
-                        VersionSpec::Kelvin(k) => (Some(format!("{}k", k)), None),
-                        VersionSpec::Tag(t) => (Some(t), None),
-                        VersionSpec::Branch(b) => (None, Some(b)),
-                        VersionSpec::Semver(ref req) if req == &semver::VersionReq::STAR => {
-                            // "latest" or "*" means use the default branch
-                            (None, None)
-                        }
-                        VersionSpec::Semver(_) => (Some(version.clone()), None),
-                        VersionSpec::Commit(_) => {
-                            // For commits, we'll let get_exact_commit handle it
-                            (None, None)
-                        }
-                    };
-                    Ok(registry::to_git_spec(&entry, tag, branch))
-                } else {
-                    anyhow::bail!(
-                        "Package '{}' not found in registry. \
-                        Use full git spec with 'git' field.",
-                        name
-                    )
-                }
-            }
-            DependencySpec::Version { version } => {
-                // Try to look up in registry
-                if let Some(entry) = registry::lookup(name).await {
-                    let version_spec = VersionSpec::parse(version)?;
-                    let (tag, branch) = match version_spec {
-                        VersionSpec::Kelvin(k) => (Some(format!("{}k", k)), None),
-                        VersionSpec::Tag(t) => (Some(t), None),
-                        VersionSpec::Branch(b) => (None, Some(b)),
-                        VersionSpec::Semver(ref req) if req == &semver::VersionReq::STAR => {
-                            // "latest" or "*" means use the default branch
-                            (None, None)
-                        }
-                        VersionSpec::Semver(_) => (Some(version.clone()), None),
-                        VersionSpec::Commit(_) => (None, None),
-                    };
-                    Ok(registry::to_git_spec(&entry, tag, branch))
-                } else {
-                    anyhow::bail!(
-                        "Package '{}' not found in registry. \
-                        Use full git spec with 'git' field.",
-                        name
-                    )
-                }
+            DependencySpec::Simple(version) | DependencySpec::Version { version } => {
+                self.registry_git_spec(name, version).await
             }
             DependencySpec::Full {
                 git,
