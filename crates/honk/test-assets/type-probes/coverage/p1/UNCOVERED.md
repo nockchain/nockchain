@@ -56,6 +56,11 @@ third conditions on that line. "Unit-tested" means
 - 428-432 `spore` `%bcbc`, 1188-1202 `relative` `%bcbc`, 3046 `autoname`
   `%bcbc`: neither compiler has a `$$` spec rune (a hoon-level `$$` is a
   `%leaf`).
+- 442 `spore` `%loop` after a successful lookup: only `%bcbc` adds names
+  to `cox`, and no parser has a `$$` spec rune, so every `/foo` loop is
+  free. `spore` crashes on a free loop in both compilers (hoon-138
+  `~(got by cox)`, hatch's `expect` at 441;
+  `reject/p1_spore_free_loop.hoon`).
 - 448 `spore` `%made`, 645-657 `example` `%made`, 1179-1185 `relative`
   `%made`, 3043 `autoname` `%made`: no parser rule produces `%made`.
 - 454 `spore` `%over`, 1187 `relative` `%over`, 3045 `autoname` `%over`: the
@@ -85,17 +90,6 @@ third conditions on that line. "Unit-tested" means
   (the `is_empty()` test the probes do cover). Only the desugarer spells the
   empty aura `"$"`, in the `?=` specs it builds for `?@` and `?^`, and it
   never passes those to `autoname`, whose only callers are parser rules.
-
-## Not yet covered by a parity probe (P; unit-tested)
-
-- 440-442 `spore` `%loop`, 644 `example` `%loop`, 1164-1170 `relative`
-  `%loop`, 1671-1672 `factory` `%loop`, 3028 `autoname` `%loop`: both
-  compilers parse `/foo` as a `%loop` spec (hoon-138 `++scad`), and with no
-  `$$` rule every such loop is free. Uncovered: no parity probe uses a `/foo`
-  spec yet. In `spore` a free loop crashes both compilers (hoon-138
-  `~(got by cox)`, hatch's `expect`).
-- 3059 `autoname` `%bcpm`: uncovered: no parity probe names a sample with a
-  wide `=$&(...)` spec yet.
 
 ## Rejection-only or malformed input (P; unit-tested)
 

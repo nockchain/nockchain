@@ -219,6 +219,7 @@ REJECTION_PROBES = [
     "mull_wet_body",
     "nest_fail_cast",
     "nest_fail_sample",
+    "p1_spore_free_loop",
     "p1_zpwt_pair_reversed",
     "p2_cord_block_opener_comment_no_space",
     "p2_cord_empty_block_col1",
