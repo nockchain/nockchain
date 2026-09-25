@@ -1499,6 +1499,17 @@ fn c4_wet_rib_keyed_on_call_site_subject() {
 }
 
 #[test]
+fn c4_wet_rib_scan_compares_entries_from_the_same_subject() {
+    // `f:d` mulls `f` against the redone door, whose body fires `g` from that
+    // door; `g`'s body fires `h` from the same subject, so the rib scan meets
+    // the entry for `g` with an equal subject and dox but another arm, and
+    // `z.e` fires from that subject with another core's dox.
+    mint_dump(include_str!(
+        "../../../../test-assets/type-probes/coverage/c4/c4_wet_rib_scan.hoon"
+    ));
+}
+
+#[test]
 fn c4_wet_mulled_core_is_not_the_played_core() {
     // `^.` plays the core literal (through the wet `id`) and the wet caller's
     // body mulls it. hoon-138 builds the played core with `*seminoun` and the

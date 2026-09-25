@@ -25,12 +25,6 @@ program.
   crashes there too.
 - L80 [P]: `fend` on a synthetic port (fend-fragment). Both compilers reject
   (`=*  w  [y y]` then `?#(^ w)`).
-- L125 [P]: `fond` when the search for the rest of the wing is unmatched.
-  `find` rejects it, but `feel` returns `|`, so an accepted `!@(a.b ...)` with
-  no `b` in the subject reaches it. No parity probe exercises it yet.
-- L124 [P]: the same for a void search. `find` rejects it, and `feel` meets it
-  only when the rest of the wing ends in a void type or a hold cycle. No parity
-  probe exercises it yet.
 - B187T, L188 [P]: `here` with a skip and no name. That needs a limb
   `[%| n ~]` with n > 0, but the parser only produces `[%| 0 ~]` (from `,`).
 - B232T, L233 [UP]: `face_tool_tune_parts` on an atom tool. `is_term_face`
@@ -103,10 +97,17 @@ program.
 
 ## wet.rs
 
-- L54-56, L58, B53T, B54T, B54F, B55T, B55F, B56T, B56F [UP]: the structural
-  scan of `fire_wet_rib` after the raw key set misses. It needs a rib entry for
-  the same call-site subject that the raw key set does not hold. No test
-  exercises it yet.
+- B55T [UP]: dead. A rib entry and its raw key are pushed and popped
+  together, and a key already present is never pushed again, so an entry whose
+  arm noun is raw-equal to the probe is always in the raw key set, which
+  answers first.
+- B56T, L58 [UP]: an entry whose arm is structurally equal to the probe's but
+  under a different noun. Arm nouns come from the battery, and
+  `canonicalize_nonsemantic_hoon_noun` strips only `%dbug`, so the canonical
+  noun is a stable sub-noun unless it rebuilds a `%ktcl` over a `%gist`. hatch
+  attaches that `%gist` from a postfix doc on a `^:` arm body, and the same doc
+  wraps the body in `%note %help`, so the rebuild never sees `%ktcl` on top.
+  Unreachable from source.
 - L92-95 [P]: a wet arm hoon that does not decode. Defensive.
 - B100F [UP]: `fire_wet_rib.pop()` returning `None`. The entry is pushed just
   above.
