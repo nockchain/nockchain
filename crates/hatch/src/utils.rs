@@ -177,40 +177,36 @@ const ALPH64: &str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV
 
 //  @uw to @
 pub fn base64_to_atom(s: String) -> ParsedAtom {
-    let mut n: u128 = 0;
+    let mut n = BigUint::zero();
 
     for ch in s.chars() {
         let v = match ALPH64.find(ch) {
-            Some(i) => i as u128,
+            Some(i) => i as u32,
             None => panic!("invalid digit '{ch}' in base64"),
         };
 
-        n = n.checked_mul(64).expect("value exceeds u128 range (mul)");
-
-        n = n.checked_add(v).expect("value exceeds u128 range (add)");
+        n = (n << 6u32) + v;
     }
 
-    ParsedAtom::Small(n)
+    ParsedAtom::from_biguint(n)
 }
 
 const ALPH32: &str = "0123456789abcdefghijklmnopqrstuv";
 
 //  @uv to @
 pub fn base32_to_atom(s: String) -> ParsedAtom {
-    let mut n: u128 = 0;
+    let mut n = BigUint::zero();
 
     for ch in s.chars() {
         let v = match ALPH32.find(ch) {
-            Some(i) => i as u128,
+            Some(i) => i as u32,
             None => panic!("invalid digit '{ch}' in base32"),
         };
 
-        n = n.checked_mul(32).expect("value exceeds u128 range (mul)");
-
-        n = n.checked_add(v).expect("value exceeds u128 range (add)");
+        n = (n << 5u32) + v;
     }
 
-    ParsedAtom::Small(n)
+    ParsedAtom::from_biguint(n)
 }
 
 // +fim
@@ -3560,22 +3556,18 @@ pub fn sea(w: u128, p: u128, b: u128, a: &ParsedAtom) -> BinaryFloat {
 //  inner function for drg_fl
 pub fn drg(e: u128, a: BigUint, p: u128, v: u128, w: u128, d: char) -> (u128, BigUint) {
     assert!(!a.is_zero(), "drg: mantissa must be nonzero");
-    eprintln!("drg caleed e {} a {} p {} v {} w {} d {}", e, a, p, v, w, d);
-    // drg caleed e 43 a 13176795 p 24 v 299 w 253 d d
-    //  it should return (13, 31.415.927)
-    //  but it returns 0 and 13176795
 
     let (e, a) = xpd(e, a, d, p, v);
-    eprintln!("xpd result: e:{} a:{}", e, a);
     assert!(!a.is_zero(), "xpd must not produce zero in drg");
 
+    //  r = a * 2^e and mn = mp = 2^e for e >= 0; s = 2^-e otherwise
     let (mut r, mut s, mut mn, mut mp) = {
         if syn_si(e) {
             let shift = abs_si(e) as usize;
             let r = lsh_big(0, shift, &a.clone());
             let s = BigUint::one();
-            let mn = BigUint::one();
-            let mp = BigUint::one();
+            let mn = lsh_big(0, shift, &BigUint::one());
+            let mp = mn.clone();
             (r, s, mn, mp)
         } else {
             let shift = abs_si(e) as usize;
@@ -3586,8 +3578,6 @@ pub fn drg(e: u128, a: BigUint, p: u128, v: u128, w: u128, d: char) -> (u128, Bi
             (r, s, mn, mp)
         }
     };
-
-    eprintln!("r: {} s: {} mn: {} mp: {}", r, s, mn, mp);
 
     let a_orig = BigUint::from(1u128) << sub_or_panic(prc(p), 1); // 2^(p-1)
     let halfway = a == a_orig;
@@ -3651,7 +3641,6 @@ pub fn drg(e: u128, a: BigUint, p: u128, v: u128, w: u128, d: char) -> (u128, Bi
         o = o * &ten + digit;
         break;
     }
-    eprintln!("drg returning {} {}", k, o);
     (k, o)
 }
 
@@ -3666,8 +3655,9 @@ pub fn drg_fl(a: BinaryFloat, p: u128, w: u128, b: u128) -> DecimalFloat {
                     mant: BigUint::zero(),
                 }
             } else {
-                let p = p + 1;
+                //  +pa:ff: fl with p=+(p), v=me (of the field width p)
                 let v = me(b, p);
+                let p = p + 1;
                 let w = bex(w) - 3;
                 let d = 'd';
                 let (k, digits) = drg(exp, mant, p, v, w, d);
@@ -3821,11 +3811,9 @@ fn lug(
 
     let q = max_p.max(max_q);
 
-    let b = end_big(0, q as usize, &a)
-        .to_u128()
-        .expect("value too large for u128");
+    let b = end_big(0, q as usize, &a);
 
-    a = rsh(0, q as usize, &ParsedAtom::Big(a)).to_biguint();
+    a = rsh_big(0, q as usize, &a);
 
     e = sum_si(e, sun_si(q));
 
@@ -3843,7 +3831,7 @@ fn lug(
                 mant: BigUint::one(),
             },
             Nearest | NearestTowards => {
-                let half = bex(q.saturating_sub(1));
+                let half = bex_big(q.saturating_sub(1));
                 if s {
                     if b <= half {
                         return Finite {
@@ -3872,7 +3860,7 @@ fn lug(
                 };
             }
             NearestAway => {
-                let half = bex(q.saturating_sub(1));
+                let half = bex_big(q.saturating_sub(1));
                 if b < half {
                     return Finite {
                         sign: true,
@@ -3895,7 +3883,7 @@ fn lug(
         Floor => { /* no change */ }
         Larger => a = a + BigUint::one(),
         Smaller => {
-            if b == 0 && s {
+            if b.is_zero() && s {
                 if e == v && d != 'i' {
                     a = sub_or_panic_big(&a, &BigUint::one());
                 } else {
@@ -3911,13 +3899,13 @@ fn lug(
             }
         }
         Ceiling => {
-            if !(b == 0 && !s) {
+            if !(b.is_zero() && s) {
                 a = a + BigUint::one();
             }
         }
         Nearest => {
-            if b != 0 {
-                let y = bex(sub_or_panic(q, 1));
+            if !b.is_zero() {
+                let y = bex_big(sub_or_panic(q, 1));
                 if b == y && s {
                     if dis_big(&a, &BigUint::one()) != BigUint::zero() {
                         a = a + BigUint::one();
@@ -3929,22 +3917,21 @@ fn lug(
             }
         }
         NearestAway => {
-            if b != 0 {
-                let y = bex(sub_or_panic(q, 1));
+            if !b.is_zero() {
+                let y = bex_big(sub_or_panic(q, 1));
                 if !(b < y) {
                     a = a + BigUint::one();
                 }
             }
         }
         NearestTowards => {
-            if b != 0 {
-                let y = bex(sub_or_panic(q, 1));
+            if !b.is_zero() {
+                let y = bex_big(sub_or_panic(q, 1));
                 if b == y {
                     if !s {
                         a = a + BigUint::one();
                     }
-                }
-                if !(b < y) {
+                } else if !(b < y) {
                     a = a + BigUint::one();
                 }
             }
@@ -3954,10 +3941,7 @@ fn lug(
     (e, a) = if (met_big(0, &a.clone()) as u128) != (prc_res + 1) {
         (e, a)
     } else {
-        a = rsh(0, 1, &ParsedAtom::Big(a))
-            .to_u128()
-            .expect("lug: cast failled")
-            .into();
+        a = rsh_big(0, 1, &a);
         e = sum_si(e, 2);
         (e, a)
     };
@@ -3996,7 +3980,7 @@ fn lug(
             exp,
             ref mant,
         } => {
-            if met_big(0, &mant.clone()) as u128 == prc(p) {
+            if met_big(0, &mant.clone()) as u128 != prc(p) {
                 return Finite {
                     sign: true,
                     exp: 0,
@@ -4078,6 +4062,10 @@ pub fn bex(a: u128) -> u128 {
         assert!(a < 128, "bex: exponent too large for u128");
         1u128 << a
     }
+}
+
+fn bex_big(a: u128) -> BigUint {
+    BigUint::one() << a
 }
 
 fn xpd(e: u128, a: BigUint, d: char, p: u128, v: u128) -> (u128, BigUint) {
@@ -4168,7 +4156,7 @@ pub fn binaryfloat_mul(
         };
     }
 
-    if ma == BigUint::zero() || mb == BigUint::zero() {
+    if sa == sb {
         return binaryfloat_mul_internal(ea, ma, eb, mb, p, v, w, r, d);
     }
     r = swr(r);
@@ -6104,17 +6092,16 @@ pub fn taft(atom: &ParsedAtom) -> ParsedAtom {
 pub fn binary_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
     let bit = any().filter(|c: &char| *c == '0' || *c == '1');
 
-    let first_group = just('0').to("0".to_string()).or(just('1')
+    let first_group = just('1')
         .then(bit.repeated().at_most(3).collect::<String>())
-        .map(|(h, t)| h.to_string() + &t));
-
-    let first = just("0b").ignore_then(first_group);
+        .map(|(h, t)| h.to_string() + &t);
 
     let rest = just('.')
         .ignore_then(gap().or_not())
         .ignore_then(bit.repeated().exactly(4).collect::<String>());
 
-    first
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first_group
         .then(rest.repeated().collect::<Vec<String>>())
         .map(|(first, rest)| {
             if rest.is_empty() {
@@ -6126,7 +6113,10 @@ pub fn binary_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> 
                 }
                 s
             }
-        })
+        });
+
+    just("0b")
+        .ignore_then(just('0').to("0".to_string()).or(groups))
         .labelled("Binary")
 }
 
@@ -6215,13 +6205,10 @@ pub fn ipv6_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
 pub fn base32_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let base32_digit = any().filter(|c: &char| c.is_ascii_digit() || ('a'..='v').contains(c));
 
-    let first = just("0v").ignore_then(choice((
-        just('0').to("0".to_string()),
-        any()
-            .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='v'))
-            .then(base32_digit.repeated().at_most(4).collect::<String>())
-            .map(|(h, t)| h.to_string() + &t),
-    )));
+    let first = any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='v'))
+        .then(base32_digit.repeated().at_most(4).collect::<String>())
+        .map(|(h, t)| h.to_string() + &t);
 
     let rest = just('.')
         .ignore_then(gap().or_not())
@@ -6229,35 +6216,36 @@ pub fn base32_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'sr
         .repeated()
         .collect::<Vec<String>>();
 
-    first
-        .then(rest)
-        .map(|(first, mut rest)| {
-            if rest.is_empty() {
-                base32_to_atom(first.to_string())
-            } else {
-                let mut parts = vec![first];
-                parts.append(&mut rest);
-                base32_to_atom(parts.join(""))
-            }
-        })
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first.then(rest).map(|(first, mut rest)| {
+        if rest.is_empty() {
+            base32_to_atom(first.to_string())
+        } else {
+            let mut parts = vec![first];
+            parts.append(&mut rest);
+            base32_to_atom(parts.join(""))
+        }
+    });
+
+    just("0v")
+        .ignore_then(choice((just('0').to(ParsedAtom::Small(0)), groups)))
         .labelled("Base32")
 }
 
 pub fn base64_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let digit = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='z' | 'A'..='Z' | '-' | '~'));
 
-    let first = just("0w").ignore_then(
-        just('0').to("0".to_string()).or(any()
-            .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='z' | 'A'..='Z' | '-' | '~'))
-            .then(digit.repeated().at_most(4).collect::<String>())
-            .map(|(h, t)| h.to_string() + &t)),
-    );
+    let first = any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='z' | 'A'..='Z' | '-' | '~'))
+        .then(digit.repeated().at_most(4).collect::<String>())
+        .map(|(h, t)| h.to_string() + &t);
 
     let group = just('.')
         .ignore_then(gap().or_not())
         .ignore_then(digit.repeated().exactly(5).collect::<String>());
 
-    first
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first
         .then(group.repeated().collect::<Vec<String>>())
         .map(|(first, rest)| {
             if rest.is_empty() {
@@ -6267,7 +6255,10 @@ pub fn base64_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'sr
                 parts.extend(rest);
                 base64_to_atom(parts.join(""))
             }
-        })
+        });
+
+    just("0w")
+        .ignore_then(just('0').to(ParsedAtom::Small(0)).or(groups))
         .labelled("Base64")
 }
 
@@ -6300,14 +6291,14 @@ pub fn decimal_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>>
 
     let non_zero_digit = any().filter(|c: &char| matches!(c, '1'..='9'));
 
-    let first = just('0').to("0".to_string()).or(non_zero_digit
+    let first = non_zero_digit
         .then(digit.repeated().at_most(2).collect::<Vec<char>>())
         .map(|(h, t)| {
             let mut s = String::with_capacity(3);
             s.push(h);
             s.extend(t);
             s
-        }));
+        });
 
     let three_digits = digit.repeated().exactly(3).collect::<String>();
 
@@ -6317,15 +6308,18 @@ pub fn decimal_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>>
         .repeated()
         .collect::<Vec<String>>();
 
-    first
-        .then(rest)
-        .map(|(first_digits, rest_digits)| {
-            let mut out = first_digits;
-            for chunk in rest_digits {
-                out.push_str(&chunk);
-            }
-            out
-        })
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first.then(rest).map(|(first_digits, rest_digits)| {
+        let mut out = first_digits;
+        for chunk in rest_digits {
+            out.push_str(&chunk);
+        }
+        out
+    });
+
+    just('0')
+        .to("0".to_string())
+        .or(groups)
         .labelled("Decimal Number")
 }
 
@@ -8873,16 +8867,20 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                 }
 
                 's' => {
-                    let q = q.to_u128().expect("signed number is bigger than 128 bits");
-                    let sign_prefix_chars = if syn_si(q) {
-                        vec!['-'.to_string(), '-'.to_string()]
-                    } else {
+                    //  $(yed 'u', q.p.lot (abs:si q.p.lot)): hay is kept, so
+                    //  -0x10 stays hexadecimal
+                    let q = q.to_biguint();
+                    let negative = q.bit(0);
+                    let sign_prefix_chars = if negative {
                         vec!['-'.to_string()]
+                    } else {
+                        vec!['-'.to_string(), '-'.to_string()]
                     };
-                    let abs_val = abs_si(q);
+                    let abs_val = (&q >> 1u32) + u32::from(negative);
+                    let aura: String = std::iter::once('u').chain(prefix.chars().skip(1)).collect();
                     let mut res: Tape = sign_prefix_chars.into_iter().collect();
                     res.extend(rend_with_rep(
-                        &Coin::Dime("u".into(), ParsedAtom::Small(abs_val)),
+                        &Coin::Dime(aura, ParsedAtom::from_biguint(abs_val)),
                         rep,
                     ));
                     res
@@ -9322,8 +9320,9 @@ pub fn number<'src>() -> impl Parser<'src, &'src str, (String, ParsedAtom), Err<
 
     let uw_number = base64_number().map(|a| ("uw".to_string(), a));
 
+    //  dim:ag: a lone 0 ends the number
     let ui_number = just("0i")
-        .ignore_then(digits())
+        .ignore_then(decimal_without_leading_zero())
         .map(|s| ("ui".to_string(), decimal_to_atom(s)));
 
     let negative = choice((
@@ -9333,13 +9332,13 @@ pub fn number<'src>() -> impl Parser<'src, &'src str, (String, ParsedAtom), Err<
             let maybe_base58 = base58_to_atom(s);
             match maybe_base58 {
                 None => Err(Rich::custom(span, "Invalid BTC address.")),
-                Some(atom) => Ok(("uc".to_string(), atom)),
+                Some(atom) => Ok(("sc".to_string(), atom)),
             }
         }),
         base32_number().map(|a| ("sv".to_string(), a)),
         base64_number().map(|a| ("sw".to_string(), a)),
         just("0i")
-            .ignore_then(digits())
+            .ignore_then(decimal_without_leading_zero())
             .map(|s| ("si".to_string(), decimal_to_atom(s))),
         decimal_number().map(|s| ("sd".to_string(), decimal_to_atom(s))),
     ))

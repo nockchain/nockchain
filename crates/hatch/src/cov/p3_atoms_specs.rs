@@ -202,17 +202,18 @@ fn bitcoin_address_literals_check_base58check() {
 
 #[test]
 fn signed_bitcoin_literal_value_is_si_encoded() {
-    // hoon ++tash makes -0c... a %sc; hatch tags it %uc
-    // (divergent/p3_sc_signed_uc.hoon). Only the @s value is pinned here.
-    let (_, q) = number()
+    // hoon ++tash makes -0c... a %sc (regressions/p3_sc_signed_uc.hoon)
+    let (p, q) = number()
         .parse("--0c1111111111111111111114oLvT2")
         .into_result()
         .expect("signed @uc parses");
+    assert_eq!(p, "sc");
     assert_eq!(q.to_biguint(), big(0));
-    let (_, q) = number()
+    let (p, q) = number()
         .parse("-0c1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")
         .into_result()
         .expect("signed @uc parses");
+    assert_eq!(p, "sc");
     let h = BigUint::parse_bytes(b"62e907b15cbf27d5425399ebf6f0fb50ebb88f18", 16).unwrap();
     assert_eq!(q.to_biguint(), h * 2u32 - 1u32);
 }
@@ -269,14 +270,25 @@ fn signed_decimal_knots_round_trip() {
 
 #[test]
 fn signed_radix_knots_keep_their_sign_marker() {
-    // hoonc renders these path segments in decimal ('-16'); hatch keeps the
-    // radix prefix (divergent/p3_path_signed_radix.hoon). Only the sign marker
-    // is common ground.
+    // ++rend:co recurses with yed 'u' but keeps hay, so the radix survives
+    // (regressions/p3_path_signed_radix.hoon)
     let (_, q) = nuck_dime("-0x10");
-    let text = render_dime("sx", q);
-    assert!(text.starts_with('-') && !text.starts_with("--"), "{text}");
+    assert_eq!(render_dime("sx", q), "-0x10");
     let (_, q) = nuck_dime("--0x10");
-    assert!(render_dime("sx", q).starts_with("--"));
+    assert_eq!(render_dime("sx", q), "--0x10");
+    let (_, q) = nuck_dime("-0b1010");
+    assert_eq!(render_dime("sb", q), "-0b1010");
+    let (_, q) = nuck_dime("-0c1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa");
+    assert_eq!(
+        render_dime("sc", q),
+        "-0c1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+    );
+    let (_, q) = nuck_dime("-1.000");
+    assert_eq!(render_dime("sd", q), "-1.000");
+    // wider than 128 bits
+    let wide = "-0x1.0000.0000.0000.0000.0000.0000.0000.0000.0000";
+    let (_, q) = nuck_dime(wide);
+    assert_eq!(render_dime("sx", q), wide);
 }
 
 #[test]

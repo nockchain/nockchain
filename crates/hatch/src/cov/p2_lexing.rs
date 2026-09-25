@@ -221,6 +221,18 @@ const FLOAT_LITERALS: &[(&str, &str, u128)] = &[
     (".~~~0", "rq", 0x0),
     (".~~~0.1", "rq", 0x3ffb999999999999999999999999999a),
     (".~~~-inf", "rq", 0xffff0000000000000000000000000000),
+    // positive products keep their sign (++mul:fl compares signs)
+    (".1", "rs", 0x3f800000),
+    (".100", "rs", 0x42c80000),
+    (".1e39", "rs", 0x7f800000),
+    (".~1", "rd", 0x3ff0000000000000),
+    (".~~1", "rh", 0x3c00),
+    (".~~~1", "rq", 0x3fff0000000000000000000000000000),
+    // ++lug drops arbitrarily many bits
+    (".1e-100", "rs", 0x0),
+    (".~1e300", "rd", 0x7e37e43c8800759c),
+    (".~1e309", "rd", 0x7ff0000000000000),
+    (".~~1e5000", "rh", 0x7c00),
 ];
 
 #[test]
@@ -272,6 +284,10 @@ fn float_rly_decodes_each_ieee_class() {
     // a power-of-two mantissa takes the halfway (tightened lower bound) path
     assert_eq!(df(&rlys(0x3f000000)), ffin(true, -1, 5));
     assert_eq!(df(&rlys(0xc0000000)), ffin(false, 0, 2));
+    // positive binary exponents scale mn/mp with r: 1e30 prints as 1e30
+    assert_eq!(df(&rlys(0x7149f2ca)), ffin(true, 30, 1));
+    // subnormals use v = me, not me for p+1: 1e-40 prints as 1e-40
+    assert_eq!(df(&rlys(0x116c2)), ffin(true, -40, 1));
 }
 
 #[test]

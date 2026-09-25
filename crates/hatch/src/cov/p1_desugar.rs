@@ -197,6 +197,15 @@ fn base64_and_base32_digits() {
     assert_eq!(base64_to_atom("1a".to_string()), ParsedAtom::Small(74));
     assert_eq!(base64_to_atom("~".to_string()), ParsedAtom::Small(63));
     assert_eq!(base32_to_atom("1v".to_string()), ParsedAtom::Small(63));
+    // wider than 128 bits
+    assert_eq!(
+        base32_to_atom(format!("1{}", "0".repeat(30))),
+        ParsedAtom::Big(BigUint::from(1u8) << 150u32)
+    );
+    assert_eq!(
+        base64_to_atom(format!("1{}", "0".repeat(25))),
+        ParsedAtom::Big(BigUint::from(1u8) << 150u32)
+    );
 }
 
 #[test]
