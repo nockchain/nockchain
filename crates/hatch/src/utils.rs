@@ -226,18 +226,36 @@ pub fn base58_to_atom(s: String) -> Option<ParsedAtom> {
     den_fa(&a)
 }
 
+// +lip:ag: four `ted:ab` groups (up to 999 each, not just 255) in base 256
 pub fn ipv4_to_atom(s: String) -> Option<ParsedAtom> {
-    let addr = s.parse::<std::net::Ipv4Addr>().ok()?;
-
-    let ip_num = u32::from_be_bytes(addr.octets());
-
-    Some(ParsedAtom::Small(ip_num.into()))
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for part in parts {
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        n = n * 256 + part.parse::<u128>().ok()?;
+    }
+    Some(ParsedAtom::Small(n))
 }
 
+// +bip:ag: eight `qex:ab` groups (up to 4 hex digits each) in base 0x1.0000
 pub fn ipv6_to_atom(s: String) -> Option<ParsedAtom> {
-    let addr = s.parse::<std::net::Ipv6Addr>().ok()?;
-    let num = u128::from_be_bytes(addr.octets());
-    Some(ParsedAtom::Small(num))
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 8 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for part in parts {
+        if part.is_empty() || part.len() > 4 || !part.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        n = (n << 16) | u128::from_str_radix(part, 16).ok()?;
+    }
+    Some(ParsedAtom::Small(n))
 }
 
 pub fn basal(bas: BaseType) -> Hoon {
@@ -5643,7 +5661,7 @@ fn tok(a: &ParsedAtom) -> ParsedAtom {
 
     let padded = lsh(3, b, &swapped);
 
-    let len = b + met(3, a);
+    let len = b + if a.is_zero() { 0 } else { met(3, a) };
 
     let hashed = shay(len as u64, &padded.to_biguint());
 
@@ -5752,7 +5770,12 @@ fn pad_fa_big(a: &BigUint) -> usize {
 }
 
 pub fn pad_fa(atom: &ParsedAtom) -> usize {
-    21usize.saturating_sub(met(3, atom))
+    // hoon's (met 3 0) is 0, so zero pads to 21; hatch's met(3, 0) is 1
+    if atom.is_zero() {
+        21
+    } else {
+        21usize.saturating_sub(met(3, atom))
+    }
 }
 
 pub fn enc_fa(atom: &ParsedAtom) -> ParsedAtom {
@@ -6108,43 +6131,30 @@ pub fn binary_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> 
 }
 
 pub fn hexadecimal_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
+    // hex:ag is (ape (bass 0x1.0000 ;~(plug qex:ab (star ;~(pfix dog qix:ab))))):
+    // a lone '0', or a qex:ab group (a lowercase sex:ab digit, then up to three
+    // hit digits of either case) and then qix:ab groups (four lowercase digits)
     let hex = any().filter(|c: &char| c.is_ascii_hexdigit());
+    let six = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'));
 
-    let first_group = hex
+    let first_group = any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='f'))
         .then(hex.repeated().at_most(3).collect::<String>())
-        .map(|(head, tail)| {
-            if head == '0' && !tail.is_empty() {
-                String::new()
-            } else {
-                let mut s = String::new();
-                s.push(head);
-                s.push_str(&tail);
-                s
-            }
-        })
-        .filter(|s| !s.is_empty());
-
-    let first = just("0x").ignore_then(first_group);
+        .map(|(head, tail)| format!("{head}{tail}"));
 
     let rest = just('.')
         .ignore_then(gap().or_not())
-        .ignore_then(hex.repeated().exactly(4).collect::<String>())
+        .ignore_then(six.repeated().exactly(4).collect::<String>())
         .repeated()
         .collect::<Vec<String>>();
 
-    first
-        .then(rest)
-        .map(|(first, rest)| {
-            if rest.is_empty() {
-                first
-            } else {
-                let mut s = first;
-                for r in rest {
-                    s.push_str(&r);
-                }
-                s
-            }
-        })
+    just("0x")
+        .ignore_then(choice((
+            just('0').to("0".to_string()),
+            first_group
+                .then(rest)
+                .map(|(first, rest)| first + &rest.concat()),
+        )))
         .labelled("Hexadecimal")
 }
 
@@ -6155,13 +6165,9 @@ pub fn ipv4_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
         .at_least(1)
         .at_most(3)
         .collect::<String>()
-        .filter(|s: &String| {
-            if s.is_empty() || s.starts_with('0') && s.len() > 1 {
-                return false;
-            }
-            let n = s.parse::<u16>().unwrap_or(256);
-            n <= 255
-        });
+        // +lip:ag octets are `(ape ted:ab)`: '0', or up to 999 without a
+        // leading zero (no 255 limit)
+        .filter(|s: &String| !(s.is_empty() || s.starts_with('0') && s.len() > 1));
 
     octet
         .separated_by(just('.').ignore_then(gap().or_not()))
@@ -6172,14 +6178,27 @@ pub fn ipv4_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
 }
 
 pub fn ipv6_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
+    // +bip:ag groups are `(ape qex:ab)`: '0', or a `sex:ab` digit (1-9, a-f;
+    // lowercase only) and up to three `hit` digits (0-9, a-f, A-F)
+    let group = just('0').to("0".to_string()).or(any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='f'))
+        .then(
+            any()
+                .filter(|c: &char| c.is_ascii_hexdigit())
+                .repeated()
+                .at_most(3)
+                .collect::<String>(),
+        )
+        .map(|(h, t)| format!("{h}{t}")));
+
     let rest = just('.')
         .ignore_then(gap().or_not())
-        .ignore_then(alphanumeric())
+        .ignore_then(group.clone())
         .repeated()
         .exactly(7)
         .collect::<Vec<_>>();
 
-    alphanumeric()
+    group
         .then(rest)
         .map(|(first, mut rest)| {
             if rest.is_empty() {
@@ -8585,7 +8604,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             rep = newest_rep
                         }
 
-                        let d_atom = ParsedAtom::Small(t.d as u128);
+                        let d_atom = ParsedAtom::from_biguint(t.d.clone());
                         let mut new_rep = vec![".".to_string()];
                         new_rep.extend(a_co(&d_atom));
                         new_rep.extend(rep);
@@ -8603,7 +8622,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             rep = newest_rep;
                         }
 
-                        let y_atom = ParsedAtom::Small(yod.y as u128);
+                        let y_atom = ParsedAtom::from_biguint(yod.y.clone());
                         let mut res = vec!["~".to_string()];
                         res.extend(a_co(&y_atom));
                         res.extend(rep);
@@ -8625,7 +8644,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
 
                         let mut res = vec!["~".to_string()];
 
-                        if yug.d == 0 && yug.m == 0 && yug.h == 0 && yug.s == 0 {
+                        if yug.d.is_zero() && yug.m == 0 && yug.h == 0 && yug.s == 0 {
                             res.extend(vec!["s".to_string(), "0".to_string()]);
                             res.extend(rep);
                             return res;
@@ -8655,8 +8674,8 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             rep = new_rep;
                         }
 
-                        if yug.d != 0 {
-                            let d_atom = ParsedAtom::Small(yug.d as u128);
+                        if !yug.d.is_zero() {
+                            let d_atom = ParsedAtom::from_biguint(yug.d.clone());
                             let mut new_rep = vec![".".to_string(), "d".to_string()];
                             new_rep.extend(a_co(&d_atom));
                             new_rep.extend(rep);
@@ -8840,11 +8859,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             let padded_ones = reap(pad_fa(&q), '1'.to_string());
                             let mut res = vec!['0'.to_string(), 'c'.to_string()];
                             res.extend(padded_ones);
-                            if q.is_zero() {
-                                res.push("0".to_string());
-                            } else {
-                                res.extend(c_co(&encoded));
-                            }
+                            res.extend(c_co(&encoded));
                             res.extend(rep);
                             res
                         }
@@ -9083,19 +9098,15 @@ fn v_ne(tig: u128) -> char {
 }
 
 fn w_ne(tig: u128) -> char {
-    // base64 with - and ~ for 62/63
+    // ++w:ne: 0-9 a-z A-Z, then - and ~ for 62/63 (the ALPH64 order)
     if tig == 62 {
         '-'
     } else if tig == 63 {
         '~'
-    } else if tig < 26 {
-        (b'A' + tig as u8) as char
-    } else if tig < 52 {
-        (b'a' + (tig - 26) as u8) as char
-    } else if tig < 62 {
-        (b'0' + (tig - 52) as u8) as char
+    } else if tig >= 36 {
+        (b'A' + (tig - 36) as u8) as char
     } else {
-        unreachable!()
+        x_ne(tig)
     }
 }
 
@@ -9361,141 +9372,99 @@ pub fn decimal_without_leading_zero<'src>() -> impl Parser<'src, &'src str, Stri
         .map(|(h, t)| format!("{h}{t}")))
 }
 
+// decimal atom from a string of ASCII digits
+fn decimal_to_big(s: &str) -> BigUint {
+    BigUint::parse_bytes(s.as_bytes(), 10).expect("decimal digits")
+}
+
+// ++most dot qix:ab after `..`: 16-bit fraction words, exactly four lowercase
+// hex digits each
+fn date_fractions<'src>() -> impl Parser<'src, &'src str, Vec<u16>, Err<'src>> {
+    just("..").ignore_then(
+        any()
+            .filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'))
+            .repeated()
+            .exactly(4)
+            .collect::<String>()
+            .map(|s| u16::from_str_radix(&s, 16).expect("four hex digits"))
+            .separated_by(just('.'))
+            .at_least(1)
+            .collect::<Vec<u16>>(),
+    )
+}
+
+// ++when. The year and day are dim:ag/dip:ag and the clock fields dum:ag:
+// bignums with no range checks. The month is mot:ag (1-12, no leading zero).
 pub fn absolute_date<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let era_year = decimal_without_leading_zero()
-        .then(just('-').to(false).or_not().map(|opt| opt.unwrap_or(true)))
-        .try_map(|(year_str, era), span| {
-            let year: u64 = year_str
-                .parse()
-                .map_err(|_| Rich::custom(span, "invalid year number"))?;
-
-            if year == 0 {
-                return Err(Rich::custom(span, "year must be ≥ 1"));
-            }
-
-            Ok((era, year))
-        });
-    let month = just('.').ignore_then(digits()).try_map(|s: String, span| {
-        let m: u64 = s.parse().map_err(|_| Rich::custom(span, "invalid month"))?;
-        if (1..=12).contains(&m) {
-            Ok(m)
-        } else {
-            Err(Rich::custom(span, "month out of range (1–12)"))
-        }
-    });
-    let day = just('.').ignore_then(digits()).try_map(|s, span| {
-        let d: u64 = s.parse().map_err(|_| Rich::custom(span, "invalid day"))?;
-        if (1..=31).contains(&d) {
-            Ok(d)
-        } else {
-            Err(Rich::custom(span, "day out of range (1–31)"))
-        }
-    });
+        .map(|s| decimal_to_big(&s))
+        .then(just('-').to(false).or_not().map(|opt| opt.unwrap_or(true)));
+    let month = just('.').ignore_then(choice((
+        just('1')
+            .ignore_then(one_of("012"))
+            .map(|c: char| 10 + (c as u64 - '0' as u64)),
+        one_of("123456789").map(|c: char| c as u64 - '0' as u64),
+    )));
+    let day = just('.').ignore_then(
+        any()
+            .filter(|c: &char| matches!(c, '1'..='9'))
+            .then(
+                any()
+                    .filter(|c: &char| c.is_ascii_digit())
+                    .repeated()
+                    .collect::<String>(),
+            )
+            .map(|(h, t)| decimal_to_big(&format!("{h}{t}"))),
+    );
+    let clock_field = || digits().map(|s| decimal_to_big(&s));
     let hour_min_secs_fractions = just("..")
-        .ignore_then(
-            digits()
-                .try_map(|s, span| {
-                    let h: u64 = s
-                        .parse::<u64>()
-                        .map_err(|_| Rich::custom(span, "invalid hour"))?;
-                    if h < 24 {
-                        Ok(h)
-                    } else {
-                        Err(Rich::custom(span, "hour out of range (0–23)"))
-                    }
-                })
-                .then_ignore(just("."))
-                .then(digits().try_map(|s, span| {
-                    let m: u64 = s
-                        .parse::<u64>()
-                        .map_err(|_| Rich::custom(span, "invalid minute"))?;
-                    if m < 60 {
-                        Ok(m)
-                    } else {
-                        Err(Rich::custom(span, "minute out of range (0–59)"))
-                    }
-                }))
-                .then_ignore(just("."))
-                .then(digits().try_map(|s, span| {
-                    let s: u64 = s
-                        .parse::<u64>()
-                        .map_err(|_| Rich::custom(span, "invalid second"))?;
-                    if s < 60 {
-                        Ok(s)
-                    } else {
-                        Err(Rich::custom(span, "second out of range (0–59)"))
-                    }
-                })),
-        )
-        .then(
-            just("..")
-                .ignore_then(
-                    alphanumeric()
-                        .separated_by(just("."))
-                        .at_least(1)
-                        .collect::<Vec<String>>(),
-                )
-                .or_not()
-                .map(|opt| opt.unwrap_or_default()),
-        )
-        .try_map(|(((h, m), s), frags), span| {
-            let mut fractions = Vec::new();
-
-            for f in frags {
-                let val = u16::from_str_radix(&f, 16)
-                    .map_err(|_| Rich::custom(span, "invalid fraction digits"))?;
-                fractions.push(val);
-            }
-
-            Ok((h, m, s, fractions))
-        })
+        .ignore_then(clock_field())
+        .then(just('.').ignore_then(clock_field()))
+        .then(just('.').ignore_then(clock_field()))
+        .then(date_fractions().or_not().map(|opt| opt.unwrap_or_default()))
+        .map(|(((h, m), s), f)| (h, m, s, f))
         .or_not()
-        .map(|opt| opt.unwrap_or((0, 0, 0, Vec::new())));
+        .map(|opt| {
+            opt.unwrap_or_else(|| {
+                (
+                    BigUint::zero(),
+                    BigUint::zero(),
+                    BigUint::zero(),
+                    Vec::new(),
+                )
+            })
+        });
 
     era_year
         .then(month)
         .then(day)
         .then(hour_min_secs_fractions)
-        .map(|((((era, y), m), d), (hour, min, sec, f))| {
-            ParsedAtom::Small(year(era, y, m, d, hour, min, sec, &f))
+        .try_map(|((((y, era), m), d), (hour, min, sec, f)), span| {
+            year_big(era, &y, m, &d, &hour, &min, &sec, &f)
+                .map(ParsedAtom::from_biguint)
+                .ok_or_else(|| Rich::custom(span, "++year crashes on this date"))
         })
 }
 
-fn unit_value_pair<'src>() -> impl Parser<'src, &'src str, (char, u64), Err<'src>> {
-    one_of("dhms").then(decimal_without_leading_zero().try_map(|s, span| {
-        s.parse::<u64>()
-            .map_err(|_| Rich::custom(span, "Invalid Number"))
-    }))
+fn unit_value_pair<'src>() -> impl Parser<'src, &'src str, (char, BigUint), Err<'src>> {
+    one_of("dhms").then(decimal_without_leading_zero().map(|s| decimal_to_big(&s)))
 }
 
 pub fn relative_date<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let time_part = unit_value_pair()
         .separated_by(just('.'))
         .at_least(1)
-        .collect::<Vec<(char, u64)>>();
+        .collect::<Vec<(char, BigUint)>>();
 
-    let hex_part = just("..")
-        .ignore_then(
-            any()
-                .filter(|c: &char| c.is_ascii_hexdigit())
-                .repeated()
-                .exactly(4)
-                .collect::<String>()
-                .map(|s| u16::from_str_radix(&s, 16).unwrap_or(0))
-                .separated_by(just('.'))
-                .at_least(1)
-                .collect::<Vec<u16>>(),
-        )
-        .or_not()
-        .map(|v| v.unwrap_or_default());
+    let hex_part = date_fractions().or_not().map(|v| v.unwrap_or_default());
 
     time_part
         .then(hex_part)
-        .map(|(pairs, hex_vec): (Vec<(char, u64)>, Vec<u16>)| {
-            let mut days = 0u64;
-            let mut hours = 0u64;
-            let mut minutes = 0u64;
-            let mut seconds = 0u64;
+        .try_map(|(pairs, hex_vec): (Vec<(char, BigUint)>, Vec<u16>), span| {
+            let mut days = BigUint::zero();
+            let mut hours = BigUint::zero();
+            let mut minutes = BigUint::zero();
+            let mut seconds = BigUint::zero();
 
             for (unit, value) in pairs {
                 match unit {
@@ -9507,22 +9476,61 @@ pub fn relative_date<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'sr
                 }
             }
 
-            ParsedAtom::Small(yule(days, hours, minutes, seconds, &hex_vec))
+            yule_big(&days, &hours, &minutes, &seconds, &hex_vec)
+                .map(ParsedAtom::from_biguint)
+                .ok_or_else(|| Rich::custom(span, "++yule crashes on a fifth fraction word"))
         })
 }
 
 // ++year: date -> @da
 pub fn year(a: bool, y: u64, m: u64, d: u64, h: u64, min: u64, s: u64, f: &[u16]) -> u128 {
+    year_big(
+        a,
+        &y.into(),
+        m,
+        &d.into(),
+        &h.into(),
+        &min.into(),
+        &s.into(),
+        f,
+    )
+    .and_then(|n| n.to_u128())
+    .expect("++year: date out of range")
+}
+
+// ++year over bignum fields. `None` where hoon crashes: BC year 0 or a BC
+// year before the pivot (`dec`/`sub` underflow), day 0, or more than four
+// fraction words (++yule).
+pub fn year_big(
+    a: bool,
+    y: &BigUint,
+    m: u64,
+    d: &BigUint,
+    h: &BigUint,
+    min: &BigUint,
+    s: &BigUint,
+    f: &[u16],
+) -> Option<BigUint> {
+    let pivot = BigUint::from(YEAR_OFFSET);
     let yer = if a {
-        YEAR_OFFSET + y
+        pivot + y
     } else {
         // (sub 292.277.024.400 (dec y))
-        YEAR_OFFSET - (y - 1)
+        if y.is_zero() || y - 1u32 > pivot {
+            return None;
+        }
+        pivot - (y - 1u32)
     };
+    if d.is_zero() || !(1..=12).contains(&m) {
+        return None;
+    }
 
-    let day_count = yawn(yer, m, d);
+    // ++yawn only looks at the year modulo 400 until it adds whole eras
+    let eras = &yer / 400u32;
+    let rem = (&yer % 400u32).to_u64()?;
+    let day_count = BigUint::from(yawn(rem, m, 1)) + (d - 1u32) + eras * ERA;
 
-    yule(day_count, h, min, s, f)
+    yule_big(&day_count, h, min, s, f)
 }
 
 pub fn yell(now: &ParsedAtom) -> Tarp {
@@ -9546,17 +9554,14 @@ pub fn yell(now: &ParsedAtom) -> Tarp {
         current_raw = end(4, muc, &current_raw);
     }
 
-    let sec_u64: u64 = match &sec_atom {
-        ParsedAtom::Small(x) => *x as u64,
-        ParsedAtom::Big(b) => b.clone().try_into().expect("yell: sec too large"),
-    };
-
-    let day = (sec_u64 / DAY) as u64;
-    let sec = (sec_u64 % DAY) as u64;
-    let hor = (sec / HOR) as u64;
-    let sec = (sec % HOR) as u64;
-    let mit = (sec / MIT) as u64;
-    let sec = (sec % MIT) as u64;
+    // days are a bignum; the rest of the tarp is below a day
+    let sec_big = sec_atom.to_biguint();
+    let day = &sec_big / DAY;
+    let sec = (&sec_big % DAY).to_u64().expect("below a day");
+    let hor = sec / HOR;
+    let sec = sec % HOR;
+    let mit = sec / MIT;
+    let sec = sec % MIT;
 
     Tarp {
         d: day,
@@ -9569,14 +9574,19 @@ pub fn yell(now: &ParsedAtom) -> Tarp {
 
 pub fn yore(now: &ParsedAtom) -> Date {
     let rip: Tarp = yell(now);
-    let (y_ger, m_ger, d_ger) = yall(rip.d);
+    // ++yall splits off whole 400-year eras first; the remainder fits a u64
+    let eras = &rip.d / ERA;
+    let rest = (&rip.d % ERA).to_u64().expect("below an era");
+    let (y_rest, m_ger, d_ger) = yall(rest);
+    let y_ger = eras * 400u32 + y_rest;
 
-    const PIVOT: u64 = 292_277_024_400;
+    let pivot = BigUint::from(YEAR_OFFSET);
 
-    let (era, y_out) = if y_ger > PIVOT {
-        (true, y_ger - PIVOT)
+    let (era, y_out) = if y_ger > pivot {
+        (true, y_ger - pivot)
     } else {
-        (false, PIVOT - y_ger)
+        // [a=| y=+((sub 292.277.024.400 y.ger))]
+        (false, pivot - y_ger + 1u32)
     };
 
     Date {
@@ -9584,7 +9594,7 @@ pub fn yore(now: &ParsedAtom) -> Date {
         y: y_out,
         m: m_ger,
         t: Tarp {
-            d: d_ger,
+            d: BigUint::from(d_ger),
             h: rip.h,
             m: rip.m,
             s: rip.s,
@@ -9653,16 +9663,27 @@ pub fn is_leap_year(year: i32) -> bool {
 }
 
 pub fn yule(d: u64, h: u64, m: u64, s: u64, f: &[u16]) -> u128 {
+    yule_big(&d.into(), &h.into(), &m.into(), &s.into(), f)
+        .and_then(|n| n.to_u128())
+        .expect("++yule: time out of range")
+}
+
+// ++yule over bignum fields. `None` where hoon crashes: a fifth fraction
+// word decrements `muc` below zero.
+pub fn yule_big(d: &BigUint, h: &BigUint, m: &BigUint, s: &BigUint, f: &[u16]) -> Option<BigUint> {
+    if f.len() > 4 {
+        return None;
+    }
     let sec = d * DAY + h * HOR + m * MIT + s;
 
     let mut fac: u64 = 0;
     let mut muc = 4i32; // starts at 4
-    for &val in f.iter().take(4) {
+    for &val in f {
         muc -= 1; // decrement *before* shift
         fac += (val as u64) << (muc as u32 * 16);
     }
 
-    ((sec as u128) << 64) | (fac as u128)
+    Some((sec << 64u32) | BigUint::from(fac))
 }
 
 fn bloq_bits(bloq: u32) -> u32 {

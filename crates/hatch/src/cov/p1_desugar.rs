@@ -220,10 +220,20 @@ fn base58_ipv4_and_ipv6() {
         ipv4_to_atom("127.0.0.1".to_string()),
         Some(ParsedAtom::Small(0x7f00_0001))
     );
-    assert_eq!(ipv4_to_atom("1.2.3.999".to_string()), None);
+    // +lip:ag octets are ted:ab (up to 999) combined in base 256
+    assert_eq!(
+        ipv4_to_atom("1.2.3.999".to_string()),
+        Some(ParsedAtom::Small((1 << 24) + (2 << 16) + (3 << 8) + 999))
+    );
+    assert_eq!(ipv4_to_atom("1.2.3".to_string()), None);
+    assert_eq!(ipv4_to_atom("1.2.3.1000".to_string()), None);
     assert_eq!(
         ipv6_to_atom("0:0:0:0:0:0:0:1".to_string()),
         Some(ParsedAtom::Small(1))
+    );
+    assert_eq!(
+        ipv6_to_atom("fe80:0:0:0:0:0:0:1".to_string()),
+        Some(ParsedAtom::Small((0xfe80 << 112) | 1))
     );
     assert_eq!(ipv6_to_atom("nope".to_string()), None);
 }

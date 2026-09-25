@@ -1,4 +1,4 @@
-::  p3 DIVERGENT (HOONC-ONLY): hoon ++when parses seconds with dum:ag;
+::  p3 regression (was HOONC-ONLY): hoon ++when parses seconds with dum:ag;
 ::  utils.rs absolute_date rejects s >= 60
 |%
 ++  main

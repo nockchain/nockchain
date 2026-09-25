@@ -280,21 +280,20 @@ fn signed_radix_knots_keep_their_sign_marker() {
 }
 
 #[test]
-fn uw_and_zero_uc_renders_keep_shape() {
-    // The @uw digit map differs from hoonc (divergent/p3_path_uw.hoon), so
-    // only the shape is pinned. 62, 63, <26, <52, <62 each take their own arm.
+fn uw_and_zero_uc_renders() {
+    // ++w:ne: 0-9 a-z A-Z - ~ (regressions/p3_path_uw.hoon).
+    // 62, 63, <10, <36, <62 each take their own arm.
     let n = 62 * 64u128.pow(4) + 63 * 64u128.pow(3) + 5 * 64u128.pow(2) + 30 * 64 + 55;
-    let text = render_dime("uw", ParsedAtom::Small(n));
-    assert!(text.starts_with("0w"), "{text}");
-    assert_eq!(text.len(), 2 + 5, "{text}");
-    assert!(text[2..]
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '~'));
+    assert_eq!(render_dime("uw", ParsedAtom::Small(n)), "0w-~5uT");
+    assert_eq!(render_dime("uw", ParsedAtom::Small(1)), "0w1");
     assert_eq!(render_dime("uw", ParsedAtom::Small(0)), "0w0");
-    // divergent/p3_path_uc_zero.hoon: hoonc prints 21 pad ones and the
-    // checksum; hatch pads with met(3, 0) = 1 and prints '0'
-    let zero = render_dime("uc", ParsedAtom::Small(0));
-    assert!(zero.starts_with("0c1") && zero.len() > 20, "{zero}");
+    // regressions/p3_path_uc_zero.hoon: (pad:fa 0) is 21 ones, then the
+    // checksum of zero
+    assert_eq!(
+        render_dime("uc", ParsedAtom::Small(0)),
+        "0c1111111111111111111114oLvT2"
+    );
+    assert_knot_round_trip("0c1111111111111111111114oLvT2", "uc");
 }
 
 #[test]
@@ -358,11 +357,22 @@ fn bc_dates_parse_and_render_the_era_marker() {
     assert_eq!(q.to_biguint(), big(year(false, 1, 1, 1, 0, 0, 0, &[])));
     let d = yore(&q);
     assert!(!d.era);
-    assert_eq!((d.m, d.t.d), (1, 1));
-    // hoonc prints ~1-.1.1; hatch's ++yore drops the +1
-    // (divergent/p3_path_bc_date.hoon), so only the shape is pinned.
-    let text = render_dime("da", q);
-    assert!(text.starts_with('~') && text.ends_with("-.1.1"), "{text}");
+    assert_eq!((d.y.clone(), d.m, d.t.d.clone()), (big(1), 1, big(1)));
+    // ++yore: [a=| y=+((sub 292.277.024.400 y.ger))]
+    // (regressions/p3_path_bc_date.hoon)
+    assert_knot_round_trip("~1-.1.1", "da");
+    assert_knot_round_trip("~2-.12.31", "da");
+    // AD year 0 is 1 BC
+    let (_, q) = nuck_dime("~0.1.1");
+    assert_eq!(render_dime("da", q), "~1-.1.1");
+    // BC year 0, and BC years before the pivot, crash ++year
+    for text in ["0-.1.1", "292277024402-.1.1"] {
+        assert!(
+            absolute_date().parse(text).into_result().is_err(),
+            "{text:?} should be rejected"
+        );
+    }
+    assert_knot_round_trip("~292277024401-.1.1", "da");
 }
 
 #[test]
@@ -377,15 +387,59 @@ fn absolute_date_range_errors() {
 }
 
 #[test]
-fn absolute_date_rejections_that_hoonc_accepts() {
-    // hoon ++when reads these with dim:ag/dip:ag/dum:ag and no range checks;
-    // hatch rejects them (divergent/p3_da_*.hoon).
-    for text in ["0.1.1", "2020.1.32", "2020.1.1..24.0.0", "2020.1.1..1.60.0", "2020.1.1..1.1.60"] {
+fn absolute_date_fields_are_not_range_checked() {
+    // hoon ++when reads these with dim:ag/dip:ag/dum:ag and no range checks
+    // (regressions/p3_da_*.hoon); the overflow carries into the next field.
+    let da = |text: &str| absolute_date().parse(text).into_result().unwrap();
+    assert_eq!(da("2020.1.32"), da("2020.2.1"));
+    assert_eq!(da("2020.1.1..24.0.0"), da("2020.1.2"));
+    assert_eq!(da("2020.1.1..1.60.0"), da("2020.1.1..2.0.0"));
+    assert_eq!(da("2020.1.1..1.1.60"), da("2020.1.1..1.2.0"));
+    assert_eq!(da("2020.1.1..001.02.3"), da("2020.1.1..1.2.3"));
+    assert_eq!(da("0.1.1"), da("1-.1.1"));
+    // bignum years and days
+    let huge = da("600000000000.1.1").to_biguint();
+    assert!(huge.bits() > 128, "{huge}");
+    assert_eq!(
+        da("2020.1.100000000000000000000").to_biguint() - da("2020.1.1").to_biguint(),
+        (BigUint::from(99_999_999_999_999_999_999u128) * 86_400u32) << 64
+    );
+}
+
+#[test]
+fn absolute_date_lexical_rules() {
+    // mot:ag and dip:ag have no leading zero, qix:ab is exactly four
+    // lowercase hex digits, and ++yule crashes on a fifth fraction word
+    // (reject/p3_da_*.hoon)
+    for text in ["2020.01.1", "2020.1.01", "2020.1.1..1.1.1..0001.0002.0003.0004.0005"] {
         assert!(
             absolute_date().parse(text).into_result().is_err(),
-            "hatch currently rejects {text:?}"
+            "{text:?} should be rejected"
         );
     }
+    // a short or uppercase fraction group is not part of the literal
+    for text in ["2020.1.1..1.1.1..abc", "2020.1.1..1.1.1..ABCD"] {
+        let (date, rest) = text.split_at(text.rfind("..").unwrap());
+        assert!(
+            absolute_date().parse(text).into_result().is_err(),
+            "{text:?}"
+        );
+        assert!(
+            absolute_date()
+                .then_ignore(just(rest))
+                .parse(text)
+                .into_result()
+                .is_ok(),
+            "{text:?}"
+        );
+        assert!(absolute_date().parse(date).into_result().is_ok());
+    }
+    assert!(absolute_date()
+        .parse("2020.1.1..1.1.1..0001.0002.0003.0004")
+        .into_result()
+        .is_ok());
+    assert!(absolute_date().parse("2020.10.1").into_result().is_ok());
+    assert!(absolute_date().parse("2020.12.1").into_result().is_ok());
 }
 
 #[test]
@@ -428,14 +482,39 @@ fn relative_dates_round_trip() {
 }
 
 #[test]
-fn relative_date_fraction_quirks_diverge_from_hoonc() {
-    // hoon ++yule crashes on a fifth fraction and six:ab is lowercase only;
-    // hatch accepts both (divergent/p3_dr_frac_*.hoon).
+fn relative_date_fraction_rules() {
+    // hoon ++yule crashes on a fifth fraction and six:ab is lowercase only
+    // (reject/p3_dr_frac_*.hoon).
     assert!(relative_date()
         .parse("s1..0001.0002.0003.0004.0005")
         .into_result()
-        .is_ok());
-    assert!(relative_date().parse("s1..ABCD").into_result().is_ok());
+        .is_err());
+    assert!(relative_date().parse("s1..ABCD").into_result().is_err());
+    assert!(relative_date().parse("s1..abcd").into_result().is_ok());
+}
+
+#[test]
+fn relative_dates_are_bignums() {
+    // dim:ag fields and ++yule are bignums (regressions/p3_dr_*.hoon)
+    let dr = |text: &str| {
+        relative_date()
+            .parse(text)
+            .into_result()
+            .unwrap()
+            .to_biguint()
+    };
+    assert_eq!(
+        dr("d300000000000000"),
+        (BigUint::from(300_000_000_000_000u64) * 86_400u32) << 64
+    );
+    assert_eq!(
+        dr("s99999999999999999999"),
+        BigUint::from(99_999_999_999_999_999_999u128) << 64
+    );
+    let (_, q) = nuck_dime("~d300000000000000");
+    assert_eq!(render_dime("dr", q), "~d300000000000000");
+    let (_, q) = nuck_dime("~s99999999999999999999");
+    assert_eq!(render_dime("dr", q), "~d1157407407407407.h9.m46.s39");
 }
 
 #[test]
@@ -447,21 +526,26 @@ fn date_helpers_agree_with_hoon() {
     assert_eq!(yall(146_097 + 36_525), (500, 1, 1));
     assert_eq!(yall(146_097 + 36_525 + 59), (500, 3, 1), "500 is not leap");
     assert_eq!(yule(1, 2, 3, 4, &[]), (86_400 + 7_200 + 180 + 4) << 64);
+    let zero = BigUint::zero();
     assert_eq!(
-        yule(0, 0, 0, 0, &[1, 2, 3, 4, 5]),
-        0x0001_0002_0003_0004,
-        "only four fraction words fit"
+        yule_big(&zero, &zero, &zero, &zero, &[1, 2, 3, 4]),
+        Some(BigUint::from(0x0001_0002_0003_0004u64))
+    );
+    assert_eq!(
+        yule_big(&zero, &zero, &zero, &zero, &[1, 2, 3, 4, 5]),
+        None,
+        "a fifth fraction word crashes ++yule"
     );
     let t = yell(&ParsedAtom::Small(
         (90_061u128 << 64) | 0x0001_0002_0003_0004,
     ));
-    assert_eq!((t.d, t.h, t.m, t.s), (1, 1, 1, 1));
+    assert_eq!((t.d.clone(), t.h, t.m, t.s), (big(1), 1, 1, 1));
     assert_eq!(t.f, vec![1, 2, 3, 4]);
     let t = yell(&ParsedAtom::Small((5u128 << 64) | (0xabcd << 48)));
     assert_eq!(t.f, vec![0xabcd]);
     let d = yore(&ParsedAtom::Small(DA_2000));
     assert!(d.era);
-    assert_eq!((d.y, d.m, d.t.d), (2000, 1, 1));
+    assert_eq!((d.y.clone(), d.m, d.t.d.clone()), (big(2000), 1, big(1)));
     for (y, leap) in [(2000, true), (1900, false), (2024, true), (2023, false)] {
         assert_eq!(is_leap_year(y), leap, "{y}");
     }

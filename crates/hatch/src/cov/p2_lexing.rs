@@ -1085,6 +1085,16 @@ fn number_group_parsers() {
     let n = |s: &'static str| number().parse(s).into_result();
     assert!(n("0x0abc").is_err(), "a leading zero group is not @ux");
     assert_eq!(n("0x0").unwrap(), ("ux".to_string(), ParsedAtom::Small(0)));
+    // hex:ag: a lowercase first digit, hit digits of either case after it,
+    // lowercase qix:ab groups, and no groups after a lone 0
+    // (reject/p2_ux_*.hoon, regressions/p2_ux_mixed_case_lead.hoon)
+    for text in ["0xABC", "0x1.ABCD", "0x0.1234"] {
+        assert!(n(text).is_err(), "{text:?} is not @ux");
+    }
+    assert_eq!(
+        n("0xaBC.1234").unwrap(),
+        ("ux".to_string(), ParsedAtom::Small(0xabc_1234))
+    );
     assert_eq!(n("0v1.23456").unwrap().1, base32_to_atom("123456".into()));
     assert_eq!(n("0w1.aBc-~").unwrap().1, base64_to_atom("1aBc-~".into()));
     assert_eq!(n("0wz").unwrap().1, base64_to_atom("z".into()));
@@ -1093,7 +1103,11 @@ fn number_group_parsers() {
         ipv4_address().parse("1.02.3.4").into_result().is_err(),
         "leading zero octet"
     );
-    assert!(ipv4_address().parse("1.2.3.256").into_result().is_err());
+    // +lip:ag octets go up to 999, not 255 (regressions/p3_if_octet_over_255.hoon)
+    assert_eq!(
+        ipv4_address().parse("1.2.3.256").into_result().unwrap(),
+        "1.2.3.256"
+    );
     assert_eq!(
         ipv4_address().parse("0.1.2.3").into_result().unwrap(),
         "0.1.2.3"
@@ -1108,6 +1122,25 @@ fn number_group_parsers() {
             .into_result()
             .unwrap(),
         "1:2:3:4:5:6:7:8"
+    );
+    // +qex:ab: the first digit of a group is lowercase, the rest any case
+    assert!(ipv6_address()
+        .parse("FE80.0.0.0.0.0.0.1")
+        .into_result()
+        .is_err());
+    assert_eq!(
+        ipv6_address()
+            .parse("fE80.0.0.0.0.0.0.1")
+            .into_result()
+            .unwrap(),
+        "fE80:0:0:0:0:0:0:1"
+    );
+    assert!(
+        ipv6_address()
+            .parse("1.2.3.4.5.6.7.08")
+            .into_result()
+            .is_err(),
+        "a leading zero group is not @is"
     );
     assert!(
         base32().parse("vz").into_result().is_err(),
@@ -1131,7 +1164,8 @@ fn atom_shift_helpers() {
     );
     // yell walks the fractional 16-bit words down to an empty remainder
     let tarp = yell(&ParsedAtom::Small(1));
-    assert_eq!((tarp.d, tarp.h, tarp.m, tarp.s), (0, 0, 0, 0));
+    assert!(tarp.d.is_zero());
+    assert_eq!((tarp.h, tarp.m, tarp.s), (0, 0, 0));
     assert_eq!(tarp.f, vec![0, 0, 0, 1]);
 }
 
