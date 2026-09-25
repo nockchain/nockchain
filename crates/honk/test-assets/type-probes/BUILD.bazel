@@ -218,6 +218,7 @@ REJECTION_PROBES = [
     "test_not_flag",
     "tissig_empty",
     "wet_slag_tail",
+    "wtzp_mint_vain",
 ]
 
 # The divergent-bunt probe is intentionally native-only. Canonical hoonc also

@@ -910,6 +910,45 @@ fn play_dispatches_rare_runes_like_their_open_lowerings() {
 }
 
 #[test]
+fn wtzp_opens_to_wtcl_and_drops_the_dead_branch() {
+    // hoon-138 `++open`: `?!(p)` => `?:(p %.n %.y)`, so gain/lose prune a void branch.
+    assert_mint_same(
+        "=/  a=@  1  !=(?!(?=(^ a)))", "=/  a=@  1  !=(?:(?=(^ a) %.n %.y))",
+    );
+    play_same("=/  a=@  1  ?!(?=(^ a))", "=/  a=@  1  %.y").unwrap();
+    play_same("=/  a=@  1  ?!(?=(@ a))", "=/  a=@  1  %.n").unwrap();
+    // Under vet, the dead `%.n` branch is minted against a void subject.
+    let err = mint_jam("=/  a=@  1  ?!(?=(^ a))").expect_err("dead ?! branch is mint-vain");
+    assert!(err.contains("mint-vain"), "{err}");
+}
+
+#[test]
+fn bare_axis_hoons_are_found_with_read_permission() {
+    // hoon-138 `++open`: `[%$ p]` => `[%cnts [[%& p] ~] ~]`, so a bare axis (from `^=`
+    // cell skins, for one) resolves like the wing `+p` and `++peel` hides blocked payloads.
+    for core in ["|=(x=@ x)", "^|(|=(x=@ x))", "^?(|=(x=@ x))", "^&(|=(x=@ x))"] {
+        for ax in [2u64, 3, 6, 7] {
+            let bare = Hoon::TisGar(bx(parse(core)), bx(axis(ax)));
+            let wing = Hoon::TisGar(bx(parse(core)), bx(Hoon::Wing(vec![Limb::Axis(ax.into())])));
+            assert_eq!(
+                play_gen_jam(&bare),
+                play_gen_jam(&wing),
+                "play {core} +{ax}"
+            );
+            assert_eq!(
+                mint_gen_jam(&bare),
+                mint_gen_jam(&wing),
+                "mint {core} +{ax}"
+            );
+        }
+    }
+    let iron_sample = Hoon::TisGar(bx(parse("^|(|=(x=@ x))")), bx(axis(6)));
+    assert_eq!(play_tag(&iron_sample), "noun");
+    let gold_sample = Hoon::TisGar(bx(parse("|=(x=@ x)")), bx(axis(6)));
+    assert_eq!(play_tag(&gold_sample), "face");
+}
+
+#[test]
 fn play_constructed_only_nodes_follow_hoon_138() {
     // %lost plays to void; %fits plays to a flag.
     assert_eq!(play_gen_jam(&Hoon::Lost(bx(axis(1)))), play_jam("!!"));

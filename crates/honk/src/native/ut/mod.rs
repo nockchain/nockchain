@@ -4172,7 +4172,6 @@ impl<'a> Ut<'a> {
             Hoon::WutBar(list) => self.mint_wtbr(sut, gol, list),
             Hoon::WutPat(wing, q, r) => self.mint_wtpt(sut, gol, wing, q, r),
             Hoon::WutSig(wing, q, r) => self.mint_wtsg(sut, gol, wing, q, r),
-            Hoon::WutZap(p) => self.mint_wtzp(sut, gol, p),
             Hoon::WutKet(wing, q, r) => self.mint_wtkt(sut, gol, wing, q, r),
             Hoon::WutGal(p, q) => self.mint_wtgl(sut, gol, p, q),
             Hoon::WutGar(p, q) => self.mint_wtgr(sut, gol, p, q),
@@ -4323,10 +4322,10 @@ impl<'a> Ut<'a> {
                 }
             },
             Hoon::Axis(axis) => {
-                let ty = self.peek(sut.clone(), Way::Free, axis.as_biguint().clone())?;
-                let ty = self.nice(sut, gol, ty)?;
-                let formula = self.formula_slot(axis.as_biguint().clone());
-                Ok((ty, formula))
+                // hoon-138 `++open`: `[%$ p]` => `[%cnts [[%& p] ~] ~]`, so the leg is
+                // resolved by `++find %read` and `++peel` hides blocked core payloads.
+                let wing = vec![Limb::Axis(axis.clone())];
+                self.emin(sut, gol, &wing, &[])
             }
             Hoon::BarCen(prefix, tomes) => {
                 self.mine(sut, gol, Vair::Gold, prefix.as_deref(), Poly::Dry, tomes)
@@ -4503,7 +4502,6 @@ impl<'a> Ut<'a> {
                     let expanded = expand_wutsig(wing, q, r);
                     self.play(sut, &expanded)
                 }
-                Hoon::WutZap(_p) => Ok(ty_bool_n(&mut self.cx, self.slab).1),
                 Hoon::WutKet(wing, q, r) => {
                     let test = Hoon::WutTis(
                         Box::new(Spec::Base(BaseType::Atom("$".to_string()))),
@@ -4716,7 +4714,11 @@ impl<'a> Ut<'a> {
                         self.play(sut, &acc)
                     }
                 },
-                Hoon::Axis(axis) => self.peek(sut, Way::Free, axis.as_biguint().clone()),
+                Hoon::Axis(axis) => {
+                    // hoon-138 `++open`: `[%$ p]` => `[%cnts [[%& p] ~] ~]` (`++find %read`).
+                    let wing = vec![Limb::Axis(axis.clone())];
+                    self.epla(sut, &wing, &[])
+                }
                 Hoon::BarCen(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Dry),
                 Hoon::BarPat(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Wet),
                 _ => self.play_opened(sut, gen),
@@ -8335,21 +8337,6 @@ impl<'a> Ut<'a> {
         // Match hoon-138 open() lowering: wtkt -> wtcl(wtts atom p, r, q)
         let expanded = Hoon::WutCol(Box::new(test), Box::new(r.clone()), Box::new(q.clone()));
         self.mint(sut, gol, &expanded)
-    }
-
-    fn mint_wtzp(
-        &mut self,
-        sut: NRc<NTy>,
-        gol: NRc<NTy>,
-        p: &Hoon,
-    ) -> Result<(NRc<NTy>, FormulaId)> {
-        let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
-        let (_p_ty, p_formula) = self.mint(sut.clone(), bool_ty.clone(), p)?;
-        let false_formula = self.formula_quote(D(1));
-        let true_formula = self.formula_quote(D(0));
-        let formula = self.formula_cond(p_formula, false_formula, true_formula);
-        let ty = self.nice(sut, gol, bool_ty)?;
-        Ok((ty, formula))
     }
 
     fn play_rock(&mut self, aura: &str, expr: &NounExpr) -> NRc<NTy> {
