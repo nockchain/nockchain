@@ -27,16 +27,8 @@ rust_library(
     proc_macro_deps = [
         "//crates/nockvm/rust/nockvm_macros",
     ] + all_crate_deps(proc_macro = True),
-    rustc_env = {
-        "BUILD_EMBED_LABEL": "{BUILD_EMBED_LABEL}",
-        "BUILD_HOST": "{BUILD_HOST}",
-        "BUILD_USER": "{BUILD_USER}",
-        "BUILD_TIMESTAMP": "{BUILD_TIMESTAMP}",
-        "FORMATTED_DATE": "{FORMATTED_DATE}",
-    },
-    # Enable stamping
-    stamp = 1,
     deps = [
+        "//crates/ai-pow-jets",
         "//crates/chaff",
         # Remove the build script dependency
         "//crates/hoonc:hoonc_lib",

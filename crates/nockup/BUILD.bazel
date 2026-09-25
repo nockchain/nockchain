@@ -15,6 +15,21 @@ exports_files([
     "templates/repl/Cargo.toml",
 ])
 
+# Cargo's build.rs sets FULL_VERSION from CARGO_PKG_VERSION. Derive both from
+# the package manifest (or its inherited workspace version) for Bazel too.
+genrule(
+    name = "package_version_env",
+    srcs = ["Cargo.toml", "//:Cargo.toml"],
+    outs = ["package_version.env"],
+    cmd = "version=$$(sed -nE 's/^version[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\\1/p' $(location Cargo.toml) | head -n 1); " +
+          "if [ -z \"$$version\" ] && grep -Eq '^version[.]workspace[[:space:]]*=[[:space:]]*true' $(location Cargo.toml); then " +
+          "version=$$(sed -n '/\\[workspace.package\\]/,/\\[/p' $(location //:Cargo.toml) | " +
+          "sed -nE 's/^version[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\\1/p' | head -n 1); " +
+          "fi; " +
+          "test -n \"$$version\"; " +
+          "printf 'FULL_VERSION=%s\\nCARGO_PKG_VERSION=%s\\n' \"$$version\" \"$$version\" > $@",
+)
+
 # Library target for nockup
 rust_library(
     name = "nockup_lib",
@@ -29,15 +44,7 @@ rust_library(
         "templates/**/*",
     ]),
     edition = "2021",
-    # Set environment variables for the library too
-    rustc_env = {
-        "BUILD_TIMESTAMP": "{BUILD_TIMESTAMP}",
-        "GIT_HASH": "{BUILD_EMBED_LABEL}",
-        "BUILD_USER": "{BUILD_USER}",
-        "BUILD_HOST": "{BUILD_HOST}",
-        "FULL_VERSION": "0.4.0",
-        "CARGO_PKG_VERSION": "0.4.0",
-    },
+    rustc_env_files = [":package_version_env"],
     deps = all_crate_deps(),
 )
 
@@ -51,17 +58,7 @@ rust_binary(
         "templates/**/*",
     ]),
     edition = "2021",
-    # Set environment variables directly (replaces build.rs)
-    rustc_env = {
-        "BUILD_TIMESTAMP": "{BUILD_TIMESTAMP}",
-        "GIT_HASH": "{BUILD_EMBED_LABEL}",
-        "BUILD_USER": "{BUILD_USER}",
-        "BUILD_HOST": "{BUILD_HOST}",
-        "FULL_VERSION": "0.4.0",
-        "CARGO_PKG_VERSION": "0.4.0",
-    },
-    # Enable stamping for build metadata
-    stamp = 1,
+    rustc_env_files = [":package_version_env"],
     deps = all_crate_deps() + [":nockup_lib"],
 )
 

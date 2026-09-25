@@ -11,9 +11,9 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     compile_data = [
-        "//assets:dumb",
-        "//assets:wal",
-        "//assets:miner",
+        "//assets:dumb_selected",
+        "//assets:wal_selected",
+        "//assets:miner_selected",
     ],
     crate_features = [
         "bazel_build",
@@ -23,9 +23,9 @@ rust_library(
     ],
     edition = "2021",
     rustc_env = {
-        "WALLET_JAM_PATH": "$(location //assets:wal)",
-        "DUMB_JAM_PATH": "$(location //assets:dumb)",
-        "MINER_JAM_PATH": "$(location //assets:miner)",
+        "WALLET_JAM_PATH": "$(location //assets:wal_selected)",
+        "DUMB_JAM_PATH": "$(location //assets:dumb_selected)",
+        "MINER_JAM_PATH": "$(location //assets:miner_selected)",
     },
     deps = [
     ],

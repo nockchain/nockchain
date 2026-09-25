@@ -30,7 +30,7 @@ NOCKAPP_BOOT_PMA_TESTS = [
 ]
 
 _NOCKAPP_TEST_COMPILE_DATA = [
-    "//assets:dumb",
+    "//assets:dumb_selected",
     "//crates/nockapp/test-jams:cue-test.jam",
     "//crates/nockapp/test-jams:test-ker.jam",
 ]
@@ -83,7 +83,7 @@ def nockapp_unit_rust_test(name, args = None, size = "medium", timeout = "modera
             # rust_test compiles from bazel-out; point Diesel's embed_migrations!
             # at the compile_data tree instead of the source-tree manifest dir.
             "CARGO_MANIFEST_DIR": "$(BINDIR)/crates/nockapp",
-            "DUMB_JAM_PATH": "$(location //assets:dumb)",
+            "DUMB_JAM_PATH": "$(location //assets:dumb_selected)",
         },
         deps = all_crate_deps(
             normal = True,
