@@ -1523,3 +1523,22 @@ fn spans_after_plain_docs_between_tisfas() {
     let src = "=/  a  1\n::     plain\n=/  b  2\nb\n";
     assert_eq!(spot_start(src, at(src, "=/  b"), src.len()), (3, 1));
 }
+
+#[test]
+fn path_knots_reject_what_wood_crashes_on() {
+    //  +hasp renders each segment with +scot, and ++wood crashes on a control
+    //  byte, so hoonc rejects these paths; the bare knot still parses
+    assert!(parse_src("[/~~~1. ~]").is_err());
+    assert!(parse_src("[/._~~~~~~1.__ ~]").is_err());
+    assert!(parse_src("[/._~~~~~~41.__ ~]").is_ok());
+    assert!(parse_src("[/~~~41. ~]").is_ok());
+    assert!(parse_src("[~~~1. ~]").is_ok());
+    let crashes =
+        |aura: &str, q: u128| rend_crashes(&Coin::Dime(aura.into(), ParsedAtom::Small(q)));
+    assert!(crashes("t", 1));
+    assert!(crashes("t", 0x28c3)); //  malformed UTF-8: ++taft crashes
+    assert!(!crashes("t", 10));
+    assert!(!crashes("ta", 1));
+    assert!(!crashes("c", 0x2603));
+    assert!(!crashes("ud", 1));
+}

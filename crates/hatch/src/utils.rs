@@ -8488,12 +8488,19 @@ pub fn path<'src>(
             NounExpr::ParsedAtom(ParsedAtom::Small(0)),
         )),
         cord(linemap).map(|s| Hoon::Sand("t".to_string(), NounExpr::ParsedAtom(s))),
-        nuck().map(|coin| {
+        nuck().try_map(|coin, span| {
+            //  +hasp renders the knot with +scot, which crashes where ++wood does
+            if rend_crashes(&coin) {
+                return Err(Rich::custom(span, "unrenderable path knot"));
+            }
             let aura = match &coin {
                 Coin::Dime(a, _) if a == "tas" => "tas",
                 _ => "ta",
             };
-            Hoon::Sand(aura.to_string(), NounExpr::ParsedAtom(rent_co(&coin)))
+            Ok(Hoon::Sand(
+                aura.to_string(),
+                NounExpr::ParsedAtom(rent_co(&coin)),
+            ))
         }),
     ));
 
@@ -9085,13 +9092,42 @@ fn ed_co(exp: &u128, int: &Tape) -> Tape {
     out
 }
 
+//  Whether ++rend crashes on `lot`: its `~~` and `~-` knots go through
+//  ++wood, which crashes on a character ++teff or ++taft rejects.
+pub fn rend_crashes(lot: &Coin) -> bool {
+    match lot {
+        Coin::Blob(_) => false,
+        Coin::Many(coins) => coins.iter().any(rend_crashes),
+        Coin::Dime(prefix, q) => match prefix.as_bytes() {
+            [b'c', ..] => wood_crashes(&tuft(q)),
+            [b't', b'a', ..] => false,
+            [b't', ..] => wood_crashes(q),
+            _ => false,
+        },
+    }
+}
+
+fn wood_crashes(a: &ParsedAtom) -> bool {
+    let mut a = a.clone();
+    while !a.is_zero() {
+        let Some(b) = teff(&a) else {
+            return true;
+        };
+        if taft(&end(3, b, &a)).is_none() {
+            return true;
+        }
+        a = rsh(3, b, &a);
+    }
+    false
+}
+
 fn wood_go(a: &ParsedAtom) -> Vec<u128> {
     if a.is_zero() {
         return Vec::new();
     }
 
-    //  hoonc's ++wood crashes where ++teff or ++taft do; render the raw bits
-    //  of such a character instead
+    //  hoonc's ++wood crashes where ++teff or ++taft do (see rend_crashes);
+    //  render the raw bits of such a character instead
     let b = teff(a).unwrap_or(1);
     let c = match taft(&end(3, b, a)) {
         Some(c_atom) => c_atom.to_u32().expect("cord byte should fit in u32"),

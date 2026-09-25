@@ -187,6 +187,17 @@ fn hoon_wide_parser<'src>(
             )))
             .boxed(),
         rune_branch!('$', buc_runes_wide(hoon_wide.clone(), spec_wide.clone())),
+        //  $$, $'foo', $5: obsolete %leaf forms hoon-138's +scat still parses
+        just('$')
+            .ignore_then(choice((
+                just('$').to(Hoon::Leaf("tas".to_string(), ParsedAtom::Small(0))),
+                cord(linemap.clone()).map(|s| Hoon::Leaf("t".to_string(), s)),
+                nuck().try_map(|coin, span| match coin {
+                    Coin::Dime(p, q) => Ok(Hoon::Leaf(p, q)),
+                    _ => Err(Rich::custom(span, "invalid leaf constant")),
+                }),
+            )))
+            .boxed(),
         rune_branch!('^', ket_runes_wide(hoon_wide.clone(), spec_wide.clone())),
         rune_branch!(
             '!',

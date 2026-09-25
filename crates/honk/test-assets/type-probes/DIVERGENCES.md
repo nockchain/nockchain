@@ -54,6 +54,8 @@ None.
 | 35 | hatch did not parse the sail `/"url"` and `@"url"` tag shorthands (and a dozen other sail forms) | same |
 | 36 | hatch did not implement sail markdown (`++cram`) | hatch: port hoon-138's ++cram sail markdown |
 | 37 | In a tall `;"""` block, a deeper-indented `"""` line ended the block; hoonc reads it as text | same |
+| 38 | A `~~` path knot holding a control byte (`/~~~1.`) compiled; hoonc crashes in `++wood` rendering it | hatch: parse the obsolete $ leaf forms and reject path knots ++wood crashes on |
+| 39 | hatch did not parse `+scat`'s obsolete `%leaf` forms `$$`, `$'x'`, and `$5` | same |
 
 ## Import pipeline (`crates/honk/src/pipeline.rs`, CLI)
 

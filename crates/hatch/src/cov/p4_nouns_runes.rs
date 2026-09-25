@@ -1775,3 +1775,23 @@ fn kettis_doc_on_a_cell_face_and_sail_utf8_attribute() {
         roundtrip(Hoon::Xray(manx));
     }
 }
+
+#[test]
+fn obsolete_buc_leaf_forms_parse_as_leaf_hoons() {
+    //  hoon-138 +scat still reads $$, $'foo', and $<dime> as %leaf hoons
+    let leaf = |p: &str, q: ParsedAtom| Hoon::Leaf(s(p), q);
+    assert_eq!(parse_one("$$"), leaf("tas", ParsedAtom::Small(0)));
+    assert_eq!(parse_one("$5"), leaf("ud", ParsedAtom::Small(5)));
+    assert_eq!(parse_one("$0x10"), leaf("ux", ParsedAtom::Small(16)));
+    assert_eq!(parse_one("$~"), leaf("n", ParsedAtom::Small(0)));
+    assert!(matches!(
+        parse_one("$'x'"),
+        Hoon::Leaf(p, q) if p == "t" && q.to_biguint() == BigUint::from(b'x')
+    ));
+    assert_eq!(parse_one("$foo"), leaf("tas", string_to_atom(s("foo"))));
+    assert!(matches!(parse_one("$"), Hoon::Wing(_)));
+    assert!(matches!(parse_one("$.a"), Hoon::Wing(_)));
+    assert!(matches!(parse_one("$(a 1)"), Hoon::CenTis(..)));
+    //  +scat only takes a %$ coin; hoonc falls back to +rump and fails too
+    assert!(parse_src("($._1_2__ 1)").is_err());
+}
