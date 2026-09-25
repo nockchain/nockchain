@@ -1,150 +1,62 @@
-# p3 coverage ledger: `crates/hatch/src/utils.rs` 8280-12029
+# p3 coverage ledger: `crates/hatch/src/utils.rs` 8382-12125
 
-What is still uncovered after the p3 unit tests
-(`crates/hatch/src/cov/p3_atoms_specs.rs`) and the parity probes in this
-directory. Tags: `U` = missed by unit tests, `P` = missed by the parity
-corpus plus these probes. Line and branch labels follow the gap report
-(`B<line>T/F`, `c2`/`c3` for later operands of `&&`/`||`).
+This package covers the atom, knot, path, date, phonetic-name, jam/cue, spec-builder and spot-anchoring code in `crates/hatch/src/utils.rs` lines 8382-12125.
 
-Totals for the range: unit 180 lines / 39 branch outcomes left (from 1507 / 392);
-parity 525 lines / 220 branch outcomes left (from 1662 / 461).
+Gaps in the range: lines missed only by unit tests 2, only by the parity corpus 316, by both 180 (498 lines); branch outcomes missed only by unit tests 0, only by parity 160, by both 42 (202 outcomes).
 
-## Blocked by a divergence (P; unit-tested)
+Tags: `U` = unit tests miss it, `P` = the parity corpus misses it, `UP` = both. `B<line>T`/`F` are branch outcomes; `c2`/`c3` mark later operands of `&&`/`||`. Unit tests are in `crates/hatch/src/cov/p3_atoms_specs.rs`; probes are in this directory.
 
-The honk side of these is exercised by the probes in `divergent/`, which CI
-keeps manual until the divergence is fixed.
+## Not yet covered
 
-- `rend_with_rep` 'd' 'a' BC arm L8601-8603, B8600T; `yore` L9579, B9576F:
-  `divergent/p3_path_bc_date` (hatch `yore` drops the `+1` of hoon `++yore`).
-- `rend_with_rep` 'u' 'c' zero arm L8844, B8843T:
-  `divergent/p3_path_uc_zero` (hatch prints `0` where hoonc prints the checksum).
-- `w_ne` L9085-9100, B9087-B9095: `divergent/p3_path_uw` (digit order
-  A-Z a-z 0-9 in hatch, 0-9 a-z A-Z in hoon `++ne:w`). `/0w0` is in
-  `p3_path_unsigned`, so only the digit map is blocked.
-- `number` negative bitcoin arm L9322-9327: `divergent/p3_sc_signed_uc` (aura
-  `%uc` instead of `%sc`).
-- `absolute_date` range errors L9373 (B9372T), L9391 (B9388F), L9404
-  (B9401F), L9415 (B9412F), L9426 (B9423F): hoonc accepts year 0, day > 31,
-  hour > 23, minute > 59, second > 59 (`divergent/p3_da_year_zero`,
-  `p3_da_day_over_31`, `p3_da_hour_over_23`, `p3_da_minute_over_59`,
-  `p3_da_second_over_59`).
-- `lsh_big` zero shift B9920T (P): only reached rendering an integral float
-  with binary exponent 0 (`/.8388608`), which hits the same MISMATCH as
-  `divergent/p3_path_float_int`.
-- `skip_plain_doc_before_equals_slash_start` L11871-11874, L11877-11878,
-  B11864F, B11869F, B11877T, and the scan-continuation outcomes after such a
-  line (B11843F, B11846T, L11847-11848, B11856F, B11860F) (P): reached
-  only when a smol `+link` doc that does not name the binder sits above a
-  `=/`. hoonc anchors the spot at the doc and hatch at the `=/`
-  (`divergent/p3_spot_doc_link_before_tisfas`).
+- `wood_crashes` malformed UTF-8 L9117, B9116T (P; unit-tested): uncovered: no probe uses a `~~` path knot whose escape encodes to bytes `++taft` rejects, such as `/~~~200000.` (above U+10FFFF).
+- `w_ne` digits 36-63 L9230, L9232, L9234, B9229T, B9231T, B9233T (P; unit-tested): uncovered: no probe renders a `@uw` path segment with a digit above `z` yet (`p3_path_unsigned` and `regressions/p3_path_uw` use `0` and `1`).
+- Wide `~0` blobs (P; unit-tested): `atom_to_bits` Big arm L11024, L11026-11031, L11034, `rub_atom` payloads over 128 bits L10968-10972, L10974-10975, B10957F, B10970T/F, `atom_bit_len` Big arm L10869, `atom_get_bit` Big arm L10876-10882 and B10880T. uncovered: no test exercises it yet. `base32_to_atom` returns a bignum, so any `~0` blob wider than 128 bits reaches `atom_to_bits`, one holding an atom wider than 128 bits reaches `rub_atom`, and such a blob in a path segment is re-jammed through `atom_bit_len` and `atom_get_bit`.
+- `skip_plain_doc_before_equals_slash_start` scan body L11951-11952, L11967-11970, L11973-11974, L11976, B11941F, B11947F, B11950T, B11959F, B11962F, B11965F, B11973T/F (UP): uncovered: no test exercises it yet. The walked-back `start` always sits on an anchoring doccord (`expand_gap_start` only walks back to one) or on a code line with a trailing doccord, so the scan returns on its first line (a code line, or a doccord that anchors) before it can see a blank or plain doc line.
+- `rend_crashes` `%blob` arm L9099 (U): uncovered: no unit test checks a `~0` blob path knot yet (the parity corpus reaches it).
+- `unanchor_hoon_spot` fallthrough L11625 (U): uncovered: no unit test exercises it yet (the parity corpus reaches it).
 
-## Rejected by both compilers (P; unit-tested)
+## Rejected by both compilers (P; unit-tested unless noted)
 
-Checked with `probe-diag.sh`: hoonc and honk both reject these inputs, so they
-cannot be parity probes.
+Reject probes in `type-probes/reject/` count toward parity, so these stay uncovered until a reject probe uses the input.
 
-- `zust` invalid ipv6 L8310 (`.1.2.3.4.5.6.7.fffff`).
-- `path` posh failures L8451 (`/=/=/...` past the file path), L8461
-  (`%/=/=/...`).
-- `number` bad base58check L9303 (`0c...DivfNb`).
-- `absolute_date` month out of range L9383, B9380F (`~2020.13.1`).
-- `tiq` unknown suffix L10096, `ind` miss L10070 (`~zzz`); `phonemic_name`
-  `doz` star prefix L10116, B10115T (`~dozzod`); zero leading word L10129,
-  B10128T (`~dozzod-dozzod`); `.~doz`.
-- `cue_inner`/`rub_*`/`get_size` malformed-jam errors L10777, L10780, L10783,
-  L10804, L10838, L10849, L10897, L10909 and B10776T, B10779T, B10782T,
-  B10803T, B10833F, B10837T, B10848T, B10896T, B10908T (`~00`, `~07`, `~0g0`).
-- `unanchor_gap_glued_children` B11421F, B11427F (UP): `?-`/`?+` with no
-  clauses is a syntax error in both.
+- `path` posh failures L8560 (`/=/=/...` past the file path) and L8570 (`%/=/=/...`).
+- `number` bad base58check L9441 (`0c...`) and L9463 (`-0c...`).
+- `year_big` BC year before the pivot B9647c2T: hoon-138 `++year` underflows in `sub` and hatch returns a parse error.
+- `ind` miss L10219 and `tiq` unknown suffix L10245 (`~zzz`).
+- `phonemic_name` `doz` star prefix L10265, B10264T (`~dozzod`), and zero leading word L10278, B10277T (`~dozzod-dozzod`).
+- Malformed jams in `~0` blobs (`~00`, `~07`, `~0g0`): `rub_backref` L10926, L10929, L10932, B10925T, B10928T, B10931T; `rub_atom` L10953, B10952T; `get_size` L10987, L10998, B10982F, B10986T, B10997T; `cue_inner` L11046, L11058, B11045T, B11057T.
+- `unanchor_gap_glued_children` B11573F, B11579F (UP): `?-` or `?+` with no clauses is a syntax error in both.
 
-## Unreachable (UP unless noted)
+## Unreachable from source
 
-- Dead code, no callers: `atom_to_char` L9051-9063, `dvr_u64` L9160-9162,
-  `w_co` L9203-9214, `is_leap` L9646-9648, `lsh_u128` L9900-9907, `rsh_big`
-  L9927-9934, `mix`/`mix_big`/`mix_atoms` L10256-10273, `rol32` L10277-10279,
-  generic `fe` L10398-10470, `noun_hash` L10620-10624. `is_leap_year`
-  L9650-9653 (P; unit-tested).
-- Unused builders, unit-tested only (P): `two_specs_closed_tall` L11134-11140,
-  `name_spec_closed_tall` L11202-11210, `one_hoon_closed_tall` L11227-11234,
-  `hoon_with_span`/`apply_hoon_trace` L11251-11261, L11388-11396, B11253T/F.
-- `ParsedAtom::Big` arms where the value is always small: `trip` L8338,
-  `rend_with_rep` prefix bytes L8540, L8545, L8881, `yell` digit/seconds
-  L9542, L9551, `fein` after `feis` L10538, `offset_to_atom` L10674
-  (B10671F).
-- `zust` invalid ipv4 L8317: `ipv4_address` already filters octets to
-  0-255 without leading zeros, so `Ipv4Addr` parsing cannot fail.
-- `path` `%%...` posh failure L8470: `poon` with an empty tyke never fails for
-  a non-empty file path (unit-tested with an empty path).
-- `rend_with_rep` fallback arms L8670, L8676, L8691, L8829-8831, L8907, and
-  `z_co` L9237-9241 (P; unit-tested): `nuck` never produces `%d?`, `%f` > 1,
-  `%i?`, `%r?` or unknown auras, so only direct `rend_co` calls reach them.
-- `w_ne` `unreachable!()` L9098, B9095F: digits are < 64.
-- `relative_date` `_` unit L9506: `one_of("dhms")`.
-- Bit helpers with fixed arguments: `bloq_bits` panic L9670 (B9669T, P);
-  `met` on `Big(0)` L9689 (B9688T, P); `rep` zero step and >=128-bit chunks
-  L9727-9731, B9713c2T, B9722F, B9727T/F (P); `rap` full-width and
-  oversized-chunk panics L9761, L9766 (P); `cut` guards L9795, L9800, L9805,
-  L9810 (P), L9825, L9831, B9824T, B9830T (bit_len and bit_start are bounded
-  by the source width), Small >=128-bit mask L9848, B9847T (P), and Big
-  wide masks L9856-9878, B9856F, B9867T (P); `lsh`/`rsh`/`end` overflow
-  L9887, L9895, L9939 (P for L9887, L9895); `rsh_u128`/`end_u128` >=128-bit
-  L9912, L9959, L9962, B9911T, B9961T (only called with `(0, 1)`);
-  `end_big` L9947.
-- `ins`/`ind` length checks L10042, L10059, B10041T, B10058T (P): `tip`/`tiq`
-  always pass three bytes.
-- `muk` blocks and 1/3-byte tails L10307-10358, B10310T/F, B10318T: `eff`
-  always hashes two bytes. `fen` odd round count L10376, B10373F and `fe_u64`
-  odd arm L10494, B10493T: `r` is always 4.
-- `feis` re-encrypt L10481, B10480T and `feen` second pass L10520, B10517F:
-  with r = 4, `fe`/`fen` outputs are at most 0xfffe.ffff, below k = 0xffff.0000.
-- `fynd_big` below 0x1.0000 B10570F, B10575F: parsed planets and larger
-  names are always >= 0x1.0000. `fynd_u64` 64-bit arm L10593-10595, B10588c2F,
-  B10592T (P; unit-tested): `fynd_big` only passes 32-bit words.
-- `fein` Small-planet and Small-moon arms L10532, L10543, L10549 (P;
-  unit-tested): parsed planets and moons are `ParsedAtom::Big`.
-- jam/cue helpers on wide atoms: `usize_bit_len(0)` L10710 (B10709T),
-  `atom_bit_len`/`atom_get_bit` Big arms L10720, L10727-10735 (B10726F,
-  B10731T/F), `bits_to_atom` empty L10743 (B10742T), `rub_atom` >128-bit
-  payload L10819-10826 (B10808F, B10821T/F), `atom_to_bits` Big
-  L10875-10885 (P): `~0` blobs are parsed into a u128, so cue never sees a
-  wide atom. The `bits_to_atom` wide arm is covered by `p3_path_misc`.
-- `stack_block_docs_clad::walk` defensive returns L11347-11360, B11346F,
-  B11349F, B11352F, B11356F, B11357F: `map_to_noun` always builds a
-  well-formed treap.
-- `attach_help_to_hoon` same-help short cut L11376, B11375T (P;
-  unit-tested): every parser call site checks `hoon_tail_has_help` first.
-- `apply_hoon_docs` B11278F (P; unit-tested by
-  `postfix_docs_attach_to_tall_micsig_args`): the same shape in
-  `p3_docs_micsig` does not reach it through honk's pipeline. Not investigated.
-- `unanchor_gap_glued_children` `.^` with non-`:*` or empty arguments L11447,
-  B11443F, B11444F: the `.^` parser always builds a non-empty `%cltr`.
-  `unanchor_hoon_spot`/`unanchor_spec_spot` fallthrough L11473, L11481: in
-  traced mode every gap-glued child is `%dbug`- or `%note`-wrapped.
-- `unanchor_spot_start` L11491, B11490F (spot line outside the source),
-  B11497F, B11501F (a doc block running to EOF with no code after it: the
-  child always has code).
-- `wrap_hoon_with_trace` nested spots L11552, L11555, B11528F, B11530F: all
-  spots in one parse share `wer`. B11538F, B11543F, B11543c3T: the nested
-  `%dbug` case on a last line with no newline, a blank line or tab indentation.
-  Only fas-rune import lines produce it, and those need deps, which the
-  `--arbitrary` probes don't have.
-- `wrap_spec_with_trace` nested spot L11595, B11592F: no spec parser re-wraps
-  a traced spec with a different span.
-- `arm_body_start_from_header` L11606-11678 and all its branches (P;
-  unit-tested; L11675 is also U), plus `chumsky_spot_to_hoon_spot` L11888:
-  no parser span starts on a `++`/`+$` header (arm bodies start after the
-  gap), so only direct span calls reach it. L11675 needs a span past the end
-  of the source.
-- `non_doc_start_after_leading_doc_span` L11689-11774 and its branches (P;
-  unit-tested): parser spans always start at a token, never at a `::` doc
-  line or leading whitespace (B11703c2F is never false in any corpus).
-  B11720c2F (U too): a blank line cannot start with `:`.
-- `skip_plain_doc_before_equals_slash_start` EOF and first-line edges
-  B11789F, B11793F, B11800F, B11804F, B11812F, B11816T, L11817, B11821F,
-  B11837F (P; unit-tested): these need the `=/` at EOF, or the anchoring doc on
-  the first two lines of the file, where the probe header comment sits.
-  B11861F (P; unit-tested): a non-name `=/` skin is a syntax error in both
-  compilers. L11880, B11877F (UP): the anchoring doc line always has
-  content, so the scan either returns or sets `saw_plain_doc`.
-- `print_noun`, `skip_dbug`, `diff_noun`, `print_context` L11905-12028 (P;
-  unit-tested): diagnostics-only test helpers, never called by the compiler.
+- Dead code, no callers (UP): `atom_to_char` L9193-9198, L9200, L9204-9205; `dvr_u64` L9298-9300; `w_co` L9341-9350, L9352; `is_leap` L9784-9786; `lsh_u128` L10049-10052, L10054, L10056; `mix` L10405-10407, `mix_big` L10409-10411, `mix_atoms` L10413-10419, L10422; `rol32` L10426-10428; generic `fe` L10547-10619; `noun_hash` L10769-10773.
+- No caller outside tests (P; unit-tested): `is_leap_year` L9788, L9790-9791, B9790T/F, B9790c2T/F; `yule` L9793-9797.
+- Unused builders (P; unit-tested): `two_specs_closed_tall` L11286-11292, `name_spec_closed_tall` L11354-11362, `one_hoon_closed_tall` L11379-11386, `hoon_with_span` L11540-11548 and the `apply_hoon_trace` it calls, L11403-11406, L11408-11409, L11411, L11413, B11405T/F.
+- `ParsedAtom::Big` arms where the value is always small (UP): `trip` L8440 (one byte), `rend_with_rep` aura bytes L8649, L8654, L8990, `yell` 16-bit digit L9678, `fein` after `feis` L10687 (`feis` returns `Small`), `offset_to_atom` L10823, B10820F (a `usize` always fits in `u128`).
+- `wood_go` raw-bit fallback L9134 (UP): `path` rejects any knot `rend_crashes` flags before rendering it, so `wood` only sees characters `++wood` accepts.
+- `zust` invalid ipv6 L8412 and invalid ipv4 L8419 (UP): `ipv6_address` and `ipv4_address` already produce exactly the group count and digit widths that `ipv6_to_atom` and `ipv4_to_atom` check, so the conversions cannot fail.
+- `path` `%%...` posh failure L8579 (P; unit-tested with an empty path): it fails only when the file path is empty, and a build always has one.
+- `rend_with_rep` fallback arms L8779, L8785, L8800, L8938-8940, L9016 and `z_co` L9375-9379 (P; unit-tested): `nuck` never produces `%d?` other than `%da`/`%dr`, `%f` above 1, `%i?` other than `%if`/`%is`, `%r?` other than `%rd`/`%rh`/`%rq`/`%rs`, or an unknown aura, so only direct `rend_co` calls reach them.
+- `relative_date` `_` unit L9603 (UP): the unit comes from `one_of("dhms")`.
+- `year_big` day 0 or month out of range L9653, B9652T, B9652c2T (UP): `absolute_date` only parses days without a leading zero and months 1-12, and `year` passes a fixed valid date.
+- Bit helpers with fixed arguments: `bloq_bits` panic L9819, B9818T (P); `met` on `Big(0)` L9838, B9837T (P); `rep` zero step and chunks of 128 bits or more L9876-9877, L9879-9880, B9862c2T, B9871F, B9876T/F (P; callers use bloq 3 or 4 with step 1); `rap` full-width mask and oversized-chunk panic L9910, L9915, B9909T, B9914T (P); `cut` guards L9944, L9949, L9954, L9959, B9943T (P), `bit_len == 0` and Small `bit_start >= 128` L9974, L9980, B9973T, B9979T (UP; both are bounded by the source width), Small mask of 128 bits or more L9997, B9996T (P), and Big masks of 128 bits or more L10017, L10024, L10026-10027, B10005F, B10016T (P); `lsh`/`rsh` overflow L10036, L10044 (P); `end` overflow L10088 (UP); `end_big` overflow L10096 (UP); `rsh_u128`/`end_u128` shifts of 128 bits or more L10061, L10108, L10111, B10060T, B10110T (UP; only called with `(0, 1)`).
+- `ins`/`ind` length checks L10191, L10208, B10190T, B10207T (P): `tip` and `tiq` always pass three bytes.
+- `muk` blocks and 1- or 3-byte tails L10456-10461, L10463, L10468-10477, L10483-10491, L10500-10507, B10459T/F, B10467T (UP): `eff` always hashes two bytes. `fen` odd round count L10525, B10522F and `fe_u64` odd arm L10643, B10642T (UP): `r` is always 4.
+- `feis` re-encrypt L10630, B10629T and `feen` second pass L10669, B10666F (UP): with r = 4, the outputs are at most 0xfffe.ffff, below k = 0xffff.0000.
+- `fein` Small-planet and Small-moon arms L10681, L10692, L10698, and the `dis`/`con` helpers that only they and the `fynd_u64` 64-bit arm use, L10386-10388, L10390-10392 (P; unit-tested): parsed planets and moons are `ParsedAtom::Big`.
+- `fynd_big` values below 0x1.0000 B10719F, B10724F (UP): parsed planets and larger names are at least 0x1.0000. `fynd_u64` 64-bit arm L10742-10744, B10737c2F, B10741T (P; unit-tested): `fynd_big` only passes 32-bit words.
+- jam helpers (UP): `usize_bit_len(0)` L10859, B10858T (`mat_bits` handles a zero atom first); `atom_get_bit` past the atom's width L10884, B10875F, B10880F (`mat_bits` only asks for bits below the width); `bits_to_atom` on no bits L10892, B10891T (jam always emits bits).
+- `stack_block_docs_clad::walk` defensive returns L11499, L11502, L11505, L11512, B11498F, B11501F, B11504F, B11508F, B11509F (UP): `map_to_noun` always builds a well-formed treap.
+- `attach_help_to_hoon` same-help short cut L11528, B11527T (P; unit-tested): every parser call site checks `hoon_tail_has_help` first.
+- `apply_hoon_docs` B11430F (P; unit-tested): docs-only. honk parses entry files with docs off (`parse_build_leaf` in `crates/honk/src/bin/honk.rs`), so no probe reaches postfix doc attachment on a tall `;~`.
+- `unanchor_gap_glued_children` `.^` with non-`:*` or empty arguments L11599, B11595F, B11596F (UP): the `.^` parser always builds a non-empty `%cltr`.
+- `unanchor_spec_spot` fallthrough L11633 (UP): in traced mode the `?-`/`?+` clause specs come from the traced spec parser, which always wraps them in `%dbug`.
+- `unanchor_spot_start` L11643, B11642F, B11648F, B11652F (UP): L11643 and B11642F need a spot line outside the source; B11648F and B11652F need a doc block that runs to EOF with no code after it, but the child always has code.
+- `wrap_spec_with_trace` nested spot L11711, B11708F (UP): no spec parser re-wraps a traced spec with a different span.
+- `arm_body_start_from_header` L11722, L11740, L11742-11755, L11758-11760, L11763-11783, L11786-11789, L11794 and its branch outcomes B11721T, B11721c2T, B11730F, B11730c3T, B11737F, and every outcome from B11743 through B11786 (P; unit-tested), plus `chumsky_spot_to_hoon_spot` L11984 (P): no parser span starts on a `++`/`+$` header (arm bodies start after the gap), is empty, starts at EOF, or follows tab indentation (hoon gaps have no tabs), so only direct span calls reach it. L11791 (UP) needs a span that ends past the source.
+- `non_doc_start_after_leading_doc_span` L11805-11806, L11821, L11823-11834, L11836-11857, L11859-11871, L11873-11881, L11883-11885, L11887, L11890 and every branch outcome from B11804F through B11884F except B11836c2F (P; unit-tested): parser spans always start at a token, never at a `::` doc line or leading whitespace. B11836c2F (UP): the block is entered only for a blank line or a line starting `::`, so the second `:` check cannot fail.
+- `skip_plain_doc_before_equals_slash_start` first-line and EOF edges L11921, B11905F, B11909F, B11916F, B11920T, B11925F (P; unit-tested): they need the `=/`, its doc, or the line above the doc on the first line of the file, where every probe keeps its header comment, or a span starting at EOF.
+
+## Diagnostics only
+
+- `print_noun` L12001-12004, L12006-12007, L12009-12011, L12013-12014, L12016-12017, L12019-12020, L12023-12024, L12026, L12029, L12031, L12037, B12002T/F, B12016T/F, B12016c2T/F; `skip_dbug` L12063, L12065-12067, L12070-12072, L12075-12077, L12079-12081, L12084, L12086, B12075T/F; `diff_noun` L12087-12089, L12091-12093, L12095-12103, L12105-12111, L12113, L12116, L12118, B12091T/F, B12097T/F, B12098T/F, B12105T/F, B12106T/F; `print_context` L12120-12124 (P; unit-tested): noun-diff helpers for the hatch CLI `--test` path and integration tests, never called by the compiler.

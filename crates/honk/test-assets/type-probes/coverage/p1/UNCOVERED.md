@@ -1,132 +1,139 @@
-# p1 uncovered ledger: `crates/hatch/src/utils.rs` lines 1-3229
+# p1 uncovered ledger: `crates/hatch/src/utils.rs` lines 1-3246
 
-Scope: the desugarer (`+ax`, `open`, `flay`, `feck`, `grip`, `half`, `reek`,
-`name_ax`, `autoname`, `+ah` tiki helpers) plus the atom-literal helpers at
-the top of the file.
+This package covers the atom-literal helpers at the top of `utils.rs` and the
+desugarer (`+ax`, `open`, `flay`, `feck`, `grip`, `half`, `reek`, `name_ax`,
+`autoname`, `peg`).
 
-Measures after this package:
-
-- Unit (`cargo test -p hatch cov::p1`): 5 lines, 2 branch outcomes left.
-- Parity (probes in this directory): 327 lines, 23 branch outcomes left.
-
-Tags: `U` = unit, `P` = parity, `UP` = both. Line numbers are from this
-worktree. "Unit-tested" means `crates/hatch/src/cov/p1_desugar.rs` covers the
-branch.
+Uncovered on the final code: 0 lines and 0 branch outcomes missed only by the
+unit tests (`U`), 286 lines and 20 branch outcomes missed only by the parity
+corpus (`P`), and 6 lines and 7 branch outcomes missed by both (`UP`), for 292
+lines and 27 branch outcomes in all. Numbers are current line numbers. `B<n>T`
+and `B<n>F` are branch outcomes at line n, and `c2`, `c3` name the second and
+third conditions on that line. "Unit-tested" means
+`crates/hatch/src/cov/p1_desugar.rs` covers the entry.
 
 ## Dead code (UP)
 
-- 1607 `unreel` `None => Hoon::Wing(one)`: `res` is known non-empty, so
+- 1621 `unreel` `None => Hoon::Wing(one)`: `res` is known non-empty, so
   `res.first()` is always `Some`.
-- 2311 `loop_yex` `_ => panic!("miccol error")`: the `[]`, `[h]` and
+- 2325 `loop_yex` `_ => panic!("miccol error")`: the `[]`, `[h]` and
   `[h, t @ ..]` arms above it already cover every slice.
-- 2983, B2976F `name_ax` final `else { None }`; 3022, B3015F `autoname`
+- 2999, B2992F `name_ax` final `else { None }`; 3039, B3032F `autoname`
   `%like` final `else { None }`: the wing was just checked non-empty, so
   `first()` cannot be `None`.
 
 ## Latent mis-port, left unasserted (UP)
 
-- 2959 `reek` `Hoon::Pair(Hoon::Axis(a), _) => Some(..)`: hoon-138 `+reek`'s
+- 2975 `reek` `Hoon::Pair(Hoon::Axis(a), _) => Some(..)`: hoon-138 `+reek`'s
   `[~ *]` case is a bare `[%$ p]` hoon (`Hoon::Axis`), not a pair headed by an
   axis. The parser never builds either shape in a `reek` position, so the
-  divergence is unobservable. `reek_reads_a_bare_axis_as_a_wing` (ignored)
+  difference is unobservable. `reek_reads_a_bare_axis_as_a_wing` (ignored)
   pins the hoon-138 behavior. The unit tests do not assert this arm, because
   that would lock in the wrong behavior.
 
-## No hoon-138 source syntax (P; unit-tested)
+## Defensive checks on parser output
 
-- 330-361 `interface`; 762-808 `example` `%bcdt/%bcfs/%bczp/%bctc`; 828-857
-  `vair_case`; 1513-1578 `relative` core specs; 479 `spore` core specs; 3034,
-  3040, 3044, 3048 `autoname` core specs: hoon-138 has no parser rule for
-  `$.`, `$/`, `$!` or `` $` ``, so hoonc cannot build these specs.
-- 414-418 `spore` `%bcbc`, 426-428 `spore` `%loop`, 630 `example` `%loop`,
-  1150-1156 `relative` `%loop`, 1174-1188 `relative` `%bcbc`, 1657-1658
-  `factory` `%loop`, 3011 `autoname` `%loop`, 3029 `autoname` `%bcbc`:
-  `$$` has no parser rule, and `%loop` only means something under `$$`.
-  hatch's `/foo` loop spec is hatch-only syntax, and hoonc rejects it.
-- 434 `spore` `%made`, 631-643 `example` `%made`, 1165-1171 `relative`
-  `%made`, 3026 `autoname` `%made`: no hoon-138 parser rule produces `%made`.
-- 440 `spore` `%over`, 1173 `relative` `%over`, 3028 `autoname` `%over`:
-  `%over` specs only come from `+teal` (a hoon tiki under `?=`). `+example`'s
-  own `%over` arm removes them before spore, relative or autoname could see
-  them.
-- 655, 659-660 `example` `%name`; 3027 `autoname` `%name`: `%name` specs only
+- 134, B132F `hex_to_atom` (P; unit-tested): `hexadecimal_number` passes only
+  hex digits, and up to 32 of them always fit in `u128`.
+- 185 `base64_to_atom` and 203 `base32_to_atom` digit panics (P;
+  unit-tested): the lexers pass only valid digits.
+- 229, B228T, 234, B233c2T `ipv4_to_atom` (P; unit-tested); B233T, B233c3T
+  (UP): `ipv4_address` always yields four groups of one to three digits, so
+  the group-count, empty, length and digit checks never fail on parsed source.
+- 245, B244T `ipv6_to_atom` (P; unit-tested); 250, B249T, B249c2T, B249c3T
+  (UP): `ipv6_address` always yields eight groups of one to four hex digits.
+- 2713 `open` `%zpwt` pair `_ => false` (P; unit-tested): `zpwt_arg` reads
+  both versions with `dem`, so they always parse as numbers.
+- 3215, B3214T, B3214c2T `peg` with axis 0 (P; unit-tested): no caller
+  passes 0.
+
+## No source form reaches it (P; unit-tested)
+
+- 344-375 `interface`; 493 `spore` core specs; 776-822 `example`
+  `%bcdt/%bcfs/%bczp/%bctc`; 842-871 `vair_case`; 1527-1592 `relative` core
+  specs; 3051, 3057, 3061, 3065 `autoname` core specs: neither parser has a
+  rule for `$.`, `$/`, `$!` or `` $` ``, so these specs never exist.
+- 428-432 `spore` `%bcbc`, 1188-1202 `relative` `%bcbc`, 3046 `autoname`
+  `%bcbc`: neither compiler has a `$$` spec rune (a hoon-level `$$` is a
+  `%leaf`).
+- 448 `spore` `%made`, 645-657 `example` `%made`, 1179-1185 `relative`
+  `%made`, 3043 `autoname` `%made`: no parser rule produces `%made`.
+- 454 `spore` `%over`, 1187 `relative` `%over`, 3045 `autoname` `%over`: the
+  parser never builds `%over` specs. hatch builds them only inside `?=` tests
+  (for `$<` and `$>`) and in `grip` casts, and `+example`'s own `%over` arm
+  unwraps those before `spore`, `relative` or `autoname` could see them.
+- 669, 673-674 `example` `%name`; 3044 `autoname` `%name`: `%name` specs only
   appear as the direct operand of a `+$` arm's `%ktcl`. That goes through
   `+factory`, never through `+example`, and it never needs an autoname.
-- 1731 `open` `%eror`; 1816-1823 `open` `%leaf` (hoon-level); 2781 `flay`
-  `%limb`; 2962 `reek` `%limb`; 2986 `name_ax` `%limb`: neither parser builds
-  these hoons. hatch writes names as `%wing`.
-- 2726-2735 `chum_to_nounexpr` `VenProVerKel`: hoon-138 `+bonk` parses both
+- 2797 `flay` `%limb`; 2978 `reek` `%limb`; 3002 `name_ax` `%limb`: no
+  hatch parser rule builds a hoon-level `%limb`; hatch writes names as
+  `%wing`.
+- 2742-2751 `chum_to_nounexpr` `VenProVerKel`: hoon-138 `+bonk` parses both
   `%a:b.1` and `%a:b..1` as `[ven pro kel]`. hatch does the same, so the
   four-field chum is never built.
-- 2101, 2831-2833, B2830T `feck` `[%sand %tas @]`: no source form puts a bare
+- 2115, 2847-2849, B2846T `feck` `[%sand %tas @]`: no source form puts a bare
   `%sand %tas` in a `~|` trace. hoon-138 builds one only inside paths. The
   probes do cover the `%rock`, cell and cord (`%sand %t`) traces.
-- 2879 `grip` `%dbug` skin: `flay` never produces `%dbug` skins.
-- 3009 `autoname` `%gist`: `=spec` naming is wide-only, and wide specs carry
+- 2895 `grip` `%dbug` skin: `flay` never produces `%dbug` skins.
+- 3026 `autoname` `%gist`: `=spec` naming is wide-only, and wide specs carry
   no doccords.
-- 2975, B2974T `name_ax` empty wing; 3014, B3013T `autoname` `%like` with an
+- 2991, B2990T `name_ax` empty wing; 3031, B3030T `autoname` `%like` with an
   empty wing: the parser never builds an empty wing.
-- 2757-2760, 2762, B2758T/F `flay` `%cnts`: hatch does not parse `%=(a)` with
-  no changes in a skin position, so `flay` never sees `%cnts`.
-- 2965, B2965T/F `reek` `%cncb`: a hatch-only arm. `%_(wing)` with no changes
-  parses in neither compiler (see `lab/reek_cncb_empty_alias.hoon`).
+- 2981, B2981T, B2981F `reek` `%cncb`: a hatch-only arm. `%_(wing)` with no
+  changes parses in neither compiler (`reject/reek_cncb_empty_alias.hoon`).
+- B3017T `autoname` `aura == "$"`: the parser spells a bare `@` as `""`
+  (the `is_empty()` test the probes do cover). Only the desugarer spells the
+  empty aura `"$"`, in the `?=` specs it builds for `?@` and `?^`, and it
+  never passes those to `autoname`, whose only callers are parser rules.
+
+## Not yet covered by a parity probe (P; unit-tested)
+
+- 440-442 `spore` `%loop`, 644 `example` `%loop`, 1164-1170 `relative`
+  `%loop`, 1671-1672 `factory` `%loop`, 3028 `autoname` `%loop`: both
+  compilers parse `/foo` as a `%loop` spec (hoon-138 `++scad`), and with no
+  `$$` rule every such loop is free. Uncovered: no parity probe uses a `/foo`
+  spec yet. In `spore` a free loop crashes both compilers (hoon-138
+  `~(got by cox)`, hatch's `expect`).
+- 3059 `autoname` `%bcpm`: uncovered: no parity probe names a sample with a
+  wide `=$&(...)` spec yet.
 
 ## Rejection-only or malformed input (P; unit-tested)
 
-- 2746 `flay` cell with a non-skin side; 2771 `%tsgr` whose body is not a
-  skin; 2790 wing with a limb other than `,`; 2810, 2812 `%ktts` whose name is
-  not over `%noun` or whose body is not a skin; 2819, B2818T `open` leaves the
-  hoon unchanged: `flay` fails, and hatch reports a parse error. hoonc also
-  rejects these; `!>([b +(1)]=5)` was checked with `probe-diag.sh`, and
-  neither compiler writes an artifact.
-- 2754 `flay` cell `%rock`: no source form puts a cell rock in a skin
+- `flay` failures, where hatch reports a parse error and hoonc also rejects
+  the program: 2762 a cell with a non-skin side; 2773-2776, 2778, B2774T,
+  B2774F a `%cnts` skin, such as an axis-headed wing (`+3=5`) or a wing with
+  changes (`a(b 1)=5`), which hoon-138 `+flay` accepts only as
+  `[%cnts [@ ~] ~]` and hatch never builds in that shape; 2787 a `%tsgr`
+  whose body is not a skin; 2806 a wing with a limb other than `,`; 2826,
+  2828 a `%ktts` whose name is not over `%noun` or whose body is not a skin;
+  2835, B2834T `open` leaves the hoon unchanged. `!>([b +(1)]=5)` fails in
+  both under `probe-diag.sh`, and neither compiler writes an artifact.
+- 2770 `flay` cell `%rock`: no source form puts a cell rock in a skin
   position.
-- 2978 `name_ax` axis head; 3017 `autoname` `%like` axis head: `=$_(.)`
-  gives "cannot name spec". hoonc reports a syntax error at the same place
-  (checked with `probe-diag.sh`).
-- 2933, B2932T `half` empty `%clsg`; 2942, B2941T `half` empty `%cltr`: these
+- 2994 `name_ax` axis head; 3034 `autoname` `%like` axis head: `=$_(.)` gives
+  "cannot name spec". hoonc reports a syntax error at the same place.
+- 2949, B2948T `half` empty `%clsg`; 2958, B2957T `half` empty `%cltr`: these
   are reached only when a cell skin meets `~` or an empty `:*`, which neither
   compiler accepts.
-- 1841, B1840T `open` `%brbc` with an empty sample; 2343 `open` `%mcsg` with
+- 1855, B1854T `open` `%brbc` with an empty sample; 2357 `open` `%mcsg` with
   an empty list: the parsers require at least one element. hatch panics.
-- 134, B132F `hex_to_atom`; 185 and 205 (the base64 and base32 digit
-  panics): defensive only. The lexers pass only valid digits.
-- 3198, B3197T/c2T `peg` with axis 0: defensive only. No caller passes 0.
 
 ## No callers (P; unit-tested)
 
-- 98-102, 104-105, B99T/F `ta_to_atom`: nothing in hatch or honk calls it.
-
-## Blocked by a divergence (P; unit-tested)
-
-- 2154-2163 `open` `%sgbc`: hatch has no `~$` parser.
-  `divergent/p1_sigbuc_parse.hoon` is HOONC-ONLY.
-- 2233-2234 `open` `%mcts` `TunaTail::Call`: hatch's sail parser has no `;%`.
-  `divergent/p1_sail_call.hoon` is HOONC-ONLY.
-- 2614-2623 `open` `%xray` attribute `TagSpace`: hatch's sail attribute parser
-  rejects `a_b` names. `divergent/p1_sail_attr_namespace.hoon` is HOONC-ONLY.
-- 2690, 2693-2697, 2701-2702, 2704, B2696T/F, B2701T/F `open` `%zpwt`: any
-  `!?` inside an arm diverges, because `zpwt_arg_to_noun` (utils.rs ~13717)
-  encodes the version as `[%atom '138']`
-  (`divergent/p1_zpwt_hoon_noun.hoon`, MISMATCH). The pair test also reads
-  `[p q]` as `[min max]`, but hoon-138 treats p as the upper bound
-  (`divergent/p1_zpwt_pair_order.hoon` HOONC-ONLY,
-  `divergent/p1_zpwt_pair_reversed.hoon` HONK-ONLY).
-- 3001, B2999T `autoname` aura `"$"`: the parser spells `@` as `""`, so this
-  branch is never taken, and `=@` names the sample `%$`, which makes honk
-  segfault (`divergent/p1_autoname_bare_atom.hoon`, HOONC-ONLY).
-- 3042 `autoname` `%bcpm`: `=spec` must be wide, and hatch cannot parse wide
-  `$&` (`divergent/p1_bucpam_wide.hoon`, HOONC-ONLY).
+- 98-102, 104-105, B99T, B99F `ta_to_atom`: nothing in hatch or honk calls
+  it.
 
 ## Honk-native lowerings (P; unit-tested)
 
-- 1827 `open` `%note`: honk mints, plays and mulls `%note` natively, and
+- 1745 `open` `%eror`: hatch builds `%eror` arms for duplicate arm and
+  chapter names, but honk mints, plays and mulls `%eror` natively (failing
+  with its tape), so it never asks hatch to open one.
+- 1841 `open` `%note`: honk mints, plays and mulls `%note` natively, and
   `chip` only opens `?:` conditions, where the parser never attaches doc
-  notes. A `?&` with trailing doc comments was tried and did not reach this
-  arm.
+  notes.
 
 ## Instrumentation artifact (P)
 
-- 2957 `reek` `match gen` head region: the other `reek` arms (pair, wing,
+- 2973 `reek` `match gen` head region: the other `reek` arms (pair, wing,
   `%cnts`) run in parity through honk's `fund` and through `flay`. Unit tests
   cover this line.

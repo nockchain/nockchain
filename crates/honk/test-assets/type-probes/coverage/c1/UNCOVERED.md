@@ -1,122 +1,103 @@
-# c1 ledger: uncovered branches in `crates/honk/src/native/ut/mod.rs` 1-4799
+# c1 ledger: uncovered branches in `crates/honk/src/native/ut/mod.rs` 1-4817
 
-Scope: the Hoon arena and `Sig64` signatures, `Ut` construction and memo
-plumbing, fan-context keys, boundary caches, the `lower_*` helpers, musk
-setup, and `mint_inner`/`play_inner` dispatch.
+This range holds the `Sig64` signature writers, the Hoon arena, `Ut` memo
+plumbing, fan-context keys, boundary caches, the `lower_*` helpers, musk setup,
+and the `mint_inner`/`play_inner` dispatch.
 
-Tags: `U` = not covered by `cargo test` (after `cov/c1_ut_a.rs`), `P` = not
-covered by the parity corpus plus the `coverage/c1/*.hoon` probes. Line
-numbers match this worktree.
+The gap report lists 565 uncovered lines and 134 untaken branch outcomes: none
+are missed only by unit tests (U), 550 lines and 121 branches are missed only
+by the parity corpus (P), and 15 lines and 13 branches are missed by both (UP).
+`L` rows are lines never run; `B` rows are branch outcomes never taken (`T` or
+`F`, with `c2`/`c3` for later conditions of the same `if`).
 
-Unit tests cover everything in this range except the `U` rows below. Most
-`P` rows are covered by the unit tests in `cov/c1_ut_a.rs`, named per row.
+## Signature digests (`Sig64`)
 
-## Reason key
-
-- **unreachable**: no input or caller can take the branch (reason given).
-- **no-source**: reachable only from ASTs the Hoon parser never produces
-  (hoonc's grammar and hatch agree), so no probe exists.
-- **perf**: cache, memo, or signature plumbing. The branch cannot change a
-  type, formula, or verdict; covered by unit tests.
-- **diag**: error text or source locations only.
-- **defensive**: malformed-input or out-of-memory guard.
-- **divergence**: blocked by a divergence recorded under `divergent/`.
-- **test-only**: `#[cfg(test)]` code, not compiled into honk, so parity
-  cannot reach it.
-
-## `HoonArena` and `Sig64` (lines 184-2050)
-
-| Lines / branches | Tag | Reason |
+| Gaps | Tag | Reason |
 |---|---|---|
-| 184-191 `register_unsigned_root` | P | unreachable in production: `Sig64` never fails, so `enter_hoon_ast_scope` always registers a signed arena. Unit: `hoon_arena_unsigned_root_registers_a_single_unsigned_entry`. |
-| 225-227 `child_count` | P | test-only. |
-| 640T/F, 686F, 1383F `include_dbug_spot` false | P | unreachable in production: every `Sig64` is built spot-sensitive (`new_with_dbug_spots(true)`, `hoon_signatures_spot_sensitive_pooled`). Unit: `sig64_spot_insensitive_mode_ignores_dbug_spots`. |
-| 1351T, 1352-1354 memo hit in `write_hoon` | P | unreachable in production: one tree walk never reaches the same `&Hoon` twice. Unit: `sig64_reuses_a_digest_for_a_node_written_twice`. |
-| 582 `BaseType::Void`; 610-615 `Note::Made` with wings; 638-643 `Skin::Dbug`; 709-720 `Spec::Loop`; 745-753 `BucBuc`; 781-789 `BucDot`; 812-820 `BucFas`; 837-845 `BucTic`; 866-874 `BucZap`; 932, 941 `Tune` with a `None` entry or a list; 1022-1026 `Mane::TagSpace`; 1062-1064 `TunaTail::Call`; 1817-1822 `MicGal` | P | perf: `HoonSignature`/`SpecSignature` digests are exact cache keys and address-reuse guards and never reach output. These AST shapes are absent from the corpus and cost a new probe each (sail, core specs, `;<`). Unit: `sig64_distinguishes_every_rare_hoon_spec_skin_type_and_nock_shape`. |
-| 898-904 `Chum::VenProVerKel` | P | no-source: hoon-138's `bonk` and hatch's `jet_signature` both read `%k:foo..138` as `[ven pro kel]`, so neither builds a four-field chum. Unit: zoo test. |
-| 1098-1333 `write_poly/vair/garb/stencil/semi_noun_expr/coil/face_type/type/nock_hint/nock` (all arms) | P | no-source: reached only through `Hoon::Hand`, which exists only as a decoded `%hand` noun. Unit: zoo test (every `Type` x every `Nock`). |
-| 1388-1395 `Hoon::Eror` / `Hoon::Hand`; 1414-1418 `Hoon::Leaf` | P | no-source: `Eror` comes only from `lower_micsig([])`, and `Hand`/`Leaf` only from noun decoding. Unit: zoo test. |
-| 1496-1499, 1547-1550 `BarCen`/`BarPat` with `Some(prefix)` | P | no-source: the parser always emits `%brcn`/`%brpt` with `p=~`. Unit: zoo test. |
-| 1768-1771 `Hoon::SigBuc` (`~$`) | P | divergence: hatch has no `~$` rune (`divergent/c1_sigbuc_parse.hoon`). Unit: zoo test. |
-| 1335-1347 `write_zpwt_arg`, 2047-2050 `Hoon::ZapWut` (`!?`) | P | divergence: hatch encodes `!?`'s version wrongly (`divergent/c1_zpwt_noun.hoon`) and panics on the pair form (`divergent/c1_zpwt_range.hoon`). Unit: zoo test. |
+| L184-191 `register_unsigned_root` | P | Unreachable in production: the `Sig64` writers never return `None`, so `enter_hoon_ast_scope` always registers a signed arena. |
+| L225-227 `child_count` | P | Test-only (`#[cfg(test)]`). |
+| B692 F, B1389 F (`include_dbug_spot` false) | P | Unreachable in production: every `Sig64` is built spot-sensitive. |
+| B1357 T, L1358-1360 (memo hit in `write_hoon`) | P | Unreachable in production: one tree walk never reaches the same `&Hoon` node twice. |
+| L616-621 `Note::Made` with wings, L719-726 `Spec::Made` | P | Unreachable from source: both come only from a `%made` spec, which neither parser builds (hatch makes one only when decoding a noun). |
+| L644-649, B646 T/F `Skin::Dbug` | P | Unreachable from source: `flay` never builds a `%dbug` skin, and hatch makes `Skin::Dbug` only when decoding a noun. |
+| L715-718 `Spec::Loop` | P | Performance cache only: the digest never reaches output, and no parity probe contains a `/foo` loop spec. |
+| L751-759 `BucBuc`, L787-795 `BucDot`, L818-826 `BucFas`, L843-851 `BucTic`, L872-880 `BucZap` | P | Unreachable from source: hoon-138's parser never builds `%bcbc`, `%bcdt`, `%bcfs`, `%bctc`, or `%bczp`, and hatch makes them only when decoding nouns. |
+| L904-910 `Chum::VenProVerKel` | P | Unreachable from source: hoon-138's `++bonk` and hatch both read `%k:foo..138` as `[ven pro kel]`, so no four-field chum exists. |
+| L938 (tune entry without a value), L947 (tune list item) | P | Unreachable from source: the only source tune, from `=*`, has one entry with a value and an empty list. |
+| L1104-1339 (every listed line in `write_poly`, `write_vair`, `write_garb`, `write_stencil`, `write_semi_noun_expr`, `write_coil`, `write_face_type`, `write_type`, `write_nock_hint`, `write_nock`) | P | Unreachable from source: reached only through `Hoon::Hand`. |
+| L1398-1401 `Hoon::Hand` | P | Unreachable from source: it comes only from noun decoding. |
+| L1502-1505 `BarCen`, L1553-1556 `BarPat` with a prefix | P | Unreachable from source: both parsers emit `%brcn` and `%brpt` with `p=~`. |
 
-## Musk eval-stack cache (2230-2331)
+## Musk eval-stack copy (`musk_mack_cached_core_in_context`, `copy_into_eval_stack_shared`)
 
-| Lines / branches | Tag | Reason |
+| Gaps | Tag | Reason |
 |---|---|---|
-| 2271, 2275-2278, 2277T | P | defensive: rollback when the eval stack runs out of memory during a core copy. Existing unit tests cover it. |
-| 2277F, 2280 | U P | defensive: re-raises a non-`AllocationError` panic from the copy. Nothing the copy runs panics any other way. |
-| 2308F, 2325F | P | perf: a copy without a slab-side mug to carry over. Production mugs the core first (`noun_mug_cached`). Unit: `musk_eval_stack_copy_shares_repeated_indirect_atoms`. |
-| 2309F, 2313-2314, 2326F, 2330-2331 | U P | unreachable: a copied indirect atom or a freshly allocated cell is always allocated. |
+| L2278, L2282-2285, B2284 T | P | Defensive: rolls back when the eval stack runs out of memory during a core copy (resource exhaustion only). |
+| L2287, B2284 F | UP | Defensive: re-raises a panic other than `AllocationError`; nothing the copy runs panics any other way. |
+| L2321, L2338, B2315 F, B2332 F | P | Performance only: a copied noun with no slab-side mug to carry over; production mugs the whole core first (`noun_mug_cached`). |
+| L2320, L2337, B2316 F, B2333 F | UP | Unreachable: a copied indirect atom or a freshly allocated cell is always allocated. |
 
-## Build memos, fan legs, and fan context keys (2356-2907)
+## Build memos, fan legs, and fan context keys
 
-| Lines / branches | Tag | Reason |
+| Gaps | Tag | Reason |
 |---|---|---|
-| 2356-2370 `clear_build_memos` | P | perf: called only on the native prelude-mint path (`bin/honk.rs` ~3198/3224), never for `--arbitrary` entries. Unit: `clear_build_memos_resets_every_build_scoped_cache`. |
-| 2444T, 2445, 2451T, 2454-2467, 2455T/F, 2457T/F, 2460T/F, 2462T/F, 2471T, 2472 (`hold_repo_fan_leg_lookup_id`/`intern_id`) | P | perf: leg-ID interning falls back to structural matching only when a structurally equal `[inner gene]` pair arrives at a new address. Hold nouns come from hash-consed `live_to_noun`, so the raw-hold map always answers first. Unit: `fan_leg_lookup_matches_structurally_and_skips_colliding_entries`. |
-| 2481T, 2482; 2779T, 2780; 2874T, 2875 (ID counters wrapping to 0) | P | unreachable in practice: needs 2^64 interned IDs. Unit: `fan_leg_and_context_ids_wrap_past_zero`. |
-| 2502F, 2508T, 2511T, 2511-2515 (raw-hold store: re-store and eviction past 65,536 keys) | P | perf: bounded memo. Unit: `fan_leg_hold_raw_store_dedupes_and_evicts_oldest`. |
-| 2511F, 2556F (`pop_front` returning `None` when over the limit) | U P | unreachable: the queue is non-empty whenever its length exceeds the limit. |
-| 2527T, 2529T, 2530-2536, 2534T, 2595T, 2596 (mug-hold lookup hits) | P | perf: as above, the raw-hold map hits first in production. Unit: `fan_leg_hold_mug_store_and_lookup_compare_structurally`. |
-| 2553T, 2556T, 2556-2558, 2566T, 2568T, 2569, 2572T, 2573 (mug-hold store dedupe, bucket and key eviction) | P | perf: only mug collisions or 65,536+ distinct holds reach these. Unit: the mug-store test and `fan_leg_hold_mug_store_evicts_the_oldest_key`. |
-| 2610T, 2611 (`hold_repo_fan_leg_id_by_ptr` hit) | P | perf: `reachable_legs` memoizes per type ID, so a second lookup never reaches this map in production. Existing unit tests cover it. |
-| 2613F, 2614-2616 (leg ID of a non-hold) | P | defensive: `reachable_legs_node` calls it only on `NTy::Hold`. Unit: `fan_leg_id_for_native_hold_rejects_non_holds`. |
-| 2730T (`intersect_sorted_legs` on an empty side) | P | perf: needs an empty reachable-leg set while the fan is non-empty (callers return 0 first when the fan is empty). The corpus never does this. Unit: `fan_subset_and_context_ids_ignore_signature_collisions`. |
-| 2754T, 2755 (empty subset) | P | unreachable from callers: both scoped-key functions return 0 before interning an empty intersection. Covered by unit tests. |
-| 2771F, 2773 (subset signature collision) | P | perf: needs a (sum, xor, len) collision between distinct leg sets. Unit: the collision test above. |
-| 2803T/2804, 2821T/2822, 2841T/2842 (`!scoped_fan_enabled()`) | U P | unreachable: `scoped_fan_enabled()` is a constant `true`. |
-| 2831F, 2833-2834 (pair-scoped key with a non-empty intersection) | P | perf: needs a mint, mull, or core-mint cache query while a `%rest` leg reachable from its subject or goal is active. Hold expansion only plays, and the corpus never does this. Existing unit tests (`native_mint_cache_partitions_on_goal_reachable_rest_fan`) cover it. |
-| 2886 (activating an already-active leg) | P | unreachable in production: `with_active_rest_leg_ids` returns `rest-loop` before activating a leg that is already active. Unit: the collision test. |
-| 2900F, 2907 (deactivating an inactive leg) | P | unreachable: legs are deactivated only after the same scope activated them. The branch is a `debug_assert`. Unit: `deactivating_an_inactive_fan_leg_is_a_debug_assertion`. |
+| L2363-2377 `clear_build_memos` | P | Parity runs do not reach it: only the prelude mint paths in `bin/honk.rs` (3394, 3420) call it, and it only resets caches. |
+| L2452, B2451 T, L2466-2472, B2462 T, B2464 F, B2467 T/F, B2469 T/F (`hold_repo_fan_leg_lookup_id`); L2479, B2478 T (`hold_repo_fan_leg_intern_id`) | P | Performance cache only: interning runs only after both hold maps miss, and hold nouns are hash-consed, so the raw-ID hit and the structural matches do not fire. |
+| L2489, B2488 T; L2787, B2786 T; L2882, B2881 T (ID counters wrapping to 0) | P | Unreachable in practice: needs 2^64 interned IDs. |
+| B2509 F, B2515 T, L2518-2520, B2518 T, L2522 (`hold_repo_fan_leg_id_by_hold_raw_store`) | P | Performance cache only: callers store only after a raw-map miss, and eviction needs more than 65,536 keys. |
+| B2518 F, B2563 F | UP | Unreachable: the order queue is non-empty whenever its length exceeds the limit. |
+| L2537-2538, L2542-2543, B2534 T, B2536 T, B2541 T (`hold_repo_fan_leg_id_by_hold_mug_lookup` hit); L2603, B2602 T | P | Performance cache only: the raw-hold map answers first for hash-consed holds. |
+| L2563-2565, B2560 T, B2563 T (key eviction); L2576, B2573 T, B2575 T (dedupe); L2580, B2579 T (bucket overflow) in `hold_repo_fan_leg_id_by_hold_mug_store` | P | Performance cache only: eviction needs more than 65,536 holds, the store follows a lookup miss so no equal entry exists, and overflow needs 8 colliding mugs. |
+| L2618, B2617 T (`hold_repo_fan_leg_id_by_ptr` hit) | P | Performance cache only: `reachable_legs` memoizes per type ID, so a hold's second lookup does not reach this map. |
+| L2621-2623, B2620 F (leg ID of a non-hold) | P | Defensive: `reachable_legs_node` calls it only on `NTy::Hold`. |
+| B2737 T (`intersect_sorted_legs` with an empty side) | P | Performance cache only: needs a scope with no reachable legs while the fan is active; no parity probe does this. |
+| L2762, B2761 T (empty subset) | P | Unreachable from callers: both scoped-key functions return 0 before interning an empty intersection. |
+| L2780, B2778 F (subset signature collision) | P | Performance cache only: needs a (sum, xor, len) collision between distinct leg sets. |
+| L2811, B2810 T; L2829, B2828 T; L2849, B2848 T (`!scoped_fan_enabled()`) | UP | Unreachable: `scoped_fan_enabled()` is the constant `true`. |
+| L2840-2841, B2838 F (pair-scoped key with a non-empty intersection) | P | Performance cache only: needs a mint, core-mint, mull, or nest cache query while a `%rest` leg reachable from one of its two types is active; no parity probe does this. |
+| L2893 (activating an already-active leg) | P | Unreachable in production: `with_active_rest_leg_ids` returns `rest-loop` before activating a leg that is already active. |
+| L2914, B2907 F (deactivating an inactive leg) | P | Unreachable: legs are deactivated only after the same scope activated them; the branch is a `debug_assert`. |
 
-## AST scopes and noun canonicalization (2958-3108)
+## AST scopes and noun canonicalization
 
-| Lines / branches | Tag | Reason |
+| Gaps | Tag | Reason |
 |---|---|---|
-| 2966F, 2969-2970 | U P | unreachable: `hoon_signatures_spot_sensitive_pooled` always returns a root signature. |
-| 3033F-3046 (`strip_dbug_wrapper_noun` breaks), 3055F-3062, 3066-3068, 3067F (`strip_spec_gist_wrapper_noun` breaks), 3078F-3080F, 3097, 3100 (`canonicalize_nonsemantic_hoon_noun` on a malformed noun) | P | defensive: hoon nouns reaching the wet-rib key are well-formed, so the malformed-noun breaks never fire. Unit: `nonsemantic_hoon_noun_canonicalization_strips_dbug_and_gist_wrappers`. |
-| 3064F, 3067T, 3070 (stripping a real `%gist`), 3094 (a gene that is not `^:`) | P | perf (the `fire` wet-rib recursion-guard key). In the corpus, `mull_check_wet` only sees `^:` genes from `\|$` mold builders. A throwaway probe calling `\|*` gates under vet reached no new line here, so it was dropped. Unit: same test. |
-| 3085F, 3088 (a `^:` whose spec has a `%gist` wrapper) | P | perf: only the `fire` wet-rib recursion-guard key uses this canonicalization, and it merges keys that differ only in `%dbug` or `%gist` wrappers, whose `mull` verdict is identical. No corpus wet arm has this shape. Unit: the canonicalization test. |
-| 3104-3108 `hoon_noun_tag` | P | diag: used only to format "hold ast missing" errors (`repo.rs:75`, `mod.rs` ~9216). Unit: the canonicalization test. |
+| L2976-2977, B2973 F | UP | Unreachable: `hoon_signatures_spot_sensitive_pooled` always returns a root signature. |
+| L3041, L3044, L3047, L3053, B3040 F, B3043 F, B3046 F, B3052 F (`strip_dbug_wrapper_noun`); L3063, L3066, L3069, B3062 F, B3065 F, B3068 F, B3074 F (`strip_spec_gist_wrapper_noun`); L3101, L3104, L3107, B3085 F, B3086 F, B3087 F (`canonicalize_nonsemantic_hoon_noun`) | P | Defensive: the hoon nouns that reach the wet-rib key are well-formed, so the malformed-noun exits never run. |
+| B3071 F, L3073-3075, B3074 T, L3077 (stripping a real `%gist`); L3095, B3092 F (rebuilding a `^:` whose spec had one) | P | Performance cache only: this canonicalization feeds only the `fire` wet-rib recursion-guard key, and no parity wet arm is a `^:` whose spec carries `%gist`. |
+| L3111-3115 `hoon_noun_tag` | P | Diagnostics only: formats "ast missing" errors (`repo.rs:75`, `mod.rs` 9157 and 9164). |
 
-## `lower_*` desugarings (3110-3512)
+## `lower_*` desugarings
 
-| Lines / branches | Tag | Reason |
+| Gaps | Tag | Reason |
 |---|---|---|
-| 3112 (`:*` with no items) | P | no-source: hoon-138 `:*` takes `exps` (one or more), and hatch agrees. Unit: `lower_coltar_handles_empty_single_and_many`. |
-| 3116F, 3117 | U P | unreachable: `split_first` already proved that there are two or more items. |
-| 3319T, 3320-3321, 3329 (`feck` finds `[%sand %tas @]`) | P | no-source: hoon-138 emits `[%sand %tas @]` only inside path literals (`++poor`, 11522-11531), which are `%clsg` lists and never a bare `~|` operand. Unit: `lower_sigbar_uses_feck_for_tas_sand_and_a_cain_trap_otherwise`, `mint_sigbar_with_tas_sand_is_a_mean_hint`. |
-| 3449F, 3450 (`;~` with no rules) | P | no-source: `;~` takes `expi` (a hoon plus one or more rules). Unit: `lower_micsig_rejects_empty_and_chains_each_rule`. |
-| 3506-3512 `prefix_signature(Some(_))` | P | no-source: `%brcn`/`%brpt` prefixes are always `~` from the parser. Unit: `prefix_signature_distinguishes_named_prefixes`. |
+| L3119 (`:*` with no items) | P | Unreachable from source: `:*` takes one or more hoons in both parsers. |
+| L3124, B3123 F | UP | Unreachable: `split_first` already proved there are two or more items. |
+| L3327-3328, L3336, B3326 T (`feck` finds `[%sand %tas @]`) | P | Unreachable from source: hoon-138 builds `[%sand %tas @]` only as a path element (`++hasp`, `++limp`) inside a `%clsg` list, never as a bare `~\|` operand. |
+| L3457, B3456 F (`;~` with no rules) | P | Unreachable from source: `;~` takes a hoon plus one or more rules. |
+| L3513-3519 `prefix_signature` with a prefix | P | Unreachable from source: `%brcn` and `%brpt` prefixes are always `~` from the parser. |
 
-## Memo context keys and boundary caches (3574-4049)
+## Memo context keys and boundary caches
 
-| Lines / branches | Tag | Reason |
+| Gaps | Tag | Reason |
 |---|---|---|
-| 3575F, 3577-3592, 3601F (placeholder set) | P | unreachable in production: nothing inserts into `arm_placeholder_play_in_progress`. Unit: `memo_context_keys_follow_placeholder_and_goal_recursion_state`. |
-| 3600F (a goal in progress with `arm_in_progress` empty) | P | unreachable in production: `build_arm_formula_direct` (~8150) pushes and pops both together. Unit: same test. |
-| 3624-3751 `mint_cache_key`, `mint_boundary_lookup_exact`, `mint_boundary_store_exact`; 4011-4049 `nest_mug_lookup`, `nest_mug_register` | P | test-only. Unit: `mint_boundary_exact_compares_structurally_and_evicts_full_buckets`, `nest_mug_memo_compares_structurally_and_evicts_full_buckets`. |
-| 3860F-3868, 3864F/c2F (`redo_boundary_lookup` structural fallback and full-bucket miss); 3892-3898, 3892T/F-3896c2T/F, 3900T, 3901 (`redo_boundary_store` dedupe and eviction) | P | perf: a lookup precedes every store, and nouns are hash-consed, so the corpus stores only into empty buckets and hits only by raw identity. Unit: `redo_boundary_compares_structurally_and_evicts_full_buckets`. |
-| 3930F-3938, 3932T, 3934F/c2F; 3962-3968, 3962T/F-3966c2T/F, 3970T, 3971 (`rest_boundary_*`, same shape) | P | perf: same reason. Unit: `rest_boundary_compares_structurally_and_evicts_full_buckets`. |
+| L3584-3599, B3582 F, B3608 F (placeholder set non-empty) | P | Unreachable in production: nothing inserts into `arm_placeholder_play_in_progress`. |
+| B3607 F (a goal in progress with `arm_in_progress` empty) | P | Unreachable in production: `build_arm_formula_direct` pushes both sets together (8106-8107). |
+| L3631, L3636-3646 `mint_cache_key`; L3686-3695, L3697-3698, L3700-3711, L3713-3714, B3697 T/F, B3703 T/F, B3705 T/F, B3707 T/F, B3709 T/F, B3709 c2 T/F, B3709 c3 T/F `mint_boundary_lookup_exact`; L3717-3728, L3730-3745, L3747-3758, B3737 T/F, B3739 T/F, B3741 T/F, B3743 T/F, B3743 c2 T/F, B3743 c3 T/F, B3747 T/F `mint_boundary_store_exact`; L4018-4027, L4029-4031, L4033-4034, L4036-4037, B4026 T/F, B4030 T/F, B4031 T/F `nest_mug_lookup`; L4040-4056, B4052 T/F `nest_mug_register` | P | Test-only (`#[cfg(test)]`). |
+| L3868, L3870, L3873, L3875, B3867 F, B3869 F, B3871 F, B3871 c2 F (`redo_boundary_lookup`); L3899-3905, L3908, B3899 T/F, B3901 T/F, B3903 T/F, B3903 c2 T/F, B3907 T (`redo_boundary_store`) | P | Performance cache only: a lookup precedes every store and nouns are hash-consed, so the corpus stores only into empty buckets and every lookup that finds a bucket matches by address. |
+| L3938, L3943, L3945, B3937 F, B3939 T, B3941 F, B3941 c2 F (`rest_boundary_lookup`); L3969-3975, L3978, B3969 T/F, B3971 T/F, B3973 T/F, B3973 c2 T/F, B3977 T (`rest_boundary_store`) | P | Performance cache only: same shape as the redo cache; the legs list is rebuilt per call, so it matches structurally rather than by address. |
 
-## `mint`, `mint_inner`, and `play_inner` dispatch (4051-4799)
+## `mint`, `mint_inner`, and `play_inner` dispatch
 
-| Lines / branches | Tag | Reason |
+| Gaps | Tag | Reason |
 |---|---|---|
-| 4116F, 4120, 4340F, 4342 (`cache_sig` is `None`) | U P | unreachable: every registered arena node has a signature (see 2966F). |
-| 4235 `mint` of `%hand`; 4614-4616 `play` of `%hand` | P | no-source (`%hand` only comes from noun decoding). Unit: `mint_and_play_hand_use_the_carried_type`. |
-| 4309-4311 `mint` of an empty `=~` | P | no-source: `=~` takes `expi` (two or more hoons). Unit: `mint_tissig_handles_empty_single_and_chains`. |
-| 4707 `play` of a one-item `=~` | P | no-source: same grammar. hoonc and honk both reject `=~  a  ==` (checked with probe-diag). Unit: same test. |
-| 4317-4318, 4711-4712 (`ok_or_else` in the multi-item `=~` arm) | U P | unreachable: the arm matches only lists of two or more. |
-| 4349T, 4350 (`slot_axis` with axis 0) | P | unreachable in production: the only caller (`musk_mack_constant_core`) passes arm axes of 2 or more. Unit: `slot_axis_rejects_zero_and_walks_cells`. |
-| 4418F (cwd with no components) | U P | diag: only when honk runs from `/`. |
-| 4420T, 4422 (error path shortened below the cwd) | P | diag: error-location display. Unit: `dbug_path_strips_the_cwd_prefix_only_for_paths_below_it`. |
-| 4535 `play` of `%fits` | P | no-source: `%fits` comes only from `?=` opening and mold `factory`/`choice_`, always as a `?:` condition, which `play %wtcl` never plays. Unit: `play_constructed_only_nodes_follow_hoon_138`. |
-
-## Divergences found (see `divergent/`)
-
-- `c1_sigbuc_parse.hoon`: HOONC-ONLY. hatch has no `~$` rune (hoon-138.hoon:13308).
-- `c1_zpwt_noun.hoon`: MISMATCH. hatch `zpwt_arg_to_noun` (hatch/src/utils.rs:13716) encodes `!?(138 a)` as `[%zpwt [%atom '138'] ...]`; hoon-138 expects `[%zpwt 138 ...]`.
-- `c1_zpwt_range.hoon`: HOONC-ONLY (honk panics). hatch `open` (utils.rs:2690) reads `!?([p q] ...)` as `[min max]`; hoon-138 (8677) requires `p >= 138 >= q`.
-- `c1_bucpam_wide.hoon`: HOONC-ONLY. hatch rejects wide `$&(spec hoon)` in a `+$` arm, though the tall form parses.
+| L4127, B4123 F; L4347, B4345 F (`cache_sig` is `None`) | UP | Unreachable: every registered arena node has a signature (see B2973 F). |
+| L4240 `mint` of `%hand`; L4619-4621 `play` of `%hand` | P | Unreachable from source: `%hand` comes only from noun decoding. |
+| L4314-4316 (`mint` of an empty `=~`) | P | Unreachable from source: `=~` takes two or more hoons, and hatch's whole-file wrapper holds at least one. |
+| L4712 (`play` of a one-item `=~`) | P | Unreachable from source: `=~` takes two or more hoons; the only one-item `=~` is hatch's whole-file wrapper, which parity runs mint and never play. |
+| L4322-4323, L4716-4717 (`ok_or_else` in the multi-item `=~` arm) | UP | Unreachable: the arm matches only lists of two or more. |
+| L4355, B4354 T (`slot_axis` with axis 0) | P | Unreachable in production: the only caller, `musk_mack_constant_core`, passes op-9 arm axes, which compiled formulas never set to 0. |
+| B4423 F (cwd with no components) | UP | Diagnostics only: taken only when honk runs from `/`. |
+| L4427, B4425 T (error path below the cwd) | P | Diagnostics only: shortens error locations. |
+| L4462-4466 `play_noun` | P | Parity runs do not reach it: only the prelude seeding and isolated prelude evaluation in `bin/honk.rs` (3233, 3416) call it. |
+| L4540 `play` of `%fits` | P | Unreachable from source: `%fits` appears only as a `?:` condition (from `?=` opening and mold `factory`), and `play` of `%wtcl` never plays its condition. |

@@ -1,80 +1,219 @@
-# c3 ledger: uncovered branches in `crates/honk/src/native/ut/mod.rs` 9642-end
+# c3 ledger: uncovered code in `native/ut/mod.rs` from line 9583
 
-Unit tests: `crates/honk/src/native/ut/cov/c3_ut_c.rs`. Parity probes: this directory.
-Tags: **U** = left uncovered by unit tests, **P** = left uncovered by the parity probes.
-Rejection cases marked "both reject" were checked with `probe-diag.sh` (hoonc fails with
-the same error name) and are asserted in the unit tests.
+This package covers `crates/honk/src/native/ut/mod.rs` from line 9583 (the skin
+`gain`/`lose` helpers) to the end of the file.
 
-## Blocked by a divergence (see `divergent/`)
+Uncovered by unit tests only (`U`): 0 lines and 1 branch outcome. By the parity
+corpus only (`P`): 886 lines and 81 branch outcomes. By both (`UP`): 35 lines
+and 23 branch outcomes. `L<n>` is a line and `B<n>T`/`B<n>F` a branch outcome;
+`c<k>` names the k-th condition of a compound test. `P` entries are covered by
+unit tests.
 
-| Lines | Tag | Reason |
-|---|---|---|
-| 9759, 10074 (`Skin::Wash` gain/lose) | P | Known divergence (Wash in gain/lose); ledgered as blocked. Unit-tested. |
-| 9884 (`gain_cell_skin` %core, `Base(NounExpr)` tail) | P | `divergent/c3_gain_cell_core_base_tail`, `c3_gain_cell_core_noun_term`: hoon-138 keeps the core only for the term tail `%noun`. |
-| 10177, 10142F (`lose_cell_skin` %core, `Base(NounExpr)` tail) | UP | `divergent/c3_lose_cell_core_base_tail` (HONK-ONLY). Not pinned in a unit test, which would lock in the bug. |
-| `mull_mile` blocked seminoun | - | Known divergence; ledgered as blocked. |
+## Test-only code
+
+These items are `#[cfg(test)]`, so the parity build never runs them.
+
+- `fuse_noun` L10239-10244, `miss_noun` L10264-10268, `crop_noun` L10525-10530,
+  `fork_from_options_n` L10783-10787, `peek_noun` L10980-10984, `mull_noun`
+  L11052-11061 [P]: noun-bridged wrappers around the native operations.
+- `with_stack_guard` L10992-10994 [P]: the test-build call counter.
+- `type_face_name_if_atom` L12245-12254, `type_hold_type` L12306-12316,
+  `find_face_axis_skip` L12476-12484, and `find_face_axis_skip_inner`
+  L12487-12566 with all its branches (B12497 through B12554) [P].
+- `mint_tisgar_chain_chunked` L12701-12745, B12709T, B12709F, B12727T,
+  B12727F, B12741T, B12741F [P]: the chunked-mint prototype. The production
+  chunked prelude mint is `mint_honc_prelude_chunked` in `bin/honk.rs`.
+- `ty_face` L12769-12772 and the paired constructors `ty_noun_n`
+  L12922-12924, `ty_void_n` L12927-12929, `ty_cell_n` L12943-12952,
+  `ty_face_tool_n` L12955-12977, `ty_face_n` L12980-12988, `ty_hint_n`
+  L12991-13023, `ty_hold_n` L13026-13042, `ty_core_n` L13045-13073, `ty_fork_n`
+  L13076-13080 [P].
+- `is_const_bool_formula` L14066-14072, B14067T, B14067F, B14070T, B14070F,
+  B14071T, B14071F; `cell_type` L14075-14076, L14084-14090, B14076F, B14086T,
+  B14086F, B14086c2T, B14086c2F; `cell_type_n` L14094-14108, B14101T, B14101F,
+  B14104T, B14104F [P].
+- `cell_type` L14077-14083, B14076T [UP]: the `HONK_NATIVE_TYPES` branch. The
+  flag is read once per process, so a test that sets it would race the others.
 
 ## Unreachable from source
 
-| Lines | Tag | Reason |
-|---|---|---|
-| 9701-9702, 10040-10041 (`%base %null` skin) | P | `flay` turns `~` into a `%rock %n` leaf; no source skin is `[%base %null]`. Unit-tested. |
-| 9704, 10043 (`%base %void` skin) | P | `!!` is `%zpzp`, which `flay` rejects. Unit-tested. |
-| 9726-9730, 10058 (`Skin::Dbug`) | P | `flay` never builds `%dbug` skins (hoon-138 and hatch). Unit-tested. |
-| 9733-9737, 10059 (`Skin::Help`) | P | Needs a `%note %help` hoon in `?#` skin position; hatch attaches docs only to `^=` names, which `flay` then rejects. Unit-tested. |
-| 9707T, 9708, 9771, 9846, 9933, 10086, 10138, 10228, 10378, 10560 (void refs / void fuse subject) | P | Void cannot reach these: face, hint, cell and fork constructors collapse void, and a void leg makes the subject void (mint-vain first). Unit-tested. |
-| 9850 (`gain_cell_skin` noun ref, void head) | P | A source head skin gains `%void` from `%noun` only via `%base %void`, which `flay` never builds. Unit-tested. |
-| 9948T, 9950T, 9951F, 9957 (leaf skin with empty or `@` aura) | P | Leaf skins come only from `%rock`s, which always carry an aura. Unit-tested. |
-| 10704 (`crop_sint` fallback) | P | `crop_inner` handles `%void`/`%noun` refs before reaching `crop_sint`, and atoms and cells never reach it. |
-| 10754, 10753T, 10771, 10770T (`fitz` empty `end`/`rsh`) | UP | Dead: `$` is 0, so an empty atom returns from the `q == $` check first, and `rsh` returns `$` before reaching `rest.is_empty()`. |
-| 10778c3F | U | Redundant `p_w != 0` inside a clause reached only when `p_w != 0`. |
-| 10978c5T, 10978c6T/F, 10989T, 10990 (peek blocked context) | UP | `peel` returns `con = true` only together with `sam = true`, so the first clause always matches first. |
-| 11214-11217, 13499-14094 (`%hand` and its `type_to_noun`/`spec_to_noun`/`nock_to_noun` lowerings) | P | `Hoon::Hand` comes only from `noun_to_hoon`, never from parsing. Unit-tested (every AST form). |
-| 11474-11475 (`mull` `Hoon::Eror`) | UP | `%eror` comes only from `noun_to_hoon`. hoon-138 would crash in `open`; honk returns `%void`. Not pinned. |
-| 11417T (`mull-skip`) | P | Any `%lost` with a non-void sut side fails `mint` first (mint-lost). |
-| 11417F, 11421, 11521T, 11522, 11723F, 11725 (`vet` off inside mull) | P | hoon-138 runs `mull` only under `vet` (`fire` checks `!vet` first). Unit-tested with `vet = false`. |
-| 11515-11516, 11513F (`mull-open`) | P | Every parsed gene has a mull arm or opens. Unit-tested. |
-| 11716 (mixed synthetic/natural ports) | P | sut and dox share the definition context, so a wing resolves synthetically on both sides or on neither. Unit-tested (existing test). |
-| 11808-11813 (`atom_is_zero`) | P | Only `play_sand` with aura `n` calls it, and no source form builds `%sand %n`. Unit-tested. |
-| 11818-11823, 11820T (`atom_is_flag` Big) | P / U(11820T, 11821) | The parser emits `ParsedAtom::Small` for word-size values. `BigUint::to_bytes_le()` of zero is `[0]`, never empty, so 11820T and 11821 are dead. |
-| 11863-11870, 13596-13612 (axis/parent limbs in note wings) | P | `%made` note wings come from `|$` argument names (terms only). Unit-tested. |
-| 12124-12128, 12123T (`map_put_mug` existing key) | P | Map inputs come from `HashMap`s (unique keys). Unit-tested. |
-| 12238T, 12239, 12254F, 12257-12258, 12808, 12837 (void payload/inner, unknown tag) | P | `burp` and `ty_core` get types already collapsed by the native constructors; unknown tags don't exist. Unit-tested. |
-| 12409-12410, 12394-12395 (fork-set node missing branches) | UP (12409) | The pop side re-reads a node already validated on the push side. |
-| 12621T, 12622-12624, 12651T, 12652-12654 | UP | `axis > 1` implies `bit_len >= 2`. |
-| 12615T/12616, 12647T/12648, 12687T/12688-12690 | P | Defensive `axis <= 1` / `b == 0` checks; unit-tested. |
-| 13473 (`tune_to_noun` `None` value) | P | Parsed tunes always carry a hoon (`=*`, busk). |
+Skins:
 
-## Rejection paths (both compilers reject; unit-tested)
+- L9642-9643 (gain), L9989-9990 (lose) [P]: a `[%base %null]` skin. `flay`
+  turns `~` into a `%rock %n` leaf, so no source skin has this form.
+- L9645, L9992 [P]: a `[%base %void]` skin. `!!` is `%zpzp`, which `flay`
+  rejects.
+- L9667, L10007 [P]: `Skin::Dbug`. `flay` never builds `%dbug` skins (in
+  hoon-138 or hatch).
+- L9668-9671, L9674-9678, L10008 [P]: `Skin::Help`. It needs a `%note %help`
+  hoon in `?#` skin position; hatch attaches docs only to `^=` names, which
+  `flay` then rejects.
+- B9648T, L9649 (`%noun` base gain), L9719 (`gain_atom_skin`), L9794
+  (`gain_cell_skin`), L9882 (`gain_leaf_skin`), L10035 (`lose_atom_skin`),
+  L10087 (`lose_cell_skin`), L10176 (`lose_leaf_skin`), L10326
+  (`miss_dext_uncached`) [P]: a void ref. The face, hint, cell and fork
+  constructors collapse void, and a void leg makes the subject void, which
+  fails with mint-vain first.
+- L9798 [P]: `gain_cell_skin` on a `%noun` ref whose head skin gains `%void`.
+  From `%noun` only `[%base %void]` does that, and `flay` never builds it.
+- B9897T, B9899T, B9900F, B9905T, L9906 [P]: a leaf skin with an empty or `@`
+  aura. Leaf skins come only from `%rock`s, which always carry an aura.
+- B9695T, L9696 (`gain spec`), B10018T, L10019 (`lose spec`) [P]: `ar:fish`
+  already requires the ref to nest in the spec, so after a successful mint
+  this check cannot fail.
 
-| Lines | Tag | Error |
-|---|---|---|
-| 9754T/9755, 10069T/10070 | P | `gain spec` / `lose spec`: `ar +fish` already requires the ref to nest in the spec, so after a successful mint this is unreachable. Unit-tested directly. |
-| 9782c2T, 9783-9785, 9951c2T, 9952-9954 | P | `atom-mismatch` (`?#(@ud t)`, `?#(%5 t)` on `@t`); both reject. |
-| 10548T, 10549-10551 | P | `fuse-loop` (`?=(@ v)`, `v=$@(@ r)`); both reject. |
-| 10666T, 10667-10669 | P | `crop-loop`: every `?=` computes the gain first, which hits fuse-loop; unit-tested directly. |
-| 11084 | P | `mull-none` (`=>(!! a)` in a wet arm); both reject. |
-| 11328 | P | `mull-bonk-b`; both reject. |
-| 11346 | P | `mull-bonk-c`; both reject. |
-| 11379c2T, 11380 | P | `mull-bonk-a` (`?=(_a a)`); both reject. |
-| 11397T, 11398 | P | `mull-bonk-x` (non-nesting `?#` wing); both reject. |
-| 11379T, 11393T, 11394 | UP | Axis mismatch between sut and dox wings: wet samples keep the declared faces, so a wing resolves to the same axis on both sides. |
-| 11456T, 11457 | P | `mull-bonk-f` (`!@(p.a ...)`); both reject. |
-| 11708T, 11709 | P | Edits on a synthetic port (`tack` rejects in mint first). Unit-tested. |
-| 11753T/11754-11756, 11774T/11775-11777, 11787T/11788-11790, 11801-11803 | P | `mull_endo` axis/opal mismatches: sut and dox cores share arm layout and sample faces. Unit-tested. |
+Type operations:
 
-## Performance-cache, hash-collision or test-only code
+- B10614T, L10615-10617 [P]: crop-loop. A `?=` computes the gain before the
+  lose, and the gain fails with fuse-loop first.
+- L10652 [P]: the `crop_sint` fallback. `crop_inner` handles `%void` and
+  `%noun` refs before calling it, and its atom, cell and core callers handle
+  atom and cell refs themselves.
+- B10701T, L10702 (`end_bytes`), B10718T, L10719 (`rsh_bytes`) [UP]: dead.
+  `$` is 0, so the `fitz` loop returns before `end_bytes` sees an empty atom,
+  and `rsh_bytes` returns `$` before `rest` can be empty.
+- B10726c3F [UP]: the `p_w != 0` test is reached only when `p_w != 0`.
+- B10926c5T, B10926c6T, B10926c6F, B10937T, L10938 [UP]: the blocked-context
+  arm of `peek`. `peel` returns `con = true` only together with `sam = true`,
+  so the first clause always matches first.
 
-| Lines | Tag | Reason |
-|---|---|---|
-| 10909F, 10909c2F, 10911, 10928F, 10931F, 10932F/c2F, 10935-10936, 10938F, 10941 | UP | `peek` seen-hold buckets: reached only on a mug collision between different (hold, axis) pairs. |
-| 10325c2F, 10329F | P | `set_miss_memo_persistence` toggles (prelude mint only). Unit-tested. |
-| 10414c4T | P | Reversed-pair `miss` hold guard; needs mutually recursive molds through `redo`. Unit-tested. |
-| 10414c4F | U | Needs a three-hold cycle where the new ref equals an earlier sut but the sut differs. Termination guard only. |
-| 11075-11076, 11096 | UP | `mull` cache: the signature fallback (every AST gets a signature) and the store's error arm. |
-| 11897-11946, 11953, 11966 (`dor`, `gor_mug`/`mor_mug` equal-mug tie-break) | P | Treap ordering reaches `dor` only on a mug collision. Unit-tested. |
-| 11937T, 11938 | U | `dor` tail step after structurally-equal heads with equal mugs, inside the collision path. |
-| 12140-12141, 12165-12166, 12384T/12385-12387, 12502-12504 | UP / P(12502) | Decode-error arms on treaps built in place, the 1M-node budget, and an unknown foot tag (unit-tested). |
-| 12913-12919 (`NativeForkOptionIter::size_hint`) | P | Iterator size hint (allocation sizing only). Unit-tested. |
-| 13300F, 13301, 13309F, 13310 | U | Assertion-failure arms inside the in-file `#[cfg(test)]` module. |
-| 14107T, 14108-14114 (`cell_type` under `HONK_NATIVE_TYPES`) | U | Test helper branch behind an env flag cached process-wide; setting it would race other tests. |
+`mull`:
+
+- B11328T, B11343T, L11344 [UP]: an axis mismatch between the sut and dox
+  wings. Wet samples keep the declared faces, so a wing resolves to the same
+  axis on both sides.
+- B11367T, B11367F, L11367-11371 [P]: `%lost` in `mull`. mint rejects a
+  `%lost` on a non-void subject first (mint-lost), a void subject fails with
+  mull-none before `mull_inner`, and the `vet`-off branch is unreachable (next
+  entry).
+- B11468T, L11469 (`mull_nice`), B11677F, L11679 (`mull_cnts_with_ports`) [P]:
+  `vet` off inside `mull`. hoon-138 runs `mull` only under `vet` (`fire`
+  checks `!vet` first).
+- B11460F, L11462-11463 [P]: mull-open. Every parsed gene has a `mull` arm or
+  opens.
+- B11662T, L11663 [P]: edits on a synthetic port. `tack` rejects them in mint
+  first.
+- L11670 [P]: mixed synthetic and natural ports. sut and dox share the
+  definition context, so a wing resolves synthetically on both sides or on
+  neither.
+- B11707T, L11708-11710, B11728T, L11729-11731, B11741T, L11742-11744,
+  L11755-11757 [P]: `mull_endo` axis and opal mismatches. The sut and dox cores
+  share arm layout and sample faces.
+
+Atoms, axes and nouns:
+
+- L11765 (`atom_is_zero`), L11772-11774, L11776-11777, B11774F, B11777T,
+  B11777F (`atom_is_flag`) [P]: the `ParsedAtom::Big` arms. `play_sand` calls
+  them only for `%n` and `%f` sands, whose source atoms (`~` and the loobean
+  literals) the parser stores as `ParsedAtom::Small`.
+- B11774T, L11775 [UP]: dead. `BigUint::to_bytes_le()` of zero is `[0]`, never
+  empty.
+- B12569T, L12570 (`axis_cap_mas`), B12601T, L12602 (`axis_big_cap_mas`),
+  B12641T, L12642-12644 (`peg_axis_big_pair`) [P]: defensive `axis <= 1` and
+  `b == 0` checks.
+- B12575T, L12576-12578 (`axis_cap_mas`), B12605T, L12606-12608
+  (`axis_big_cap_mas`) [UP]: dead. `axis > 1` implies a bit length of at least
+  2.
+- B12077T, B12078T, B12078F, L12078-12082 [P]: `map_put_mug` on an existing
+  key. Every caller builds the map from a `HashMap`, so keys are unique.
+- L12094-12095, L12119-12120 [UP]: `map_put_mug` missing-branches errors. The
+  recursive call returns a node it just built.
+- L12348-12349 [P]: a fork-set node without branches on the push side of
+  `fork_set_options`. Defensive against malformed type nouns.
+- L12363-12364 [UP]: the same error on the pop side, which re-reads a node the
+  push side already checked.
+- B12338T, L12339-12341 [UP]: the million-node budget of `fork_set_options`.
+  Defensive; no test builds a fork set that large.
+- B12192T, L12193 [P]: `type_tag_kind` on a void core payload. `ty_core` is its
+  only production caller, and the native constructors collapse a void payload
+  first.
+- B12208F, L12211-12212 [P]: an unknown type tag. No type noun has one.
+- L12777 (`ty_face_tool`), L12806 (`ty_core`) [P]: a void inner type or
+  payload. Callers pass types the native constructors already collapsed.
+- L12456-12458 [P]: an unknown foot tag in `foot_parts`. Defensive.
+- L12882-12888 [P]: `NativeForkOptionIter::size_hint`. Allocation sizing only;
+  no compile path calls it.
+- L13442 [P]: a tune alias without a hoon in `tune_to_noun`. Parsed tunes
+  always carry one (`=*`, busk).
+
+`%hand` lowering:
+
+- L11163-11166 (`mull_inner`), `type_to_noun` L13468-13514,
+  `face_type_to_noun` L13516-13524, `coil_to_noun` L13583-13610,
+  `garb_to_noun` L13612-13623, `poly_to_noun` L13625-13630, `vair_to_noun`
+  L13632-13639, `semi_noun_expr_to_noun` L13641-13645, `stencil_to_noun`
+  L13647-13668, `block_to_noun` L13670-13676, `gate_to_noun` L13695-13700,
+  `spec_to_noun` L13702-13896, `basetype_to_noun` L13898-13910,
+  `skin_to_noun` L13912-13960, `atom_to_noun` L13978-13980, `nock_to_noun`
+  L13982-14052, `nock_hint_to_noun` L14054-14063 [P]: `Hoon::Hand` comes only
+  from `noun_to_hoon`, never from parsing.
+
+Note wings:
+
+- L13541-13546, L13550 (`note_to_noun`), `wing_to_noun` L13557-13563,
+  `limb_to_noun` L13565-13581, `slot_formula_axis_noun` L11817-11819,
+  `slot_formula_axis_big` L11821-11824 [P]: a `%made` note with a wing list.
+  It comes only from `example` or `relative` of a `%made` spec, which neither
+  hatch's parser nor hoon-138 builds (hatch makes `Spec::Made` only in
+  `noun_to_spec`).
+
+## Rejected by both compilers
+
+Each case is unit-tested, and hoonc fails on the same program.
+
+- B9730c2T, L9731-9733 (`gain_atom_skin`), B9900c2T, L9901-9903
+  (`gain_leaf_skin`) [P]: atom-mismatch (`?#(@ud t)`, `?#(%5 t)` on a `@t`).
+- B10496T, L10497-10499 [P]: fuse-loop (`?=(@ v)` with `v=$@(@ r)`).
+- L11033 [P]: mull-none (`=>(!! a)` in a wet arm).
+- L11277 [P]: mull-bonk-b.
+- L11295 [P]: mull-bonk-c.
+- B11328c2T, L11329 [P]: mull-bonk-a (`?=(_a a)`).
+- B11347T, L11348 [P]: mull-bonk-x (a non-nesting `?#` wing).
+- B11406T, L11407 [P]: mull-bonk-f (`!@(p.a ...)`).
+- L11423 [P]: `%eror` in `mull`, from a duplicate arm or chapter. hoon-138
+  `++open` crashes on `%eror`.
+
+One rejection has no hoonc verdict:
+
+- L9703-9707 [P]: gain-wash, a wash skin as a `?:` condition. hoon-138
+  `ar:gain` recurses forever on it, so hoonc never finishes and no
+  hoonc-checked compile reaches this line. The native-only probe
+  `../../reject/wash_gain_loop.hoon` pins honk's error.
+
+## Caches and hash collisions
+
+- B10273c2F, B10277F [P]: `set_miss_memo_persistence` enabling persistence
+  that is already on. The `honk` binary enables it only on a `Ut` where it is
+  off.
+- B10362c4T [P]: the reversed-pair hold guard in `miss_dext_uncached`. It needs
+  mutually recursive molds through `redo`.
+- B10362c4F [U]: the same guard with the new ref equal to an earlier sut but a
+  different sut (a three-hold cycle). The parity corpus reaches it; no unit
+  test builds that cycle yet.
+- L10859, B10857F, B10857c2F (`seen_hold`), L10883-10884, B10880F, B10880c2F,
+  B10886F (`unsee_hold`) [UP]: a `peek` seen-hold bucket holding a different
+  (hold, axis) pair. That needs a collision of the combined hash.
+- L10889, B10876F, B10879F [UP]: dead. `unsee_hold` removes only a pair that
+  `seen_hold` inserted, so its bucket and entry are always present.
+- L11024-11025 [UP]: the `mull` cache signature fallback. Every AST gets a
+  signature.
+- L11045 [UP]: the error return of `mull_cache_store`. The lookup has already
+  computed the same fan key.
+- B11852T, L11853, B11858F, L11859, L11875-11876, B11890F, B11891T, B11891F,
+  L11891-11892, L11896 [P]: `dor`, the tie-break of `gor_mug` and `mor_mug`. It
+  runs only when two treap keys have equal mugs, so which arms run depends on
+  hash collisions in the compiled programs.
+
+## Not yet covered
+
+- L10023 [P]: a wash skin in `lose`. `gain` rejects a wash skin, so `lose`
+  meets one only where `gain` skips it, for example the tail of a cell skin
+  whose head gains `%void`. No parity probe exercises it yet.
+- B10125T, L10126 [UP]: `lose_cell_skin` on a core ref with the term `noun` as
+  the tail skin, where the payload survives `lose` of the head skin. No test
+  exercises it yet.
+- B12665F [UP]: `is_noun_term_skin` on a term tail skin other than `noun`
+  (gain or lose of a cell skin on a core ref). No test exercises it yet.
+- L12634 [P]: `peel` with `Way::Free` on a non-gold core, as when a `?#` cell
+  skin is tested against an iron, zinc or lead core. No parity probe exercises
+  it yet.
