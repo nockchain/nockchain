@@ -14137,3 +14137,6 @@ fn cell_type_n(
     }
     Ok(ty_cell_n(cx, slab, head, tail))
 }
+
+#[cfg(test)]
+mod cov;

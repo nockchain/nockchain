@@ -4927,3 +4927,7 @@ mod tests {
         fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 }
+
+#[cfg(test)]
+#[path = "../bin_tests/cov_c6_bin.rs"]
+mod cov_c6_bin;
