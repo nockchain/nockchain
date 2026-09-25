@@ -1,17 +1,15 @@
 //! Direct conversion of space-resident nockvm nouns into hash-consed nockasm
 //! nouns.
 //!
-//! The cache write path used to bridge representations by jamming the slab
-//! noun and cueing the bytes back through nockasm — two full serializations
-//! of every product just to change Rust types. This walks the slab noun once,
-//! interning every distinct subtree so the produced nockasm nouns carry
-//! maximal `Rc` sharing: equal subtrees are pointer-equal, which keeps
-//! `nockasm::lift_bundle`'s structural memo on its O(1) `ptr_eq` fast path.
+//! The converter walks the slab noun once, with no jam/cue round trip, and
+//! interns every distinct subtree. Equal subtrees in the output are
+//! pointer-equal, which keeps `nockasm::lift_bundle`'s structural memo on its
+//! O(1) `ptr_eq` fast path.
 //!
 //! The intern tables key parents by their children's intern ids, so structural
 //! equality of parents reduces to id-pair equality (children are canonical
-//! before any parent is built). No structural comparisons or hashes of whole
-//! subtrees ever run; every node costs O(1) map work.
+//! before any parent is built). No whole subtree is compared or hashed; every
+//! node costs O(1) map work.
 
 use nockvm::noun::{Noun, NounSpace};
 
@@ -26,13 +24,12 @@ struct NasmNounId(u32);
 
 #[derive(Default)]
 pub struct SlabToNockasm {
-    /// Canonical noun per intern id. The maps below store bare ids, so every
-    /// canonical noun is held exactly once here — the maps stay compact and
-    /// carry no `Rc` refcount traffic.
+    /// Canonical noun per intern id. The maps below store bare ids, so each
+    /// canonical noun is held once, here, and the maps carry no `Rc` refcounts.
     canon: Vec<nockasm::Noun>,
     /// Raw slab noun bits (allocation offset + tag, or direct-atom value) to
-    /// intern id. Sound because slab nouns are immutable and a given raw
-    /// value always denotes the same noun within one space.
+    /// intern id. Slab nouns are immutable, so a raw value always denotes the
+    /// same noun within one space.
     slab_memo: FastHashMap<NounIdentity, NasmNounId>,
     small_atoms: FastHashMap<AtomValue, NasmNounId>,
     big_atoms: std::collections::HashMap<
@@ -53,9 +50,8 @@ impl SlabToNockasm {
         Self::default()
     }
 
-    /// Convert one root. Interning state persists across calls, so converting
-    /// several roots through one instance preserves sharing between them —
-    /// matching the sharing the old single-list jam gave `lift_bundle`.
+    /// Convert one root. Interning state persists across calls, so roots
+    /// converted through one instance share their common subtrees.
     pub fn convert(&mut self, root: Noun, space: &NounSpace) -> Result<nockasm::Noun> {
         let mut tasks = vec![Task::Visit(root)];
         let mut values: Vec<NasmNounId> = Vec::new();
@@ -170,16 +166,15 @@ mod tests {
 
     use super::*;
 
-    /// The old write path proved representation equivalence by construction
-    /// (jam → cue). The direct converter must produce nouns that jam to the
-    /// same bytes and that lift into the same bundle.
+    /// The direct converter must agree with a jam/cue round trip: equal nouns,
+    /// equal jam bytes, and the same lifted bundle.
     #[test]
     fn direct_conversion_matches_jam_cue_bridge() {
         let mut slab: NounSlab = NounSlab::new();
         let big = Atom::from_bytes(&mut slab, &[0xab; 19]).as_noun();
         let shared = T(&mut slab, &[D(42), big, D(7)]);
-        // Duplicate copies of an equal subtree (distinct allocations) plus
-        // genuine pointer sharing, atoms both small and wide.
+        // Equal subtrees in distinct allocations, real pointer sharing, and
+        // both small and wide atoms.
         let shared_copy = T(&mut slab, &[D(42), big, D(7)]);
         let root = T(&mut slab, &[shared, shared_copy, shared, D(0)]);
         slab.set_root(root);

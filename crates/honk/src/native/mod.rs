@@ -1,15 +1,11 @@
-// The arena migration kept the former `Rc<Type>` call shape by aliasing the
-// one-word, `Copy` `TypeRef` handle as `Rc` inside native compiler modules.
-// Existing `.clone()` calls are therefore zero-cost handle copies. Removing
-// hundreds of them mechanically would obscure the semantic arena change; keep
-// that cosmetic cleanup separate from the migration review.
+// Native compiler modules alias the one-word, `Copy` `TypeRef` handle as `Rc`,
+// so their many `.clone()` calls are free handle copies.
 #![allow(clippy::clone_on_copy)]
 
 pub mod formula;
 pub mod hot;
 pub mod identity;
-// Native compiler IR; see docs/native-compiler for the migration and
-// performance-validation record.
+// Native compiler IR; see docs/native-compiler for design and performance notes.
 pub mod ir;
 pub mod noun;
 pub mod ut;
@@ -49,14 +45,11 @@ impl NativeCompiler {
             let gol = crate::native::ut::ty_noun(&mut slab);
             let mut ut = Ut::new(&mut slab);
             ut.set_vet(vet);
-            // mint is native now (C-final.1a); route the noun sut/gol through the
-            // mint_noun bridge, which returns a noun type for CompiledNative/TypeNoun.
+            // `mint_noun` returns the noun type that `CompiledNative` carries.
             let (ty, formula) = ut.mint_noun(sut, gol, expr)?;
 
-            // Native-types migration Phase 1: flag-gated IR-completeness
-            // invariant. When HONK_IR_ROUNDTRIP is set, assert the native
-            // Formula IR can represent and re-emit every minted formula
-            // byte-for-byte. Default-off → zero impact on the shipping path.
+            // When HONK_IR_ROUNDTRIP is set, check that the native Formula IR
+            // can represent and re-emit the minted formula byte for byte.
             if std::env::var_os("HONK_IR_ROUNDTRIP").is_some() {
                 crate::native::ir::roundtrip_check(formula, &slab.noun_space())?;
             }

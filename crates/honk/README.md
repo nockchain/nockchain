@@ -1,6 +1,6 @@
 # Native Hoon Compiler (`honk`)
 
-Rust native compiler for Hoon-to-Nock compilation and byte-for-byte parity with `hoonc`, principally verified with `hoon-138` and the project-specific kernels.
+Native Rust compiler from Hoon to Nock with byte-for-byte parity with `hoonc`, verified mainly against `hoon-138` and this project's kernels.
 
 Canonical compiler reference file:
 
@@ -9,10 +9,8 @@ Canonical compiler reference file:
 Native compiler notes:
 
 - `../../docs/native-compiler/README.md`
-- `../../docs/native-compiler/architecture.md`
-- `../../docs/native-compiler/parity-policy.md`
-- `../../docs/native-compiler/semantic-invariants.md`
-- `../../docs/native-compiler/debugging.md`
+- `../../docs/native-compiler/artifact-parity.md`
+- `../../docs/native-compiler/source-spots.md`
 - `../../docs/native-compiler/performance.md`
 
 ## High-level architecture
@@ -34,7 +32,7 @@ Important source areas:
 | `src/pipeline.rs` | Native parser integration and import resolution helpers. |
 | `src/bin/honk.rs` | CLI used by Bazel native Hoon rules. |
 | `src/arm_map.rs` | Arm-name-to-axis extraction from compiled core types used by parity and arm-axis validation. |
-| `src/artifact.rs` | Import, export, verification, and structural diffing for Nockasm kernel artifacts. |
+| `src/artifact.rs` | Export, verification, and structural diffing for Nockasm kernel artifacts. |
 | `src/build_cache.rs` | Atomic content-addressed storage for persistent native build products. |
 | `../honk-tools/` | Standalone JAM/asset diagnostics such as `jam-diff` and `extract-hoonc-octs-type`. |
 | `test-assets/` | Minimal open compiler fixtures and Bazel parity targets. |
@@ -48,7 +46,7 @@ For a direct AST compile through the library API:
 3. `NativeCompiler` creates a noun slab and initial subject/goal types.
 4. `Ut::mint` compiles the AST under a subject type and goal type.
 5. The result is a pair of inferred type noun and generated Nock formula.
-6. `Compiled` can JAM the formula, the type, arbitrary-mode output, or dynock output depending on caller needs.
+6. `Compiled` can JAM the formula, dynock output, or typed dynock output.
 
 For a file/artifact build through the CLI or Bazel path:
 
@@ -70,7 +68,7 @@ For a file/artifact build through the CLI or Bazel path:
 - `peek`, `repo`, `feel`, `lose`, `gain`-like narrowing, `fuse`, `crop`, and subject update helpers.
 - Constant-folding helpers used by `^~` and related paths.
 
-The implementation uses caches heavily for repeated type operations. Caches are correctness-preserving accelerators only: a cache hit and a cache miss must produce identical compiler output.
+The implementation caches repeated type operations heavily. A cache hit and a cache miss must produce identical compiler output.
 
 ## Parser/compiler boundary
 
@@ -78,8 +76,8 @@ The compiler consumes the AST from `crates/hatch/`. Parser choices can change co
 
 Relevant docs:
 
-- `../../docs/native-compiler/parity-policy.md`
-- `../../docs/native-compiler/semantic-invariants.md`
+- `../../docs/native-compiler/artifact-parity.md`
+- `../../docs/native-compiler/source-spots.md`
 
 ## Output modes
 
@@ -90,7 +88,7 @@ The compiler supports several artifact shapes:
 - `dynock`: `[type (trap nock)]` with a stable minimal type header.
 - `dynock-typed`: `[inferred-type (trap nock)]` retaining the inferred type.
 
-The library-level `Compiled` type exposes helpers for these shapes. The CLI and Bazel rules select the mode through flags or per-entry batch manifest rows.
+The library-level `Compiled` type exposes helpers for the dynock shapes. The CLI and Bazel rules select the mode through flags or per-entry batch manifest rows.
 
 ## Bazel integration
 
@@ -105,7 +103,7 @@ Strict parity targets are defined under `crates/honk/test-assets/` and
 
 ## Parity policy
 
-Native compiler parity is byte-for-byte artifact parity unless a test explicitly states a weaker diagnostic comparison. Source spots and `dbug` metadata are part of the artifact and should not be ignored to hide differences.
+Native compiler parity is byte-for-byte artifact parity unless a test states a weaker diagnostic comparison. Source spots and `dbug` metadata are part of the artifact and should not be ignored to hide differences.
 
 Useful validation commands:
 
@@ -133,7 +131,7 @@ just build-honk-pgo
 target/honk-pgo/honk --help
 ```
 
-This recipe uses vanilla Rust PGO across honk's complete target dependency graph. It builds an instrumented compiler, trains it on the Wallet and Dumbnet kernels, merges the resulting profiles with the `llvm-profdata` from the active Rust toolchain, builds the optimized compiler, and checks that its Dumbnet JAM is byte-identical to the instrumented compiler's output. The final binary, merged profile, and source/toolchain identity are written under `target/honk-pgo/`. Install the matching LLVM tools first with `rustup component add llvm-tools-preview` if the active toolchain does not already include them.
+The recipe applies standard Rust PGO to honk's entire target dependency graph. It builds an instrumented compiler, trains it on the Wallet and Dumbnet kernels, merges the profiles with the active Rust toolchain's `llvm-profdata`, builds the optimized compiler, and checks that its Dumbnet JAM is byte-identical to the instrumented compiler's output. The binary, merged profile, and source/toolchain identity are written under `target/honk-pgo/`. If the active toolchain lacks the LLVM tools, install them with `rustup component add llvm-tools-preview`.
 
 Compile one entry in arbitrary mode:
 
@@ -171,11 +169,11 @@ target/release/honk \
 ```
 
 `--new` bypasses cache reads and atomically repopulates the same
-content-addressed objects. Cache writes use a temporary file, `fsync`, and
-rename; a missing, truncated, noncanonical, or hash-mismatched object is a
-cache miss and is repaired by the successful build. The compiler does not
-persist `Ut`'s semantic memo tables because those depend on mutable compilation
-state and are not safe across builds.
+content-addressed objects. Cache writes go through a temporary file and a
+rename, and packs are also fsynced. A missing, truncated, undecodable, or
+hash-mismatched object is a cache miss and is repaired by the successful
+build. The compiler does not persist `Ut`'s semantic memo tables because those
+depend on mutable compilation state and are not safe across builds.
 
 Inspect or age out the cache with:
 
@@ -186,7 +184,7 @@ target/release/honk cache gc --cache-dir target/honk-cache --max-age-days 30
 
 ## Nockasm artifact inspection
 
-Any valid kernel JAM can be imported, whether it came from `hoonc` or `honk`:
+Any valid kernel JAM can be exported, whether it came from `hoonc` or `honk`:
 
 ```bash
 target/release/honk nockasm export kernel.jam --output kernel.nockasm
@@ -199,8 +197,8 @@ records source, graph, root, and canonical-JAM hashes. `tree/` is a
 content-addressed debug view split into 256 files; its 128-bit display IDs and
 sorted records stay stable when unrelated nodes move. The specialized diff
 skips equal subgraphs by full BLAKE3 hash and emits small changed subtrees as
-named-op Nockasm fragments. Large mismatched subtrees are represented by an
-axis and full hash rather than expanded into an unmanageable file.
+named-op Nockasm fragments. Large mismatched subtrees are written as an axis
+and full hash instead of being expanded.
 
 The exported tree is for review and diagnostics, not the build-cache hot path.
 Persistent builds read the compact bundle directly.

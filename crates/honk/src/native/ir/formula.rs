@@ -1,17 +1,15 @@
-//! Native Nock formula IR (plan §3.2) — Phase 1 shadow.
+//! Tree-shaped Nock formula IR.
 //!
-//! `Formula::to_noun` emits byte-exact Nock. The smart constructors
-//! (`cons`/`comb`/`cond`) reproduce honk's hoon-138 peephole rewrites
-//! (`crate::native::formula`) on the native enum. Hint kinds are split (RT-12);
-//! axes are arbitrary atoms (RT-08); leaves are provenanced (RT-04).
+//! The compiler's live formulas use [`super::formula_dag`]; this form backs the
+//! `HONK_IR_ROUNDTRIP` check. `Formula::to_noun` emits byte-exact Nock. The smart
+//! constructors (`cons`/`comb`/`cond`) reproduce honk's hoon-138 peephole
+//! rewrites (`crate::native::formula`) on the native enum. Axes are arbitrary
+//! atoms and leaves are owned.
 //!
-//! Byte-exactness note: the noun peephole checks are *structural* on the noun
-//! (e.g. `noun_pair` splits any cell), so degenerate noun-only forms such as a
-//! `Quote` of the literal constant `[0 1]` used as `comb`'s `mal` would match a
-//! check that the native producer expresses as `Slot(1)`. The native mint is the
-//! only producer of these Formulas and emits the canonical native shape, so the
-//! native-structure checks below are byte-exact for the native pipeline. (The
-//! noun path had to tolerate arbitrary nouns; the native path constructs them.)
+//! The noun peephole checks are structural on the noun (e.g. `noun_pair` splits
+//! any cell), so a degenerate form such as a `Quote` of the constant `[0 1]` used
+//! as `comb`'s `mal` can match a noun check. The native checks below match only
+//! canonical native shapes such as `Slot(1)`, so the two can differ on such forms.
 
 use std::rc::Rc;
 
@@ -26,7 +24,7 @@ use crate::errors::{CompilerError, Result};
 use crate::native::identity::NockOpcode;
 use crate::native::noun::noun_pair;
 
-/// A Nock axis. Arbitrary-size (Nock 0/9/10 axes are atoms, not `u64`) — RT-08.
+/// A Nock axis. Arbitrary-size, since Nock 0/9/10 axes are atoms, not `u64`.
 #[derive(Clone, Debug)]
 pub enum Axis {
     Small(u64),
@@ -93,7 +91,7 @@ pub enum Formula {
     NoteHint {
         note: Leaf,
         body: Rc<Formula>,
-    }, // [11 note body] (op-12 variant TBD in port)
+    }, // [11 note body]
     Dbug {
         spot: Leaf,
         body: Rc<Formula>,
@@ -101,7 +99,7 @@ pub enum Formula {
     Op {
         code: NockOpcode,
         args: Vec<Rc<Formula>>,
-    }, // [code args…] for 3/4/5/7/8/12 pending typed variants
+    }, // [code args…] for 3/4/5/7/8/12
 }
 
 impl Formula {
@@ -210,7 +208,7 @@ fn quote_direct(f: &Formula) -> Option<u64> {
     }
 }
 
-// ---- smart constructors (mirror crate::native::formula exactly) -------------
+// ---- smart constructors (mirror crate::native::formula) ---------------------
 
 /// `++cons`: collapse two constants `[1 h]`/`[1 t]` to `[1 h t]`; else autocons.
 pub fn cons(head: Formula, tail: Formula) -> Formula {
@@ -220,7 +218,7 @@ pub fn cons(head: Formula, tail: Formula) -> Formula {
     Formula::Cell(rc(head), rc(tail))
 }
 
-/// `++comb` composition, matching the noun check order exactly.
+/// `++comb` composition, matching the noun check order.
 pub fn comb(mal: Formula, buz: Formula) -> Formula {
     // Check 1: mal = [0 a], a >= 1
     if let Some(a) = slot_axis(&mal) {
@@ -292,13 +290,11 @@ fn peg(a: &Axis, b: &Axis) -> Axis {
 
 // ---- from_noun: parse a Nock formula noun into the native IR ----------------
 //
-// Used to prove IR completeness (round-trip `from_noun(f).to_noun() == f`) on
-// real honk-emitted formulas before the construction port, and as a bridge that
-// lets the native path consume not-yet-ported noun sub-formulas. Follows Nock's
-// head-is-cell ⇒ autocons / head-is-atom ⇒ opcode rule. Hint kinds (`%fast`/
-// `%note`/`%spot`) and op-12 all decode to a representation that re-emits the
-// same `[11 …]`/`[12 …]` bytes — the semantic distinction is only needed when
-// BUILDING from mint, not for representation/round-trip.
+// Used by the IR-completeness round trip (`from_noun(f).to_noun() == f`) on real
+// honk-emitted formulas. Follows Nock's head-is-cell ⇒ autocons / head-is-atom ⇒
+// opcode rule. Every hint kind (`%fast`/`%note`/`%spot`) and op 12 decode to a
+// form that re-emits the same `[11 …]`/`[12 …]` bytes, which is all a round
+// trip needs.
 impl Formula {
     pub fn from_noun(noun: Noun, space: &NounSpace) -> Result<Formula> {
         let (head, tail) = noun_pair(noun, space)
@@ -371,8 +367,7 @@ impl Formula {
             }
             11 => {
                 let (hint, body) = pair(tail)?;
-                // Representation-only: all [11 …] decode to Dbug (re-emits the
-                // same bytes). The jet/note/spot distinction is a build concern.
+                // All [11 …] decode to Dbug, which re-emits the same bytes.
                 Formula::Dbug {
                     spot: Leaf::from_noun(hint, space),
                     body: rc(Formula::from_noun(body, space)?),

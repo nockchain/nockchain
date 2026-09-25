@@ -1,11 +1,10 @@
-//! Cores, batteries, lazy batteries, holds, forks (plan §3.4–§3.6).
+//! Unused model of cores, batteries, lazy batteries, holds, and forks.
 //!
-//! Lazy cores replace the noun seminoun + integer `lazy_resolver_next_id`:
-//! sharing is by `Rc<LazyBattery>` identity. But laziness is a lifetime/scope
-//! contract (RT-05): a `LazyBattery` must outlive every type/formula/fold that
-//! references it, its per-arm formula cache must preserve the **defining** fan
-//! scope, and it must not be evicted while live. `%hold` is a FINITE lazy node
-//! (subject + native gene), never a cyclic `Rc` (cycles leak — plan §3.6).
+//! The compiler uses `ty::Type` and integer `LazyResolverId`s instead.
+//! Constraints on a lazy battery shared by `Rc` identity: it must outlive every
+//! type, formula, or fold that references it, its per-arm formula cache must use
+//! the defining fan scope, and it must not be evicted while live. A `%hold` is a
+//! finite lazy node (subject + gene), never a cyclic `Rc`, since cycles leak.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -24,8 +23,7 @@ pub struct Core {
     pub battery: Battery,
 }
 
-/// Core variance/metadata (`%gold`/`%iron`/`%lead`/`%zinc`); modeled concretely
-/// in Phase 2.
+/// Core variance (`%gold`/`%iron`/`%lead`/`%zinc`).
 #[derive(Clone, Copy)]
 pub enum Garb {
     Gold,
@@ -40,35 +38,31 @@ pub enum Battery {
     Lazy(Rc<LazyBattery>),
 }
 
-/// On-demand arm compilation. Shared by `Rc` identity (no integer resolver id).
+/// On-demand arm compilation, shared by `Rc` identity.
 pub struct LazyBattery {
     /// The core type arms are minted against.
     pub context: Rc<Type>,
-    /// The arm sources, keyed by term (native AST — no noun round-trip, RT-13).
+    /// The arm sources as native AST, keyed by term.
     pub arms: Rc<ArmMap>,
     /// Per-arm compiled formulas, memoized for the whole compile. Resolution
-    /// must use the DEFINING fan scope, not the caller's (RT-05) — the scope
-    /// field is added with the native fan scope in Phase 3.
+    /// must use the defining fan scope, not the caller's; there is no scope
+    /// field yet.
     pub cache: RefCell<HashMap<BigUint, Rc<Formula>>>,
-    // pub fan_scope: FanScope,  // defining scope — Phase 3 (plan §3.5)
 }
 
-/// Native arm/tome map: term → native AST gene (replaces noun map values,
-/// RT-13).
+/// Native arm map: term → native AST gene.
 pub struct ArmMap {
     pub arms: HashMap<Rc<str>, Rc<Hoon>>,
 }
 
-/// A `%hold` recursive type — a FINITE node expanded on demand by repo/rest,
+/// A `%hold` recursive type: a finite node expanded on demand by repo/rest,
 /// memoized on `Rc<Hold>` identity. Never a cyclic `Rc`.
 pub struct Hold {
     pub subject: Rc<Type>,
     pub gene: Rc<Hoon>,
 }
 
-/// A `%fork` option set. Internally a canonical-ordered set (the skeleton uses a
-/// `Vec`); the real canonical set + the exact Hoon-treap output serialization
-/// land in Phase 2/5 (plan §3.4, RT-07).
+/// A `%fork` option set, stored as a `Vec`.
 pub struct ForkSet {
     pub options: Vec<Rc<Type>>,
 }

@@ -1,24 +1,17 @@
-//! Native Hoon type IR — Phase 1 BOUNDARY form (plan §3.3, the Type-IR boundary
-//! slice).
+//! Native Hoon type IR.
 //!
-//! `Type::to_noun`/`from_noun` represent and re-emit honk's type nouns
-//! byte-for-byte (proven by round-trip on the real compiled prelude + kernel
-//! types), the type analogue of the Formula-IR boundary.
+//! Recursive type children (`Cell` head/tail, `Core` payload and context, `Face`
+//! inner, `Hint` payload, `Hold` subject) are canonical [`TypeRef`] handles. The
+//! other parts are carried as [`Leaf`]s: the `%atom` aura and bits, `%face` tool,
+//! `%hint` `[inner note]` head, `%hold` gene, and `%core` battery `rest`. Reused
+//! `%fork` members materialize as native children; the fork's original
+//! mug-ordered treap remains the serialization witness. `Type::to_noun` re-emits
+//! honk's type nouns byte for byte.
 //!
-//! BOUNDARY vs TARGET: this form makes the type SKELETON native — recursive type
-//! children (`Cell` head/tail, `Core` payload, `Face` inner, `Hold` subject,
-//! `Hint` payload) are `Rc<Type>` — while carrying the complex / leaf
-//! sub-structures faithfully as provenanced [`Leaf`]s: the `%atom` aura+bits,
-//! `%face` tool, `%hint` `[inner note]` head, `%hold` gene (AST), and `%core`
-//! battery seminoun. Reused `%fork` members materialize as native DAG children;
-//! its original mug-ordered treap remains the typed-Dynock serialization witness.
-//! Remaining carried leaves are later nativization targets.
-//!
-//! Normalization (RT-06: `ty_face(void)→void`, `ty_core(void)→void`,
-//! `ty_hint(void|noun)→…`) happens at CONSTRUCTION, so real type nouns are
-//! already normalized; `from_noun` only decodes what exists and `to_noun`
-//! re-emits it. Normalization is a Phase-2 construction concern, not a boundary
-//! one.
+//! Normalization (`face(_,void)` -> void, `core(void,_)` -> void,
+//! `hint(_,void|noun)` -> void|noun) happens at construction, so real type nouns
+//! are already normalized; decoding only reads what exists and `to_noun`
+//! re-emits it.
 
 use std::cell::{Cell, OnceCell};
 use std::fmt;
@@ -150,13 +143,11 @@ impl<T> Hash for TypeRef<T> {
 
 type Rc<T> = TypeRef<T>;
 
-/// A native `%core` garb — the head of a coil, `[nym poly vair]`.
+/// A native `%core` garb, the head of a coil: `[nym poly vair]`.
 ///
 /// nym = `0` (anonymous, `None`) or `[0 term]` (named, `Some(term)`); poly =
-/// `%wet`|`%dry`; vair = `%gold`|`%iron`|`%lead`|`%zinc`. Replaces the jammed
-/// `Leaf` the coil head used to carry: built directly from `mint`'s parts and
-/// re-emitted byte-identically (mirrors `garb_from_parts`), so the core type
-/// noun round-trips unchanged while never jamming/cueing the tiny garb.
+/// `%wet`|`%dry`; vair = `%gold`|`%iron`|`%lead`|`%zinc`. Built from `mint`'s
+/// parts and re-emitted byte for byte, so the garb never goes through jam and cue.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Garb {
     pub nym: Option<String>,
@@ -164,8 +155,7 @@ pub struct Garb {
     pub vair: Vair,
 }
 
-/// Build a native [`Garb`] from `mint`'s parts (replaces `garb_from_parts`'
-/// noun building where it feeds `cons_core`).
+/// Build a native [`Garb`] from `mint`'s parts.
 pub fn garb_native(name: Option<&str>, poly: Poly, vair: Vair) -> Garb {
     Garb {
         nym: name.map(str::to_string),
@@ -175,8 +165,8 @@ pub fn garb_native(name: Option<&str>, poly: Poly, vair: Vair) -> Garb {
 }
 
 impl Garb {
-    /// Re-emit the garb noun `[nym poly vair]` BYTE-IDENTICALLY to
-    /// `garb_from_parts` (nym = `0` | `[0 term]`; poly/vair via `term_to_noun`).
+    /// Emit the garb noun `[nym poly vair]` (nym = `0` | `[0 term]`; poly/vair via
+    /// `term_to_noun`).
     pub fn to_noun(&self, dst: &mut NounSlab) -> Noun {
         let name_noun = match &self.nym {
             None => D(0),
@@ -204,8 +194,7 @@ impl Garb {
         T(dst, &[name_noun, poly_noun, vair_noun])
     }
 
-    /// Decode a garb noun `[nym poly vair]` into a native [`Garb`] (mirrors
-    /// `garb_parts`/`garb_poly`/`garb_vair`; errors as those do).
+    /// Decode a garb noun `[nym poly vair]` into a native [`Garb`].
     pub fn from_noun(garb: Noun, space: &NounSpace) -> Result<Garb> {
         let cell = garb
             .in_space(space)
@@ -280,50 +269,48 @@ impl Garb {
     }
 }
 
-/// A Hoon compiler type (Phase-1 boundary form; see module docs).
+/// A Hoon compiler type (see module docs).
 #[derive(Debug)]
 pub enum Type {
     Void,
     Noun,
-    /// `[%atom aura bits]` — aura + bits carried as leaves.
+    /// `[%atom aura bits]`, with aura and bits carried as leaves.
     Atom {
         aura: Leaf,
         bits: Leaf,
     },
-    /// `[%cell head tail]` — both native.
+    /// `[%cell head tail]`, both native.
     Cell(Rc<Type>, Rc<Type>),
-    /// `[%core payload coil]` — payload native; coil = `[garb [context rest]]`.
-    /// Phase 2: the coil's `context` (the deepening subject) is a SHARED native
-    /// `Rc<Type>` child so it is never jammed/copied on the hot path; only the
-    /// tiny `garb` and the bounded `rest` (battery seminoun + tomes) stay carried
-    /// as leaves.
+    /// `[%core payload coil]` with coil = `[garb [context rest]]`. The payload and
+    /// the coil's `context` (the deepening subject) are native children, so the
+    /// context is never jammed or copied; `rest` (battery seminoun and tomes) is
+    /// carried as a leaf.
     Core {
         payload: Rc<Type>,
         garb: Garb,
         context: Rc<Type>,
         rest: Leaf,
     },
-    /// `[%face tool inner]` — inner native; tool carried.
+    /// `[%face tool inner]`: inner native, tool carried.
     Face {
         tool: Leaf,
         inner: Rc<Type>,
     },
-    /// `[%hint [inner note] payload]` — payload native; `[inner note]` carried.
+    /// `[%hint [inner note] payload]`: payload native, `[inner note]` carried.
     Hint {
         head: Leaf,
         payload: Rc<Type>,
     },
-    /// `[%fork set]` — adaptively retained native option children for type algebra
-    /// plus the original mug-ordered treap as an exact typed-Dynock serialization
-    /// witness (RT-07). One-shot forks avoid retaining a child vector; a repeated
-    /// traversal promotes the children into the native DAG. The witness is never
-    /// rebuilt at the output boundary, so output bytes cannot change.
+    /// `[%fork set]`: the original mug-ordered treap, kept as the exact
+    /// serialization witness so output matches hoon-138 byte for byte, plus native
+    /// option children for type algebra. One-shot forks retain no child vector; a
+    /// repeated traversal promotes the children into the native DAG.
     Fork {
         set: Leaf,
         options: OnceCell<Vec<Rc<Type>>>,
         options_seen: Cell<bool>,
     },
-    /// `[%hold sut gen]` — sut native; gene (AST) carried.
+    /// `[%hold sut gen]`: sut native, gene carried.
     Hold {
         subject: Rc<Type>,
         gene: Leaf,
@@ -362,9 +349,7 @@ impl Type {
                 rest,
             } => {
                 let p = payload.to_noun(dst);
-                // Rebuild the coil noun = [garb [context rest]] (mirrors
-                // coil_from_parts: [garb [context rest]]). The garb noun is built
-                // BYTE-IDENTICALLY to garb_from_parts.
+                // Rebuild the coil `[garb [context rest]]` as `coil_from_parts` does.
                 let g = garb.to_noun(dst);
                 let ctx = context.to_noun(dst);
                 let r = rest.to_noun(dst);
@@ -396,8 +381,8 @@ impl Type {
 }
 
 /// Independently owned decoder form used only by the optional public
-/// round-trip oracle. Keeping it separate lets the live compiler's `TypeRef`
-/// remain an unconditional, branch-free arena handle.
+/// round-trip and intern-stats checks. Keeping it separate lets the live
+/// compiler's `TypeRef` remain an unconditional, branch-free arena handle.
 #[derive(Debug)]
 pub(super) enum BoundaryType {
     Void,
@@ -566,9 +551,8 @@ impl BoundaryType {
 }
 
 /// Decode the members of a Hoon `%set` treap in the same deterministic order as
-/// the compiler's historical `fork_set_options` helper. The exact tree remains
-/// separately retained in `Type::Fork`, so this walk is only for native DAG
-/// edges and never controls serialization.
+/// `fork_set_options`. `Type::Fork` retains the exact tree separately, so this
+/// walk only builds native DAG edges and never controls serialization.
 pub(crate) fn visit_fork_set_members(
     noun: Noun,
     space: &NounSpace,
@@ -660,7 +644,7 @@ mod tests {
                 T(s, &[D(tas("hold")), sut, gen])
             },
             |s| {
-                // [%core payload coil] — coil = [garb [context rest]],
+                // [%core payload coil], coil = [garb [context rest]],
                 // garb = [nym poly vair] = [0 %dry %gold] (anonymous dry gold core).
                 let payload = T(s, &[D(tas("atom")), D(tas("ud")), D(0)]);
                 let ctx = D(tas("noun"));
@@ -671,7 +655,7 @@ mod tests {
                 T(s, &[D(tas("core")), payload, coil])
             },
             |s| {
-                // [%core payload coil] with a NAMED garb = [[0 %foo] %wet %iron].
+                // [%core payload coil] with a named garb = [[0 %foo] %wet %iron].
                 let payload = T(s, &[D(tas("atom")), D(tas("ud")), D(0)]);
                 let ctx = D(tas("noun"));
                 let tomes = D(0);
@@ -682,7 +666,7 @@ mod tests {
                 T(s, &[D(tas("core")), payload, coil])
             },
             |s| {
-                // [%fork set] — opaque treap (a 1-node-ish set noun)
+                // [%fork set] with a one-node treap
                 let opt = T(s, &[D(tas("atom")), D(tas("ud")), D(0)]);
                 let lr = T(s, &[D(0), D(0)]);
                 let set = T(s, &[opt, lr]);

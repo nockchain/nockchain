@@ -1,8 +1,10 @@
 //! Scalar identities used by compiler arenas and memo tables.
 //!
 //! These wrappers have the representation of their underlying scalar. IDs are
-//! local to one compiler context; hashes are only bucket selectors and never
-//! replace the exact comparisons performed by the corresponding interner.
+//! local to one compiler context. Mug and node-hash hits are compared exactly,
+//! as are `SpecSignature` buckets. `HoonSignature` and `TomesSignature` are
+//! digests trusted as exact keys by the mint, mull, core-mint, and lazy
+//! resolver caches and by the `open_cache` address guard.
 //!
 //! Equal integer representations do not make different ID domains compatible:
 //! ```compile_fail
