@@ -510,6 +510,36 @@ fn malformed_import_clauses_are_parse_errors() {
 }
 
 #[test]
+fn header_del_comments_trailing_slashes_and_a_final_fas() {
+    let tree = import_tree();
+    // DEL (127) is not printable (`prn`), so a comment holding one is not
+    // `vul`: the header stops before it, and the body parser rejects it.
+    let entry = tree.write("app/del.hoon", "/+  util  ::\x7fnote\n`*`42\n");
+    let faces: Vec<Option<String>> = resolved(&entry, tree.root())
+        .into_iter()
+        .map(|import| import.face)
+        .collect();
+    assert_eq!(faces, [Some("util".to_string())]);
+    assert!(parse_native_hoon_leaf(&entry, tree.root(), false).is_err());
+
+    // `stap` refuses an empty last knot outside the root path `/`.
+    match resolve_err("/=  raw  /common/raw/\n`*`raw\n") {
+        CompilerError::Parse(message) => assert!(message.contains("malformed /="), "{message}"),
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+
+    // A `/` that is the last byte of the file is no clause; it is the body.
+    for (source, expected) in [("/", &[][..]), ("/=  raw  /common/raw\n/", &["raw"][..])] {
+        let entry = tree.write("app/fas.hoon", source);
+        let faces: Vec<String> = resolved(&entry, tree.root())
+            .into_iter()
+            .filter_map(|import| import.face)
+            .collect();
+        assert_eq!(faces, expected, "{source:?}");
+    }
+}
+
+#[test]
 fn data_imports_accept_any_mark_and_hoon_files_stay_hoon() {
     let tree = import_tree();
     let entry = tree.write(

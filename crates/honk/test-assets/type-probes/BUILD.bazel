@@ -194,6 +194,8 @@ test_suite(
 #   bazel test //crates/honk/test-assets/type-probes:reject_rest_loop_alias_test
 REJECTION_PROBES = [
     "c3_lose_cell_core_base_tail",
+    "c6_header_comment_del",
+    "c6_import_trailing_slash",
     "censig_atom_door_gate",
     "censig_test_src",
     "core_cast_arms",
