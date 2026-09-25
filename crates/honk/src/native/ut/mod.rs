@@ -291,6 +291,12 @@ pub struct Ut<'a> {
     // equal lazy cores intern to one type and identity-keyed recursion cuts
     // converge. Lives as long as `lazy_resolvers`, for the whole compile.
     pub lazy_resolver_canonical_ids: HashMap<LazyCoreKey, LazyResolverId>,
+    // Resolver IDs for the `%lazy` battery seminoun of mulled cores (hoon-138
+    // `++mile`'s `laze`), keyed like `lazy_resolver_canonical_ids` but drawn
+    // separately and never registered: a mulled core never resolves arms, but
+    // its seminoun must differ from `*seminoun`, full batteries, and `++mine`'s
+    // lazy root, while staying equal across mulls of the same core.
+    pub mull_lazy_resolver_ids: HashMap<LazyCoreKey, LazyResolverId>,
     // Exact AST recovery from structurally equal hoon nouns. The honk binary
     // enables it for prelude builds; the normal compile path keeps it off.
     pub exact_hoon_ast_lookup_enabled: bool,
@@ -2091,6 +2097,7 @@ impl<'a> Ut<'a> {
             lazy_resolver_next_id: LazyResolverId(1),
             lazy_resolvers: HashMap::new(),
             lazy_resolver_canonical_ids: HashMap::new(),
+            mull_lazy_resolver_ids: HashMap::new(),
             exact_hoon_ast_lookup_enabled: false,
             hoon_identity_cache_raw: HashMap::new(),
             hoon_identity_cache_order: VecDeque::new(),
@@ -5028,7 +5035,7 @@ impl<'a> Ut<'a> {
                 self.type_test_formula_on_axis(ref_type.clone(), axis)?
             }
             _ => {
-                let (_ty, base_formula) = self.fine(&port)?;
+                let (_ty, base_formula) = self.fine(&sut, &port)?;
                 let test = self.type_test_formula_on_axis(ref_type.clone(), 1u64)?;
                 // hoon-138 emits an explicit `%7` in this branch.
                 self.formula_op(NockOpcode::COMPOSE, &[base_formula, test])
@@ -5591,6 +5598,30 @@ impl<'a> Ut<'a> {
         }
         let id = self.lazy_resolver_new_id();
         self.lazy_resolver_canonical_ids.insert(key, id);
+        id
+    }
+
+    /// The resolver ID of hoon-138 `++mile`'s `(laze nym hud dom)`: one per
+    /// `(sut, tomes_sig, poly)` like `lazy_resolver_canonical_id`, but from a
+    /// separate table so it never equals `++mine`'s lazy root for the same
+    /// core. It is never registered, so its arms resolve as blocked (a mull
+    /// never evaluates arms).
+    fn mull_lazy_resolver_id(
+        &mut self,
+        sut: &NRc<NTy>,
+        tomes_sig: TomesSignature,
+        poly: Poly,
+    ) -> LazyResolverId {
+        let key = LazyCoreKey {
+            subject: sut.arena_id(),
+            tomes: tomes_sig,
+            poly: PolyKey::from(poly),
+        };
+        if let Some(&id) = self.mull_lazy_resolver_ids.get(&key) {
+            return id;
+        }
+        let id = self.lazy_resolver_new_id();
+        self.mull_lazy_resolver_ids.insert(key, id);
         id
     }
 
@@ -7012,7 +7043,7 @@ impl<'a> Ut<'a> {
                     let (_axis, next_hag) = self.toss(sub_wing, patch_type, &hag)?;
                     hag = next_hag;
                 }
-                self.fire(&hag)
+                self.fire(&sut, &hag)
             }
         }
     }
@@ -7229,7 +7260,7 @@ impl<'a> Ut<'a> {
         wing: &WingType,
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let port = self.find(sut.clone(), Way::Read, wing)?;
-        let (ty, formula) = self.fine(&port)?;
+        let (ty, formula) = self.fine(&sut, &port)?;
         let ty = self.nice(sut, gol, ty)?;
         Ok((ty, formula))
     }
@@ -7350,7 +7381,7 @@ impl<'a> Ut<'a> {
 
                 let hike = self.hike_formula(base_axis, &edits)?;
                 let formula = self.formula_arena.kick(arm_axis, hike);
-                let arm_ty = self.fire(&hag)?;
+                let arm_ty = self.fire(&sut, &hag)?;
                 let ty = self.nice(sut, gol, arm_ty)?;
                 Ok((ty, formula))
             }
@@ -9396,13 +9427,13 @@ impl<'a> Ut<'a> {
     fn feel(&mut self, sut: NRc<NTy>, wings: &[WingType]) -> Result<bool> {
         let mut current = sut;
         for wing in wings.iter().rev() {
-            let pony = self.fond(current, Way::Free, wing)?;
+            let pony = self.fond(current.clone(), Way::Free, wing)?;
             let port = match pony {
                 Pony::Void | Pony::Unmatched(_) => return Ok(false),
                 Pony::Palo(palo) => Port::Palo(palo),
                 Pony::Synthetic { typ, formula } => Port::Synthetic { typ, formula },
             };
-            let (ty, _formula) = self.fine(&port)?;
+            let (ty, _formula) = self.fine(&current, &port)?;
             current = ty;
         }
         Ok(true)
@@ -11579,12 +11610,19 @@ impl<'a> Ut<'a> {
         tomes: &HashMap<String, Tome>,
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
         // Payload and context stay shared native types. The coil rest is a noun
-        // leaf pairing a fully blocked seminoun (standing in for `laze`) with the
+        // leaf pairing a `%lazy` root seminoun (standing in for `laze`) with the
         // arm map; cons_core collapses a void payload to void, like ty_core.
+        // hoon-138 computes one `(laze nym hud dom)` against `sut` for both
+        // cores. It is never `*seminoun`, so a mulled core's coil differs from
+        // the played core's and nest takes its slow path, as in hoonc.
         let tomes_map = self.tomes_map_from_ast(tomes)?;
+        let tomes_sig = TomesSignature(u64::from(
+            self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(nym).0,
+        ));
+        let resolver_id = self.mull_lazy_resolver_id(&sut, tomes_sig, hud);
         // Construct yet = core(sut, [nym hud gold], sut, laze, dom)
         let garb = garb_native(nym, hud, Vair::Gold);
-        let semi_noun = self.semi_noun_blocked();
+        let semi_noun = self.semi_noun_lazy_root(resolver_id);
         let rest = T(self.slab, &[semi_noun, tomes_map]);
         let yet = {
             let space = self.slab.noun_space();
@@ -11780,8 +11818,8 @@ impl<'a> Ut<'a> {
                     hag_q = dix_q.1;
                 }
                 // Fire the sut side with the current vet, the dox side with vet off.
-                let p_ty = ut.fire(&hag_p)?;
-                let q_ty = ut.with_vet_off(|ut| ut.fire(&hag_q))?;
+                let p_ty = ut.fire(&sut, &hag_p)?;
+                let q_ty = ut.with_vet_off(|ut| ut.fire(&sut, &hag_q))?;
                 Ok((p_ty, q_ty))
             }
             // Mismatched opal types: one leg, one arm

@@ -459,7 +459,7 @@ impl<'a> Ut<'a> {
                                 continue;
                             }
                             Pony::Palo(palo) => {
-                                let (fid_ty_n, fid_formula) = ut.fine(&Port::Palo(palo))?;
+                                let (fid_ty_n, fid_formula) = ut.fine(&sut, &Port::Palo(palo))?;
                                 let composed =
                                     compose_axis_formula(ut, axe.clone(), bridge_formula);
                                 let formula = ut.formula_comb(composed, fid_formula);

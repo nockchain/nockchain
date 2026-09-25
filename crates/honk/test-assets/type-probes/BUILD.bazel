@@ -205,6 +205,8 @@ REJECTION_PROBES = [
     "fork_edit_synthetic",
     "fork_wing_missing",
     "lead_sample_edit",
+    "mile_mint_ktdt_core_meet",
+    "mile_mull_ktdt_core_meet",
     "mint_lost_case",
     "mint_vain_case",
     "mint_vain_wtcl",
@@ -230,6 +232,9 @@ REJECTION_PROBES = [
     "skin_shape_mismatch",
     "test_not_flag",
     "tissig_empty",
+    "wet_dear_empty_wec_face_use",
+    "wet_rib_subject_key_arm_control",
+    "wet_rib_subject_key_trap_control",
     "wet_slag_tail",
     "wtzp_mint_vain",
 ]

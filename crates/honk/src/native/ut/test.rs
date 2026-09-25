@@ -2465,19 +2465,26 @@ fn redo_fork_overlap_without_nest_kept() {
 }
 
 #[test]
-fn redo_fork_no_match_errors() {
+fn redo_fork_no_match_drops_faces() {
+    // hoon-138 `++dear`: when `++sint` prunes every reference fork case, `wec`
+    // is empty and the redone type carries no faces at all, neither the
+    // reference's nor the subject's; it is not a redo-match.
     let mut slab = NounSlab::new();
-    let payload = ty_atom(&mut slab, "ud", None);
+    let payload_inner = ty_atom(&mut slab, "ud", None);
+    let payload = ty_face(&mut slab, "p", payload_inner);
     let cell_a_head = ty_noun(&mut slab);
     let cell_a_tail = ty_noun(&mut slab);
     let cell_a = ty_cell(&mut slab, cell_a_head, cell_a_tail);
     let cell_b_head = ty_void(&mut slab);
     let cell_b_tail = ty_noun(&mut slab);
     let cell_b = ty_cell(&mut slab, cell_b_head, cell_b_tail);
-    let reference = ty_fork(&mut slab, vec![cell_a, cell_b]);
+    let face_a = ty_face(&mut slab, "a", cell_a);
+    let reference = ty_fork(&mut slab, vec![face_a, cell_b]);
     let mut ut = Ut::new(&mut slab);
-    let result = ut.redo_wet_payload(payload, reference);
-    assert!(result.is_err(), "no-match fork should error");
+    let result = ut
+        .redo_wet_payload(payload, reference)
+        .expect("no-match fork redo");
+    assert!(noun_eq(result, payload_inner, &ut.slab.noun_space()).expect("noun_eq"));
 }
 
 #[test]

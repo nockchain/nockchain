@@ -897,7 +897,7 @@ fn c4_find_synthetic_alias_ports() {
     assert_eq!(dump(ut.slab, f), "[7 [[0 1] [[0 1] [0 1]]]]");
 
     // `fine` passes a synthetic port through unchanged.
-    let (fine_ty, fine_formula) = ut.fine(&port).unwrap();
+    let (fine_ty, fine_formula) = ut.fine(&typ, &port).unwrap();
     assert!(NRc::ptr_eq(&fine_ty, &typ));
     assert_eq!(fine_formula, formula);
 
@@ -1307,19 +1307,19 @@ fn c4_fire_edge_arms() {
     let cb = nat(&mut ut, core_b);
 
     // No arms: void, as `(fork ~)` in hoon-138.
-    assert!(matches!(&*ut.fire(&[]).unwrap(), NTy::Void));
+    assert!(matches!(&*ut.fire(&ca, &[]).unwrap(), NTy::Void));
     // One wet arm whose body is `[%$ 1]`: the core itself, no %hold.
-    let out = ut.fire(&[(ca.clone(), wet1)]).unwrap();
+    let out = ut.fire(&ca, &[(ca.clone(), wet1)]).unwrap();
     assert!(NRc::ptr_eq(&out, &ca));
     // A wet arm with any other body: a %hold on the redone core.
     ut.set_vet(false);
-    let out = ut.fire(&[(ca.clone(), wet2)]).unwrap();
+    let out = ut.fire(&ca, &[(ca.clone(), wet2)]).unwrap();
     assert!(matches!(&*out, NTy::Hold { .. }));
     // A malformed foot is rejected.
-    assert!(ut.fire(&[(ca.clone(), D(5))]).is_err());
+    assert!(ut.fire(&ca, &[(ca.clone(), D(5))]).is_err());
     // Two dry arms on different cores fork their holds.
     ut.set_vet(true);
-    let out = ut.fire(&[(ca, dry1), (cb, dry1)]).unwrap();
+    let out = ut.fire(&ca.clone(), &[(ca, dry1), (cb, dry1)]).unwrap();
     assert!(matches!(&*out, NTy::Fork { .. }));
 }
 
@@ -1430,9 +1430,11 @@ fn c4_wet_mull_check_wet_rejects_undecodable_arm() {
     let mut ut = Ut::new(&mut slab);
     let n = nat(&mut ut, noun);
     ut.set_vet(false);
-    assert!(ut.mull_check_wet(n.clone(), n.clone(), D(12345)).is_ok());
+    assert!(ut
+        .mull_check_wet(&n, n.clone(), n.clone(), D(12345))
+        .is_ok());
     ut.set_vet(true);
-    let msg = err_text(ut.mull_check_wet(n.clone(), n, D(12345)));
+    let msg = err_text(ut.mull_check_wet(&n.clone(), n.clone(), n, D(12345)));
     assert!(msg.contains("fire-wet arm ast missing"), "{msg}");
     assert!(ut.fire_wet_rib.is_empty());
     assert!(ut.fire_wet_rib_raw.is_empty());
@@ -1444,6 +1446,55 @@ fn c4_wet_redo_rejects_mixed_face_depths() {
     // `[a]`, for an atom argument; hoonc also fails with %dear-many/redo-match.
     let msg = mint_err("=/  gat  |*  a=?(b=@ @)  a\n(gat 5)");
     assert!(msg.contains("redo-match"), "{msg}");
+}
+
+#[test]
+fn c4_wet_redo_empty_wec_drops_faces() {
+    // Every case of the forked formal sample misses the actual sample, so
+    // `++sint` leaves `wec` empty and hoon-138 `++dear` yields no faces: the
+    // redone sample loses both the formal `a=` and the actual `q=`.
+    let (ty, _) = mint_dump("=/  gat  |*  a=?(%foo %bar)  +6\n(gat q=%baz)");
+    assert!(
+        ty.starts_with("[%hold [[%core [[%cell [[%atom [%tas [0 %baz]]] %noun]] "),
+        "{ty}"
+    );
+    // An atom against a fork of cells (formerly redo-match): faceless, accepted.
+    let (ty, _) = mint_dump("=/  gat  |*  a=?([p=@ q=@] [r=@ s=@])  1\n(gat 5)");
+    assert!(
+        ty.starts_with("[%hold [[%core [[%cell [[%atom [%ud 0]] %noun]] "),
+        "{ty}"
+    );
+    // The body can no longer name the dropped sample face (hoonc: find . a).
+    let msg = mint_err("=/  gat  |*  a=?(%foo %bar)  a\n(gat %baz)");
+    assert!(msg.contains("find"), "{msg}");
+}
+
+#[test]
+fn c4_wet_rib_keyed_on_call_site_subject() {
+    // `=>  foo  $` enters the wet arm from the formal gate itself, so the
+    // recursive `$(x [x x])` fires from the same subject and hoon-138 ++fire
+    // finds `[sut dox arm]` in `rib`: the `x=[@ @]` re-mull is skipped.
+    mint_dump("=/  foo  |*(x=@ [.+(x) $(x [x x])])\n=>  foo\n$");
+    // Entered with `$(x 0)`, the redone core differs from the entry subject,
+    // so the inner call is re-mulled with `x=[@ud @ud]` and `.+(x)` fails.
+    let msg = mint_err("=/  foo  |*(x=@ [.+(x) $(x [x x])])\n=>  foo\n$(x 0)");
+    assert!(msg.contains("mull-nice"), "{msg}");
+}
+
+#[test]
+fn c4_wet_mulled_core_is_not_the_played_core() {
+    // `^.` plays the core literal (through the wet `id`) and the wet caller's
+    // body mulls it. hoon-138 builds the played core with `*seminoun` and the
+    // mulled one with `++laze`, so nest cannot take the equal-coil shortcut and
+    // meet(context, payload) rejects `x=%foo` against `x=@ud`.
+    let src = |edit: &str| {
+        format!(
+            "=/  id  |*(a=* a)\n=/  wet  |*  x=*  ^.  id  =>  |%  ++  y  1  --  .(x {edit})\n(wet 5)"
+        )
+    };
+    let msg = mint_err(&src("%foo"));
+    assert!(msg.contains("mull-nice"), "{msg}");
+    mint_dump(&src("6"));
 }
 
 #[test]
