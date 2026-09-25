@@ -4,8 +4,8 @@ This range holds the `Sig64` signature writers, the Hoon arena, `Ut` memo
 plumbing, fan-context keys, boundary caches, the `lower_*` helpers, musk setup,
 and the `mint_inner`/`play_inner` dispatch.
 
-The gap report lists 565 uncovered lines and 134 untaken branch outcomes: none
-are missed only by unit tests (U), 550 lines and 121 branches are missed only
+The gap report lists 561 uncovered lines and 134 untaken branch outcomes: none
+are missed only by unit tests (U), 546 lines and 121 branches are missed only
 by the parity corpus (P), and 15 lines and 13 branches are missed by both (UP).
 `L` rows are lines never run; `B` rows are branch outcomes never taken (`T` or
 `F`, with `c2`/`c3` for later conditions of the same `if`).
@@ -20,7 +20,6 @@ by the parity corpus (P), and 15 lines and 13 branches are missed by both (UP).
 | B1357 T, L1358-1360 (memo hit in `write_hoon`) | P | Unreachable in production: one tree walk never reaches the same `&Hoon` node twice. |
 | L616-621 `Note::Made` with wings, L719-726 `Spec::Made` | P | Unreachable from source: both come only from a `%made` spec, which neither parser builds (hatch makes one only when decoding a noun). |
 | L644-649, B646 T/F `Skin::Dbug` | P | Unreachable from source: `flay` never builds a `%dbug` skin, and hatch makes `Skin::Dbug` only when decoding a noun. |
-| L715-718 `Spec::Loop` | P | Performance cache only: the digest never reaches output, and no parity probe contains a `/foo` loop spec. |
 | L751-759 `BucBuc`, L787-795 `BucDot`, L818-826 `BucFas`, L843-851 `BucTic`, L872-880 `BucZap` | P | Unreachable from source: hoon-138's parser never builds `%bcbc`, `%bcdt`, `%bcfs`, `%bctc`, or `%bczp`, and hatch makes them only when decoding nouns. |
 | L904-910 `Chum::VenProVerKel` | P | Unreachable from source: hoon-138's `++bonk` and hatch both read `%k:foo..138` as `[ven pro kel]`, so no four-field chum exists. |
 | L938 (tune entry without a value), L947 (tune list item) | P | Unreachable from source: the only source tune, from `=*`, has one entry with a value and an empty list. |

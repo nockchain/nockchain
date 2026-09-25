@@ -2,7 +2,7 @@
 
 This package covers `crates/hatch/src/utils.rs` from line 12126 to the end (noun encoding and decoding), `crates/hatch/src/main.rs`, `crates/hatch/src/lib.rs`, `crates/hatch/src/runes/*.rs` (including `runes/cram.rs`) and `crates/hatch/src/ast/hoon.rs`.
 
-Gaps in the range: lines missed only by unit tests 51, only by the parity corpus 902, by both 361 (1314 lines); branch outcomes missed only by unit tests 15, only by parity 176, by both 69 (260 outcomes).
+Gaps in the range: lines missed only by unit tests 0, only by the parity corpus 890, by both 344 (1234 lines); branch outcomes missed only by unit tests 0, only by parity 174, by both 51 (225 outcomes).
 
 Tags: `U` = unit tests miss it, `P` = the parity corpus misses it, `UP` = both. `B<line>T`/`F` are branch outcomes; `c2`/`c3` mark later operands of `&&`/`||`. Unit tests are in `crates/hatch/src/cov/p4_nouns_runes.rs`; probes are in this directory.
 

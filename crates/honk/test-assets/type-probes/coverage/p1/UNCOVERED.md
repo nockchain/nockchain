@@ -5,8 +5,8 @@ desugarer (`+ax`, `open`, `flay`, `feck`, `grip`, `half`, `reek`, `name_ax`,
 `autoname`, `peg`).
 
 Uncovered on the final code: 0 lines and 0 branch outcomes missed only by the
-unit tests (`U`), 286 lines and 20 branch outcomes missed only by the parity
-corpus (`P`), and 6 lines and 7 branch outcomes missed by both (`UP`), for 292
+unit tests (`U`), 271 lines and 20 branch outcomes missed only by the parity
+corpus (`P`), and 6 lines and 7 branch outcomes missed by both (`UP`), for 277
 lines and 27 branch outcomes in all. Numbers are current line numbers. `B<n>T`
 and `B<n>F` are branch outcomes at line n, and `c2`, `c3` name the second and
 third conditions on that line. "Unit-tested" means

@@ -1,21 +1,14 @@
 # c6 coverage ledger: honk pipeline, library entry points, and CLI
 
 Range: `crates/honk/src/pipeline.rs`, `lib.rs`, `errors.rs`, `types.rs` and
-`crates/honk/src/bin/honk.rs`, excluding `#[cfg(test)]` modules. Gaps: 2578
-lines (45 unit-only, 2168 parity-only, 365 both) and 446 branch outcomes (4
-unit-only, 344 parity-only, 98 both). Tags: `U` = not covered by unit tests
+`crates/honk/src/bin/honk.rs`, excluding `#[cfg(test)]` modules. Gaps: 2473
+lines (0 unit-only, 2120 parity-only, 353 both) and 425 branch outcomes (0
+unit-only, 335 parity-only, 90 both). Tags: `U` = not covered by unit tests
 (including `cov_c6.rs`, `bin_tests/cov_c6_bin.rs` and `tests/cov_c6_cli.rs`),
 `P` = not covered by the parity corpus, `UP` = both. Line numbers match the
 current source.
 
 ## bin/honk.rs
-
-### Unit-only gaps [U] (covered by parity)
-
-- `compile_entry` L2359-2363: unreachable, because `compile_path_uncached`
-  with `keep_product` always returns a product. Its single parity hit is a
-  counter artifact: LLVM derives this arm's count by subtraction, and the
-  compile that panics the worker (L604) unwinds through the match.
 
 ### Unreachable, dead, defensive, or diagnostics-only [UP]
 
@@ -111,9 +104,9 @@ current source.
   subcommands, `--help`, argument errors); `run` B678F (`--no-dbug`, which
   hoonc does not have); `run` L740, B735F and `compile_entry_with_hoonc`
   L3545, B3540F (an output path with no directory).
-- Dynock and batch modes. The `c6_dynock`, `c6_dynock_typed` and `c6_batch_*`
-  genrule pairings are verified by Bazel but not replayed for coverage:
-  `from_flags` L114, 116, B113T B115T; `CompileMode::parse` L122-128, 130;
+- Batch mode. The `c6_batch_*` genrule pairings are verified by Bazel but
+  not replayed for coverage (the replay runs the dynock pairings and single
+  entries only): `CompileMode::parse` L122-128, 130;
   `parse_batch_manifest` L356-374, 376, 378-382, 385-389; B361T/F B365T/F
   B373T/F B385T/F; `run` L624-625, 627, 629-632, 634-635, 646-651, 705-712;
   B623T B629T/F B645T B704T (including a whole batch delegated to hoonc);
@@ -121,13 +114,12 @@ current source.
   directory lists and the memo shared by batch entries); `run` L652 (a batch
   entry whose dependency tree fails `check_dependency_tree`);
   `compile_batch_with_shared_prelude` L1427-1436, 1441-1448, 1450-1454,
-  1456-1458, 1460-1462; B1451T/F; `jam_product` L3047-3052;
-  `jam_dynock_output_native` L3562-3568, B3563T/F; and the manifest
-  directory lists in `directory_mug_with_files` L4613-4615, B4612T
-  B4613T/F, `hoonc_directory_allowed_paths` L4851-4857, 4859-4860,
-  B4854T/F, `hoonc_manifest_relative_path` L4862-4870, 4872-4883,
-  4887-4892; B4863T/F B4864T/F B4868T/F B4878T/F B4880T/F, and
-  `normal_path_components` L4894-4901.
+  1456-1458, 1460-1462; B1451T/F; and the manifest directory lists in
+  `directory_mug_with_files` L4613-4615, B4612T B4613T/F,
+  `hoonc_directory_allowed_paths` L4851-4857, 4859-4860, B4854T/F,
+  `hoonc_manifest_relative_path` L4862-4870, 4872-4883, 4887-4892; B4863T/F
+  B4864T/F B4868T/F B4878T/F B4880T/F, and `normal_path_components`
+  L4894-4901.
 - Persistent cache. Only the batch genrule passes `--cache-dir`:
   `dependency_merkle_for_path` L2086-2091, 2093-2113, 2115-2124, 2127-2129,
   2131-2132, 2134-2138, 2140-2144; B2088T/F B2091F; `cache_object_key`
@@ -209,19 +201,13 @@ current source.
   L4561, B4560T; `trace_timed` L4568, 4570-4577, 4579, B4566F;
   `hoon_log_path` L526, 529, 532; B524F B525T (log paths equal to or
   outside the working directory).
-- Rejections: `check_dependency_tree` L804-808, B800T (a path `+stab`
-  rejects) and L867-871, B866T (an import cycle) are the
-  `unreachable-bad-path` and `unreachable-cycle` trees under `reject/`,
-  verified by Bazel against hoonc but not replayed for coverage.
-  `check_dependency_tree` L823, B822T: an empty file in the tree, which
-  hangs hoonc, so there is no hoonc verdict. `jam_product` L3075, 3077,
-  3079-3080 (a standard-mode entry that is not a gate, so the `@uvI`
-  directory hash cannot be slammed into it) is the `standard-not-gate` tree
-  under `reject/`, likewise not replayed, and
-  `compile_batch_with_shared_prelude` L1449 is the same failure in a batch.
-  `eval_formula_noun_in_context`
-  L4319-4320, 4322-4323, B4320F: an evaluation that crashes (no parity probe
-  has a crashing `/dat` node).
+- Rejections: `check_dependency_tree` L823, B822T: an empty file in the
+  tree, which hangs hoonc, so there is no hoonc verdict.
+  `compile_batch_with_shared_prelude` L1449: a standard-mode entry that is
+  not a gate, built in a batch (the single-entry form is the replayed
+  `standard-not-gate` tree; batch builds are not replayed).
+  `eval_formula_noun_in_context` L4319-4320, 4322-4323, B4320F: an
+  evaluation that crashes (no parity probe has a crashing `/dat` node).
 - Defensive checks: `catch_nock_panic` L4539-4554 (a panic inside Nock
   evaluation); `native_value_override` L3462-3467, B3460F (an unpinned
   softed-constraints module that reached native compilation; `run` delegates
@@ -287,19 +273,15 @@ current source.
   L985-992; `wer_base_dir_for_mode` L998; `resolve_urbit_arvo_root`
   L1017-1022, B1018T/F; `find_urbit_arvo_root` L1024-1033, 1035-1039,
   1041-1042; B1026T/F B1029T/F B1037T/F.
-- Import rejections, which hoonc also rejects. The multi-file trees under
-  `reject/` are verified by Bazel against hoonc but not replayed for
-  coverage:
-  - Missing imports (`unreachable-missing-import`, `skipped-dir`):
-    `resolve_import` L263, 286-287, 291-295, 297-298, 300-303; B262T B284F
-    B287F; `hoonc_tree_file` L314, 322; B310T B321T B321c2T (`.` or `..`
-    knots, a skipped directory, or a suffix hoonc does not load);
-    `path_knots` L422, B421T and `stap` B581T B581c2F (the root path `/`).
-  - Malformed headers: `gaq` L533, B531F (`one-space-gap`); `sym` L551,
-    B550T (`bar-star-face`); `reject_leftover_import` L710, 713-730; B711F
-    B720T/F (a clause the header rule cannot take, as in `trailing-comma`,
-    `tab-continuation`, `bar-bare-mark`, `lib-before-sur` and
-    `raw-after-dat`; `/%` is reported as unsupported).
+- Import rejections, which hoonc also rejects, that the replayed `reject/`
+  trees do not reach:
+  - Missing imports: `resolve_import` L263, B262T (a `/*` path with fewer
+    than two knots) and L295, 297-298 (the not-found message for a missing
+    `/-`, `/#` or `/*` import); `hoonc_tree_file` L314, B310T B321c2T (`.`
+    or `..` knots, or a suffix hoonc does not load); `path_knots` L422,
+    B421T and `stap` B581c2F (the root path `/`).
+  - `reject_leftover_import` L721-723, B720T: a `/%` clause, which honk
+    reports as unsupported.
 
 ## errors.rs, lib.rs, types.rs
 

@@ -1,7 +1,7 @@
 # c5 (native/ir) uncovered-branch ledger
 
 Range: `crates/honk/src/native/ir/*.rs`, excluding `#[cfg(test)]` modules and
-`cov_c5.rs`. Gaps: 653 lines (0 unit-only, 633 parity-only, 20 both) and 100
+`cov_c5.rs`. Gaps: 652 lines (0 unit-only, 632 parity-only, 20 both) and 100
 branch outcomes (0 unit-only, 89 parity-only, 11 both). Tags: `U` = not
 covered by unit tests, `P` = not covered by the parity corpus plus the
 `coverage/c5` probes, `UP` = both. Line numbers match the current source.
@@ -43,10 +43,6 @@ covered by unit tests, `P` = not covered by the parity corpus plus the
   compiler never builds one. The unit test uses `should_panic`.
 - L464 [P]: `cove` through a `%11` hint. `cove` reads the mint of a bare
   `[%wing …]`, which is `[0 a]` or an arm kick, never a hint. Unit-covered.
-- L466 [P]: `cove` error. It is reachable only as a rejection: `?=` on an arm
-  wing inside a wet gate that is called and so mulled. hoonc rejects the same
-  program with `cove`. Unit test:
-  `source_fits_on_an_arm_in_a_mulled_wet_gate_is_rejected_by_cove`.
 - L497, 500-502, 504-510, 513; B493F B495F B499T B500T/F B504T/F B504c2T/F
   [P]: `comb` rule-1 fallthroughs and rule 1b need a bare `[0 0]` or
   `[2 [0 x] [0 y]]` operand. Every source expression carries a `%dbug` spot,

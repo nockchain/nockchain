@@ -3,10 +3,10 @@
 This package covers the wing, tiki, float, tape, cord, atom-literal and path
 lexers, and the `LineMap` span and doc-anchoring code.
 
-Uncovered on the final code: 1 line and 1 branch outcome missed only by the
-unit tests (`U`), 251 lines and 158 branch outcomes missed only by the parity
-corpus (`P`), and 131 lines and 123 branch outcomes missed by both (`UP`), for
-383 lines and 282 branch outcomes in all. Numbers are current line numbers.
+Uncovered on the final code: 0 lines and 0 branch outcomes missed only by the
+unit tests (`U`), 263 lines and 162 branch outcomes missed only by the parity
+corpus (`P`), and 118 lines and 113 branch outcomes missed by both (`UP`), for
+381 lines and 275 branch outcomes in all. Numbers are current line numbers.
 `B<n>T` and `B<n>F` are branch outcomes at line n, and `c2` to `c5` name the
 later conditions on that line. "Unit-tested" means
 `crates/hatch/src/cov/p2_lexing.rs` covers the entry.

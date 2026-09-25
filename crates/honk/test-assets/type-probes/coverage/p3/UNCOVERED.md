@@ -2,7 +2,7 @@
 
 This package covers the atom, knot, path, date, phonetic-name, jam/cue, spec-builder and spot-anchoring code in `crates/hatch/src/utils.rs` lines 8382-12125.
 
-Gaps in the range: lines missed only by unit tests 2, only by the parity corpus 316, by both 180 (498 lines); branch outcomes missed only by unit tests 0, only by parity 160, by both 42 (202 outcomes).
+Gaps in the range: lines missed only by unit tests 0, only by the parity corpus 291, by both 178 (469 lines); branch outcomes missed only by unit tests 0, only by parity 154, by both 40 (194 outcomes).
 
 Tags: `U` = unit tests miss it, `P` = the parity corpus misses it, `UP` = both. `B<line>T`/`F` are branch outcomes; `c2`/`c3` mark later operands of `&&`/`||`. Unit tests are in `crates/hatch/src/cov/p3_atoms_specs.rs`; probes are in this directory.
 

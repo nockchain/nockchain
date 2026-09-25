@@ -5,19 +5,19 @@ This package covers `native/ut/{find,wet,repo,fire,types,keys}.rs`,
 and `native/mod.rs`; `hot.rs`, `identity.rs` and `keys.rs` have no gaps.
 
 Uncovered by unit tests only (`U`): 0 lines and 0 branch outcomes. By the parity
-corpus only (`P`): 700 lines and 180 branch outcomes. By both (`UP`): 16 lines
-and 19 branch outcomes. `L<n>` is a line and `B<n>T`/`B<n>F` a branch outcome;
+corpus only (`P`): 698 lines and 180 branch outcomes. By both (`UP`): 13 lines
+and 14 branch outcomes. `L<n>` is a line and `B<n>T`/`B<n>F` a branch outcome;
 `c<k>` names the k-th condition of a compound test. `P` entries are covered by
 unit tests. Where an entry says both compilers reject, hoonc fails on the same
 program.
 
 ## find.rs
 
-- L19-30, L226-227 [P]: a face name that is not valid text
+- L19-30, L229-230 [P]: a face name that is not valid text
   (`atom_handle_to_string`, `is_term_face`). Parsed faces are always terms, so
   only malformed input reaches this.
-- L57-60 (`find_noun`), L86-94 (`fend_noun`), L590-596, B591T, B591F
-  (`resolve_wing_axis`), L600-603 (`resolve_wing_axis_noun`) [P]:
+- L57-60 (`find_noun`), L86-94 (`fend_noun`), L593-599, B594T, B594F
+  (`resolve_wing_axis`), L603-606 (`resolve_wing_axis_noun`) [P]:
   `#[cfg(test)]` helpers.
 - L78 [P]: `fend` on an arm port. `?#` fends `[[%& 1] q.gen]` like hoon-138,
   which turns an arm into a leg on its core (`../regressions/c4_wthx_arm_fend.hoon`),
@@ -25,40 +25,40 @@ program.
   crashes there too.
 - L80 [P]: `fend` on a synthetic port (fend-fragment). Both compilers reject
   (`=*  w  [y y]` then `?#(^ w)`).
-- B187T, L188 [P]: `here` with a skip and no name. That needs a limb
+- B190T, L191 [P]: `here` with a skip and no name. That needs a limb
   `[%| n ~]` with n > 0, but the parser only produces `[%| 0 ~]` (from `,`).
-- B232T, L233 [UP]: `face_tool_tune_parts` on an atom tool. `is_term_face`
+- B235T, L236 [UP]: `face_tool_tune_parts` on an atom tool. `is_term_face`
   already handles atom tools.
-- L236-237 [UP]: a noun that is neither an atom nor a cell.
-- L355-358 [UP]: a face tool that is neither a term nor a tune. Atoms go to
+- L239-240 [UP]: a noun that is neither an atom nor a cell.
+- L358-361 [UP]: a face tool that is neither a term nor a tune. Atoms go to
   `is_term_face`, and cells always decode as `Some`.
-- L244-249, L251, B243T [P]: the `[%tune aliases bridges]` tagged tool form.
+- L247-252, L254, B246T [P]: the `[%tune aliases bridges]` tagged tool form.
   hoonc and hatch both build untagged tunes, so this is a defensive decode.
-- B242F [P]: a tune whose head is a non-text atom. Alias-map heads are cells or
+- B245F [P]: a tune whose head is a non-text atom. Alias-map heads are cells or
   `~`, so only malformed input reaches this.
-- B258T, L259, L370-379 [P]: a tune alias whose value is `~`. No source
+- B261T, L262, L373-382 [P]: a tune alias whose value is `~`. No source
   construct makes one: `=*` always stores `[~ hoon]`, and `=,` uses bridges.
-- L262-263, L265-266, L268-269, L271-273, B270T [P]: a malformed alias unit
+- L265-266, L268-269, L271-272, L274-276, B273T [P]: a malformed alias unit
   (`unit_hoon_value`). Defensive.
-- L314, L328, L454 [P]: the error return of a nested head, tail or bridge
+- L317, L331, L457 [P]: the error return of a nested head, tail or bridge
   search. Only rejected programs or malformed face tools raise an error there.
-- L386-389, L437-440 [P]: a tune hoon missing from the AST cache. Tune hoons
+- L389-392, L440-443 [P]: a tune hoon missing from the AST cache. Tune hoons
   come from the compiler's own lowering, so this is defensive.
-- L429-432 [P]: an improper bridge list. Defensive.
-- B498F, L499 [P]: a `%fork` with no members. Canonical forks have at least
+- L432-435 [P]: an improper bridge list. Defensive.
+- B501F, L502 [P]: a `%fork` with no members. Canonical forks have at least
   two members.
-- B613F, L615 [P]: two different holds with the same mug in the goal-core walk
+- B616F, L618 [P]: two different holds with the same mug in the goal-core walk
   (`noun_seen_insert_structural`). This needs a 31-bit mug collision.
-- B640T, L641 [P]: two synthetic ports with different formulas (find-fork).
+- B643T, L644 [P]: two synthetic ports with different formulas (find-fork).
   Both compilers reject. Any two source `=*` aliases carry different debug
   spots, so a fork of two branch aliases always gets here.
-- B678T, L679 [P]: the same arm name at different battery axes (find-fork).
+- B681T, L682 [P]: the same arm name at different battery axes (find-fork).
   Both compilers reject.
-- B691F, L694 [P]: the same interned core with a different foot. An interned
+- B694F, L697 [P]: the same interned core with a different foot. An interned
   core has one foot per arm, so this is unreachable from source.
-- L708 [P]: a leg in one fork branch and an arm in the other (find-fork). Both
+- L711 [P]: a leg in one fork branch and an arm in the other (find-fork). Both
   compilers reject.
-- B629F, L711 [P]: different unmatched skip counts, or mixed port kinds
+- B632F, L714 [P]: different unmatched skip counts, or mixed port kinds
   (find-fork). Both compilers reject (`^^a.c` over `?(b [a=1 a=2] [a=1 z=2])`).
 
 ## fire.rs

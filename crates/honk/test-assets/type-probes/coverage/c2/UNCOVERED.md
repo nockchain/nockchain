@@ -4,9 +4,9 @@ This range holds `fish` and skin tests, seminouns, lazy resolvers and musk,
 `bran`, `%=`, the hoon/spec/open caches, core minting, literals, `nest`,
 `wrap_type`, and `burp_type`.
 
-The gap report lists 247 uncovered lines and 95 untaken branch outcomes: none
-are missed only by unit tests (U), 152 lines and 52 branches are missed only
-by the parity corpus (P), and 95 lines and 43 branches are missed by both (UP).
+The gap report lists 229 uncovered lines and 94 untaken branch outcomes: none
+are missed only by unit tests (U), 152 lines and 51 branches are missed only
+by the parity corpus (P), and 77 lines and 43 branches are missed by both (UP).
 `L` rows are lines never run; `B` rows are branch outcomes never taken (`T` or
 `F`, with `c2` for the second condition of the same `if`). The parity corpus
 also compiles the rejection probes in `../../reject/`, so a rejection path is

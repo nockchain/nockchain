@@ -42,16 +42,17 @@ output is checked byte-for-byte against hoonc.
 
 | Measure | Before | Now |
 |---|---|---|
-| Unit tests: lines | 72.1% | 94.6% |
-| Unit tests: branches | 55.9% (2,530 of 5,736 missed) | 88.6% (677 of 5,916 missed) |
-| Parity corpus: lines | 65.9% | 76.3% |
-| Parity corpus: branches | 51.8% (2,552 of 5,292 missed) | 65.8% (1,867 of 5,456 missed) |
+| Unit tests: lines | 72.1% | 95.1% |
+| Unit tests: branches | 55.9% (2,530 of 5,736 missed) | 89.7% (607 of 5,918 missed) |
+| Parity corpus: lines | 65.9% | 76.8% |
+| Parity corpus: branches | 51.8% (2,552 of 5,292 missed) | 66.9% (1,808 of 5,458 missed) |
 
-Most of the remaining parity gap is code no source program reaches (the
-`%hand` lowerings, `HONK_IR_ROUNDTRIP`-only checks, library API the binary
-never calls), programs both compilers reject (covered by `../reject/` and unit
-tests), and build tooling that cannot change compiled output. The ledgers
-give the reason for each gap.
+The unit tests reach every line and branch outcome the parity corpus reaches.
+No ledger entry is left as "not yet covered": every remaining gap has a
+reason. Most of the parity gap is build tooling and CLI paths that cannot
+change compiled output, internal forms no source program produces (`%hand`,
+noun decoding, `HONK_IR_ROUNDTRIP` checks), library API the binary never
+calls, dead or test-only code, and defensive checks.
 
 ## How it is measured
 
@@ -67,4 +68,5 @@ toolchain's `llvm-tools`.
 - Parity: an instrumented release `honk` replays every hoonc-checked compile:
   the six kernels, the hoon-138 native self-mint, the curated type probes and
   compiler fixtures, the rejection corpus, the correctness regressions, every
-  coverage package probe, and the `c6` import and kernel pairings.
+  coverage package probe, and the `c6` import and kernel pairings, rejection
+  trees, and dynock pairings. The `c6` batch genrule is not replayed.
