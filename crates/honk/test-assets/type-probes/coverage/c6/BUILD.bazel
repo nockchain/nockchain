@@ -135,6 +135,12 @@ C6_REJECTION_TREES = [
     ("unreachable_missing_import", "unreachable-missing-import"),
 ]
 
+# Rejection trees whose entry is built as a kernel (standard mode) rather than
+# with --arbitrary.
+C6_STANDARD_REJECTION_TREES = [
+    ("standard_not_gate", "standard-not-gate"),
+]
+
 [
     sh_test(
         name = "c6_reject_{}_test".format(name),
@@ -146,14 +152,15 @@ C6_REJECTION_TREES = [
             "$(rootpath //hoon/common:hoon.hoon)",
             "$(rootpath reject/{}/app/entry.hoon)".format(root),
             "{}/reject/{}".format(C6_PACKAGE, root),
-        ],
+        ] + mode,
         data = glob(["reject/{}/**".format(root)]) + [
             "//crates/honk:honk",
             "//crates/hoonc:hoonc_bin",
             "//hoon/common:hoon.hoon",
         ],
     )
-    for name, root in C6_REJECTION_TREES
+    for name, root, mode in [(n, r, []) for n, r in C6_REJECTION_TREES] +
+                            [(n, r, ["standard"]) for n, r in C6_STANDARD_REJECTION_TREES]
 ]
 
 # c6 CLI pairings that the hoon_library/honk_library rules cannot express:
@@ -296,5 +303,6 @@ test_suite(
     tests = ["{}_parity_test".format(name) for name in PROBES] +
             ["{}_parity_test".format(name) for name, _, _, _ in C6_PAIRINGS] +
             ["{}_parity_test".format(name) for name in C6_CLI_PAIRINGS] +
-            ["c6_reject_{}_test".format(name) for name, _ in C6_REJECTION_TREES],
+            ["c6_reject_{}_test".format(name) for name, _ in C6_REJECTION_TREES] +
+            ["c6_reject_{}_test".format(name) for name, _ in C6_STANDARD_REJECTION_TREES],
 )

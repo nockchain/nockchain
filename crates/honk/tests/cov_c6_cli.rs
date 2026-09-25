@@ -1,6 +1,6 @@
 //! Coverage-driven end-to-end tests for the honk CLI: argument handling,
 //! output modes, batch manifests, subject-type overrides, non-canonical
-//! preludes, wrapper asset dumps, and the hoonc delegation for changed
+//! preludes, wrapper asset dumps, build failures, and the pinned and changed
 //! softed constraints.
 //!
 //! Added to close branch-coverage gaps; see the coverage report in the PR.
@@ -620,6 +620,9 @@ fn c6_cli_non_canonical_preludes_are_minted_natively() {
     );
     assert!(log.contains("chunked prelude: 2 layers + ride"), "{log}");
     assert!(log.contains("chunked prelude: minted layer 3/3"), "{log}");
+    let (untraced, log) = run(&chained, Some("--arbitrary"), &arb, &[], "untraced.jam");
+    assert!(!log.contains("minted layer"), "{log}");
+    assert_eq!(untraced, chunked);
     let (whole, log) = run(
         &chained,
         Some("--arbitrary"),
@@ -801,4 +804,207 @@ fn c6_cli_changed_softed_constraints_are_delegated_to_hoonc() {
         fs::read(cwd.join("b/plain.jam")).expect("plain"),
         native_plain
     );
+}
+
+#[test]
+fn c6_cli_failures_before_and_during_the_build() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path();
+    let prelude = prelude();
+    let out = cwd.join("out.jam");
+
+    // A batch entry whose dependency tree holds a file that does not parse.
+    let deps = deps_tree(&cwd.join("broken"));
+    write(&deps, "junk/bad.hoon", "|=  a=@\n(\n");
+    let manifest = write(
+        cwd,
+        "broken.tsv",
+        format!(
+            "b/gate.jam\t{}\tarbitrary\n",
+            deps.join("app/gate.hoon").display()
+        ),
+    );
+    let output = honk(
+        &args!["--batch-manifest", manifest, "--prelude", prelude, deps],
+        cwd,
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("native parser failed"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!cwd.join("b/gate.jam").exists());
+
+    // A prelude that does not parse, and one that parses but does not build.
+    let deps = deps_tree(&cwd.join("ok"));
+    let gate = deps.join("app/gate.hoon");
+    let unparsable = write(cwd, "preludes/unparsable.hoon", "|%\n++  x\n");
+    let unbuildable = write(
+        cwd, "preludes/unbuildable.hoon", "|%\n++  x  (nope 1)\n--\n",
+    );
+    let native = cwd.join("native-dump");
+    for args in [
+        args!["--arbitrary", "--output", out, "--prelude", unparsable, gate, deps],
+        args!["--dump-native-wrapper-assets", native, "--prelude", unbuildable, deps],
+    ] {
+        let output = honk(&args, cwd);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("native hoon compile failed"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    assert!(!out.exists());
+    assert!(!native.exists());
+
+    // A standard (kernel) build slams the product with the directory hash, so
+    // an entry that is not a gate fails, alone or in a batch.
+    let not_gate = write(&deps, "app/not-gate.hoon", "[%not %a %gate]\n");
+    let manifest = write(
+        cwd,
+        "not-gate.tsv",
+        format!("b/not-gate.jam\t{}\tstandard\n", not_gate.display()),
+    );
+    for args in [
+        args!["--output", out, "--prelude", prelude, not_gate, deps],
+        args!["--batch-manifest", manifest, "--prelude", prelude, deps],
+    ] {
+        let output = honk(&args, cwd);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("failed to build deferred trap"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    assert!(!out.exists());
+    assert!(!cwd.join("b/not-gate.jam").exists());
+
+    // A panic on the worker thread is reported as a failed compile. hatch
+    // panics on a `!?` version miss, where hoon-138's `open` crashes.
+    let entry = write(&deps, "app/version.hoon", "!?(100 42)\n");
+    let output = honk(
+        &args!["--arbitrary", "--output", out, "--prelude", prelude, entry, deps],
+        cwd,
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("native compiler worker thread panicked"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!out.exists());
+}
+
+#[test]
+fn c6_cli_pinned_softed_constraints_and_dat_nodes_build_natively() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path();
+    let deps = cwd.join("deps");
+    let repo = repo_root();
+    // The pinned module and constraint jams, byte for byte, so the native
+    // value override applies. Only those three files are pinned, so a stub
+    // /common/zeke (a faceless import of the module) supplies its molds.
+    for rel in [
+        "dat/softed-constraints.hoon", "jams/constraints-0-1.jam", "jams/constraints-2.jam",
+    ] {
+        write(
+            &deps,
+            rel,
+            fs::read(repo.join("hoon").join(rel)).expect("pinned file"),
+        );
+    }
+    write(
+        &deps,
+        "common/zeke.hoon",
+        "|%\n+$  preprocess  [preprocess-0-1 preprocess-2]\n+$  preprocess-0-1  *\n+$  preprocess-2  *\n--\n",
+    );
+    // An ordinary /dat node, which is kicked while it is built.
+    write(&deps, "dat/const.hoon", "[%const 42]\n");
+    let entry = write(
+        &deps, "app/entry.hoon",
+        "/#  softed-constraints\n/#  const\n[?=(^ softed-constraints) const]\n",
+    );
+    let prelude = prelude();
+    let output = honk_env(
+        &args!["--dynock", "--output", "out.jam", "--prelude", prelude, entry, deps],
+        cwd,
+        &[("NATIVE_HOON_TRACE", "1")],
+    );
+    assert_ok(&output);
+    let log = stderr(&output);
+    assert!(
+        log.contains("[honk] cueing softed-constraints static jam pair"),
+        "{log}"
+    );
+    assert!(log.contains("dat/const.hoon"), "{log}");
+    assert!(!fs::read(cwd.join("out.jam")).expect("artifact").is_empty());
+}
+
+#[test]
+fn c6_cli_dynamic_wrapper_dumps_with_a_minted_prelude_formula() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path();
+    let deps = cwd.join("deps");
+    fs::create_dir_all(&deps).expect("deps");
+    let prelude = prelude();
+    let sut = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/honc-type-138.jam");
+    let native = cwd.join("native");
+    assert_ok(&honk(
+        &args!["--dump-native-wrapper-assets", native, "--prelude", prelude, deps],
+        cwd,
+    ));
+
+    // HONK_NATIVE_PARITY, or a prelude that is not byte-for-byte hoon-138,
+    // keeps the prelude formula minted here instead of the embedded one. The
+    // subject type is given, so the prelude is not played.
+    let parity = cwd.join("parity");
+    assert_ok(&honk_env(
+        &args!["--dump-wrapper-assets", parity, "--sut-jam", sut, "--prelude", prelude, deps],
+        cwd,
+        &[("HONK_NATIVE_PARITY", "1")],
+    ));
+    let mut source = fs::read_to_string(&prelude).expect("prelude");
+    source.push_str("::  not the canonical bytes\n");
+    let changed = write(cwd, "changed-hoon.hoon", source);
+    // With --no-dbug the wrappers are compiled without spots.
+    let nodbug = cwd.join("nodbug");
+    assert_ok(&honk(
+        &args![
+            "--no-dbug", "--dump-wrapper-assets", nodbug, "--sut-jam", sut, "--prelude", changed,
+            deps
+        ],
+        cwd,
+    ));
+
+    let mut names: Vec<String> = fs::read_dir(&native)
+        .expect("native dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 11, "{names:?}");
+    for name in &names {
+        let reference = fs::read(native.join(name)).expect("native asset");
+        assert_eq!(
+            fs::read(parity.join(name)).expect("parity asset"),
+            reference,
+            "{name}"
+        );
+        // Only the constant and data wrappers are always compiled without
+        // spots.
+        let spotless = name == "constant-vase-battery.jam" || name == "data-vase-battery.jam";
+        assert_eq!(
+            fs::read(nodbug.join(name)).expect("no-dbug asset") == reference,
+            spotless,
+            "{name}"
+        );
+    }
 }

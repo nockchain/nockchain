@@ -4,12 +4,19 @@
 # ../../rejection_test.sh; the verdict is artifact absence, since hoonc exits 0
 # even when its build fails.
 #
-# usage: rejection_tree_test.sh <hoonc-runfile> <honk-runfile> <prelude-runfile> <entry-runfile> <deps-dir>
+# usage: rejection_tree_test.sh <hoonc-runfile> <honk-runfile> <prelude-runfile> <entry-runfile> <deps-dir> [standard]
+#
+# Both compilers build with --arbitrary unless the sixth argument is
+# `standard`, which builds the entry as a kernel.
 set -u
 
-if [[ "$#" -ne 5 ]]; then
-  echo "usage: $0 <hoonc> <honk> <prelude> <entry> <deps-dir>" >&2
+if [[ "$#" -ne 5 && ! ( "$#" -eq 6 && "$6" == "standard" ) ]]; then
+  echo "usage: $0 <hoonc> <honk> <prelude> <entry> <deps-dir> [standard]" >&2
   exit 2
+fi
+mode=(--arbitrary)
+if [[ "$#" -eq 6 ]]; then
+  mode=()
 fi
 
 root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
@@ -28,7 +35,7 @@ trap 'rm -rf "$work"' EXIT
 export HOME="$work"
 cd "$work"
 
-timeout 120 "$hoonc" --new --data-dir "$work/hoonc-data" --arbitrary \
+timeout 120 "$hoonc" --new --data-dir "$work/hoonc-data" ${mode[@]+"${mode[@]}"} \
   --output "$work/ref.jam" "$entry" "$deps" \
   > "$work/hoonc.log" 2>&1 || true
 # Guard against infra failures masquerading as rejections: hoonc must have
@@ -41,7 +48,7 @@ if ! grep -aqE "build-hash|parsing" "$work/hoonc.log"; then
   exit 1
 fi
 
-timeout 120 "$honk" --arbitrary --output "$work/nat.jam" \
+timeout 120 "$honk" ${mode[@]+"${mode[@]}"} --output "$work/nat.jam" \
   --prelude "$prelude" "$entry" "$deps" \
   > "$work/honk.log" 2>&1 || true
 
