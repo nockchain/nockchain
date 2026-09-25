@@ -34,11 +34,14 @@ use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, T};
 use num_bigint::BigUint;
 use smallvec::SmallVec;
 
+use self::keys::*;
 use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
 use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
+use crate::native::identity::*;
 use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
 use crate::native::ir::semi_dag::{SemiArena, SemiId, SemiNode};
+use crate::native::ir::ty::TypeId;
 use crate::native::ir::value_dag::{ValueArena, ValueId};
 use crate::native::noun::{
     atom_to_string, noun_expr_to_noun, opt_from_noun, opt_to_noun, parsed_atom_to_noun, tag,
@@ -49,6 +52,7 @@ use crate::native::noun::{noun_eq_direct, noun_pair};
 
 mod find;
 mod fire;
+pub(crate) mod keys;
 mod repo;
 #[cfg(test)]
 pub mod test;
@@ -58,7 +62,7 @@ pub use types::*;
 
 #[derive(Clone, Copy)]
 struct HoldRepoFanLegIdEntry {
-    id: u64,
+    id: FanLegId,
     inner: Noun,
     hoon: Noun,
 }
@@ -66,38 +70,26 @@ struct HoldRepoFanLegIdEntry {
 #[derive(Clone, Copy)]
 struct HoldRepoFanHoldIdEntry {
     hold: Noun,
-    id: u64,
+    id: FanLegId,
 }
 
 const SEMI_TAG_FULL: u64 = 1_819_047_270; // %full
 const SEMI_TAG_HALF: u64 = 1_718_378_856; // %half
 const SEMI_TAG_LAZY: u64 = 2_038_063_468; // %lazy
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct SemanticContextKey {
-    vet_key: u8,
-    fan_context_key: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct MemoContextKey {
-    arm_epoch_key: u64,
-    placeholder_context_key: u64,
-}
-
 struct MuskRuntime {
     context: NockContext,
     cold_state: Option<&'static [u8]>,
     // Dynamic subject/formula states on the current partial-evaluation stack.
-    araw_active: Vec<(SemiId, u64)>,
+    araw_active: Vec<ArawKey>,
     // Copied interpreter-side cores keyed by the source core raw noun. These nouns live on the
     // runtime's long-lived eval stack, outside per-mack call frames, so repeated `^~` folds share
     // copied batteries/context instead of copying the same core tree for every arm invocation.
-    mack_core_cache_raw: FastHashMap<u64, Noun>,
-    mack_core_cache_context: Option<u64>,
+    mack_core_cache_raw: FastHashMap<NounIdentity, Noun>,
+    mack_core_cache_context: Option<EvalFrameId>,
     // Complete seminoun data is canonicalized by `ValueArena`, so equivalent
     // cores share one exact identity even when their slab addresses differ.
-    mack_cache_by_value: FastHashMap<(ValueId, u64), Option<Noun>>,
+    mack_cache_by_value: FastHashMap<MackKey, Option<Noun>>,
 }
 
 impl MuskRuntime {
@@ -124,11 +116,6 @@ impl MuskRuntime {
         self.mack_core_cache_context = None;
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct CacheContextKey {
-    semantic: SemanticContextKey,
-    memo: MemoContextKey,
-}
 
 /// Dense, scope-local identity for a parsed Hoon node.
 ///
@@ -136,12 +123,13 @@ struct CacheContextKey {
 /// the borrowed AST is active. Compiler sidecars use this index instead of
 /// independently hashing the same AST address for every property.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 struct HoonId(u32);
 
 #[derive(Default)]
 struct HoonArenaEntry {
     source: Option<NonNull<Hoon>>,
-    signature: Option<u64>,
+    signature: Option<HoonSignature>,
     hot_children: Option<[HoonId; 2]>,
     noun: Option<Noun>,
     // `Some(None)` is a cached negative result: canonical `open` returned the
@@ -151,14 +139,14 @@ struct HoonArenaEntry {
 
 #[derive(Default)]
 struct HoonArena {
-    by_ptr: FastHashMap<usize, HoonId>,
+    by_ptr: FastHashMap<HoonIdentity, HoonId>,
     entries: Vec<HoonArenaEntry>,
 }
 
 struct HoonArenaBuildNode {
-    ptr: usize,
-    signature: u64,
-    hot_children: Option<[usize; 2]>,
+    ptr: HoonIdentity,
+    signature: HoonSignature,
+    hot_children: Option<[HoonIdentity; 2]>,
 }
 
 impl HoonArena {
@@ -180,7 +168,7 @@ impl HoonArena {
             );
             self.by_ptr.insert(node.ptr, id);
             self.entries.push(HoonArenaEntry {
-                source: NonNull::new(node.ptr as *mut Hoon),
+                source: NonNull::new(node.ptr.0 as *mut Hoon),
                 signature: Some(node.signature),
                 hot_children: None,
                 noun: None,
@@ -194,18 +182,18 @@ impl HoonArena {
         }
     }
 
-    fn register_unsigned_root(&mut self, ptr: usize) {
+    fn register_unsigned_root(&mut self, ptr: HoonIdentity) {
         self.clear();
         self.by_ptr.insert(ptr, HoonId(0));
         self.entries.push(HoonArenaEntry {
-            source: NonNull::new(ptr as *mut Hoon),
+            source: NonNull::new(ptr.0 as *mut Hoon),
             ..HoonArenaEntry::default()
         });
     }
 
     #[inline]
     fn id_for(&self, hoon: &Hoon) -> Option<HoonId> {
-        self.by_ptr.get(&(hoon as *const Hoon as usize)).copied()
+        self.by_ptr.get(&(HoonIdentity::of(hoon))).copied()
     }
 
     #[inline]
@@ -294,34 +282,34 @@ pub struct Ut<'a> {
     // accessors below rather than hand-assembling context tuples at each cache surface.
     // Recursion / in-progress guards. These are not caches; they constrain valid memo reuse and
     // are folded into the memo-context helpers when the cache policy requires it.
-    pub arm_in_progress: HashSet<(Arc<str>, u64)>,
+    pub arm_in_progress: HashSet<(Arc<str>, TypeId)>,
     pub arm_goal_in_progress: Vec<ArmInProgressEntry>,
-    pub arm_placeholder_play_in_progress: HashSet<u64>,
-    pub arm_epoch: u64,
-    pub lazy_resolver_next_id: u64,
-    pub lazy_resolvers: HashMap<u64, LazyResolverContext>,
+    pub arm_placeholder_play_in_progress: HashSet<NounIdentity>,
+    pub arm_epoch: ArmEpoch,
+    pub lazy_resolver_next_id: LazyResolverId,
+    pub lazy_resolvers: HashMap<LazyResolverId, LazyResolverContext>,
     // RT-05 canonical lazy-core identity: maps a recursive core's structural key
     // (interned-sut ptr, tomes_sig, poly) to ONE canonical resolver id, so
     // structurally-equal lazy cores intern to one `Rc` and every pointer-keyed
     // recursion cut converges. Shares `lazy_resolvers`' whole-compile lifetime
     // (never cleared by `clear_build_transients`).
-    pub lazy_resolver_canonical_ids: HashMap<(usize, u64, u8), u64>,
+    pub lazy_resolver_canonical_ids: HashMap<LazyCoreKey, LazyResolverId>,
     // Hybrid oracle-sut parity compilation can opt into exact AST recovery from structurally equal
     // hoon nouns. Keep this disabled on the normal compiler path.
     pub exact_hoon_ast_lookup_enabled: bool,
-    pub hoon_identity_cache_raw: HashMap<u64, Noun>,
-    pub hoon_identity_cache_order: VecDeque<u64>,
-    pub hoon_cache_raw: HashMap<u64, Arc<Hoon>>,
-    pub hoon_cache_raw_order: VecDeque<u64>,
-    pub hoon_cache_struct: FastHashMap<u32, VecDeque<(Noun, Arc<Hoon>)>>,
-    pub hoon_cache_struct_order: VecDeque<u32>,
-    pub hoon_identity_cache_struct: FastHashMap<u32, VecDeque<Noun>>,
-    pub hoon_identity_cache_struct_order: VecDeque<u32>,
+    pub hoon_identity_cache_raw: HashMap<NounIdentity, Noun>,
+    pub hoon_identity_cache_order: VecDeque<NounIdentity>,
+    pub hoon_cache_raw: HashMap<NounIdentity, Arc<Hoon>>,
+    pub hoon_cache_raw_order: VecDeque<NounIdentity>,
+    pub hoon_cache_struct: FastHashMap<NounMug, VecDeque<(Noun, Arc<Hoon>)>>,
+    pub hoon_cache_struct_order: VecDeque<NounMug>,
+    pub hoon_identity_cache_struct: FastHashMap<NounMug, VecDeque<Noun>>,
+    pub hoon_identity_cache_struct_order: VecDeque<NounMug>,
     // Bounded decode cache for `%hold` gene nouns that are discovered from type data rather than
     // from parser-owned AST pointers.
-    pub decoded_hold_hoon_cache_raw: HashMap<u64, Arc<Hoon>>,
-    pub decoded_hold_hoon_cache_order: VecDeque<u64>,
-    pub decoded_hold_hoon_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
+    pub decoded_hold_hoon_cache_raw: HashMap<NounIdentity, Arc<Hoon>>,
+    pub decoded_hold_hoon_cache_order: VecDeque<NounIdentity>,
+    pub decoded_hold_hoon_ptr_cache: HashMap<HoonIdentity, (Option<NounIdentity>, Noun)>,
     // Arena IR for the borrowed top-level Hoon tree. Address lookup happens
     // once at a compiler boundary; signatures, canonical nouns, and opened
     // forms are then dense HoonId-indexed properties. Generated lowering
@@ -337,9 +325,12 @@ pub struct Ut<'a> {
     // empty — scope churn (one per distinct AST root, including every
     // compiler-generated lowering) made the empty-map growth path hot.
     hoon_arena_pool: Vec<HoonArena>,
-    sig_scratch_pool: Vec<(FastHashMap<usize, u64>, Vec<HoonArenaBuildNode>)>,
-    pub hoon_ast_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
-    pub hoon_ast_ptr_cache_order: VecDeque<usize>,
+    sig_scratch_pool: Vec<(
+        FastHashMap<HoonIdentity, HoonSignature>,
+        Vec<HoonArenaBuildNode>,
+    )>,
+    pub hoon_ast_ptr_cache: HashMap<HoonIdentity, (Option<NounIdentity>, Noun)>,
+    pub hoon_ast_ptr_cache_order: VecDeque<HoonIdentity>,
     pub hold_memo: HoldMemoSet,
     // Canonical `++fire` wet-arm validation tracks `[sut dox gen]` in `rib`
     // to avoid recursive re-entry during `mull` checks. `sut`/`dox` are now native
@@ -347,49 +338,46 @@ pub struct Ut<'a> {
     // the rib keys on their `Rc` pointers; the `gen` half stays a canonicalized
     // hoon noun (kept as both the live noun and its raw address for the fast path).
     fire_wet_rib: Vec<(NRc<NTy>, NRc<NTy>, Noun)>,
-    fire_wet_rib_raw: FastHashSet<(usize, usize, u64)>,
+    fire_wet_rib_raw: FastHashSet<WetRibKey>,
     // Dynamic `%rest` / `%hold` fan scope. This is part of the semantic execution context.
     // Canonical `++rest` tracks active loop legs in `fan`; native interns each structural
     // `[inner hoon]` pair to a stable `leg_id` and keys the active semantic scope by that set.
-    hold_repo_fan_leg_ids: FastHashMap<(u32, u32), Vec<HoldRepoFanLegIdEntry>>,
-    hold_repo_fan_leg_raw_ids: FastHashMap<(u64, u64), u64>,
-    hold_repo_fan_leg_id_by_hold_raw: FastHashMap<u64, u64>,
-    hold_repo_fan_leg_id_by_hold_raw_order: VecDeque<u64>,
-    hold_repo_fan_leg_id_by_hold_mug: FastHashMap<u32, VecDeque<HoldRepoFanHoldIdEntry>>,
-    hold_repo_fan_leg_id_by_hold_mug_order: VecDeque<u32>,
-    hold_repo_fan_active_leg_ids: Vec<u64>,
+    hold_repo_fan_leg_ids: FastHashMap<HoldKey<NounMug>, Vec<HoldRepoFanLegIdEntry>>,
+    hold_repo_fan_leg_raw_ids: FastHashMap<HoldKey<NounIdentity>, FanLegId>,
+    hold_repo_fan_leg_id_by_hold_raw: FastHashMap<NounIdentity, FanLegId>,
+    hold_repo_fan_leg_id_by_hold_raw_order: VecDeque<NounIdentity>,
+    hold_repo_fan_leg_id_by_hold_mug: FastHashMap<NounMug, VecDeque<HoldRepoFanHoldIdEntry>>,
+    hold_repo_fan_leg_id_by_hold_mug_order: VecDeque<NounMug>,
+    hold_repo_fan_active_leg_ids: Vec<FanLegId>,
     hold_repo_fan_signature_sum: u64,
     hold_repo_fan_signature_xor: u64,
-    hold_repo_fan_context_by_signature: FastHashMap<(u64, u64, usize), Vec<(Vec<u64>, u64)>>,
-    pub hold_repo_fan_context_id: u64,
-    pub hold_repo_fan_context_next_id: u64,
-    hold_repo_fan_leg_next_id: u64,
+    hold_repo_fan_context_by_signature:
+        FastHashMap<SetSignature, Vec<(Vec<FanLegId>, FanContextId)>>,
+    pub hold_repo_fan_context_id: FanContextId,
+    pub hold_repo_fan_context_next_id: FanContextId,
+    hold_repo_fan_leg_next_id: FanLegId,
     // Scope-precise fan key: per-Rc-ptr leg-id memo for %hold types, so
     // `reachable_legs` resolves a hold's leg-id in O(1) amortized (reusing the
     // existing noun-path leg intern once per distinct hold pointer). Persists for
     // the whole compile (leg-ids are compile-stable); cleared in clear_build_memos
     // alongside the fan/lazy state.
-    hold_repo_fan_leg_id_by_ptr: FastHashMap<usize, u64>,
+    hold_repo_fan_leg_id_by_ptr: FastHashMap<TypeId, FanLegId>,
     // Memoized intersection ids for scoped fan subsets: maps a (active-context-id,
     // legset-id) pair to its interned subset id, avoiding re-interning the same
     // (active ∩ legset) Vec across calls. Reuses the same dedup discipline as
     // refresh_hold_repo_fan_context_id over arbitrary sorted subsets.
-    hold_repo_fan_subset_by_signature: FastHashMap<(u64, u64, usize), Vec<(Vec<u64>, u64)>>,
+    hold_repo_fan_subset_by_signature:
+        FastHashMap<SetSignature, Vec<(Vec<FanLegId>, FanContextId)>>,
     // Canonical-boundary memoization surface. These are the first caches being
     // consolidated around Vere-style ut boundaries (`mint`, `mull`, `rest`,
     // `nest`, `redo`, etc.) instead of helper-local policy tables.
     pub boundary_memo: BoundaryMemoSet,
-    pub bran_semi_memo: BucketMemo<BranSemiMemoKey, BranSemiCacheEntry>,
-    // Caches keyed by structural mug rather than raw pointer.  The native compiler frequently
-    // reconstructs equal type nouns (e.g. `ty_atom("n", 0)`), which defeats pointer-keyed caches
-    // and can lead to runaway `find/cool/chip` recursion in large molds (notably hoon-138).
-    // Lookup/narrowing memo surface for canonical `find/fond/fine` and `ar`-adjacent helpers.
-    pub lookup_memo: LookupMemoSet,
-    pub spec_example_cache: HashMap<u64, VecDeque<(Spec, Arc<Hoon>)>>,
-    pub spec_example_cache_order: VecDeque<u64>,
-    pub spec_factory_open_cache: HashMap<u64, VecDeque<(Spec, Arc<Hoon>)>>,
-    pub spec_factory_open_cache_order: VecDeque<u64>,
-    pub burp_type_cache: HashMap<u64, Noun>,
+    pub bran_semi_memo: BucketMemo<BranSemiKey, BranSemiCacheEntry>,
+    pub spec_example_cache: HashMap<SpecSignature, VecDeque<(Spec, Arc<Hoon>)>>,
+    pub spec_example_cache_order: VecDeque<SpecSignature>,
+    pub spec_factory_open_cache: HashMap<SpecSignature, VecDeque<(Spec, Arc<Hoon>)>>,
+    pub spec_factory_open_cache_order: VecDeque<SpecSignature>,
+    pub burp_type_cache: HashMap<NounIdentity, Noun>,
     musk: MuskRuntime,
     // Cross-call persistence for the `miss` memo; only enabled during the
     // isolated prelude (hoon-138) mint. See miss().
@@ -400,22 +388,22 @@ pub struct Ut<'a> {
     /// under another (observed: ++dish's `~|` vase constant kept a `%hint`
     /// fork member hoonc resolves away). Clearing on any epoch change keeps
     /// within-arm reuse (the perf case) while never reusing across state.
-    miss_memo_persist: Option<((u8, u64, u64, u64), FastHashMap<(u64, u64, u8), bool>)>,
+    miss_memo_persist: Option<(CacheContextKey, FastHashMap<MissKey, bool>)>,
     // `^~` fold outcomes keyed by exact native (bran, formula) identity. Folding is a pure
     // function of these two values: arm resolution through the persistent
     // lazy resolvers is time-invariant, so both successes and failures are
     // safe to reuse for the lifetime of the Ut.
-    ktsg_fold_cache: FastHashMap<(SemiId, FormulaId), Option<Noun>>,
+    ktsg_fold_cache: FastHashMap<FoldKey, Option<Noun>>,
     semi_root_blocked_set: Option<Noun>,
     semi_full_blocked_interned: Option<Noun>,
     // Cache for `hatch::utils::open()`. Keyed by `&Hoon` pointer, guarded by a structural
     // signature to avoid incorrect hits when the allocator reuses freed AST node addresses.
     //
     // Value is `None` when `open(gen)` returns `gen` unchanged, avoiding storing duplicate clones.
-    pub open_cache: HashMap<usize, (u64, Option<Arc<Hoon>>)>,
-    pub open_cache_order: VecDeque<usize>,
-    pub arm_key_term_cache: HashMap<u64, Arc<str>>,
-    pub arm_key_term_cache_order: VecDeque<u64>,
+    pub open_cache: HashMap<HoonIdentity, (HoonSignature, Option<Arc<Hoon>>)>,
+    pub open_cache_order: VecDeque<HoonIdentity>,
+    pub arm_key_term_cache: HashMap<NounIdentity, Arc<str>>,
+    pub arm_key_term_cache_order: VecDeque<NounIdentity>,
     #[cfg(test)]
     pub skin_match_static_calls: usize,
     #[cfg(test)]
@@ -428,7 +416,7 @@ pub struct Sig64 {
     // A Hoon child contributes its completed structural digest to its parent.
     // Besides avoiding quadratic subtree rescans, this records the digest for
     // every native AST node reached through Spec/Tome/etc. in one traversal.
-    hoon_signatures: FastHashMap<usize, u64>,
+    hoon_signatures: FastHashMap<HoonIdentity, HoonSignature>,
     // Completed nodes are emitted in post-order. Only the two canonical binary
     // forms that recurse directly by ID carry child edges; every other form
     // enters through the arena boundary without paying generic edge costs.
@@ -529,20 +517,20 @@ impl Sig64 {
         self.write_pint(&spot.q);
     }
 
-    fn hoon_signature_spot_sensitive(hoon: &Hoon) -> Option<u64> {
+    fn hoon_signature_spot_sensitive(hoon: &Hoon) -> Option<HoonSignature> {
         let mut sig = Self::new_with_dbug_spots(true);
         sig.write_hoon(hoon)?;
-        sig.hoon_signatures
-            .get(&(hoon as *const Hoon as usize))
-            .copied()
+        sig.hoon_signatures.get(&(HoonIdentity::of(hoon))).copied()
     }
 
-    fn hoon_signatures_spot_sensitive(hoon: &Hoon) -> Option<(u64, Vec<HoonArenaBuildNode>)> {
+    fn hoon_signatures_spot_sensitive(
+        hoon: &Hoon,
+    ) -> Option<(HoonSignature, Vec<HoonArenaBuildNode>)> {
         let mut sig = Self::new_with_dbug_spots(true);
         sig.write_hoon(hoon)?;
         let root = sig
             .hoon_signatures
-            .get(&(hoon as *const Hoon as usize))
+            .get(&(HoonIdentity::of(hoon)))
             .copied()?;
         Some((root, sig.hoon_nodes))
     }
@@ -553,11 +541,11 @@ impl Sig64 {
     /// root, so rebuilding these tables from empty was measurable.
     fn hoon_signatures_spot_sensitive_pooled(
         hoon: &Hoon,
-        mut signatures: FastHashMap<usize, u64>,
+        mut signatures: FastHashMap<HoonIdentity, HoonSignature>,
         mut nodes: Vec<HoonArenaBuildNode>,
     ) -> (
-        Option<u64>,
-        FastHashMap<usize, u64>,
+        Option<HoonSignature>,
+        FastHashMap<HoonIdentity, HoonSignature>,
         Vec<HoonArenaBuildNode>,
     ) {
         signatures.clear();
@@ -568,18 +556,16 @@ impl Sig64 {
             hoon_signatures: signatures,
             hoon_nodes: nodes,
         };
-        let root = sig.write_hoon(hoon).and_then(|_| {
-            sig.hoon_signatures
-                .get(&(hoon as *const Hoon as usize))
-                .copied()
-        });
+        let root = sig
+            .write_hoon(hoon)
+            .and_then(|_| sig.hoon_signatures.get(&(HoonIdentity::of(hoon))).copied());
         (root, sig.hoon_signatures, sig.hoon_nodes)
     }
 
-    fn spec_signature_spot_sensitive(spec: &Spec) -> Option<u64> {
+    fn spec_signature_spot_sensitive(spec: &Spec) -> Option<SpecSignature> {
         let mut sig = Self::new_with_dbug_spots(true);
         sig.write_spec(spec)?;
-        Some(sig.finish())
+        Some(SpecSignature(sig.finish()))
     }
 
     fn write_parsed_atom(&mut self, atom: &ParsedAtom) {
@@ -1386,10 +1372,10 @@ impl Sig64 {
     }
 
     fn write_hoon(&mut self, hoon: &Hoon) -> Option<()> {
-        let ptr = hoon as *const Hoon as usize;
+        let ptr = HoonIdentity::of(hoon);
         if let Some(signature) = self.hoon_signatures.get(&ptr).copied() {
             self.write_byte(0xff);
-            self.write_u64(signature);
+            self.write_u64(signature.0);
             return Some(());
         }
 
@@ -2089,10 +2075,10 @@ impl Sig64 {
                 self.write_hoon(q)?;
             }
         }
-        let signature = self.state;
+        let signature = HoonSignature(self.state);
         let hot_children = match hoon {
             Hoon::Pair(head, tail) | Hoon::TisGar(head, tail) => {
-                Some([head.as_ref() as *const Hoon as usize, tail.as_ref() as *const Hoon as usize])
+                Some([HoonIdentity::of(head.as_ref()), HoonIdentity::of(tail.as_ref())])
             }
             _ => None,
         };
@@ -2104,7 +2090,7 @@ impl Sig64 {
         });
         self.state = parent_state;
         self.write_byte(0xff);
-        self.write_u64(signature);
+        self.write_u64(signature.0);
         Some(())
     }
 }
@@ -2132,8 +2118,8 @@ impl<'a> Ut<'a> {
             arm_in_progress: HashSet::new(),
             arm_goal_in_progress: Vec::new(),
             arm_placeholder_play_in_progress: HashSet::new(),
-            arm_epoch: 0,
-            lazy_resolver_next_id: 1,
+            arm_epoch: ArmEpoch(0),
+            lazy_resolver_next_id: LazyResolverId(1),
             lazy_resolvers: HashMap::new(),
             lazy_resolver_canonical_ids: HashMap::new(),
             exact_hoon_ast_lookup_enabled: false,
@@ -2168,14 +2154,13 @@ impl<'a> Ut<'a> {
             hold_repo_fan_signature_sum: 0,
             hold_repo_fan_signature_xor: 0,
             hold_repo_fan_context_by_signature: Default::default(),
-            hold_repo_fan_context_id: 0,
-            hold_repo_fan_context_next_id: 1,
-            hold_repo_fan_leg_next_id: 1,
+            hold_repo_fan_context_id: FanContextId(0),
+            hold_repo_fan_context_next_id: FanContextId(1),
+            hold_repo_fan_leg_next_id: FanLegId(1),
             hold_repo_fan_leg_id_by_ptr: Default::default(),
             hold_repo_fan_subset_by_signature: Default::default(),
             boundary_memo: Default::default(),
             bran_semi_memo: Default::default(),
-            lookup_memo: Default::default(),
             spec_example_cache: HashMap::new(),
             spec_example_cache_order: VecDeque::new(),
             spec_factory_open_cache: HashMap::new(),
@@ -2225,7 +2210,7 @@ impl<'a> Ut<'a> {
     }
 
     #[inline]
-    fn formula_op(&mut self, code: u8, args: &[FormulaId]) -> FormulaId {
+    fn formula_op(&mut self, code: NockOpcode, args: &[FormulaId]) -> FormulaId {
         self.formula_arena.op(code, args)
     }
 
@@ -2276,7 +2261,7 @@ impl<'a> Ut<'a> {
     const MUSK_CORE_CACHE_CAP: usize = 4_000_000;
 
     fn ensure_musk_mack_core_cache_context(&mut self, context: &NockContext) {
-        let context_id = context.stack.frame_identity();
+        let context_id = EvalFrameId(context.stack.frame_identity());
         if self.musk.mack_core_cache_context != Some(context_id) {
             self.musk.mack_core_cache_raw.clear();
             self.musk.mack_core_cache_context = Some(context_id);
@@ -2298,7 +2283,7 @@ impl<'a> Ut<'a> {
         core_space: &NounSpace,
     ) -> Option<Noun> {
         self.ensure_musk_mack_core_cache_context(context);
-        let raw = core.as_raw();
+        let raw = NounIdentity::of(core);
         if let Some(cached) = self.musk.mack_core_cache_raw.get(&raw).copied() {
             return Some(cached);
         }
@@ -2351,7 +2336,7 @@ impl<'a> Ut<'a> {
             if noun.is_direct() {
                 return noun;
             }
-            let raw = noun.as_raw();
+            let raw = NounIdentity::of(noun);
             if let Some(cached) = self.musk.mack_core_cache_raw.get(&raw).copied() {
                 return cached;
             }
@@ -2366,7 +2351,7 @@ impl<'a> Ut<'a> {
             self.musk.mack_core_cache_raw.insert(raw, copied);
             return copied;
         };
-        let raw = noun.as_raw();
+        let raw = NounIdentity::of(noun);
         if let Some(cached) = self.musk.mack_core_cache_raw.get(&raw).copied() {
             return cached;
         }
@@ -2409,10 +2394,9 @@ impl<'a> Ut<'a> {
 
     pub fn clear_build_memos(&mut self) {
         self.clear_build_transients();
-        self.arm_epoch = 0;
+        self.arm_epoch = ArmEpoch(0);
         self.hold_memo = Default::default();
         self.boundary_memo = Default::default();
-        self.lookup_memo = Default::default();
         self.spec_example_cache.clear();
         self.spec_example_cache_order.clear();
         self.spec_factory_open_cache.clear();
@@ -2438,7 +2422,7 @@ impl<'a> Ut<'a> {
         self.hold_repo_fan_active_leg_ids.clear();
         self.hold_repo_fan_signature_sum = 0;
         self.hold_repo_fan_signature_xor = 0;
-        self.hold_repo_fan_context_id = 0;
+        self.hold_repo_fan_context_id = FanContextId(0);
         self.hold_repo_fan_subset_by_signature.clear();
         self.bran_semi_memo = Default::default();
     }
@@ -2474,47 +2458,53 @@ impl<'a> Ut<'a> {
     const HOLD_REPO_FAN_LEG_HOLD_MUG_KEY_LIMIT: usize = 65_536;
     const HOLD_REPO_FAN_LEG_HOLD_MUG_BUCKET_LIMIT: usize = 8;
 
-    fn hold_repo_fan_context_key(&self) -> u64 {
+    fn hold_repo_fan_context_key(&self) -> FanContextId {
         if self.hold_repo_fan_active_leg_ids.is_empty() {
-            0
+            FanContextId(0)
         } else {
             self.hold_repo_fan_context_id
         }
     }
 
-    fn hold_repo_fan_leg_signature_component(leg_id: u64) -> u64 {
+    fn hold_repo_fan_leg_signature_component(leg_id: FanLegId) -> u64 {
         let mut hasher = FastHasher::default();
-        hasher.mix_u64(leg_id);
+        hasher.mix_u64(leg_id.0);
         hasher.finish()
     }
 
     fn semantic_context_key(&self) -> SemanticContextKey {
         SemanticContextKey {
-            vet_key: u8::from(self.vet),
+            vet_key: VetMode(self.vet),
             fan_context_key: self.hold_repo_fan_context_key(),
         }
     }
 
-    fn hold_repo_fan_leg_lookup_id(&mut self, inner: Noun, hoon: Noun) -> Result<Option<u64>> {
-        let raw_key = (unsafe { inner.as_raw() }, unsafe { hoon.as_raw() });
+    fn hold_repo_fan_leg_lookup_id(&mut self, inner: Noun, hoon: Noun) -> Result<Option<FanLegId>> {
+        let raw_key = HoldKey {
+            subject: NounIdentity::of(inner),
+            gene: NounIdentity::of(hoon),
+        };
         if let Some(id) = self.hold_repo_fan_leg_raw_ids.get(&raw_key).copied() {
             return Ok(Some(id));
         }
-        let key = (self.noun_mug_cached(inner), self.noun_mug_cached(hoon));
+        let key = HoldKey {
+            subject: self.noun_mug_cached(inner),
+            gene: self.noun_mug_cached(hoon),
+        };
         let Some(entries) = self.hold_repo_fan_leg_ids.get(&key) else {
             return Ok(None);
         };
-        let inner_raw = unsafe { inner.as_raw() };
-        let hoon_raw = unsafe { hoon.as_raw() };
+        let inner_raw = NounIdentity::of(inner);
+        let hoon_raw = NounIdentity::of(hoon);
         for entry in entries.iter().rev() {
             let inner_match = unsafe { entry.inner.raw_equals(&inner) }
-                || unsafe { entry.inner.as_raw() } == inner_raw
+                || NounIdentity::of(entry.inner) == inner_raw
                 || noun_eq(entry.inner, inner, &self.slab.noun_space())?;
             if !inner_match {
                 continue;
             }
             let hoon_match = unsafe { entry.hoon.raw_equals(&hoon) }
-                || unsafe { entry.hoon.as_raw() } == hoon_raw
+                || NounIdentity::of(entry.hoon) == hoon_raw
                 || noun_eq(entry.hoon, hoon, &self.slab.noun_space())?;
             if hoon_match {
                 self.hold_repo_fan_leg_raw_ids.insert(raw_key, entry.id);
@@ -2524,19 +2514,27 @@ impl<'a> Ut<'a> {
         Ok(None)
     }
 
-    fn hold_repo_fan_leg_intern_id(&mut self, inner: Noun, hoon: Noun) -> Result<u64> {
+    fn hold_repo_fan_leg_intern_id(&mut self, inner: Noun, hoon: Noun) -> Result<FanLegId> {
         if let Some(id) = self.hold_repo_fan_leg_lookup_id(inner, hoon)? {
             return Ok(id);
         }
 
-        let key = (self.noun_mug_cached(inner), self.noun_mug_cached(hoon));
-        let id = self.hold_repo_fan_leg_next_id.max(1);
-        self.hold_repo_fan_leg_next_id = self.hold_repo_fan_leg_next_id.wrapping_add(1);
-        if self.hold_repo_fan_leg_next_id == 0 {
-            self.hold_repo_fan_leg_next_id = 1;
+        let key = HoldKey {
+            subject: self.noun_mug_cached(inner),
+            gene: self.noun_mug_cached(hoon),
+        };
+        let id = self.hold_repo_fan_leg_next_id.max(FanLegId(1));
+        self.hold_repo_fan_leg_next_id = FanLegId(self.hold_repo_fan_leg_next_id.0.wrapping_add(1));
+        if self.hold_repo_fan_leg_next_id == FanLegId(0) {
+            self.hold_repo_fan_leg_next_id = FanLegId(1);
         }
-        self.hold_repo_fan_leg_raw_ids
-            .insert((unsafe { inner.as_raw() }, unsafe { hoon.as_raw() }), id);
+        self.hold_repo_fan_leg_raw_ids.insert(
+            HoldKey {
+                subject: NounIdentity::of(inner),
+                gene: NounIdentity::of(hoon),
+            },
+            id,
+        );
         // The mug store is authoritative and lives for the whole compile; with no
         // frame arena, `inner`/`hoon` live in the single slab for the whole
         // compile, so id lookups (noun_eq) stay valid without any relocation.
@@ -2547,7 +2545,7 @@ impl<'a> Ut<'a> {
         Ok(id)
     }
 
-    fn hold_repo_fan_leg_id_by_hold_raw_store(&mut self, hold_raw: u64, leg_id: u64) {
+    fn hold_repo_fan_leg_id_by_hold_raw_store(&mut self, hold_raw: NounIdentity, leg_id: FanLegId) {
         if !self
             .hold_repo_fan_leg_id_by_hold_raw
             .contains_key(&hold_raw)
@@ -2566,16 +2564,16 @@ impl<'a> Ut<'a> {
             .insert(hold_raw, leg_id);
     }
 
-    fn hold_repo_fan_leg_id_by_hold_mug_lookup(&mut self, hold: Noun) -> Result<Option<u64>> {
+    fn hold_repo_fan_leg_id_by_hold_mug_lookup(&mut self, hold: Noun) -> Result<Option<FanLegId>> {
         let hold_mug = self.noun_mug_cached(hold);
         let Some(entries) = self.hold_repo_fan_leg_id_by_hold_mug.get(&hold_mug) else {
             return Ok(None);
         };
-        let hold_raw = unsafe { hold.as_raw() };
+        let hold_raw = NounIdentity::of(hold);
         let mut matched = None;
         for entry in entries.iter().rev() {
             let hold_match = unsafe { entry.hold.raw_equals(&hold) }
-                || unsafe { entry.hold.as_raw() } == hold_raw
+                || NounIdentity::of(entry.hold) == hold_raw
                 || noun_eq(entry.hold, hold, &self.slab.noun_space())?;
             if hold_match {
                 matched = Some(entry.id);
@@ -2589,7 +2587,11 @@ impl<'a> Ut<'a> {
         Ok(None)
     }
 
-    fn hold_repo_fan_leg_id_by_hold_mug_store(&mut self, hold: Noun, leg_id: u64) -> Result<()> {
+    fn hold_repo_fan_leg_id_by_hold_mug_store(
+        &mut self,
+        hold: Noun,
+        leg_id: FanLegId,
+    ) -> Result<()> {
         let hold_mug = self.noun_mug_cached(hold);
         if !self
             .hold_repo_fan_leg_id_by_hold_mug
@@ -2609,10 +2611,10 @@ impl<'a> Ut<'a> {
             .hold_repo_fan_leg_id_by_hold_mug
             .entry(hold_mug)
             .or_default();
-        let hold_raw = unsafe { hold.as_raw() };
+        let hold_raw = NounIdentity::of(hold);
         for entry in bucket.iter() {
             let hold_match = unsafe { entry.hold.raw_equals(&hold) }
-                || unsafe { entry.hold.as_raw() } == hold_raw
+                || NounIdentity::of(entry.hold) == hold_raw
                 || noun_eq(entry.hold, hold, &self.slab.noun_space())?;
             if hold_match {
                 return Ok(());
@@ -2632,8 +2634,8 @@ impl<'a> Ut<'a> {
         hold: Noun,
         inner: Noun,
         hoon: Noun,
-    ) -> Result<u64> {
-        let hold_raw = unsafe { hold.as_raw() };
+    ) -> Result<FanLegId> {
+        let hold_raw = NounIdentity::of(hold);
         if let Some(id) = self
             .hold_repo_fan_leg_id_by_hold_raw
             .get(&hold_raw)
@@ -2655,8 +2657,8 @@ impl<'a> Ut<'a> {
     /// (`hold_repo_fan_leg_id_for_hold_type`), then memoizes ptr -> leg-id, so
     /// `reachable_legs` resolves a hold's leg-id O(1) amortized. Byte-neutral:
     /// returns the SAME id `redo_subject_hold_in_fan` would (same intern path).
-    fn hold_repo_fan_leg_id_for_hold_native(&mut self, hold: &NRc<NTy>) -> Result<u64> {
-        let ptr = native_type_id_usize(hold);
+    fn hold_repo_fan_leg_id_for_hold_native(&mut self, hold: &NRc<NTy>) -> Result<FanLegId> {
+        let ptr = native_type_id(hold);
         if let Some(id) = self.hold_repo_fan_leg_id_by_ptr.get(&ptr).copied() {
             return Ok(id);
         }
@@ -2682,8 +2684,8 @@ impl<'a> Ut<'a> {
     /// visited at most once and the closure is O(1) amortized per node. See the
     /// linearity proof in the design memo. The `Fork` case decodes options once
     /// per fork ptr (also memoized) and unions their legsets.
-    fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[u64]>> {
-        let id = t.arena_id().0;
+    fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[FanLegId]>> {
+        let id = t.arena_id();
         if let Some(legs) = legset_memo_lookup(&self.cx, id) {
             return Ok(legs);
         }
@@ -2694,8 +2696,8 @@ impl<'a> Ut<'a> {
 
     /// One node of `reachable_legs`' memoized recursion (the `with_stack_guard`
     /// wraps each level for deep DAGs). See `reachable_legs`.
-    fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[u64]>> {
-        let legs: Vec<u64> = match &**t {
+    fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[FanLegId]>> {
+        let legs: Vec<FanLegId> = match &**t {
             NTy::Void | NTy::Noun | NTy::Atom { .. } => Vec::new(),
             NTy::Cell(h, tl) => {
                 let h = h.clone();
@@ -2724,7 +2726,7 @@ impl<'a> Ut<'a> {
             NTy::Fork { .. } => {
                 // Fork options are native DAG children; union their legsets.
                 let options = self.fork_options_native(t)?;
-                let mut acc: Vec<u64> = Vec::new();
+                let mut acc: Vec<FanLegId> = Vec::new();
                 for opt in options {
                     let lo = self.reachable_legs(&opt)?;
                     acc = Self::merge_sorted_legs(&acc, &lo);
@@ -2748,7 +2750,7 @@ impl<'a> Ut<'a> {
 
     /// Sorted-merge-dedup union of two sorted leg-id slices (mirrors the
     /// NestSeenSet binary-search insert discipline; here a linear merge).
-    fn merge_sorted_legs(a: &[u64], b: &[u64]) -> Vec<u64> {
+    fn merge_sorted_legs(a: &[FanLegId], b: &[FanLegId]) -> Vec<FanLegId> {
         if a.is_empty() {
             return b.to_vec();
         }
@@ -2780,7 +2782,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Intersection of two sorted leg-id slices (both already sorted+deduped).
-    fn intersect_sorted_legs(a: &[u64], b: &[u64]) -> Vec<u64> {
+    fn intersect_sorted_legs(a: &[FanLegId], b: &[FanLegId]) -> Vec<FanLegId> {
         if a.is_empty() || b.is_empty() {
             return Vec::new();
         }
@@ -2806,9 +2808,9 @@ impl<'a> Ut<'a> {
     /// deterministically. Shares the `hold_repo_fan_context_next_id` id space and
     /// the same id-assignment order, so no new id semantics are introduced.
     /// Empty subset is the sentinel 0 (identical to today's empty-fan key).
-    fn intern_fan_subset_id(&mut self, subset: &[u64]) -> u64 {
+    fn intern_fan_subset_id(&mut self, subset: &[FanLegId]) -> FanContextId {
         if subset.is_empty() {
-            return 0;
+            return FanContextId(0);
         }
         let mut sum: u64 = 0;
         let mut xor: u64 = 0;
@@ -2817,7 +2819,11 @@ impl<'a> Ut<'a> {
             sum = sum.wrapping_add(component);
             xor ^= component;
         }
-        let key = (sum, xor, subset.len());
+        let key = SetSignature {
+            sum,
+            xor,
+            len: subset.len(),
+        };
         if let Some(entries) = self.hold_repo_fan_subset_by_signature.get(&key) {
             for (legs, id) in entries.iter().rev() {
                 if legs.as_slice() == subset {
@@ -2825,10 +2831,11 @@ impl<'a> Ut<'a> {
                 }
             }
         }
-        let id = self.hold_repo_fan_context_next_id.max(1);
-        self.hold_repo_fan_context_next_id = self.hold_repo_fan_context_next_id.wrapping_add(1);
-        if self.hold_repo_fan_context_next_id == 0 {
-            self.hold_repo_fan_context_next_id = 1;
+        let id = self.hold_repo_fan_context_next_id.max(FanContextId(1));
+        self.hold_repo_fan_context_next_id =
+            FanContextId(self.hold_repo_fan_context_next_id.0.wrapping_add(1));
+        if self.hold_repo_fan_context_next_id == FanContextId(0) {
+            self.hold_repo_fan_context_next_id = FanContextId(1);
         }
         self.hold_repo_fan_subset_by_signature
             .entry(key)
@@ -2853,17 +2860,17 @@ impl<'a> Ut<'a> {
     /// shape, already proven by every kernel) for the ~97% of resolutions whose
     /// intersection is empty. Falls back to the whole-active key when the flag is
     /// off, so the change is inert until enabled.
-    fn fan_context_key_scoped(&mut self, scope: &NRc<NTy>) -> Result<u64> {
+    fn fan_context_key_scoped(&mut self, scope: &NRc<NTy>) -> Result<FanContextId> {
         if !Self::scoped_fan_enabled() {
             return Ok(self.hold_repo_fan_context_key());
         }
         if self.hold_repo_fan_active_leg_ids.is_empty() {
-            return Ok(0);
+            return Ok(FanContextId(0));
         }
         let legs = self.reachable_legs(scope)?;
         let inter = Self::intersect_sorted_legs(&self.hold_repo_fan_active_leg_ids, &legs);
         if inter.is_empty() {
-            return Ok(0);
+            return Ok(FanContextId(0));
         }
         Ok(self.intern_fan_subset_id(&inter))
     }
@@ -2872,19 +2879,19 @@ impl<'a> Ut<'a> {
     /// by dual-perspective ops like mull, where the fan can be consulted from
     /// either the sut or the dox descent). Byte-safe: any leg that could change
     /// the result is reachable from at least one of the two scopes.
-    fn fan_context_key_scoped_pair(&mut self, a: &NRc<NTy>, b: &NRc<NTy>) -> Result<u64> {
+    fn fan_context_key_scoped_pair(&mut self, a: &NRc<NTy>, b: &NRc<NTy>) -> Result<FanContextId> {
         if !Self::scoped_fan_enabled() {
             return Ok(self.hold_repo_fan_context_key());
         }
         if self.hold_repo_fan_active_leg_ids.is_empty() {
-            return Ok(0);
+            return Ok(FanContextId(0));
         }
         let la = self.reachable_legs(a)?;
         let lb = self.reachable_legs(b)?;
         let legs = Self::merge_sorted_legs(&la, &lb);
         let inter = Self::intersect_sorted_legs(&self.hold_repo_fan_active_leg_ids, &legs);
         if inter.is_empty() {
-            return Ok(0);
+            return Ok(FanContextId(0));
         }
         Ok(self.intern_fan_subset_id(&inter))
     }
@@ -2894,12 +2901,12 @@ impl<'a> Ut<'a> {
     /// native (content-keyed `native_of_cached`) ONCE and scope on it. Flag-off
     /// and empty-active short-circuit before any conversion, so the noun path is
     /// unchanged when the feature is inert.
-    fn fan_context_key_scoped_noun(&mut self, sut: Noun) -> Result<u64> {
+    fn fan_context_key_scoped_noun(&mut self, sut: Noun) -> Result<FanContextId> {
         if !Self::scoped_fan_enabled() {
             return Ok(self.hold_repo_fan_context_key());
         }
         if self.hold_repo_fan_active_leg_ids.is_empty() {
-            return Ok(0);
+            return Ok(FanContextId(0));
         }
         let sut_native = self.native_of_cached(sut)?;
         self.fan_context_key_scoped(&sut_native)
@@ -2907,15 +2914,15 @@ impl<'a> Ut<'a> {
 
     fn refresh_hold_repo_fan_context_id(&mut self) {
         if self.hold_repo_fan_active_leg_ids.is_empty() {
-            self.hold_repo_fan_context_id = 0;
+            self.hold_repo_fan_context_id = FanContextId(0);
             return;
         }
 
-        let key = (
-            self.hold_repo_fan_signature_sum,
-            self.hold_repo_fan_signature_xor,
-            self.hold_repo_fan_active_leg_ids.len(),
-        );
+        let key = SetSignature {
+            sum: self.hold_repo_fan_signature_sum,
+            xor: self.hold_repo_fan_signature_xor,
+            len: self.hold_repo_fan_active_leg_ids.len(),
+        };
         if let Some(entries) = self.hold_repo_fan_context_by_signature.get(&key) {
             for (legs, id) in entries.iter().rev() {
                 if *legs == self.hold_repo_fan_active_leg_ids {
@@ -2925,10 +2932,11 @@ impl<'a> Ut<'a> {
             }
         }
 
-        let id = self.hold_repo_fan_context_next_id.max(1);
-        self.hold_repo_fan_context_next_id = self.hold_repo_fan_context_next_id.wrapping_add(1);
-        if self.hold_repo_fan_context_next_id == 0 {
-            self.hold_repo_fan_context_next_id = 1;
+        let id = self.hold_repo_fan_context_next_id.max(FanContextId(1));
+        self.hold_repo_fan_context_next_id =
+            FanContextId(self.hold_repo_fan_context_next_id.0.wrapping_add(1));
+        if self.hold_repo_fan_context_next_id == FanContextId(0) {
+            self.hold_repo_fan_context_next_id = FanContextId(1);
         }
         self.hold_repo_fan_context_by_signature
             .entry(key)
@@ -2937,7 +2945,7 @@ impl<'a> Ut<'a> {
         self.hold_repo_fan_context_id = id;
     }
 
-    fn hold_repo_fan_activate_leg_id(&mut self, leg_id: u64) -> bool {
+    fn hold_repo_fan_activate_leg_id(&mut self, leg_id: FanLegId) -> bool {
         match self.hold_repo_fan_active_leg_ids.binary_search(&leg_id) {
             Ok(_) => false,
             Err(idx) => {
@@ -2952,7 +2960,7 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn hold_repo_fan_deactivate_leg_id(&mut self, leg_id: u64) {
+    fn hold_repo_fan_deactivate_leg_id(&mut self, leg_id: FanLegId) {
         if let Ok(idx) = self.hold_repo_fan_active_leg_ids.binary_search(&leg_id) {
             self.hold_repo_fan_active_leg_ids.remove(idx);
             let component = Self::hold_repo_fan_leg_signature_component(leg_id);
@@ -3064,7 +3072,11 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn mint_cache_signature_for(&mut self, gen: &Hoon, id: Option<HoonId>) -> Option<u64> {
+    fn mint_cache_signature_for(
+        &mut self,
+        gen: &Hoon,
+        id: Option<HoonId>,
+    ) -> Option<HoonSignature> {
         // `mint` returns formulas with `%spot` hints, so cache keys must include debug spots.
         if let Some(id) = id.or_else(|| self.hoon_arena.id_for(gen)) {
             return self.hoon_arena.entry(id).signature;
@@ -3073,11 +3085,11 @@ impl<'a> Ut<'a> {
     }
 
     #[inline]
-    fn mint_cache_signature_id(&self, id: HoonId) -> Option<u64> {
+    fn mint_cache_signature_id(&self, id: HoonId) -> Option<HoonSignature> {
         self.hoon_arena.entry(id).signature
     }
 
-    fn mint_cache_signature(&mut self, gen: &Hoon) -> Option<u64> {
+    fn mint_cache_signature(&mut self, gen: &Hoon) -> Option<HoonSignature> {
         self.mint_cache_signature_for(gen, None)
     }
 
@@ -3553,7 +3565,7 @@ impl<'a> Ut<'a> {
         )
     }
 
-    fn prefix_signature(prefix: Option<&str>) -> u32 {
+    fn prefix_signature(prefix: Option<&str>) -> PrefixSignature {
         let mut hash: u32 = 0x811c_9dc5;
         match prefix {
             Some(term) => {
@@ -3569,32 +3581,7 @@ impl<'a> Ut<'a> {
                 hash = hash.wrapping_mul(0x0100_0193);
             }
         }
-        hash
-    }
-
-    fn core_mint_cache_key(
-        &mut self,
-        sut: Noun,
-        gol: Noun,
-        tomes_map: Noun,
-        prefix: &Option<String>,
-        poly: Poly,
-    ) -> CoreMintBoundaryKey {
-        let context = self.cache_context_key();
-        let poly_key = match poly {
-            Poly::Dry => 0u8,
-            Poly::Wet => 1u8,
-        };
-        (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(gol),
-            self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref()),
-            context.semantic.vet_key,
-            poly_key,
-            context.semantic.fan_context_key,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
-        )
+        PrefixSignature(hash)
     }
 
     /// C-final.1b: native-re-keyed `core_mint` boundary cache. The TYPE
@@ -3617,12 +3604,10 @@ impl<'a> Ut<'a> {
         // `nice`/`nest`, so `%hold` fan reachability is a property of the
         // subject-goal pair, not just the deepening subject.
         let fan = self.fan_context_key_scoped_pair(sut, gol)?;
-        let tomes_sig =
-            (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
-        let poly_key = match poly {
-            Poly::Dry => 0u8,
-            Poly::Wet => 1u8,
-        };
+        let tomes_sig = TomesSignature(u64::from(
+            self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
+        ));
+        let poly_key = PolyKey::from(poly);
         Ok(native_core_mint_cache_lookup(
             &self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key,
@@ -3642,12 +3627,10 @@ impl<'a> Ut<'a> {
     ) -> Result<()> {
         let context = self.cache_context_key();
         let fan = self.fan_context_key_scoped_pair(sut, gol)?;
-        let tomes_sig =
-            (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
-        let poly_key = match poly {
-            Poly::Dry => 0u8,
-            Poly::Wet => 1u8,
-        };
+        let tomes_sig = TomesSignature(u64::from(
+            self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
+        ));
+        let poly_key = PolyKey::from(poly);
         native_core_mint_cache_store(
             &mut self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key, core_type, formula,
@@ -3655,11 +3638,11 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    fn arm_placeholder_context_signature(&self) -> u64 {
+    fn arm_placeholder_context_signature(&self) -> PlaceholderSignature {
         if self.arm_placeholder_play_in_progress.is_empty() {
-            return 0;
+            return PlaceholderSignature(0);
         }
-        let mut raws: Vec<u64> = self
+        let mut raws: Vec<NounIdentity> = self
             .arm_placeholder_play_in_progress
             .iter()
             .copied()
@@ -3667,14 +3650,16 @@ impl<'a> Ut<'a> {
         raws.sort_unstable();
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         for raw in raws {
-            hash ^= raw;
+            hash ^= raw.0;
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        hash ^ (self.arm_placeholder_play_in_progress.len() as u64)
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        PlaceholderSignature(
+            hash ^ (self.arm_placeholder_play_in_progress.len() as u64)
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15),
+        )
     }
 
-    fn arm_cache_epoch_key(&self) -> u64 {
+    fn arm_cache_epoch_key(&self) -> ArmEpoch {
         // `arm_epoch` bumps on every arm enter/exit. If we key caches directly on it, we lose
         // cross-arm memoization even when no recursion-sensitive context is active.
         //
@@ -3684,7 +3669,7 @@ impl<'a> Ut<'a> {
             && self.arm_goal_in_progress.is_empty()
             && self.arm_placeholder_play_in_progress.is_empty()
         {
-            0
+            ArmEpoch(0)
         } else {
             self.arm_epoch
         }
@@ -3704,21 +3689,21 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn mint_cache_key(&mut self, sut: Noun, gol: Noun, gen_sig: u64) -> MintBoundaryKey {
+    fn mint_cache_key(&mut self, sut: Noun, gol: Noun, gen_sig: HoonSignature) -> MintKey<NounMug> {
         // mint's result depends on the active fan scope (%hold/%rest legs) and
         // on in-progress recursive-arm state, exactly like the sibling
         // core_mint cache — include the full context (fan + arm epoch +
         // placeholder), all of which collapse to 0 in the steady state.
         let context = self.cache_context_key();
-        (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(gol),
-            context.semantic.vet_key,
-            gen_sig,
-            context.semantic.fan_context_key,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
-        )
+        MintKey {
+            subject: self.noun_mug_cached(sut),
+            goal: self.noun_mug_cached(gol),
+            vet: context.semantic.vet_key,
+            gene: gen_sig,
+            fan: context.semantic.fan_context_key,
+            arm_epoch: context.memo.arm_epoch_key,
+            placeholder: context.memo.placeholder_context_key,
+        }
     }
 
     /// C-final.1b: native-re-keyed `mint` boundary cache. TYPE components
@@ -3729,7 +3714,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
-        gen_sig: u64,
+        gen_sig: HoonSignature,
     ) -> Result<Option<(NRc<NTy>, FormulaId)>> {
         let context = self.cache_context_key();
         // `mint` cache hits bypass the fresh `nice(sut, gol, typ)` check; include
@@ -3746,7 +3731,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
-        gen_sig: u64,
+        gen_sig: HoonSignature,
         ty: NRc<NTy>,
         formula: FormulaId,
     ) -> Result<()> {
@@ -3766,16 +3751,20 @@ impl<'a> Ut<'a> {
         gol: Noun,
         gen: Noun,
     ) -> Result<Option<(Noun, Noun)>> {
-        let key = self.mint_cache_key(sut, gol, self.noun_mug_cached(gen) as u64);
+        let key = self.mint_cache_key(
+            sut,
+            gol,
+            HoonSignature(u64::from(self.noun_mug_cached(gen).0)),
+        );
         let Some(entries) = self.boundary_memo.mint.get(&key) else {
             return Ok(None);
         };
-        let sut_raw = unsafe { sut.as_raw() };
-        let gol_raw = unsafe { gol.as_raw() };
+        let sut_raw = NounIdentity::of(sut);
+        let gol_raw = NounIdentity::of(gol);
         for entry in entries.iter().rev() {
-            let sut_match = unsafe { entry.sut.as_raw() } == sut_raw
+            let sut_match = NounIdentity::of(entry.sut) == sut_raw
                 || noun_eq(entry.sut, sut, &self.slab.noun_space())?;
-            let gol_match = unsafe { entry.gol.as_raw() } == gol_raw
+            let gol_match = NounIdentity::of(entry.gol) == gol_raw
                 || noun_eq(entry.gol, gol, &self.slab.noun_space())?;
             let gen_match = unsafe { entry.gen.raw_equals(&gen) }
                 || noun_eq(entry.gen, gen, &self.slab.noun_space())?;
@@ -3795,17 +3784,21 @@ impl<'a> Ut<'a> {
         ty: Noun,
         formula: Noun,
     ) -> Result<()> {
-        let key = self.mint_cache_key(sut, gol, self.noun_mug_cached(gen) as u64);
+        let key = self.mint_cache_key(
+            sut,
+            gol,
+            HoonSignature(u64::from(self.noun_mug_cached(gen).0)),
+        );
         let bucket = self
             .boundary_memo
             .mint
             .ensure_key(key, Self::MINT_CACHE_KEY_LIMIT);
-        let sut_raw = unsafe { sut.as_raw() };
-        let gol_raw = unsafe { gol.as_raw() };
+        let sut_raw = NounIdentity::of(sut);
+        let gol_raw = NounIdentity::of(gol);
         for entry in bucket.iter() {
-            let sut_match = unsafe { entry.sut.as_raw() } == sut_raw
+            let sut_match = NounIdentity::of(entry.sut) == sut_raw
                 || noun_eq(entry.sut, sut, &self.slab.noun_space())?;
-            let gol_match = unsafe { entry.gol.as_raw() } == gol_raw
+            let gol_match = NounIdentity::of(entry.gol) == gol_raw
                 || noun_eq(entry.gol, gol, &self.slab.noun_space())?;
             let gen_match = unsafe { entry.gen.raw_equals(&gen) }
                 || noun_eq(entry.gen, gen, &self.slab.noun_space())?;
@@ -3826,24 +3819,6 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    fn mull_cache_key(&mut self, sut: Noun, gol: Noun, dox: Noun, gen: Noun) -> MullBoundaryKey {
-        // Like mint, the dual-perspective wet recheck depends on the active
-        // fan scope and in-progress arm state; carry the full context (all
-        // steady-state-0). fire_wet_rib is deliberately NOT keyed (it is not
-        // steady-state-collapsing); no concrete rib-only divergence is known.
-        let context = self.cache_context_key();
-        (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(gol),
-            self.noun_mug_cached(dox),
-            context.semantic.vet_key,
-            self.noun_mug_cached(gen) as u64,
-            context.semantic.fan_context_key,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
-        )
-    }
-
     /// C-final.1b: native-re-keyed `mull` boundary cache. TYPE components
     /// (sut/gol/dox) keyed on interned `Rc` pointer identity; non-type semantic
     /// fields carried VERBATIM from the old `mull_cache_key` (vet, gen_sig =
@@ -3854,7 +3829,7 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
         dox: &NRc<NTy>,
-        gen_sig: u64,
+        gen_sig: HoonSignature,
     ) -> Result<Option<(NRc<NTy>, NRc<NTy>)>> {
         let context = self.cache_context_key();
         // mull is dual-perspective (sut + dox). The active fan can be consulted
@@ -3873,7 +3848,7 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
         dox: &NRc<NTy>,
-        gen_sig: u64,
+        gen_sig: HoonSignature,
         p_ty: NRc<NTy>,
         q_ty: NRc<NTy>,
     ) -> Result<()> {
@@ -3884,18 +3859,6 @@ impl<'a> Ut<'a> {
             context.memo.arm_epoch_key, context.memo.placeholder_context_key, p_ty, q_ty,
         );
         Ok(())
-    }
-
-    fn unary_type_boundary_key(&mut self, sut: Noun, ref_: Noun) -> TypeBinaryBoundaryKey {
-        // Shared by crop and fuse; both call repo() on %hold types, whose
-        // unfolding depends on the active fan scope.
-        let semantic = self.semantic_context_key();
-        (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(ref_),
-            semantic.vet_key,
-            semantic.fan_context_key,
-        )
     }
 
     /// C-final.4: native-re-keyed `crop` boundary cache. TYPE components
@@ -3957,21 +3920,21 @@ impl<'a> Ut<'a> {
     pub(super) fn redo_boundary_lookup(&mut self, sut: Noun, ref_: Noun) -> Result<Option<Noun>> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped_noun(sut)?;
-        let key = (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(ref_),
-            semantic.vet_key,
+        let key = TypeBinaryKey {
+            subject: self.noun_mug_cached(sut),
+            reference: self.noun_mug_cached(ref_),
+            vet: semantic.vet_key,
             fan,
-        );
+        };
         let Some(bucket) = self.boundary_memo.redo.get(&key) else {
             return Ok(None);
         };
-        let sut_raw = unsafe { sut.as_raw() };
-        let ref_raw = unsafe { ref_.as_raw() };
+        let sut_raw = NounIdentity::of(sut);
+        let ref_raw = NounIdentity::of(ref_);
         for entry in bucket.iter().rev() {
-            let sut_match = unsafe { entry.sut.as_raw() } == sut_raw
+            let sut_match = NounIdentity::of(entry.sut) == sut_raw
                 || noun_eq(entry.sut, sut, &self.slab.noun_space())?;
-            let ref_match = unsafe { entry.ref_.as_raw() } == ref_raw
+            let ref_match = NounIdentity::of(entry.ref_) == ref_raw
                 || noun_eq(entry.ref_, ref_, &self.slab.noun_space())?;
             if sut_match && ref_match {
                 return Ok(Some(entry.result));
@@ -3988,22 +3951,22 @@ impl<'a> Ut<'a> {
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped_noun(sut)?;
-        let key = (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(ref_),
-            semantic.vet_key,
+        let key = TypeBinaryKey {
+            subject: self.noun_mug_cached(sut),
+            reference: self.noun_mug_cached(ref_),
+            vet: semantic.vet_key,
             fan,
-        );
+        };
         let bucket = self
             .boundary_memo
             .redo
             .ensure_key(key, Self::REDO_CACHE_KEY_LIMIT);
-        let sut_raw = unsafe { sut.as_raw() };
-        let ref_raw = unsafe { ref_.as_raw() };
+        let sut_raw = NounIdentity::of(sut);
+        let ref_raw = NounIdentity::of(ref_);
         for entry in bucket.iter() {
-            let sut_match = unsafe { entry.sut.as_raw() } == sut_raw
+            let sut_match = NounIdentity::of(entry.sut) == sut_raw
                 || noun_eq(entry.sut, sut, &self.slab.noun_space())?;
-            let ref_match = unsafe { entry.ref_.as_raw() } == ref_raw
+            let ref_match = NounIdentity::of(entry.ref_) == ref_raw
                 || noun_eq(entry.ref_, ref_, &self.slab.noun_space())?;
             if sut_match && ref_match {
                 return Ok(());
@@ -4027,21 +3990,21 @@ impl<'a> Ut<'a> {
     pub(super) fn rest_boundary_lookup(&mut self, sut: Noun, legs: Noun) -> Result<Option<Noun>> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped_noun(sut)?;
-        let key = (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(legs),
-            semantic.vet_key,
+        let key = RestKey {
+            subject: self.noun_mug_cached(sut),
+            legs: self.noun_mug_cached(legs),
+            vet: semantic.vet_key,
             fan,
-        );
+        };
         let Some(bucket) = self.boundary_memo.rest.get(&key) else {
             return Ok(None);
         };
-        let sut_raw = unsafe { sut.as_raw() };
-        let legs_raw = unsafe { legs.as_raw() };
+        let sut_raw = NounIdentity::of(sut);
+        let legs_raw = NounIdentity::of(legs);
         for entry in bucket.iter().rev() {
-            let sut_match = unsafe { entry.sut.as_raw() } == sut_raw
+            let sut_match = NounIdentity::of(entry.sut) == sut_raw
                 || noun_eq(entry.sut, sut, &self.slab.noun_space())?;
-            let legs_match = unsafe { entry.legs.as_raw() } == legs_raw
+            let legs_match = NounIdentity::of(entry.legs) == legs_raw
                 || noun_eq(entry.legs, legs, &self.slab.noun_space())?;
             if sut_match && legs_match {
                 return Ok(Some(entry.result));
@@ -4058,22 +4021,22 @@ impl<'a> Ut<'a> {
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped_noun(sut)?;
-        let key = (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(legs),
-            semantic.vet_key,
+        let key = RestKey {
+            subject: self.noun_mug_cached(sut),
+            legs: self.noun_mug_cached(legs),
+            vet: semantic.vet_key,
             fan,
-        );
+        };
         let bucket = self
             .boundary_memo
             .rest
             .ensure_key(key, Self::REST_CACHE_KEY_LIMIT);
-        let sut_raw = unsafe { sut.as_raw() };
-        let legs_raw = unsafe { legs.as_raw() };
+        let sut_raw = NounIdentity::of(sut);
+        let legs_raw = NounIdentity::of(legs);
         for entry in bucket.iter() {
-            let sut_match = unsafe { entry.sut.as_raw() } == sut_raw
+            let sut_match = NounIdentity::of(entry.sut) == sut_raw
                 || noun_eq(entry.sut, sut, &self.slab.noun_space())?;
-            let legs_match = unsafe { entry.legs.as_raw() } == legs_raw
+            let legs_match = NounIdentity::of(entry.legs) == legs_raw
                 || noun_eq(entry.legs, legs, &self.slab.noun_space())?;
             if sut_match && legs_match {
                 return Ok(());
@@ -4114,21 +4077,21 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    fn noun_mug_cached(&self, noun: Noun) -> u32 {
+    fn noun_mug_cached(&self, noun: Noun) -> NounMug {
         // Prefer the mug cached on allocated nouns. This avoids building an ever-growing Rust
         // HashMap while compiling large inputs (hoon-138).
         let space = self.slab.noun_space();
-        get_mug(noun, &space).unwrap_or_else(|| slab_mug(noun, &space))
+        NounMug(get_mug(noun, &space).unwrap_or_else(|| slab_mug(noun, &space)))
     }
 
     fn nest_mug_lookup(&mut self, sut: Noun, ref_: Noun) -> Result<Option<bool>> {
         let semantic = self.semantic_context_key();
-        let key = (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(ref_),
-            semantic.vet_key,
-            semantic.fan_context_key,
-        );
+        let key = TypeBinaryKey {
+            subject: self.noun_mug_cached(sut),
+            reference: self.noun_mug_cached(ref_),
+            vet: semantic.vet_key,
+            fan: semantic.fan_context_key,
+        };
         let Some(entries) = self.boundary_memo.nest.get(&key) else {
             return Ok(None);
         };
@@ -4144,12 +4107,12 @@ impl<'a> Ut<'a> {
 
     fn nest_mug_register(&mut self, sut: Noun, ref_: Noun, result: bool) {
         let semantic = self.semantic_context_key();
-        let key = (
-            self.noun_mug_cached(sut),
-            self.noun_mug_cached(ref_),
-            semantic.vet_key,
-            semantic.fan_context_key,
-        );
+        let key = TypeBinaryKey {
+            subject: self.noun_mug_cached(sut),
+            reference: self.noun_mug_cached(ref_),
+            vet: semantic.vet_key,
+            fan: semantic.fan_context_key,
+        };
         let bucket = self
             .boundary_memo
             .nest
@@ -5172,7 +5135,7 @@ impl<'a> Ut<'a> {
                 let (_ty, base_formula) = self.fine(&port)?;
                 let test = self.type_test_formula_on_axis(ref_type.clone(), 1u64)?;
                 // hoon-138 emits an explicit `%7` in this branch.
-                self.formula_op(7, &[base_formula, test])
+                self.formula_op(NockOpcode::COMPOSE, &[base_formula, test])
             }
         };
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
@@ -5324,22 +5287,22 @@ impl<'a> Ut<'a> {
         match base {
             BaseType::NounExpr => Ok(self.formula_quote(D(0))),
             BaseType::Void => Ok(self.formula_quote(D(1))),
-            BaseType::Cell => Ok(self.formula_op(3, &[slot])),
+            BaseType::Cell => Ok(self.formula_op(NockOpcode::CELL, &[slot])),
             BaseType::Atom(_) => {
-                let test = self.formula_op(3, &[slot]);
+                let test = self.formula_op(NockOpcode::CELL, &[slot]);
                 let false_formula = self.formula_quote(D(1));
                 let true_formula = self.formula_quote(D(0));
                 Ok(self.formula_cond(test, false_formula, true_formula))
             }
             BaseType::Null => {
                 let zero = self.formula_quote(D(0));
-                Ok(self.formula_op(5, &[zero, slot]))
+                Ok(self.formula_op(NockOpcode::EQUAL, &[zero, slot]))
             }
             BaseType::Flag => {
                 let zero = self.formula_quote(D(0));
                 let one = self.formula_quote(D(1));
-                let eq_zero = self.formula_op(5, &[slot, zero]);
-                let eq_one = self.formula_op(5, &[slot, one]);
+                let eq_zero = self.formula_op(NockOpcode::EQUAL, &[slot, zero]);
+                let eq_one = self.formula_op(NockOpcode::EQUAL, &[slot, one]);
                 let atom_test = self.base_test_formula(&BaseType::Atom("$".to_string()), slot)?;
                 let flag_value_test = self.formula_flor(eq_zero, eq_one);
                 Ok(self.formula_flan(atom_test, flag_value_test))
@@ -5385,10 +5348,10 @@ impl<'a> Ut<'a> {
                 let slot = self.formula_slot(axis);
                 if let Some(value) = value {
                     let const_value = self.formula_quote(value);
-                    Ok(self.formula_op(5, &[const_value, slot]))
+                    Ok(self.formula_op(NockOpcode::EQUAL, &[const_value, slot]))
                 } else {
                     // Canonical ++fish: unknown atom narrows via flip([3 [0 axis]]).
-                    let is_cell = self.formula_op(3, &[slot]);
+                    let is_cell = self.formula_op(NockOpcode::CELL, &[slot]);
                     Ok(self.formula_flip(is_cell))
                 }
             }
@@ -5396,7 +5359,7 @@ impl<'a> Ut<'a> {
                 let head = head.clone();
                 let tail = tail.clone();
                 let slot = self.formula_slot(axis.clone());
-                let is_cell = self.formula_op(3, &[slot]);
+                let is_cell = self.formula_op(NockOpcode::CELL, &[slot]);
                 let head_formula = self.type_test_formula_on_axis_inner(
                     head,
                     peg_axis_big(axis.clone(), 2)?,
@@ -5448,8 +5411,8 @@ impl<'a> Ut<'a> {
                 let atom_test = self.skin_test_formula(sut, axis.clone(), &atom_skin)?;
                 let zero = self.formula_quote(D(0));
                 let one = self.formula_quote(D(1));
-                let eq_zero = self.formula_op(5, &[slot, zero]);
-                let eq_one = self.formula_op(5, &[slot, one]);
+                let eq_zero = self.formula_op(NockOpcode::EQUAL, &[slot, zero]);
+                let eq_one = self.formula_op(NockOpcode::EQUAL, &[slot, one]);
                 let flag_value_test = self.formula_flor(eq_zero, eq_one);
                 Ok(self.formula_flan(atom_test, flag_value_test))
             }
@@ -5457,10 +5420,10 @@ impl<'a> Ut<'a> {
             Skin::Leaf(_aura, atom) => {
                 let value = parsed_atom_to_noun(self.slab, atom);
                 let const_val = self.formula_quote(value);
-                Ok(self.formula_op(5, &[const_val, slot]))
+                Ok(self.formula_op(NockOpcode::EQUAL, &[const_val, slot]))
             }
             Skin::Cell(head, tail) => {
-                let is_cell = self.formula_op(3, &[slot]);
+                let is_cell = self.formula_op(NockOpcode::CELL, &[slot]);
                 let head_axis = peg_axis_big(axis.clone(), 2)?;
                 let tail_axis = peg_axis_big(axis, 3)?;
                 let head_test = self.skin_test_formula(sut, head_axis, head)?;
@@ -5621,7 +5584,10 @@ impl<'a> Ut<'a> {
         // bran_canonical_semi is native (Phase-2 tail): thread the native subject
         // directly — no `live_to_noun` of the deepening subject.
         let bran = self.bran_canonical_semi(sut)?;
-        let fold_key = (bran, formula);
+        let fold_key = FoldKey {
+            subject: bran,
+            formula,
+        };
         if let Some(cached) = self.ktsg_fold_cache.get(&fold_key).copied() {
             return Ok(match cached {
                 Some(noun) => (ty, self.formula_quote(noun)),
@@ -5687,8 +5653,8 @@ impl<'a> Ut<'a> {
         semi
     }
 
-    fn semi_noun_lazy_root(&mut self, resolver_id: u64) -> Noun {
-        let resolve = noun_u64(self.slab, resolver_id);
+    fn semi_noun_lazy_root(&mut self, resolver_id: LazyResolverId) -> Noun {
+        let resolve = noun_u64(self.slab, resolver_id.0);
         let frag = noun_biguint(self.slab, BigUint::from(1u32));
         let mask = T(self.slab, &[D(SEMI_TAG_LAZY), frag, resolve]);
         self.semi_make(mask, D(0))
@@ -5699,11 +5665,11 @@ impl<'a> Ut<'a> {
         T(self.slab, &[mask, data])
     }
 
-    fn lazy_resolver_new_id(&mut self) -> u64 {
+    fn lazy_resolver_new_id(&mut self) -> LazyResolverId {
         let id = self.lazy_resolver_next_id;
-        self.lazy_resolver_next_id = self.lazy_resolver_next_id.wrapping_add(1);
-        if self.lazy_resolver_next_id == 0 {
-            self.lazy_resolver_next_id = 1;
+        self.lazy_resolver_next_id = LazyResolverId(self.lazy_resolver_next_id.0.wrapping_add(1));
+        if self.lazy_resolver_next_id == LazyResolverId(0) {
+            self.lazy_resolver_next_id = LazyResolverId(1);
         }
         id
     }
@@ -5724,12 +5690,18 @@ impl<'a> Ut<'a> {
     /// transient (completed cores carry an id-free `[%full ~]` semi), so reusing it
     /// never changes emitted bytes. `sut` is interned (held by the TypeTable for the
     /// whole compile), so `Rc::as_ptr(sut)` is a stable structural key.
-    fn lazy_resolver_canonical_id(&mut self, sut: &NRc<NTy>, tomes_sig: u64, poly: Poly) -> u64 {
-        let poly_key = match poly {
-            Poly::Dry => 0u8,
-            Poly::Wet => 1u8,
+    fn lazy_resolver_canonical_id(
+        &mut self,
+        sut: &NRc<NTy>,
+        tomes_sig: TomesSignature,
+        poly: Poly,
+    ) -> LazyResolverId {
+        let poly_key = PolyKey::from(poly);
+        let key = LazyCoreKey {
+            subject: sut.arena_id(),
+            tomes: tomes_sig,
+            poly: poly_key,
         };
-        let key = (native_type_id_usize(sut), tomes_sig, poly_key);
         if let Some(&id) = self.lazy_resolver_canonical_ids.get(&key) {
             return id;
         }
@@ -5740,7 +5712,7 @@ impl<'a> Ut<'a> {
 
     fn lazy_resolver_register_context(
         &mut self,
-        resolver_id: u64,
+        resolver_id: LazyResolverId,
         core_type: NRc<NTy>,
         poly: Poly,
         arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
@@ -5764,7 +5736,7 @@ impl<'a> Ut<'a> {
 
     fn lazy_resolver_resolve_axis(
         &mut self,
-        resolver_id: u64,
+        resolver_id: LazyResolverId,
         fragment: &BigUint,
     ) -> Result<Option<FormulaId>> {
         // hoon-138 `++laze`: the resolver answers exact arm axes only
@@ -5785,7 +5757,7 @@ impl<'a> Ut<'a> {
 
     fn lazy_resolver_compile_arm(
         &mut self,
-        resolver_id: u64,
+        resolver_id: LazyResolverId,
         fragment: BigUint,
     ) -> Result<Option<FormulaId>> {
         let Some((core_type, poly, arm_entry)) = ({
@@ -5868,7 +5840,7 @@ impl<'a> Ut<'a> {
     }
 
     fn semi_import_noun(&mut self, semi: Noun) -> Result<SemiId> {
-        let raw = unsafe { semi.as_raw() };
+        let raw = NounIdentity::of(semi);
         if let Some(id) = self.semi_arena.raw_lookup(raw) {
             return Ok(id);
         }
@@ -5946,7 +5918,7 @@ impl<'a> Ut<'a> {
                         })?,
                     )
                 };
-                Ok(self.semi_arena.lazy(fragment, resolver_id))
+                Ok(self.semi_arena.lazy(fragment, LazyResolverId(resolver_id)))
             }
             _ => Ok(self.semi_full_blocked()),
         }
@@ -6161,9 +6133,12 @@ impl<'a> Ut<'a> {
         &mut self,
         bus: SemiId,
         fol: Noun,
-        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+        memo: &mut FastHashMap<ArawKey, SemiId>,
     ) -> Result<Option<SemiId>> {
-        let key = (bus, unsafe { fol.as_raw() });
+        let key = ArawKey {
+            subject: bus,
+            formula: NounIdentity::of(fol),
+        };
         if let Some(cached) = memo.get(&key) {
             return Ok(Some(*cached));
         }
@@ -6179,9 +6154,12 @@ impl<'a> Ut<'a> {
         &mut self,
         bus: SemiId,
         fol: Noun,
-        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+        memo: &mut FastHashMap<ArawKey, SemiId>,
     ) -> Result<Option<SemiId>> {
-        let key = (bus, unsafe { fol.as_raw() });
+        let key = ArawKey {
+            subject: bus,
+            formula: NounIdentity::of(fol),
+        };
         if let Some(cached) = memo.get(&key) {
             return Ok(Some(*cached));
         }
@@ -6205,7 +6183,7 @@ impl<'a> Ut<'a> {
         &mut self,
         bus: SemiId,
         fol: Noun,
-        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+        memo: &mut FastHashMap<ArawKey, SemiId>,
     ) -> Result<Option<SemiId>> {
         let space = self.slab.noun_space();
         let (head, tail) = {
@@ -6489,7 +6467,7 @@ impl<'a> Ut<'a> {
         &mut self,
         one: SemiId,
         axis: u64,
-        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+        memo: &mut FastHashMap<ArawKey, SemiId>,
     ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment(axis, one)?;
         let partial = self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))?;
@@ -6500,7 +6478,7 @@ impl<'a> Ut<'a> {
         &mut self,
         one: SemiId,
         axis: &BigUint,
-        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+        memo: &mut FastHashMap<ArawKey, SemiId>,
     ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment_big(axis, one)?;
         self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))
@@ -6533,7 +6511,10 @@ impl<'a> Ut<'a> {
             return Ok(None);
         }
 
-        let key = (core_id, axis);
+        let key = MackKey {
+            core: core_id,
+            axis: SmallAxis(axis),
+        };
         if let Some(result) = self.musk.mack_cache_by_value.get(&key).copied() {
             return Ok(result);
         }
@@ -6653,7 +6634,7 @@ impl<'a> Ut<'a> {
     }
 
     fn musk_apex_output(&mut self, bus: SemiId, fol: Noun) -> Result<MuskOutput> {
-        let mut memo: FastHashMap<(SemiId, u64), SemiId> = Default::default();
+        let mut memo: FastHashMap<ArawKey, SemiId> = Default::default();
         self.musk.araw_active.clear();
         let result = self.musk_araw(bus, fol, &mut memo);
         self.musk.araw_active.clear();
@@ -6679,29 +6660,31 @@ impl<'a> Ut<'a> {
         self.bran_canonical_semi_inner(sut, &mut seen_holds)
     }
 
-    fn bran_seen_holds_signature(seen_holds: &[NRc<NTy>]) -> (u64, u64, usize) {
+    fn bran_seen_holds_signature(seen_holds: &[NRc<NTy>]) -> SetSignature {
         let mut sum = 0u64;
         let mut xor = 0u64;
         for hold in seen_holds {
-            let id = native_type_id_u64(hold);
+            let id = u64::from(native_type_id(hold).0);
             let component = id.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             sum = sum.wrapping_add(component);
             xor ^= component.rotate_left((id as u32) & 31);
         }
-        (sum, xor, seen_holds.len())
+        SetSignature {
+            sum,
+            xor,
+            len: seen_holds.len(),
+        }
     }
 
-    fn bran_semi_cache_key(&self, sut: &NRc<NTy>, seen_holds: &[NRc<NTy>]) -> BranSemiMemoKey {
+    fn bran_semi_cache_key(&self, sut: &NRc<NTy>, seen_holds: &[NRc<NTy>]) -> BranSemiKey {
         let semantic = self.semantic_context_key();
-        let (seen_sum, seen_xor, seen_len) = Self::bran_seen_holds_signature(seen_holds);
-        (
-            native_type_id_u64(sut),
-            semantic.vet_key,
-            semantic.fan_context_key,
-            seen_sum,
-            seen_xor,
-            seen_len,
-        )
+        let seen = Self::bran_seen_holds_signature(seen_holds);
+        BranSemiKey {
+            subject: sut.arena_id(),
+            vet: semantic.vet_key,
+            fan: semantic.fan_context_key,
+            seen,
+        }
     }
 
     fn bran_seen_holds_equal(left: &[NRc<NTy>], right: &[NRc<NTy>]) -> bool {
@@ -6872,7 +6855,7 @@ impl<'a> Ut<'a> {
         let goal = cons_noun(&mut self.cx);
         let (_q_ty, q_formula) = self.mint(sut, goal, q)?;
         let hint = self.formula_import(hint)?;
-        let formula = self.formula_op(12, &[hint, q_formula]);
+        let formula = self.formula_op(NockOpcode::SCRY, &[hint, q_formula]);
         Ok((ty, formula))
     }
 
@@ -6884,7 +6867,7 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let atom_ty = ty_atom_n(&mut self.cx, self.slab, "$", None).1;
         let (_p_ty, p_formula) = self.mint(sut.clone(), atom_ty.clone(), p)?;
-        let formula = self.formula_op(4, &[p_formula]);
+        let formula = self.formula_op(NockOpcode::INCREMENT, &[p_formula]);
         let ty = self.nice(sut, gol, atom_ty)?;
         Ok((ty, formula))
     }
@@ -6914,7 +6897,7 @@ impl<'a> Ut<'a> {
         let noun_ty = cons_noun(&mut self.cx);
         let (_p_ty, p_formula) = self.mint(sut.clone(), noun_ty.clone(), p)?;
         let (_q_ty, q_formula) = self.mint(sut.clone(), noun_ty, q)?;
-        let formula = self.formula_op(5, &[p_formula, q_formula]);
+        let formula = self.formula_op(NockOpcode::EQUAL, &[p_formula, q_formula]);
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let ty = self.nice(sut, gol, bool_ty)?;
         Ok((ty, formula))
@@ -6928,7 +6911,7 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let noun_ty = cons_noun(&mut self.cx);
         let (_p_ty, p_formula) = self.mint(sut.clone(), noun_ty, p)?;
-        let formula = self.formula_op(3, &[p_formula]);
+        let formula = self.formula_op(NockOpcode::CELL, &[p_formula]);
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let ty = self.nice(sut, gol, bool_ty)?;
         Ok((ty, formula))
@@ -7402,13 +7385,13 @@ impl<'a> Ut<'a> {
         goal: NRc<NTy>,
         vet: bool,
     ) -> Result<Option<NRc<NTy>>> {
-        let hoon_raw = unsafe { hoon.as_raw() };
+        let hoon_raw = NounIdentity::of(hoon);
 
         // ATOMIC FLIP perf: core/goal are interned native Rcs, so structural
         // equality is exactly pointer identity (hash-cons guarantees one canonical
         // Rc per type) — Rc::ptr_eq replaces the noun as_raw/noun_eq compare.
         for entry in self.arm_goal_in_progress.iter().rev() {
-            let entry_hoon_raw = unsafe { entry.hoon.as_raw() };
+            let entry_hoon_raw = NounIdentity::of(entry.hoon);
             let core_match = NRc::ptr_eq(&entry.core, &core);
             if !core_match {
                 continue;
@@ -7450,7 +7433,7 @@ impl<'a> Ut<'a> {
     /// `native_of` would (the canonical interned `Rc`), so it is byte-exact; mug
     /// collisions just fall through to a real decode.
     fn native_of_cached(&mut self, noun: Noun) -> Result<NRc<NTy>> {
-        let mug = self.noun_mug_cached(noun) as u64;
+        let mug = self.noun_mug_cached(noun);
         for cand in native_of_mug_candidates(&self.cx, mug) {
             let cand_noun = live_to_noun(&mut self.cx, &cand, self.slab);
             let space = self.slab.noun_space();
@@ -7567,15 +7550,15 @@ impl<'a> Ut<'a> {
         Ok((ty, formula))
     }
 
-    fn hoon_ast_ptr_key(gen: &Hoon) -> usize {
-        gen as *const Hoon as usize
+    fn hoon_ast_ptr_key(gen: &Hoon) -> HoonIdentity {
+        HoonIdentity::of(gen)
     }
 
     fn cache_hoon_ast_ptr(
-        cache: &mut HashMap<usize, (Option<u64>, Noun)>,
-        order: &mut VecDeque<usize>,
-        ptr: usize,
-        raw: Option<u64>,
+        cache: &mut HashMap<HoonIdentity, (Option<NounIdentity>, Noun)>,
+        order: &mut VecDeque<HoonIdentity>,
+        ptr: HoonIdentity,
+        raw: Option<NounIdentity>,
         noun: Noun,
     ) {
         if !cache.contains_key(&ptr) {
@@ -7595,7 +7578,7 @@ impl<'a> Ut<'a> {
         }
 
         let hoon_noun = self.hoon_noun_for_node(gen);
-        let hoon_raw = unsafe { hoon_noun.as_raw() };
+        let hoon_raw = NounIdentity::of(hoon_noun);
         let hoon_mug = self.noun_mug_cached(hoon_noun);
         let ast = Arc::new(gen.clone());
 
@@ -7626,7 +7609,7 @@ impl<'a> Ut<'a> {
         }
         let bucket = self.hoon_cache_struct.entry(hoon_mug).or_default();
         for (cached_noun, cached_ast) in bucket.iter_mut() {
-            if unsafe { cached_noun.as_raw() } == hoon_raw {
+            if NounIdentity::of(cached_noun) == hoon_raw {
                 *cached_ast = ast;
                 return;
             }
@@ -7817,8 +7800,9 @@ impl<'a> Ut<'a> {
         // RT-05: a CONTENT-ADDRESSED resolver id (keyed on the lazy core's
         // structural identity) so structurally-equal recursive cores intern to one
         // `Rc` and the pointer-keyed cuts converge at the natural settling depth.
-        let tomes_sig =
-            (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
+        let tomes_sig = TomesSignature(u64::from(
+            self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
+        ));
         let resolver_id = self.lazy_resolver_canonical_id(&sut, tomes_sig, poly);
         let lazy_semi = self.semi_noun_lazy_root(resolver_id);
         let lazy_rest = T(self.slab, &[lazy_semi, tomes_map]);
@@ -7998,7 +7982,7 @@ impl<'a> Ut<'a> {
         &mut self,
         goal: Noun,
         actual_count: usize,
-        seen_holds: &mut HashMap<u32, Vec<Noun>>,
+        seen_holds: &mut HashMap<NounMug, Vec<Noun>>,
     ) -> Result<()> {
         match type_tag(goal, &self.slab.noun_space())?.as_str() {
             "noun" => Ok(()),
@@ -8051,7 +8035,7 @@ impl<'a> Ut<'a> {
 
     fn goal_core_for_mine(&mut self, goal: Noun, actual_tomes_map: Noun) -> Result<Option<Noun>> {
         let actual_count = self.map_entry_count(actual_tomes_map)?;
-        let mut seen_holds: HashMap<u32, Vec<Noun>> = HashMap::new();
+        let mut seen_holds: HashMap<NounMug, Vec<Noun>> = HashMap::new();
         self.check_goal_core_chapter_counts(goal, actual_count, &mut seen_holds)?;
 
         let mut current = goal;
@@ -8346,7 +8330,7 @@ impl<'a> Ut<'a> {
 
         // The in-progress dedup id is the interned core Rc's pointer (one canonical
         // Rc per type via hash-cons), replacing the old noun as_raw() identity.
-        let core_type_id = native_type_id_u64(&core_type);
+        let core_type_id = native_type_id(&core_type);
         let in_progress_key = (Arc::clone(&key), core_type_id);
         let in_progress_entry = ArmInProgressEntry {
             key: Arc::clone(&key),
@@ -8357,7 +8341,7 @@ impl<'a> Ut<'a> {
         };
         self.arm_in_progress.insert(in_progress_key.clone());
         self.arm_goal_in_progress.push(in_progress_entry);
-        self.arm_epoch = self.arm_epoch.wrapping_add(1);
+        self.arm_epoch = ArmEpoch(self.arm_epoch.0.wrapping_add(1));
         // core_type/goal are the NATIVE deepening core + goal: thread straight to
         // native mint (no per-arm native_of re-lift — the O(N^2) -> O(N) win).
         let result = self.mint(core_type.clone(), goal.clone(), hoon);
@@ -8368,19 +8352,19 @@ impl<'a> Ut<'a> {
             popped.map(|entry| (
                 entry.key,
                 entry.core.arena_id(),
-                unsafe { entry.hoon.as_raw() },
+                NounIdentity::of(entry.hoon),
                 entry.goal.arena_id(),
                 entry.vet,
             )),
             Some((
                 Arc::clone(&key),
                 core_type.arena_id(),
-                unsafe { hoon_noun.as_raw() },
+                NounIdentity::of(hoon_noun),
                 goal.arena_id(),
                 arm_vet,
             ))
         );
-        self.arm_epoch = self.arm_epoch.wrapping_add(1);
+        self.arm_epoch = ArmEpoch(self.arm_epoch.0.wrapping_add(1));
         let (ty, formula) = match result {
             Ok(ok) => ok,
             Err(err) => {
@@ -8665,7 +8649,7 @@ impl<'a> Ut<'a> {
             return None;
         }
 
-        let hoon_raw = unsafe { hoon_noun.as_raw() };
+        let hoon_raw = NounIdentity::of(hoon_noun);
         if let Some(ast) = self.hoon_cache_raw.get(&hoon_raw).cloned() {
             return Some(ast);
         }
@@ -8675,7 +8659,7 @@ impl<'a> Ut<'a> {
         let hoon_mug = self.noun_mug_cached(hoon_noun);
         let bucket = self.hoon_cache_struct.get(&hoon_mug)?;
         for (cached_noun, cached_ast) in bucket.iter().rev() {
-            if unsafe { cached_noun.as_raw() } == hoon_raw {
+            if NounIdentity::of(cached_noun) == hoon_raw {
                 return Some(Arc::clone(cached_ast));
             }
             if let Ok(true) = noun_eq(*cached_noun, hoon_noun, &self.slab.noun_space()) {
@@ -8686,7 +8670,7 @@ impl<'a> Ut<'a> {
     }
 
     fn decode_hold_hoon_ast(&mut self, hoon_noun: Noun) -> std::result::Result<Arc<Hoon>, String> {
-        let hoon_raw = unsafe { hoon_noun.as_raw() };
+        let hoon_raw = NounIdentity::of(hoon_noun);
         if let Some(ast) = self.decoded_hold_hoon_cache_raw.get(&hoon_raw).cloned() {
             return Ok(ast);
         }
@@ -8741,7 +8725,7 @@ impl<'a> Ut<'a> {
         let by_ptr = &self.hoon_arena.by_ptr;
         let entries = &mut self.hoon_arena.entries;
         hoon_to_noun_with_cache(self.slab, gen, |ptr, noun| {
-            if let Some(id) = by_ptr.get(&ptr) {
+            if let Some(id) = by_ptr.get(&HoonIdentity(ptr)) {
                 entries[id.0 as usize].noun = Some(noun);
             }
         })
@@ -8750,11 +8734,11 @@ impl<'a> Ut<'a> {
     fn prune_recursive_holds(&mut self, typ: Noun, hoon_noun: Noun) -> Result<Noun> {
         // This traversal can get very deep (e.g. large recursive molds in hoon-138).  Use an
         // explicit stack to avoid Rust stack overflows in release tests.
-        let mut seen: HashSet<u64> = HashSet::new();
+        let mut seen: HashSet<NounIdentity> = HashSet::new();
         let mut todo: Vec<Noun> = vec![typ];
         let mut post: Vec<Noun> = Vec::new();
         while let Some(node) = todo.pop() {
-            let raw = unsafe { node.as_raw() };
+            let raw = NounIdentity::of(node);
             if !seen.insert(raw) {
                 continue;
             }
@@ -8786,9 +8770,10 @@ impl<'a> Ut<'a> {
                 _ => {}
             }
         }
-        let mut memo: HashMap<u64, Noun> = HashMap::with_capacity(post.len().saturating_mul(2));
+        let mut memo: HashMap<NounIdentity, Noun> =
+            HashMap::with_capacity(post.len().saturating_mul(2));
         for node in post.into_iter().rev() {
-            let raw = unsafe { node.as_raw() };
+            let raw = NounIdentity::of(node);
             let result = match type_tag(node, &self.slab.noun_space())?.as_str() {
                 "hold" => {
                     let _ = hoon_noun;
@@ -8799,7 +8784,7 @@ impl<'a> Ut<'a> {
                     let options = type_fork_options(node, &self.slab.noun_space())?;
                     let mut kept = Vec::with_capacity(options.len());
                     for option in options {
-                        let opt_raw = unsafe { option.as_raw() };
+                        let opt_raw = NounIdentity::of(option);
                         let pruned = memo.get(&opt_raw).copied().unwrap_or(option);
                         if type_tag(pruned, &self.slab.noun_space())? == "void" {
                             continue;
@@ -8814,29 +8799,29 @@ impl<'a> Ut<'a> {
                 }
                 "cell" => {
                     let (head, tail) = type_cell_parts(node, &self.slab.noun_space())?;
-                    let head_raw = unsafe { head.as_raw() };
-                    let tail_raw = unsafe { tail.as_raw() };
+                    let head_raw = NounIdentity::of(head);
+                    let tail_raw = NounIdentity::of(tail);
                     let head = memo.get(&head_raw).copied().unwrap_or(head);
                     let tail = memo.get(&tail_raw).copied().unwrap_or(tail);
                     ty_cell(self.slab, head, tail)
                 }
                 "face" => {
                     let inner = type_face_inner(node, &self.slab.noun_space())?;
-                    let inner_raw = unsafe { inner.as_raw() };
+                    let inner_raw = NounIdentity::of(inner);
                     let inner = memo.get(&inner_raw).copied().unwrap_or(inner);
                     type_face_with_inner(self.slab, node, inner)?
                 }
                 "hint" => {
                     let (inner, note, payload) = type_hint_parts(node, &self.slab.noun_space())?;
-                    let payload_raw = unsafe { payload.as_raw() };
+                    let payload_raw = NounIdentity::of(payload);
                     let payload = memo.get(&payload_raw).copied().unwrap_or(payload);
                     ty_hint(self.slab, inner, note, payload)
                 }
                 "core" => {
                     let (payload, coil) = type_core_parts(node, &self.slab.noun_space())?;
                     let (garb, context, rest) = coil_parts(coil, &self.slab.noun_space())?;
-                    let payload_raw = unsafe { payload.as_raw() };
-                    let context_raw = unsafe { context.as_raw() };
+                    let payload_raw = NounIdentity::of(payload);
+                    let context_raw = NounIdentity::of(context);
                     let payload = memo.get(&payload_raw).copied().unwrap_or(payload);
                     let context = memo.get(&context_raw).copied().unwrap_or(context);
                     let new_coil = coil_from_parts(self.slab, garb, context, rest);
@@ -8846,7 +8831,7 @@ impl<'a> Ut<'a> {
             };
             memo.insert(raw, result);
         }
-        let root_raw = unsafe { typ.as_raw() };
+        let root_raw = NounIdentity::of(typ);
         Ok(*memo.get(&root_raw).unwrap_or(&typ))
     }
 
@@ -9002,8 +8987,8 @@ impl<'a> Ut<'a> {
                 return Ok(true);
             }
             let memo_key = NestMemoKey {
-                sut_id: native_type_id_u64(&sut),
-                ref_id: native_type_id_u64(&ref_),
+                sut_id: native_type_id(&sut),
+                ref_id: native_type_id(&ref_),
                 seg: seen_sut_holds.snapshot(),
                 reg: seen_ref_holds.snapshot(),
                 gil: gil.snapshot(),
@@ -9144,8 +9129,8 @@ impl<'a> Ut<'a> {
                     )
                 }
                 NTy::Hold { .. } => {
-                    let sut_id = native_type_id_u64(&sut);
-                    let ref_id = native_type_id_u64(&ref_);
+                    let sut_id = native_type_id(&sut);
+                    let ref_id = native_type_id(&ref_);
                     if !seen_sut_holds.insert_id(sut_id) {
                         return Ok(false);
                     }
@@ -9223,8 +9208,8 @@ impl<'a> Ut<'a> {
                 self.nest_inner(sut, inner, depth, seen_sut_holds, seen_ref_holds, gil, memo)
             }
             NTy::Hold { .. } => {
-                let sut_id = native_type_id_u64(&sut);
-                let ref_id = native_type_id_u64(&ref_);
+                let sut_id = native_type_id(&sut);
+                let ref_id = native_type_id(&ref_);
                 if !seen_ref_holds.insert_id(ref_id) {
                     return Ok(true);
                 }
@@ -9348,8 +9333,8 @@ impl<'a> Ut<'a> {
             }
             return Ok(true);
         }
-        let sut_id = native_type_id_u64(&sut);
-        let ref_id = native_type_id_u64(&ref_);
+        let sut_id = native_type_id(&sut);
+        let ref_id = native_type_id(&ref_);
         if !gil.insert_id(sut_id, ref_id) {
             return Ok(true);
         }
@@ -9669,7 +9654,7 @@ impl<'a> Ut<'a> {
 
     pub fn burp_type(&mut self, typ: Noun) -> Result<Noun> {
         let space = self.slab.noun_space();
-        let raw = unsafe { typ.as_raw() };
+        let raw = NounIdentity::of(typ);
         if let Some(cached) = self.burp_type_cache.get(&raw) {
             return Ok(*cached);
         }
@@ -9861,7 +9846,7 @@ impl<'a> Ut<'a> {
                 _ => self.take_inner(sut, tail, duz),
             },
             Some(step) => {
-                let mut vil: HashSet<u64> = HashSet::new();
+                let mut vil: HashSet<TypeId> = HashSet::new();
                 self.take_axis(sut, step, tail, duz, &mut vil)
             }
         }
@@ -9873,7 +9858,7 @@ impl<'a> Ut<'a> {
         step: BigUint,
         tail: &[Option<BigUint>],
         duz: &F,
-        vil: &mut HashSet<u64>,
+        vil: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
@@ -9941,7 +9926,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, new_payload))
             }
             NTy::Hold { .. } => {
-                let sut_id = native_type_id_u64(&sut);
+                let sut_id = native_type_id(&sut);
                 if !vil.insert(sut_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10056,7 +10041,7 @@ impl<'a> Ut<'a> {
     }
 
     fn gain_skin(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>, skin: &Skin) -> Result<NRc<NTy>> {
-        let mut seen: HashSet<u64> = HashSet::new();
+        let mut seen: HashSet<TypeId> = HashSet::new();
         self.gain_skin_inner(sut, ref_, skin, &mut seen)
     }
 
@@ -10065,7 +10050,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
         skin: &Skin,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match skin {
             Skin::Term(name) => {
@@ -10103,16 +10088,16 @@ impl<'a> Ut<'a> {
                     }
                 }
                 BaseType::Atom(aura) => {
-                    let mut seen_ref: HashSet<u64> = HashSet::new();
+                    let mut seen_ref: HashSet<TypeId> = HashSet::new();
                     self.gain_atom_skin(sut, ref_, aura, &mut seen_ref)
                 }
             },
             Skin::Cell(head, tail) => {
-                let mut seen_ref: HashSet<u64> = HashSet::new();
+                let mut seen_ref: HashSet<TypeId> = HashSet::new();
                 self.gain_cell_skin(sut, ref_, head, tail, &mut seen_ref)
             }
             Skin::Leaf(aura, atom) => {
-                let mut seen_ref: HashSet<u64> = HashSet::new();
+                let mut seen_ref: HashSet<TypeId> = HashSet::new();
                 self.gain_leaf_skin(sut, ref_, aura, atom, &mut seen_ref)
             }
             Skin::Dbug(_, inner) => self.gain_skin_inner(sut, ref_, inner, seen),
@@ -10158,7 +10143,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
         aura: &str,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match &*ref_ {
             NTy::Void => Ok(cons_void(&mut self.cx)),
@@ -10214,7 +10199,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = native_type_id_u64(&ref_);
+                let ref_id = native_type_id(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10233,7 +10218,7 @@ impl<'a> Ut<'a> {
         ref_: NRc<NTy>,
         head: &Skin,
         tail: &Skin,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match &*ref_ {
             NTy::Void => Ok(cons_void(&mut self.cx)),
@@ -10301,7 +10286,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, hd, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = native_type_id_u64(&ref_);
+                let ref_id = native_type_id(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10320,7 +10305,7 @@ impl<'a> Ut<'a> {
         ref_: NRc<NTy>,
         aura: &str,
         atom: &ParsedAtom,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match &*ref_ {
             NTy::Void => Ok(cons_void(&mut self.cx)),
@@ -10383,7 +10368,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = native_type_id_u64(&ref_);
+                let ref_id = native_type_id(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10397,7 +10382,7 @@ impl<'a> Ut<'a> {
     }
 
     fn lose_skin(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>, skin: &Skin) -> Result<NRc<NTy>> {
-        let mut seen: HashSet<u64> = HashSet::new();
+        let mut seen: HashSet<TypeId> = HashSet::new();
         self.lose_skin_inner(sut, ref_, skin, &mut seen)
     }
 
@@ -10406,7 +10391,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
         skin: &Skin,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match skin {
             Skin::Term(name) => {
@@ -10436,16 +10421,16 @@ impl<'a> Ut<'a> {
                 BaseType::Void => Ok(ref_),
                 BaseType::NounExpr => Ok(cons_void(&mut self.cx)),
                 BaseType::Atom(aura) => {
-                    let mut seen_ref: HashSet<u64> = HashSet::new();
+                    let mut seen_ref: HashSet<TypeId> = HashSet::new();
                     self.lose_atom_skin(sut, ref_, aura, &mut seen_ref)
                 }
             },
             Skin::Cell(head, tail) => {
-                let mut seen_ref: HashSet<u64> = HashSet::new();
+                let mut seen_ref: HashSet<TypeId> = HashSet::new();
                 self.lose_cell_skin(sut, ref_, head, tail, &mut seen_ref)
             }
             Skin::Leaf(aura, atom) => {
-                let mut seen_ref: HashSet<u64> = HashSet::new();
+                let mut seen_ref: HashSet<TypeId> = HashSet::new();
                 self.lose_leaf_skin(sut, ref_, aura, atom, &mut seen_ref)
             }
             Skin::Dbug(_, inner) => self.lose_skin_inner(sut, ref_, inner, seen),
@@ -10473,7 +10458,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
         _aura: &str,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match &*ref_ {
             NTy::Void => Ok(cons_void(&mut self.cx)),
@@ -10506,7 +10491,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = native_type_id_u64(&ref_);
+                let ref_id = native_type_id(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10525,7 +10510,7 @@ impl<'a> Ut<'a> {
         ref_: NRc<NTy>,
         head: &Skin,
         tail: &Skin,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match &*ref_ {
             NTy::Void => Ok(cons_void(&mut self.cx)),
@@ -10596,7 +10581,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, hd, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = native_type_id_u64(&ref_);
+                let ref_id = native_type_id(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10615,7 +10600,7 @@ impl<'a> Ut<'a> {
         ref_: NRc<NTy>,
         _aura: &str,
         atom: &ParsedAtom,
-        seen: &mut HashSet<u64>,
+        seen: &mut HashSet<TypeId>,
     ) -> Result<NRc<NTy>> {
         match &*ref_ {
             NTy::Void => Ok(cons_void(&mut self.cx)),
@@ -10655,7 +10640,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = native_type_id_u64(&ref_);
+                let ref_id = native_type_id(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10675,7 +10660,7 @@ impl<'a> Ut<'a> {
         if let Some(cached) = self.fuse_boundary_lookup(&sut, &ref_)? {
             return Ok(cached);
         }
-        let mut seen: HashSet<(usize, usize)> = HashSet::new();
+        let mut seen: HashSet<(TypeId, TypeId)> = HashSet::new();
         let result = self.fuse_inner(sut.clone(), ref_.clone(), &mut seen)?;
         self.fuse_boundary_store(&sut, &ref_, result.clone())?;
         Ok(result)
@@ -10691,13 +10676,10 @@ impl<'a> Ut<'a> {
 
     fn miss(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<bool> {
         // ATOMIC FLIP (consumer C5b): native. seen/memo keyed by native pointer.
-        let mut seen: Vec<(u64, u64)> = Vec::new();
+        let mut seen: Vec<(TypeId, TypeId)> = Vec::new();
         if let Some((stored_epoch, mut memo)) = self.miss_memo_persist.take() {
             let context = self.cache_context_key();
-            let epoch = (
-                context.semantic.vet_key, context.semantic.fan_context_key,
-                context.memo.arm_epoch_key, context.memo.placeholder_context_key,
-            );
+            let epoch = context;
             if stored_epoch != epoch {
                 memo.clear();
             }
@@ -10705,7 +10687,7 @@ impl<'a> Ut<'a> {
             self.miss_memo_persist = Some((epoch, memo));
             return result;
         }
-        let mut memo: FastHashMap<(u64, u64, u8), bool> = Default::default();
+        let mut memo: FastHashMap<MissKey, bool> = Default::default();
         self.miss_dext(sut, ref_, &mut seen, &mut memo)
     }
 
@@ -10720,9 +10702,9 @@ impl<'a> Ut<'a> {
     pub fn set_miss_memo_persistence(&mut self, enabled: bool) -> bool {
         let was_enabled = self.miss_memo_persist.is_some();
         if enabled && !was_enabled {
-            // Sentinel epoch (vet_key is only ever 0/1): the first `miss`
-            // call stamps the real epoch over an empty map.
-            self.miss_memo_persist = Some(((u8::MAX, 0, 0, 0), Default::default()));
+            // An empty memo is valid in the current context. Later context
+            // changes clear it before any lookup.
+            self.miss_memo_persist = Some((self.cache_context_key(), Default::default()));
         } else if !enabled {
             self.miss_memo_persist = None;
         }
@@ -10730,12 +10712,12 @@ impl<'a> Ut<'a> {
     }
 
     #[inline]
-    fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>) -> (u64, u64, u8) {
-        (
-            native_type_id_u64(sut),
-            native_type_id_u64(ref_),
-            u8::from(self.vet),
-        )
+    fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>) -> MissKey {
+        MissKey {
+            subject: sut.arena_id(),
+            reference: ref_.arena_id(),
+            vet: VetMode(self.vet),
+        }
     }
     /// Memo over raw (sut, ref_, vet, rest-context) keys, scoped to one
     /// outer `miss` call. Without it, sibling fork branches re-explore
@@ -10751,8 +10733,8 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
-        seen: &mut Vec<(u64, u64)>,
-        memo: &mut FastHashMap<(u64, u64, u8), bool>,
+        seen: &mut Vec<(TypeId, TypeId)>,
+        memo: &mut FastHashMap<MissKey, bool>,
     ) -> Result<bool> {
         let key = self.miss_memo_key(&sut, &ref_);
         if let Some(&cached) = memo.get(&key) {
@@ -10766,8 +10748,8 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
-        seen: &mut Vec<(u64, u64)>,
-        memo: &mut FastHashMap<(u64, u64, u8), bool>,
+        seen: &mut Vec<(TypeId, TypeId)>,
+        memo: &mut FastHashMap<MissKey, bool>,
     ) -> Result<bool> {
         if NRc::ptr_eq(&sut, &ref_) {
             // C-final.4: nest is native; call it directly on the deepening type
@@ -10810,8 +10792,8 @@ impl<'a> Ut<'a> {
                 self.miss_dext(payload, ref_, seen, memo)
             }
             NTy::Hold { .. } => {
-                let sp = native_type_id_u64(&sut);
-                let rp = native_type_id_u64(&ref_);
+                let sp = native_type_id(&sut);
+                let rp = native_type_id(&ref_);
                 for (a, b) in seen.iter() {
                     if (*a == sp && *b == rp) || (*a == rp && *b == sp) {
                         return Ok(true);
@@ -10829,8 +10811,8 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
-        seen: &mut Vec<(u64, u64)>,
-        memo: &mut FastHashMap<(u64, u64, u8), bool>,
+        seen: &mut Vec<(TypeId, TypeId)>,
+        memo: &mut FastHashMap<MissKey, bool>,
     ) -> Result<bool> {
         match &*ref_ {
             NTy::Atom { .. } => {
@@ -10867,7 +10849,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
-        seen: &mut HashSet<(usize, usize)>,
+        seen: &mut HashSet<(TypeId, TypeId)>,
     ) -> Result<NRc<NTy>> {
         if NRc::ptr_eq(&sut, &ref_) || matches!(&*ref_, NTy::Noun) {
             return Ok(sut);
@@ -10946,7 +10928,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, fused))
             }
             NTy::Hold { .. } => {
-                let key = (native_type_id_usize(&sut), native_type_id_usize(&ref_));
+                let key = (native_type_id(&sut), native_type_id(&ref_));
                 if seen.contains(&key) {
                     return Err(CompilerError::UnsupportedExpr(
                         "native mint: fuse-loop".to_string(),
@@ -10970,7 +10952,7 @@ impl<'a> Ut<'a> {
         if let Some(cached) = self.crop_boundary_lookup(&sut, &ref_)? {
             return Ok(cached);
         }
-        let mut seen: HashSet<(usize, usize)> = HashSet::new();
+        let mut seen: HashSet<(TypeId, TypeId)> = HashSet::new();
         let result = self.crop_inner(sut.clone(), ref_.clone(), &mut seen)?;
         self.crop_boundary_store(&sut, &ref_, result.clone())?;
         Ok(result)
@@ -10988,7 +10970,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
-        seen: &mut HashSet<(usize, usize)>,
+        seen: &mut HashSet<(TypeId, TypeId)>,
     ) -> Result<NRc<NTy>> {
         if NRc::ptr_eq(&sut, &ref_) || matches!(&*ref_, NTy::Noun) {
             return Ok(cons_void(&mut self.cx));
@@ -11065,7 +11047,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, cropped))
             }
             NTy::Hold { .. } => {
-                let key = (native_type_id_usize(&sut), native_type_id_usize(&ref_));
+                let key = (native_type_id(&sut), native_type_id(&ref_));
                 if seen.contains(&key) {
                     return Err(CompilerError::UnsupportedExpr(
                         "native mint: crop-loop".to_string(),
@@ -11088,7 +11070,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         ref_: NRc<NTy>,
-        seen: &mut HashSet<(usize, usize)>,
+        seen: &mut HashSet<(TypeId, TypeId)>,
     ) -> Result<NRc<NTy>> {
         match &*ref_ {
             NTy::Core { .. } => Ok(sut),
@@ -11305,12 +11287,14 @@ impl<'a> Ut<'a> {
         // Phase 1 (lowered via to_noun); repo is native (C1).
         fn seen_hold(
             ut: &mut Ut<'_>,
-            seen: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
+            seen: &mut HashMap<HoldAxisHash, Vec<(Noun, BigUint)>>,
             hold: Noun,
             axis: &BigUint,
         ) -> Result<bool> {
             let axis_noun = noun_biguint(ut.slab, axis.clone());
-            let mug = ut.noun_mug_cached(hold) ^ slab_mug(axis_noun, &ut.slab.noun_space());
+            let mug = HoldAxisHash(
+                ut.noun_mug_cached(hold).0 ^ slab_mug(axis_noun, &ut.slab.noun_space()),
+            );
             if let Some(bucket) = seen.get(&mug) {
                 for (prior, prior_axis) in bucket {
                     if prior_axis == axis && noun_eq(*prior, hold, &ut.slab.noun_space())? {
@@ -11324,12 +11308,14 @@ impl<'a> Ut<'a> {
 
         fn unsee_hold(
             ut: &mut Ut<'_>,
-            seen: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
+            seen: &mut HashMap<HoldAxisHash, Vec<(Noun, BigUint)>>,
             hold: Noun,
             axis: &BigUint,
         ) -> Result<()> {
             let axis_noun = noun_biguint(ut.slab, axis.clone());
-            let mug = ut.noun_mug_cached(hold) ^ slab_mug(axis_noun, &ut.slab.noun_space());
+            let mug = HoldAxisHash(
+                ut.noun_mug_cached(hold).0 ^ slab_mug(axis_noun, &ut.slab.noun_space()),
+            );
             if let Some(bucket) = seen.get_mut(&mug) {
                 let space = ut.slab.noun_space();
                 let mut idx = 0;
@@ -11352,7 +11338,7 @@ impl<'a> Ut<'a> {
             sut: NRc<NTy>,
             way: Way,
             axis: BigUint,
-            seen_holds: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
+            seen_holds: &mut HashMap<HoldAxisHash, Vec<(Noun, BigUint)>>,
         ) -> Result<NRc<NTy>> {
             if axis == BigUint::from(1u32) {
                 return Ok(sut);
@@ -11429,7 +11415,7 @@ impl<'a> Ut<'a> {
             }
         }
 
-        let mut seen_holds: HashMap<u32, Vec<(Noun, BigUint)>> = HashMap::new();
+        let mut seen_holds: HashMap<HoldAxisHash, Vec<(Noun, BigUint)>> = HashMap::new();
         go(self, sut, way, axis.into(), &mut seen_holds)
     }
 
@@ -11482,7 +11468,7 @@ impl<'a> Ut<'a> {
             Some(signature) => signature,
             None => {
                 let gen_noun = self.hoon_noun_for_node(gen);
-                self.noun_mug_cached(gen_noun) as u64
+                HoonSignature(u64::from(self.noun_mug_cached(gen_noun).0))
             }
         };
         if let Some(cached) = self.mull_cache_lookup(&sut, &gol, &dox, gen_sig)? {
@@ -13315,13 +13301,8 @@ fn coil_from_parts(slab: &mut NounSlab, garb: Noun, context: Noun, rest: Noun) -
 use crate::native::ir::ty::TypeRef as NRc;
 
 #[inline(always)]
-fn native_type_id_u64(ty: &NRc<NTy>) -> u64 {
-    u64::from(ty.arena_id().0)
-}
-
-#[inline(always)]
-fn native_type_id_usize(ty: &NRc<NTy>) -> usize {
-    ty.arena_id().0 as usize
+fn native_type_id(ty: &NRc<NTy>) -> TypeId {
+    ty.arena_id()
 }
 
 enum NativeForkOptions<'a> {
@@ -13821,8 +13802,11 @@ mod native_ctor_tests {
         assert_eq!(outer_legs.as_ref(), outer_legs2.as_ref());
 
         // intersect-empty -> intern_fan_subset_id returns the empty sentinel 0.
-        assert_eq!(ut.intern_fan_subset_id(&[]), 0);
-        let inter = Ut::intersect_sorted_legs(&[leg_id + 7, leg_id + 9], &outer_legs);
+        assert_eq!(ut.intern_fan_subset_id(&[]), FanContextId(0));
+        let inter = Ut::intersect_sorted_legs(
+            &[FanLegId(leg_id.0 + 7), FanLegId(leg_id.0 + 9)],
+            &outer_legs,
+        );
         assert!(
             inter.is_empty(),
             "disjoint active set -> empty intersection"
@@ -13833,14 +13817,23 @@ mod native_ctor_tests {
         assert_eq!(inter2, vec![leg_id]);
         let id1 = ut.intern_fan_subset_id(&inter2);
         let id2 = ut.intern_fan_subset_id(&inter2);
-        assert_ne!(id1, 0);
+        assert_ne!(id1, FanContextId(0));
         assert_eq!(id1, id2, "equal subsets map to one stable id");
 
         // merge/intersect helper sanity.
-        assert_eq!(Ut::merge_sorted_legs(&[1, 3], &[2, 3, 4]), vec![1, 2, 3, 4]);
         assert_eq!(
-            Ut::intersect_sorted_legs(&[1, 3, 5], &[3, 5, 7]),
-            vec![3, 5]
+            Ut::merge_sorted_legs(
+                &[FanLegId(1), FanLegId(3)],
+                &[FanLegId(2), FanLegId(3), FanLegId(4)]
+            ),
+            vec![FanLegId(1), FanLegId(2), FanLegId(3), FanLegId(4)]
+        );
+        assert_eq!(
+            Ut::intersect_sorted_legs(
+                &[FanLegId(1), FanLegId(3), FanLegId(5)],
+                &[FanLegId(3), FanLegId(5), FanLegId(7)]
+            ),
+            vec![FanLegId(3), FanLegId(5)]
         );
         Ok(())
     }

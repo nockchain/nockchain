@@ -15,6 +15,7 @@ use super::{
     NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, Sig64, StructNounPairSet,
     StructNounSet, Ut, Way,
 };
+use crate::native::identity::{FanContextId, HoonSignature, NounIdentity};
 use crate::native::ut::wet::RedoState;
 
 #[test]
@@ -379,7 +380,7 @@ fn nest_cell_branch_resets_hold_seen_guards() {
     let mut memo = Default::default();
 
     assert!(
-        seen_sut_holds.insert_id(u64::from(hold_n.arena_id().0)),
+        seen_sut_holds.insert_id(hold_n.arena_id()),
         "seed insert should succeed"
     );
 
@@ -411,7 +412,7 @@ fn nest_hold_seen_guard_still_applies_outside_cell() {
     let mut gil = NestPairSet::new();
     let mut memo = Default::default();
     assert!(
-        seen_sut_holds.insert_id(u64::from(hold_n.arena_id().0)),
+        seen_sut_holds.insert_id(hold_n.arena_id()),
         "seed insert should succeed"
     );
 
@@ -747,7 +748,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
 
     let mut ut = Ut::new(&mut slab);
     ut.set_vet(false);
-    let mull_gen_sig = ut.noun_mug_cached(mull_gen) as u64;
+    let mull_gen_sig = HoonSignature(u64::from(ut.noun_mug_cached(mull_gen).0));
     // The mull cache is native-keyed (C8/C-final); native_of the noun sut/gol/ref
     // for the mull_cache_store/lookup calls (the other caches stay noun-keyed).
     let space = ut.slab.noun_space();
@@ -816,7 +817,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     let first_inner_context_key = ut
         .with_rest_leg(rest_inner, rest_hoon, |ut| {
             let inner_context_key = ut.hold_repo_fan_context_key();
-            assert_ne!(inner_context_key, 0);
+            assert_ne!(inner_context_key, FanContextId(0));
             // mint_boundary_lookup_exact uses the noun whole-active key -> MISS.
             assert!(ut
                 .mint_boundary_lookup_exact(sut, gol, mint_gen)
@@ -859,7 +860,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
         })
         .expect("rest leg should succeed");
 
-    assert_eq!(ut.hold_repo_fan_context_key(), 0);
+    assert_eq!(ut.hold_repo_fan_context_key(), FanContextId(0));
     assert!(ut
         .mint_boundary_lookup_exact(sut, gol, mint_gen)
         .expect("post mint boundary lookup")
@@ -1021,7 +1022,7 @@ fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let gol = ty_hold(&mut slab, inner, hoon);
     let ty = ty_atom(&mut slab, "@", Some(D(9)));
     let formula = T(&mut slab, &[D(1), D(123)]);
-    let gen_sig = 0xfeed_u64;
+    let gen_sig = HoonSignature(0xfeed_u64);
 
     let mut ut = Ut::new(&mut slab);
     let space = ut.slab.noun_space();
@@ -1040,12 +1041,12 @@ fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
     ut.with_rest_leg(inner, hoon, |ut| {
         assert_eq!(
             ut.fan_context_key_scoped(&sut_n)?,
-            0,
+            FanContextId(0),
             "the subject alone cannot see the active hold leg"
         );
         assert_ne!(
             ut.fan_context_key_scoped_pair(&sut_n, &gol_n)?,
-            0,
+            FanContextId(0),
             "the goal can see the active hold leg"
         );
         assert!(
@@ -1087,8 +1088,11 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
         .is_some());
 
     ut.with_rest_leg(inner, hoon, |ut| {
-        assert_eq!(ut.fan_context_key_scoped(&sut_n)?, 0);
-        assert_ne!(ut.fan_context_key_scoped_pair(&sut_n, &gol_n)?, 0);
+        assert_eq!(ut.fan_context_key_scoped(&sut_n)?, FanContextId(0));
+        assert_ne!(
+            ut.fan_context_key_scoped_pair(&sut_n, &gol_n)?,
+            FanContextId(0)
+        );
         assert!(
             ut.core_mint_cache_lookup(&sut_n, &gol_n, tomes_map, &prefix, poly)?
                 .is_none(),
@@ -1115,7 +1119,7 @@ fn active_rest_fan_context_partitions_rest_boundary() {
     let first_context = ut
         .with_rest_leg(inner, hoon, |ut| {
             let context_key = ut.hold_repo_fan_context_key();
-            assert_ne!(context_key, 0);
+            assert_ne!(context_key, FanContextId(0));
             assert!(ut
                 .rest_boundary_lookup(rest_sut, legs_noun)
                 .expect("rest boundary lookup before store")
@@ -1147,7 +1151,7 @@ fn active_rest_fan_context_partitions_rest_boundary() {
     // rest_sut's reachable legs — the collapse this approach intends. Both
     // kernels are byte-exact with the scoped key.
     let scoped = Ut::scoped_fan_enabled();
-    assert_eq!(ut.hold_repo_fan_context_key(), 0);
+    assert_eq!(ut.hold_repo_fan_context_key(), FanContextId(0));
     let outside = ut
         .rest_boundary_lookup(rest_sut, legs_noun)
         .expect("rest boundary lookup outside fan");
@@ -1347,7 +1351,7 @@ fn hold_repo_fan_leg_id_shortcuts_exact_hold_raw() {
     let inner = core_with_context_face_only(&mut slab, "tree");
     let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, inner, hoon_noun);
-    let hold_raw = unsafe { hold.as_raw() };
+    let hold_raw = NounIdentity::of(hold);
     let mut ut = Ut::new(&mut slab);
 
     let first = ut
@@ -1409,8 +1413,8 @@ fn gain_atom_skin_hold_guard_is_structural() {
     let sut = native_of(&mut ut.cx, sut_noun, &ut.slab.noun_space()).expect("native sut");
     let hold_a_n = native_of(&mut ut.cx, hold_a, &ut.slab.noun_space()).expect("native hold_a");
     let hold_b_n = native_of(&mut ut.cx, hold_b, &ut.slab.noun_space()).expect("native hold_b");
-    let mut seen: HashSet<u64> = HashSet::new();
-    assert!(seen.insert(u64::from(hold_a_n.arena_id().0)), "seed guard");
+    let mut seen: HashSet<crate::native::ir::ty::TypeId> = HashSet::new();
+    assert!(seen.insert(hold_a_n.arena_id()), "seed guard");
     let out = ut
         .gain_atom_skin(sut, hold_b_n, "@", &mut seen)
         .expect("gain atom skin");
@@ -1438,8 +1442,8 @@ fn lose_leaf_skin_hold_guard_is_structural() {
     let sut = native_of(&mut ut.cx, sut_noun, &ut.slab.noun_space()).expect("native sut");
     let hold_a_n = native_of(&mut ut.cx, hold_a, &ut.slab.noun_space()).expect("native hold_a");
     let hold_b_n = native_of(&mut ut.cx, hold_b, &ut.slab.noun_space()).expect("native hold_b");
-    let mut seen: HashSet<u64> = HashSet::new();
-    assert!(seen.insert(u64::from(hold_a_n.arena_id().0)), "seed guard");
+    let mut seen: HashSet<crate::native::ir::ty::TypeId> = HashSet::new();
+    assert!(seen.insert(hold_a_n.arena_id()), "seed guard");
     let out = ut
         .lose_leaf_skin(sut, hold_b_n, "@", &ParsedAtom::Small(7), &mut seen)
         .expect("lose leaf skin");

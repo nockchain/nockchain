@@ -561,17 +561,17 @@ fn hash_op(hash: &mut blake3::Hasher, hashes: &[blake3::Hash], op: &DagOp) {
 }
 
 fn write_hash_shards(directory: &Path, nodes: &[DagNode], hashes: &[blake3::Hash]) -> Result<()> {
-    let mut shards: Vec<Vec<u32>> = (0..SHARD_COUNT).map(|_| Vec::new()).collect();
+    let mut shards: Vec<Vec<DagId>> = (0..SHARD_COUNT).map(|_| Vec::new()).collect();
     for (index, hash) in hashes.iter().enumerate() {
-        shards[hash.as_bytes()[0] as usize].push(index as u32);
+        shards[hash.as_bytes()[0] as usize]
+            .push(DagId::from_index(index).ok_or("node ID exceeds u32")?);
     }
     for (shard, ids) in shards.iter_mut().enumerate() {
         ids.sort_unstable_by(|left, right| compare_hashes(hashes, *left, *right));
         let path = directory.join(format!("tree/{shard:02x}.nodes"));
         let mut output = BufWriter::new(File::create(path)?);
         for id in ids {
-            let id = DagId::from_index(*id as usize).ok_or("node ID exceeds u32")?;
-            write_node_line(&mut output, nodes, hashes, id)?;
+            write_node_line(&mut output, nodes, hashes, *id)?;
         }
     }
     Ok(())
@@ -604,10 +604,10 @@ fn verify_hash_shards(directory: &Path, nodes: &[DagNode], hashes: &[blake3::Has
     result
 }
 
-fn compare_hashes(hashes: &[blake3::Hash], left: u32, right: u32) -> Ordering {
-    hashes[left as usize]
+fn compare_hashes(hashes: &[blake3::Hash], left: DagId, right: DagId) -> Ordering {
+    hashes[left.index()]
         .as_bytes()
-        .cmp(hashes[right as usize].as_bytes())
+        .cmp(hashes[right.index()].as_bytes())
         .then_with(|| left.cmp(&right))
 }
 

@@ -68,6 +68,11 @@ thread_local! {
     static COMPILE_CHILD_NANOS_STACK: RefCell<Vec<u128>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Address identity of a retained Nockasm bundle used by the hydration memo.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct BundleIdentity(usize);
+
 #[derive(Clone, Debug)]
 struct Cli {
     entry: Option<PathBuf>,
@@ -1424,7 +1429,7 @@ struct NativeBuildContext<'a> {
     /// by the pack bundle's `Rc` address (stable: `BuildCache` retains every
     /// loaded pack for the session). Roots hydrate on demand and reads of the
     /// same pack share every already-built node.
-    pack_hydration: HashMap<usize, Vec<Option<Noun>>>,
+    pack_hydration: HashMap<BundleIdentity, Vec<Option<Noun>>>,
     cache_namespace: blake3::Hash,
     visiting: HashSet<PathBuf>,
     wrappers: ExactWrapperBatteries,
@@ -2026,7 +2031,7 @@ impl<'a> NativeBuildContext<'a> {
             .id();
         let values = self
             .pack_hydration
-            .entry(std::rc::Rc::as_ptr(bundle) as usize)
+            .entry(BundleIdentity(std::rc::Rc::as_ptr(bundle) as usize))
             .or_insert_with(|| vec![None; bundle.nodes().len()]);
         hydrate_pack_root(&mut *self.ut.slab, bundle.nodes(), root_id, values)?;
         values[root_id.index()].ok_or_else(|| "cache pack root failed to hydrate".into())
