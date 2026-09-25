@@ -193,6 +193,7 @@ test_suite(
 # Run it locally with:
 #   bazel test //crates/honk/test-assets/type-probes:reject_rest_loop_alias_test
 REJECTION_PROBES = [
+    "c2_mull_lazy_arm_fold",
     "c3_lose_cell_core_base_tail",
     "c4_fond_void_tail",
     "c6_header_comment_del",

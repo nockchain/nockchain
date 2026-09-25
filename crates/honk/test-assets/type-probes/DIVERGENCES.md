@@ -30,6 +30,7 @@ None.
 | 10 | Cell-skin lose re-wrapped a face that hoon-138 strips | same |
 | 11 | A wash skin as a `?:` condition compiled in honk; hoonc recurses forever. honk now fails with `gain-wash` | same |
 | #NEW-c1 | `!@` on a two-limb wing whose rest searches a void type answered no; hoon-138 `++fond` has no `?~` guard on the rest of the wing and crashes | honk: match hoon-138 ++fond on a void wing tail |
+| #NEW-c2 | Mulled cores' lazy batteries never resolved, so `^~` of an arm formula in a `?=` alias stayed a slot and passed `++cove`; hoon-138's `++mile` battery is `++laze`, which mints the arm, and `++cove` rejects the constant | honk: resolve mulled cores' arms through ++laze like hoon-138 |
 
 ## Parser and desugarer (`crates/hatch`)
 

@@ -704,6 +704,17 @@ fn c3_mull_wet_bodies() {
 }
 
 #[test]
+fn c3_mull_folds_arms_of_mulled_cores() {
+    // The `?=` wing is an alias to `^~(+4)`, an arm formula in the battery of
+    // a core built in the wet body. hoon-138's `++mile` battery is `++laze`,
+    // which mints the arm, so the fold succeeds and `++cove` rejects the
+    // constant; `+3` holds the unknown sample and stays a slot.
+    let body = |axis: &str| format!("=>  |%  ++  x  1  ++  y  2  --  =*  z  ^~(+{axis})  ?=(@ z)");
+    assert!(wet_err("*", &body("4"), "5").contains("cove"));
+    wet_ok("*", &body("3"), "5");
+}
+
+#[test]
 fn c3_mull_wet_rejections() {
     // Refinement differs between the call-site and the declared sample.
     assert!(wet_err("@", "?:(?=(^ a) 1 2)", "[1 2]").contains("mull-bonk-b"));

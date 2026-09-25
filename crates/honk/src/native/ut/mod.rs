@@ -5527,8 +5527,8 @@ impl<'a> Ut<'a> {
     /// The resolver ID of hoon-138 `++mile`'s `(laze nym hud dom)`: one per
     /// `(sut, tomes_sig, poly)` like `lazy_resolver_canonical_id`, but from a
     /// separate table so it never equals `++mine`'s lazy root for the same
-    /// core. It is never registered, so its arms resolve as blocked (a mull
-    /// never evaluates arms).
+    /// core. `mull_mile` registers it against the mulled core over `sut`, so a
+    /// fold in a mulled body resolves arms as hoon-138's `++laze` does.
     fn mull_lazy_resolver_id(
         &mut self,
         sut: &NRc<NTy>,
@@ -11564,6 +11564,20 @@ impl<'a> Ut<'a> {
                 rest_leaf,
             )
         };
+
+        // hoon-138's `laze` thunk mints an arm on demand against a core over
+        // `sut`, so a fold in a mulled body (a `?=` whose wing is an alias to
+        // `^~`) can read the battery. Register the resolver once, as
+        // `mint_core` does.
+        if !self.lazy_resolvers.contains_key(&resolver_id) {
+            let mut lazy_arms = HashMap::new();
+            self.collect_lazy_resolver_arms_from_tomes_map(
+                tomes_map,
+                BigUint::from(1u32),
+                &mut lazy_arms,
+            )?;
+            self.lazy_resolver_register_context(resolver_id, yet.clone(), hud, lazy_arms);
+        }
 
         // Construct hum = core(dox, [nym hud gold], dox, laze, dom)
         let garb_hum = garb_native(nym, hud, Vair::Gold);
