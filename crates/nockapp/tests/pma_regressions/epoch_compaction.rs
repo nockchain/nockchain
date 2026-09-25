@@ -165,7 +165,7 @@ async fn run() -> TestResult {
     let epoch = snapshots
         .iter()
         .find(|snapshot| snapshot.kind == "epoch")
-        .unwrap();
+        .expect("retained epoch");
     select_active_snapshot(&data_dir, epoch.snapshot_id)?;
     sql_query("DELETE FROM events WHERE event_num = 11")
         .execute(&mut sqlite_connection(&data_dir)?)?;
