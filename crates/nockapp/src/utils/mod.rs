@@ -3,6 +3,7 @@ pub(crate) mod durability;
 pub mod error;
 pub mod scry;
 pub mod slogger;
+pub(crate) mod sparse_copy;
 
 use std::ptr::copy_nonoverlapping;
 use std::slice::from_raw_parts_mut;

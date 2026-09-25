@@ -15,6 +15,9 @@ use thiserror::Error;
 use crate::utils::durability;
 
 const ACTIVE_SNAPSHOT_ID_KEY: &str = "active_snapshot_id";
+const REPLAY_FLOOR_KEY: &str = "replay_floor";
+const COMPACTION_EVENT_NUM_KEY: &str = "compaction_event_num";
+const RECLAMATION_PENDING_KEY: &str = "reclamation_pending";
 const EVENT_LOG_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 diesel::table! {
@@ -118,6 +121,12 @@ pub(crate) enum EventLogError {
     QuickCheck(String),
     #[error("event sequence gap detected: expected event_num {expected}, found {found}")]
     EventSequenceGap { expected: u64, found: u64 },
+    #[error("cannot replay from event {requested} below retained replay floor {floor}")]
+    ReplayBeforeFloor { requested: u64, floor: u64 },
+    #[error("unsafe event log compaction: {0}")]
+    InvalidCompaction(String),
+    #[error("event log WAL checkpoint could not finish: busy={busy}")]
+    CheckpointBusy { busy: i64 },
 }
 
 pub(crate) struct EventLog {
@@ -258,6 +267,12 @@ struct QuickCheckRow {
     quick_check: String,
 }
 
+#[derive(QueryableByName)]
+struct CheckpointRow {
+    #[diesel(sql_type = BigInt)]
+    busy: i64,
+}
+
 impl EventLog {
     pub(crate) fn open(config: EventLogConfig) -> Result<Self, EventLogError> {
         if let Some(parent) = config.path.parent() {
@@ -336,6 +351,167 @@ impl EventLog {
             .collect()
     }
 
+    pub(crate) fn retired_snapshots(&mut self) -> Result<Vec<ReadySnapshotRecord>, EventLogError> {
+        snapshots::table
+            .filter(snapshots::state.eq("retired"))
+            .load::<SnapshotRow>(&mut self.conn)?
+            .into_iter()
+            .map(SnapshotRow::try_into_record)
+            .collect()
+    }
+
+    pub(crate) fn replay_floor(&mut self) -> Result<u64, EventLogError> {
+        load_meta_event_num(&mut self.conn, REPLAY_FLOOR_KEY)
+    }
+
+    pub(crate) fn compaction_event_num(&mut self) -> Result<u64, EventLogError> {
+        load_meta_event_num(&mut self.conn, COMPACTION_EVENT_NUM_KEY)
+    }
+
+    pub(crate) fn reclamation_pending(&mut self) -> Result<bool, EventLogError> {
+        Ok(load_meta_i64(&mut self.conn, RECLAMATION_PENDING_KEY)?.unwrap_or(0) != 0)
+    }
+
+    /// Publishes an already durable, fully verified epoch and its replay floor together.
+    /// Snapshot files must have unique paths; retired files are removed after commit.
+    pub(crate) fn compact_to_epoch(
+        &mut self,
+        snapshot: &ReadySnapshotRecord,
+        head_event_num: u64,
+    ) -> Result<Vec<ReadySnapshotRecord>, EventLogError> {
+        if snapshot.kind != "epoch" {
+            return Err(EventLogError::InvalidCompaction(
+                "replacement snapshot must be an epoch".to_string(),
+            ));
+        }
+        let row = NewSnapshotRow::try_from_record(snapshot)?;
+        let cut = snapshot.event_num;
+        let cut_sql = sqlite_i64("event_num", cut)?;
+        let head_sql = sqlite_i64("head_event_num", head_event_num)?;
+        self.conn.immediate_transaction(|conn| {
+            let floor = load_meta_event_num(conn, REPLAY_FLOOR_KEY)?;
+            let actual_head = events::table
+                .select(max(events::event_num))
+                .first::<Option<i64>>(conn)?;
+            if actual_head != Some(head_sql) {
+                return Err(EventLogError::InvalidCompaction(format!(
+                    "expected head {head_event_num}, found {actual_head:?}"
+                )));
+            }
+            if cut <= floor || cut >= head_event_num {
+                return Err(EventLogError::InvalidCompaction(format!(
+                    "cut {cut} must advance floor {floor} and remain below head {head_event_num}"
+                )));
+            }
+            let ready = snapshots::table
+                .filter(snapshots::state.eq("ready"))
+                .order((
+                    snapshots::timestamp_tag.desc(),
+                    snapshots::snapshot_id.desc(),
+                ))
+                .load::<SnapshotRow>(conn)?
+                .into_iter()
+                .map(SnapshotRow::try_into_record)
+                .collect::<Result<Vec<_>, _>>()?;
+            let rotating = ready
+                .iter()
+                .filter(|record| record.kind == "rotating")
+                .collect::<Vec<_>>();
+            if rotating.len() < 2
+                || rotating
+                    .iter()
+                    .any(|record| record.event_num < cut || record.event_num > head_event_num)
+            {
+                return Err(EventLogError::InvalidCompaction(
+                    "requires at least two ready rotating snapshots, all between cut and head"
+                        .to_string(),
+                ));
+            }
+            let conflicting_paths = snapshots::table
+                .filter(
+                    snapshots::pma_path
+                        .eq(&snapshot.pma_path)
+                        .or(snapshots::manifest_path.eq(&snapshot.manifest_path))
+                        .or(snapshots::pma_path.eq(&snapshot.manifest_path))
+                        .or(snapshots::manifest_path.eq(&snapshot.pma_path)),
+                )
+                .count()
+                .get_result::<i64>(conn)?;
+            if snapshot.pma_path == snapshot.manifest_path || conflicting_paths != 0 {
+                return Err(EventLogError::InvalidCompaction(
+                    "replacement epoch must use new, distinct artifact paths".to_string(),
+                ));
+            }
+            // Check only event numbers so validating a large suffix does not load job blobs.
+            let suffix = events::table
+                .select(events::event_num)
+                .filter(events::event_num.gt(cut_sql))
+                .order(events::event_num.asc())
+                .load::<i64>(conn)?;
+            let mut expected = cut + 1;
+            for event_num in suffix {
+                let event_num = event_num_from_sqlite(event_num)?;
+                if event_num != expected {
+                    return Err(EventLogError::EventSequenceGap {
+                        expected,
+                        found: event_num,
+                    });
+                }
+                expected += 1;
+            }
+            if expected != head_event_num + 1 {
+                return Err(EventLogError::InvalidCompaction(
+                    "retained event suffix does not reach the accepted head".to_string(),
+                ));
+            }
+            let active_id = load_meta_i64(conn, ACTIVE_SNAPSHOT_ID_KEY)?;
+            let retained_active = rotating
+                .iter()
+                .find(|record| Some(record.snapshot_id) == active_id)
+                .unwrap_or(&rotating[0])
+                .snapshot_id;
+            let retired = ready
+                .into_iter()
+                .filter(|record| record.kind == "epoch" || record.event_num < cut)
+                .collect::<Vec<_>>();
+            let retired_ids = retired
+                .iter()
+                .map(|record| record.snapshot_id)
+                .collect::<Vec<_>>();
+
+            // Everything below this point commits or rolls back as one publication.
+            diesel::update(snapshots::table.filter(snapshots::snapshot_id.eq_any(retired_ids)))
+                .set(snapshots::state.eq("retired"))
+                .execute(conn)?;
+            diesel::insert_into(snapshots::table)
+                .values(&row)
+                .execute(conn)?;
+            store_meta_i64(conn, ACTIVE_SNAPSHOT_ID_KEY, retained_active)?;
+            store_meta_i64(conn, REPLAY_FLOOR_KEY, cut_sql)?;
+            store_meta_i64(conn, COMPACTION_EVENT_NUM_KEY, head_sql)?;
+            store_meta_i64(conn, RECLAMATION_PENDING_KEY, 1)?;
+            diesel::delete(events::table.filter(events::event_num.le(cut_sql))).execute(conn)?;
+            Ok(retired)
+        })
+    }
+
+    /// Physical reclamation is retryable maintenance, separate from logical compaction.
+    pub(crate) fn reclaim_compacted_space(&mut self) -> Result<(), EventLogError> {
+        if !self.reclamation_pending()? {
+            return Ok(());
+        }
+        self.conn.batch_execute("VACUUM;")?;
+        let checkpoint = sql_query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .get_result::<CheckpointRow>(&mut self.conn)?;
+        if checkpoint.busy != 0 {
+            return Err(EventLogError::CheckpointBusy {
+                busy: checkpoint.busy,
+            });
+        }
+        delete_meta_key(&mut self.conn, RECLAMATION_PENDING_KEY)?;
+        Ok(())
+    }
+
     pub(crate) fn latest_ready_snapshot_event_num(&mut self) -> Result<Option<u64>, EventLogError> {
         let latest_event_num = snapshots::table
             .filter(snapshots::state.eq("ready"))
@@ -389,6 +565,13 @@ impl EventLog {
         &mut self,
         event_num: u64,
     ) -> Result<Vec<ReplayLogEntry>, EventLogError> {
+        let floor = self.replay_floor()?;
+        if event_num < floor {
+            return Err(EventLogError::ReplayBeforeFloor {
+                requested: event_num,
+                floor,
+            });
+        }
         let rows = events::table
             .select((events::event_num, events::job_jam))
             .filter(events::event_num.gt(sqlite_i64("event_num", event_num)?))
@@ -503,6 +686,10 @@ fn load_meta_i64(conn: &mut SqliteConnection, key: &str) -> Result<Option<i64>, 
         .map_err(Into::into)
 }
 
+fn load_meta_event_num(conn: &mut SqliteConnection, key: &str) -> Result<u64, EventLogError> {
+    load_meta_i64(conn, key)?.map_or(Ok(0), event_num_from_sqlite)
+}
+
 fn store_meta_i64(conn: &mut SqliteConnection, key: &str, value: i64) -> Result<(), EventLogError> {
     sql_query(
         r#"
@@ -579,6 +766,315 @@ mod tests {
             event_processing_duration: Duration::from_micros(event_num),
             created_at_ms: 42,
         }
+    }
+
+    fn sample_snapshot(kind: &str, event_num: u64) -> ReadySnapshotRecord {
+        let name = format!("{kind}-{event_num}");
+        ReadySnapshotRecord {
+            snapshot_id: 0,
+            kind: kind.to_string(),
+            event_num,
+            pma_path: format!("{name}.pma"),
+            manifest_path: format!("{name}.manifest"),
+            alloc_words: 128,
+            kernel_root_raw: u64::MAX,
+            cold_offset: PmaOffsetWords::from_words(3),
+            used_blake3: vec![5; 32],
+            structure_blake3: None,
+            created_at_ms: 99,
+            activated_at_ms: Some(99),
+            base_snapshot_id: None,
+            timestamp_tag: name,
+        }
+    }
+
+    fn compaction_fixture() -> (TempDir, EventLog) {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("event-log.sqlite3");
+        let mut log = EventLog::open(EventLogConfig { path }).expect("open event log");
+        for event_num in 1..=6 {
+            log.append_event(&sample_entry(event_num))
+                .expect("append event");
+        }
+        for (kind, event_num) in [("epoch", 0), ("rotating", 2), ("rotating", 4)] {
+            log.insert_ready_snapshot(&sample_snapshot(kind, event_num))
+                .expect("insert snapshot");
+        }
+        (temp, log)
+    }
+
+    fn assert_uncompacted(log: &mut EventLog) {
+        assert_eq!(log.replay_floor().expect("floor"), 0);
+        assert_eq!(log.compaction_event_num().expect("compaction head"), 0);
+        assert!(!log.reclamation_pending().expect("pending"));
+        assert_eq!(log.list_ready_snapshots().expect("ready").len(), 3);
+        assert!(log.retired_snapshots().expect("retired").is_empty());
+        assert_eq!(
+            events::table
+                .count()
+                .get_result::<i64>(&mut log.conn)
+                .expect("event count"),
+            6
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_head_rotating_anchors_and_replay_suffix_across_reopen() {
+        let (_temp, mut log) = compaction_fixture();
+        let active_id = log.active_snapshot_id().expect("active");
+        let retired = log
+            .compact_to_epoch(&sample_snapshot("epoch", 2), 6)
+            .expect("compact");
+        assert_eq!(retired.len(), 1);
+        assert_eq!(retired[0].kind, "epoch");
+        assert_eq!(retired[0].event_num, 0);
+        assert_eq!(log.active_snapshot_id().expect("active"), active_id);
+        assert_eq!(log.retired_snapshots().expect("retired").len(), 1);
+        assert_eq!(log.ready_rotating_snapshots().expect("rotations").len(), 2);
+        let path = log.path().to_path_buf();
+        drop(log);
+
+        let mut log = EventLog::open(EventLogConfig { path }).expect("reopen");
+        assert_eq!(log.replay_floor().expect("floor"), 2);
+        assert_eq!(log.compaction_event_num().expect("compaction head"), 6);
+        assert_eq!(log.max_event_num().expect("head"), Some(6));
+        assert!(log.reclamation_pending().expect("pending"));
+        assert!(matches!(
+            log.replay_events_after(1),
+            Err(EventLogError::ReplayBeforeFloor {
+                requested: 1,
+                floor: 2
+            })
+        ));
+        let replay = log.replay_events_after(2).expect("replay suffix");
+        assert_eq!(
+            replay
+                .iter()
+                .map(|event| event.event_num)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5, 6]
+        );
+        assert_eq!(replay[0].job_jam, sample_entry(3).job_jam);
+        log.append_event(&sample_entry(7))
+            .expect("append after compaction");
+        assert_eq!(log.max_event_num().expect("head"), Some(7));
+        assert_eq!(log.compaction_event_num().expect("compaction head"), 6);
+    }
+
+    #[test]
+    fn compaction_rejects_unsafe_bounds_and_artifact_reuse_before_changes() {
+        let (_temp, mut log) = compaction_fixture();
+        for (cut, head) in [(0, 6), (6, 6), (7, 6), (2, 5), (2, 7), (3, 6)] {
+            assert!(matches!(
+                log.compact_to_epoch(&sample_snapshot("epoch", cut), head),
+                Err(EventLogError::InvalidCompaction(_))
+            ));
+            assert_uncompacted(&mut log);
+        }
+        let mut reused_path = sample_snapshot("epoch", 2);
+        reused_path.pma_path = sample_snapshot("epoch", 0).pma_path;
+        assert!(matches!(
+            log.compact_to_epoch(&reused_path, 6),
+            Err(EventLogError::InvalidCompaction(_))
+        ));
+        assert!(matches!(
+            log.compact_to_epoch(&sample_snapshot("rotating", 2), 6),
+            Err(EventLogError::InvalidCompaction(_))
+        ));
+        assert_uncompacted(&mut log);
+    }
+
+    #[test]
+    fn compaction_requires_two_rotating_anchors_at_valid_boundaries() {
+        let (_temp, mut log) = compaction_fixture();
+        let rotations = log.ready_rotating_snapshots().expect("rotations");
+        log.retire_snapshot(rotations[0].snapshot_id)
+            .expect("retire rotation");
+        assert!(matches!(
+            log.compact_to_epoch(&sample_snapshot("epoch", 2), 6),
+            Err(EventLogError::InvalidCompaction(_))
+        ));
+        log.insert_ready_snapshot(&sample_snapshot("rotating", 7))
+            .expect("future rotation");
+        assert!(matches!(
+            log.compact_to_epoch(&sample_snapshot("epoch", 2), 6),
+            Err(EventLogError::InvalidCompaction(_))
+        ));
+        assert_eq!(log.replay_floor().expect("floor"), 0);
+        assert_eq!(log.replay_events_after(0).expect("full replay").len(), 6);
+    }
+
+    #[test]
+    fn compaction_rejects_a_gap_in_the_retained_suffix() {
+        let (_temp, mut log) = compaction_fixture();
+        diesel::delete(events::table.filter(events::event_num.eq(4)))
+            .execute(&mut log.conn)
+            .expect("delete event");
+        assert!(matches!(
+            log.compact_to_epoch(&sample_snapshot("epoch", 2), 6),
+            Err(EventLogError::EventSequenceGap {
+                expected: 4,
+                found: 5
+            })
+        ));
+        assert_eq!(log.replay_floor().expect("floor"), 0);
+        assert_eq!(log.compaction_event_num().expect("compaction head"), 0);
+        assert!(!log.reclamation_pending().expect("pending"));
+        assert!(log.retired_snapshots().expect("retired").is_empty());
+    }
+
+    #[test]
+    fn compaction_rolls_back_snapshot_and_metadata_publication_when_deletion_fails() {
+        let (_temp, mut log) = compaction_fixture();
+        let active_id = log.active_snapshot_id().expect("active");
+        log.conn.batch_execute(
+            "CREATE TRIGGER fail_compaction BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;",
+        ).expect("install failure trigger");
+        assert!(matches!(
+            log.compact_to_epoch(&sample_snapshot("epoch", 2), 6),
+            Err(EventLogError::Query(_))
+        ));
+        assert_uncompacted(&mut log);
+        assert_eq!(log.active_snapshot_id().expect("active"), active_id);
+        log.conn
+            .batch_execute("DROP TRIGGER fail_compaction;")
+            .expect("remove trigger");
+        log.compact_to_epoch(&sample_snapshot("epoch", 2), 6)
+            .expect("retry compaction");
+    }
+
+    #[test]
+    fn repeated_compaction_advances_floor_and_replaces_epoch() {
+        let (_temp, mut log) = compaction_fixture();
+        log.compact_to_epoch(&sample_snapshot("epoch", 2), 6)
+            .expect("first compaction");
+        assert!(matches!(
+            log.compact_to_epoch(&sample_snapshot("epoch", 2), 6),
+            Err(EventLogError::InvalidCompaction(_))
+        ));
+        let oldest = log
+            .ready_rotating_snapshots()
+            .expect("rotations")
+            .into_iter()
+            .find(|record| record.event_num == 2)
+            .expect("oldest rotation");
+        log.retire_snapshot(oldest.snapshot_id)
+            .expect("retire oldest");
+        log.insert_ready_snapshot(&sample_snapshot("rotating", 6))
+            .expect("new rotation");
+        log.append_event(&sample_entry(7)).expect("append event");
+        let retired = log
+            .compact_to_epoch(&sample_snapshot("epoch", 4), 7)
+            .expect("second compaction");
+        assert_eq!(retired.len(), 1);
+        assert_eq!(retired[0].event_num, 2);
+        assert_eq!(log.replay_floor().expect("floor"), 4);
+        assert_eq!(log.compaction_event_num().expect("compaction head"), 7);
+        assert_eq!(log.max_event_num().expect("head"), Some(7));
+        assert_eq!(log.replay_events_after(4).expect("suffix").len(), 3);
+        assert_eq!(
+            log.list_ready_snapshots()
+                .expect("ready")
+                .iter()
+                .filter(|record| record.kind == "epoch")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_active_rotation_and_replaces_active_epoch_selection() {
+        let (_temp, mut log) = compaction_fixture();
+        let rotations = log.ready_rotating_snapshots().expect("rotations");
+        let oldest_rotation = rotations
+            .iter()
+            .find(|record| record.event_num == 2)
+            .expect("older rotation")
+            .snapshot_id;
+        log.set_active_snapshot_id(oldest_rotation)
+            .expect("select older rotation");
+        log.compact_to_epoch(&sample_snapshot("epoch", 2), 6)
+            .expect("compact");
+        assert_eq!(
+            log.active_snapshot_id().expect("active"),
+            Some(oldest_rotation)
+        );
+
+        let (_temp, mut log) = compaction_fixture();
+        let epoch_id = log
+            .list_ready_snapshots()
+            .expect("snapshots")
+            .into_iter()
+            .find(|record| record.kind == "epoch")
+            .expect("epoch")
+            .snapshot_id;
+        let newest_rotation = log.ready_rotating_snapshots().expect("rotations")[0].snapshot_id;
+        log.set_active_snapshot_id(epoch_id).expect("select epoch");
+        log.compact_to_epoch(&sample_snapshot("epoch", 2), 6)
+            .expect("compact");
+        assert_eq!(
+            log.active_snapshot_id().expect("active"),
+            Some(newest_rotation)
+        );
+    }
+
+    #[test]
+    fn reclamation_failure_remains_pending_and_retries_after_reader_releases_wal() {
+        let (_temp, mut log) = compaction_fixture();
+        log.compact_to_epoch(&sample_snapshot("epoch", 2), 6)
+            .expect("compact");
+        let mut reader = establish_connection(log.path()).expect("open reader");
+        reader
+            .batch_execute("BEGIN; SELECT COUNT(*) FROM events;")
+            .expect("hold read snapshot");
+        assert!(log.reclaim_compacted_space().is_err());
+        assert!(log.reclamation_pending().expect("pending after failure"));
+        assert_eq!(log.replay_floor().expect("floor"), 2);
+        assert_eq!(
+            log.replay_events_after(2)
+                .expect("suffix after failure")
+                .len(),
+            4
+        );
+        reader.batch_execute("ROLLBACK;").expect("release reader");
+        log.reclaim_compacted_space().expect("retry reclaim");
+        assert!(!log.reclamation_pending().expect("pending after success"));
+    }
+
+    #[test]
+    fn reclamation_shrinks_database_and_keeps_a_reopenable_suffix() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("event-log.sqlite3");
+        let mut log =
+            EventLog::open(EventLogConfig { path: path.clone() }).expect("open event log");
+        for event_num in 1..=12 {
+            let mut entry = sample_entry(event_num);
+            entry.job_jam = vec![event_num as u8; 128 * 1024];
+            log.append_event(&entry).expect("append large event");
+        }
+        for (kind, event_num) in [("epoch", 0), ("rotating", 10), ("rotating", 11)] {
+            log.insert_ready_snapshot(&sample_snapshot(kind, event_num))
+                .expect("snapshot");
+        }
+        log.conn
+            .batch_execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("initial checkpoint");
+        let before = fs::metadata(&path).expect("db metadata").len();
+        log.compact_to_epoch(&sample_snapshot("epoch", 10), 12)
+            .expect("compact");
+        log.reclaim_compacted_space().expect("reclaim");
+        assert!(!log.reclamation_pending().expect("pending"));
+        assert!(fs::metadata(&path).expect("db metadata").len() < before / 2);
+        drop(log);
+
+        let mut log = EventLog::open(EventLogConfig { path }).expect("reopen");
+        log.quick_check().expect("integrity");
+        assert_eq!(log.max_event_num().expect("head"), Some(12));
+        assert_eq!(log.replay_floor().expect("floor"), 10);
+        assert_eq!(log.replay_events_after(10).expect("suffix").len(), 2);
+        assert!(!log.reclamation_pending().expect("pending after reopen"));
+        log.reclaim_compacted_space()
+            .expect("already reclaimed no-op");
     }
 
     #[test]

@@ -15,7 +15,7 @@ use nockvm::pma::{
 };
 use nockvm::serialization::met0_u64_to_usize;
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::event_log::{EventLog, EventLogError, ReadySnapshotRecord};
 use crate::utils::durability;
@@ -497,11 +497,183 @@ pub(crate) fn restore_verified_snapshot(
     Ok(verification.manifest)
 }
 
+/// Advance the epoch using the older retained rotating snapshot. The cadence is
+/// measured at the accepted head, independently of the older replay boundary.
+pub(crate) fn maybe_compact_epoch_snapshot(
+    event_log: &mut EventLog,
+    cumulative_processing_time: Duration,
+    interval: Option<Duration>,
+) -> Result<bool, SnapshotBuildError> {
+    let Some(interval) = interval else {
+        return Ok(false);
+    };
+    if cumulative_processing_time < interval {
+        return Ok(false);
+    }
+    let rotating = event_log.ready_rotating_snapshots()?;
+    if rotating.len() < 2 {
+        return Ok(false);
+    }
+    // Use event order, not timestamps: a clock adjustment must not invalidate
+    // either retained recovery source. Extra rows from failed cleanup also pin
+    // the boundary until they have been retired.
+    let candidate = rotating
+        .iter()
+        .min_by_key(|record| record.event_num)
+        .unwrap();
+    let head = event_log.max_event_num()?.unwrap_or(0);
+    if candidate.event_num <= event_log.replay_floor()? || candidate.event_num >= head {
+        return Ok(false);
+    }
+
+    let started = Instant::now();
+    let verification = verify_snapshot(
+        Path::new(&candidate.manifest_path),
+        Path::new(&candidate.pma_path),
+        SnapshotVerifyMode::Full,
+    )?;
+    let source = verification.manifest;
+    // The prune boundary comes from SQLite; bind it to the verified artifact
+    // before removing the events needed to reconstruct that state.
+    if source.kind != SnapshotKind::Rotating
+        || source.event_num != candidate.event_num
+        || source.alloc_words != candidate.alloc_words
+        || source.kernel_root_raw != candidate.kernel_root_raw
+        || source.cold_offset != candidate.cold_offset
+        || source.used_blake3.as_slice() != candidate.used_blake3
+        || source.structure_blake3.map(|hash| hash.to_vec()) != candidate.structure_blake3
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compaction snapshot row does not match its verified manifest",
+        )
+        .into());
+    }
+
+    // Unique names keep the previous epoch intact until the SQLite transaction
+    // publishes the new generation and its pruning boundary together.
+    let created_at_ms = current_time_ms()?;
+    let tag = format!(
+        "{created_at_ms:020}-{:020}-{}",
+        source.event_num,
+        uuid::Uuid::new_v4()
+    );
+    let pma_dir = Path::new(&candidate.pma_path)
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "snapshot has no parent"))?;
+    let pma_path = pma_dir.join(format!("epoch-{tag}.pma"));
+    let manifest_path = pma_dir.join(format!("epoch-{tag}.manifest"));
+    let tmp_path = pma_path.with_extension("pma.tmp");
+    let staged = (|| -> Result<SnapshotManifest, SnapshotBuildError> {
+        copy_snapshot_file(Path::new(&candidate.pma_path), &tmp_path)?;
+        replace_file(&tmp_path, &pma_path)?;
+        let manifest = SnapshotManifest::new(
+            SnapshotKind::Epoch,
+            tag.clone(),
+            Hash::from_bytes(source.ker_hash),
+            source.event_num,
+            source.pma_words,
+            source.alloc_words,
+            source.kernel_root_raw,
+            source.cold_offset,
+            Hash::from_bytes(source.used_blake3),
+            source.structure_blake3.map(Hash::from_bytes),
+            created_at_ms,
+        )?;
+        manifest.write_to_path(&manifest_path)?;
+        verify_snapshot(&manifest_path, &pma_path, SnapshotVerifyMode::Full)?;
+        Ok(manifest)
+    })();
+    let manifest = match staged {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            discard_unpublished_epoch(event_log, &pma_path, &manifest_path);
+            return Err(err);
+        }
+    };
+
+    if let Err(err) = event_log.compact_to_epoch(
+        &ReadySnapshotRecord {
+            snapshot_id: 0,
+            kind: "epoch".to_string(),
+            event_num: manifest.event_num,
+            pma_path: pma_path.to_string_lossy().into_owned(),
+            manifest_path: manifest_path.to_string_lossy().into_owned(),
+            alloc_words: manifest.alloc_words,
+            kernel_root_raw: manifest.kernel_root_raw,
+            cold_offset: manifest.cold_offset,
+            used_blake3: manifest.used_blake3.to_vec(),
+            structure_blake3: manifest.structure_blake3.map(|hash| hash.to_vec()),
+            created_at_ms,
+            activated_at_ms: Some(created_at_ms),
+            base_snapshot_id: Some(candidate.snapshot_id),
+            timestamp_tag: tag,
+        },
+        head,
+    ) {
+        discard_unpublished_epoch(event_log, &pma_path, &manifest_path);
+        return Err(err.into());
+    }
+
+    // Cleanup/reclamation is retryable. Once the transaction commits, callers
+    // must advance the cadence even if maintenance fails afterward.
+    if let Err(err) = cleanup_retired_snapshot_artifacts(event_log, pma_dir) {
+        warn!("epoch compaction committed; snapshot cleanup deferred: {err}");
+    }
+    if let Err(err) = event_log.reclaim_compacted_space() {
+        warn!("epoch compaction committed; SQLite space reclamation deferred: {err}");
+    }
+    info!(
+        cut = manifest.event_num,
+        head,
+        elapsed_ms = duration_ms(started.elapsed()),
+        "epoch compaction complete"
+    );
+    Ok(true)
+}
+
+// A commit error can be ambiguous. Only discard a generation after a successful
+// database read establishes that neither artifact is a published recovery source.
+fn discard_unpublished_epoch(event_log: &mut EventLog, pma: &Path, manifest: &Path) {
+    let ready = match event_log.list_ready_snapshots() {
+        Ok(ready) => ready,
+        Err(err) => {
+            warn!(
+                "cannot determine whether failed epoch was published; retaining artifacts: {err}"
+            );
+            return;
+        }
+    };
+    if ready.iter().any(|record| {
+        Path::new(&record.pma_path) == pma || Path::new(&record.manifest_path) == manifest
+    }) {
+        return;
+    }
+    for path in [
+        pma.to_path_buf(),
+        manifest.to_path_buf(),
+        pma.with_extension("pma.tmp"),
+        manifest.with_extension("manifest.tmp"),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                if let Err(err) = sync_parent_dir(&path) {
+                    warn!(path = %path.display(), "failed to sync discarded epoch: {err}");
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => warn!(path = %path.display(), "failed to discard unpublished epoch: {err}"),
+        }
+    }
+}
+
 pub(crate) fn cleanup_snapshot_artifacts(
     event_log: &mut EventLog,
     pma_dir: &Path,
 ) -> Result<(), SnapshotCleanupError> {
     retire_old_rotating_snapshots(event_log)?;
+    cleanup_retired_snapshot_artifacts(event_log, pma_dir)?;
+    event_log.reclaim_compacted_space()?;
     if !pma_dir.exists() {
         return Ok(());
     }
@@ -527,6 +699,12 @@ pub(crate) fn cleanup_snapshot_artifacts(
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        // These are unpublished copies; no snapshot row can refer to them.
+        if name.starts_with(".sparse-copy-") {
+            fs::remove_file(&path)?;
+            sync_parent_dir(&path)?;
+            continue;
+        }
         if !is_snapshot_artifact(name) || tracked_paths.contains(&normalize_snapshot_path(&path)) {
             continue;
         }
@@ -648,6 +826,7 @@ fn retire_old_rotating_snapshots(event_log: &mut EventLog) -> Result<(), Snapsho
     let rotating = event_log.ready_rotating_snapshots()?;
     let mut retired_count = 0usize;
     for snapshot in rotating.into_iter().skip(2) {
+        event_log.retire_snapshot(snapshot.snapshot_id)?;
         let pma_path = Path::new(&snapshot.pma_path);
         if pma_path.exists() {
             fs::remove_file(pma_path)?;
@@ -656,7 +835,6 @@ fn retire_old_rotating_snapshots(event_log: &mut EventLog) -> Result<(), Snapsho
         if manifest_path.exists() {
             fs::remove_file(manifest_path)?;
         }
-        event_log.retire_snapshot(snapshot.snapshot_id)?;
         retired_count += 1;
     }
     debug!(
@@ -664,6 +842,36 @@ fn retire_old_rotating_snapshots(event_log: &mut EventLog) -> Result<(), Snapsho
         elapsed_ms = duration_ms(retire_start.elapsed()),
         "retire old rotating snapshots done"
     );
+    Ok(())
+}
+
+fn cleanup_retired_snapshot_artifacts(
+    event_log: &mut EventLog,
+    pma_dir: &Path,
+) -> Result<(), SnapshotCleanupError> {
+    let ready_paths: HashSet<_> = event_log
+        .list_ready_snapshots()?
+        .into_iter()
+        .flat_map(|record| {
+            [
+                tracked_snapshot_path(pma_dir, &record.pma_path),
+                tracked_snapshot_path(pma_dir, &record.manifest_path),
+            ]
+        })
+        .collect();
+    for record in event_log.retired_snapshots()? {
+        for raw in [&record.pma_path, &record.manifest_path] {
+            let path = tracked_snapshot_path(pma_dir, raw);
+            if ready_paths.contains(&path) {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => sync_parent_dir(&path)?,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -730,6 +938,7 @@ fn is_snapshot_artifact(name: &str) -> bool {
         name,
         "epoch.pma" | "epoch.manifest" | "epoch.tmp" | "epoch.pma.tmp" | "epoch.manifest.tmp"
     ) || name.starts_with("snap-")
+        || name.starts_with("epoch-")
 }
 
 fn move_to_corrupted_dir(path: &Path, corrupted_dir: &Path) -> Result<(), io::Error> {
@@ -888,7 +1097,7 @@ fn copy_snapshot_file(src: &Path, dst: &Path) -> Result<(), io::Error> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(src, dst)?;
+    crate::utils::sparse_copy::copy(src, dst)?;
     let file = File::open(dst)?;
     durability::sync_all(&file, "snapshot_file_fsync", Some(dst))?;
     Ok(())
@@ -1240,6 +1449,48 @@ mod tests {
     }
 
     #[test]
+    fn sparse_snapshot_copy_restores_full_verified_pma() {
+        let (sandbox, pma_path, manifest_path, manifest, _root_raw) = build_test_snapshot();
+        // Bytes outside the hashed allocation prefix must survive too: sparse
+        // copying preserves the PMA format, including its footer at capacity.
+        assert!(manifest.alloc_words < manifest.pma_words - 1);
+        overwrite_u64(&pma_path, manifest.pma_words - 1, 0xfeed_beef);
+        let snapshot_path = sandbox.path().join("copied.pma");
+        copy_snapshot_file(&pma_path, &snapshot_path).expect("copy snapshot");
+        let verification =
+            verify_snapshot(&manifest_path, &snapshot_path, SnapshotVerifyMode::Full)
+                .expect("verify sparse snapshot");
+        assert_eq!(verification.manifest, manifest);
+        let record = ReadySnapshotRecord {
+            snapshot_id: 1,
+            kind: "epoch".to_string(),
+            event_num: manifest.event_num,
+            pma_path: snapshot_path.to_string_lossy().into_owned(),
+            manifest_path: manifest_path.to_string_lossy().into_owned(),
+            alloc_words: manifest.alloc_words,
+            kernel_root_raw: manifest.kernel_root_raw,
+            cold_offset: manifest.cold_offset,
+            used_blake3: manifest.used_blake3.to_vec(),
+            structure_blake3: None,
+            created_at_ms: manifest.created_at_ms,
+            activated_at_ms: Some(manifest.created_at_ms),
+            base_snapshot_id: None,
+            timestamp_tag: manifest.timestamp_tag.clone(),
+        };
+        let restored_path = sandbox.path().join("restored.pma");
+        assert_eq!(
+            restore_verified_snapshot(&record, &restored_path).expect("restore sparse snapshot"),
+            manifest,
+        );
+        verify_snapshot(&manifest_path, &restored_path, SnapshotVerifyMode::Full)
+            .expect("verify restored PMA");
+        assert_eq!(
+            fs::read(&pma_path).unwrap(),
+            fs::read(&restored_path).unwrap()
+        );
+    }
+
+    #[test]
     fn verify_snapshot_rejects_used_hash_mismatch() {
         let (_sandbox, pma_path, manifest_path, mut manifest, _root_raw) = build_test_snapshot();
         manifest.used_blake3 = [7; OUT_LEN];
@@ -1278,5 +1529,337 @@ mod tests {
         let err = verify_snapshot(&manifest_path, &pma_path, SnapshotVerifyMode::Full)
             .expect_err("corrupt");
         assert!(matches!(err, SnapshotVerifyError::Direct(_)));
+    }
+
+    fn copy_compaction_fixture_snapshot(
+        pma_dir: &Path,
+        source_path: &Path,
+        source_manifest: &SnapshotManifest,
+        kind: SnapshotKind,
+        event_num: u64,
+        stem: &str,
+    ) -> ReadySnapshotRecord {
+        let pma_path = pma_dir.join(format!("{stem}.pma"));
+        let manifest_path = pma_dir.join(format!("{stem}.manifest"));
+        copy_snapshot_file(source_path, &pma_path).expect("copy fixture PMA");
+        let mut manifest = source_manifest.clone();
+        manifest.kind = kind;
+        manifest.event_num = event_num;
+        manifest.timestamp_tag = format!("{event_num:020}");
+        manifest.created_at_ms = event_num as i64;
+        manifest.checksum = manifest.compute_checksum().unwrap();
+        manifest.write_to_path(&manifest_path).unwrap();
+        verify_snapshot(&manifest_path, &pma_path, SnapshotVerifyMode::Full)
+            .expect("fixture must be independently verifiable");
+        ReadySnapshotRecord {
+            snapshot_id: 0,
+            kind: snapshot_kind_name(kind).to_string(),
+            event_num,
+            pma_path: pma_path.to_string_lossy().into_owned(),
+            manifest_path: manifest_path.to_string_lossy().into_owned(),
+            alloc_words: manifest.alloc_words,
+            kernel_root_raw: manifest.kernel_root_raw,
+            cold_offset: manifest.cold_offset,
+            used_blake3: manifest.used_blake3.to_vec(),
+            structure_blake3: manifest.structure_blake3.map(|hash| hash.to_vec()),
+            created_at_ms: manifest.created_at_ms,
+            activated_at_ms: Some(manifest.created_at_ms),
+            base_snapshot_id: None,
+            timestamp_tag: manifest.timestamp_tag,
+        }
+    }
+
+    fn compaction_fixture() -> (TestPmaSandbox, EventLog, [ReadySnapshotRecord; 3]) {
+        use crate::event_log::EventLogEntry;
+
+        let (sandbox, source_path, _manifest_path, manifest, _root) = build_test_snapshot();
+        let pma_dir = sandbox.path().join("pma");
+        fs::create_dir(&pma_dir).unwrap();
+        let mut event_log = EventLog::open(EventLogConfig {
+            path: sandbox.path().join("event-log.sqlite3"),
+        })
+        .unwrap();
+        for event_num in 1..=12 {
+            event_log
+                .append_event(&EventLogEntry {
+                    event_num,
+                    job_jam: vec![event_num as u8],
+                    wire_source: "compaction-test".to_string(),
+                    wire_version: 1,
+                    wire_tags_json: "[]".to_string(),
+                    cause_hash: vec![0; OUT_LEN],
+                    job_hash: vec![event_num as u8; OUT_LEN],
+                    event_processing_duration: Duration::from_secs(1),
+                    created_at_ms: event_num as i64,
+                })
+                .unwrap();
+        }
+        let records = [
+            (SnapshotKind::Epoch, 0, "epoch"),
+            (SnapshotKind::Rotating, 4, "snap-0004"),
+            (SnapshotKind::Rotating, 8, "snap-0008"),
+        ]
+        .map(|(kind, event_num, stem)| {
+            let mut record = copy_compaction_fixture_snapshot(
+                &pma_dir, &source_path, &manifest, kind, event_num, stem,
+            );
+            record.snapshot_id = event_log.insert_ready_snapshot(&record).unwrap();
+            record
+        });
+        (sandbox, event_log, records)
+    }
+
+    fn assert_fixture_history(event_log: &mut EventLog, floor: u64) {
+        assert_eq!(event_log.replay_floor().unwrap(), floor);
+        assert_eq!(event_log.max_event_num().unwrap(), Some(12));
+        let events = event_log.replay_events_after(floor).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_num)
+                .collect::<Vec<_>>(),
+            ((floor + 1)..=12).collect::<Vec<_>>(),
+        );
+        for event in events {
+            assert_eq!(event.job_jam, vec![event.event_num as u8]);
+        }
+    }
+
+    #[test]
+    fn epoch_compaction_waits_for_threshold_and_keeps_verified_recovery_sources() {
+        let (sandbox, mut event_log, records) = compaction_fixture();
+        let interval = Some(Duration::from_secs(10));
+        assert!(
+            !maybe_compact_epoch_snapshot(&mut event_log, Duration::from_secs(9), interval)
+                .unwrap()
+        );
+        assert_fixture_history(&mut event_log, 0);
+        assert!(Path::new(&records[0].pma_path).exists());
+
+        assert!(
+            maybe_compact_epoch_snapshot(&mut event_log, Duration::from_secs(10), interval)
+                .unwrap()
+        );
+        assert_fixture_history(&mut event_log, 4);
+        assert_eq!(event_log.compaction_event_num().unwrap(), 12);
+        assert_eq!(
+            event_log.active_snapshot_id().unwrap(),
+            Some(records[2].snapshot_id)
+        );
+        assert!(!Path::new(&records[0].pma_path).exists());
+        assert!(!Path::new(&records[0].manifest_path).exists());
+        let ready = event_log.list_ready_snapshots().unwrap();
+        assert_eq!(ready.len(), 3);
+        let epoch = ready.iter().find(|record| record.kind == "epoch").unwrap();
+        assert_eq!(epoch.event_num, 4);
+        assert_ne!(epoch.pma_path, records[0].pma_path);
+        assert_ne!(epoch.pma_path, records[1].pma_path);
+        for record in &ready {
+            verify_snapshot(
+                Path::new(&record.manifest_path),
+                Path::new(&record.pma_path),
+                SnapshotVerifyMode::Full,
+            )
+            .expect("all retained recovery sources verify");
+        }
+        let rotating_ids: HashSet<_> = ready
+            .iter()
+            .filter(|record| record.kind == "rotating")
+            .map(|record| record.snapshot_id)
+            .collect();
+        assert_eq!(
+            rotating_ids,
+            HashSet::from([records[1].snapshot_id, records[2].snapshot_id])
+        );
+
+        // Mutating the source after publication must not change the epoch copy.
+        let source_path = Path::new(&records[1].pma_path);
+        let mut bytes = fs::read(source_path).unwrap();
+        bytes[0] ^= 0x80;
+        fs::write(source_path, bytes).unwrap();
+        let restored_path = sandbox.path().join("independent-epoch-restore.pma");
+        let restored = restore_verified_snapshot(epoch, &restored_path).unwrap();
+        assert_eq!(restored.event_num, 4);
+        verify_snapshot(
+            Path::new(&epoch.manifest_path),
+            &restored_path,
+            SnapshotVerifyMode::Full,
+        )
+        .expect("new epoch is independent of its source");
+    }
+
+    #[test]
+    fn epoch_compaction_rejects_corrupt_candidate_without_pruning() {
+        let (_sandbox, mut event_log, records) = compaction_fixture();
+        let source = Path::new(&records[1].pma_path);
+        let mut bytes = fs::read(source).unwrap();
+        bytes[0] ^= 0x80;
+        fs::write(source, bytes).unwrap();
+        let error = maybe_compact_epoch_snapshot(
+            &mut event_log,
+            Duration::from_secs(10),
+            Some(Duration::from_secs(10)),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SnapshotBuildError::Verify(SnapshotVerifyError::UsedHashMismatch { .. })
+        ));
+        assert_fixture_history(&mut event_log, 0);
+        assert_eq!(event_log.list_ready_snapshots().unwrap().len(), 3);
+        verify_snapshot(
+            Path::new(&records[0].manifest_path),
+            Path::new(&records[0].pma_path),
+            SnapshotVerifyMode::Full,
+        )
+        .expect("old epoch survives failed compaction");
+    }
+
+    #[test]
+    fn epoch_compaction_binds_prune_boundary_to_verified_manifest() {
+        let (sandbox, mut event_log, records) = compaction_fixture();
+        let manifest_path = Path::new(&records[1].manifest_path);
+        let mut manifest = SnapshotManifest::read_from_path(manifest_path).unwrap();
+        manifest.event_num = 5;
+        manifest.checksum = manifest.compute_checksum().unwrap();
+        manifest.write_to_path(manifest_path).unwrap();
+        verify_snapshot(
+            manifest_path,
+            Path::new(&records[1].pma_path),
+            SnapshotVerifyMode::Full,
+        )
+        .expect("artifact is valid but disagrees with its SQLite row");
+        let error = maybe_compact_epoch_snapshot(
+            &mut event_log,
+            Duration::from_secs(10),
+            Some(Duration::from_secs(10)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SnapshotBuildError::Io(ref err) if err.kind() == io::ErrorKind::InvalidData)
+        );
+        assert_fixture_history(&mut event_log, 0);
+        assert_eq!(event_log.compaction_event_num().unwrap(), 0);
+        assert!(Path::new(&records[0].pma_path).exists());
+        assert!(Path::new(&records[0].manifest_path).exists());
+        assert_eq!(fs::read_dir(sandbox.path().join("pma")).unwrap().count(), 6);
+    }
+
+    #[test]
+    fn rejected_compaction_transaction_removes_staged_generation_without_losing_history() {
+        let (sandbox, mut event_log, records) = compaction_fixture();
+        let connection = rusqlite::Connection::open(event_log.path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_compaction BEFORE DELETE ON events
+                 BEGIN SELECT RAISE(ABORT, 'injected compaction failure'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        for _ in 0..2 {
+            assert!(maybe_compact_epoch_snapshot(
+                &mut event_log,
+                Duration::from_secs(10),
+                Some(Duration::from_secs(10)),
+            )
+            .is_err());
+            assert_fixture_history(&mut event_log, 0);
+            let ready_ids: HashSet<_> = event_log
+                .list_ready_snapshots()
+                .unwrap()
+                .into_iter()
+                .map(|record| record.snapshot_id)
+                .collect();
+            assert_eq!(
+                ready_ids,
+                records.iter().map(|record| record.snapshot_id).collect()
+            );
+            assert!(Path::new(&records[0].pma_path).exists());
+            assert!(Path::new(&records[0].manifest_path).exists());
+            assert_eq!(fs::read_dir(sandbox.path().join("pma")).unwrap().count(), 6);
+        }
+    }
+
+    #[test]
+    fn cleanup_recovers_commit_before_unlink_and_is_idempotent() {
+        let (sandbox, mut event_log, records) = compaction_fixture();
+        let pma_dir = sandbox.path().join("pma");
+        let source_manifest =
+            SnapshotManifest::read_from_path(Path::new(&records[1].manifest_path)).unwrap();
+        let new_epoch = copy_compaction_fixture_snapshot(
+            &pma_dir,
+            Path::new(&records[1].pma_path),
+            &source_manifest,
+            SnapshotKind::Epoch,
+            4,
+            "epoch-committed-before-crash",
+        );
+        event_log.compact_to_epoch(&new_epoch, 12).unwrap();
+        assert!(Path::new(&records[0].pma_path).exists());
+        assert!(Path::new(&records[0].manifest_path).exists());
+        let database_path = event_log.path().to_path_buf();
+        drop(event_log);
+        let mut event_log = EventLog::open(EventLogConfig {
+            path: database_path,
+        })
+        .unwrap();
+
+        for _ in 0..2 {
+            cleanup_snapshot_artifacts(&mut event_log, &pma_dir).unwrap();
+            assert_fixture_history(&mut event_log, 4);
+            assert!(!Path::new(&records[0].pma_path).exists());
+            assert!(!Path::new(&records[0].manifest_path).exists());
+            let ready = event_log.list_ready_snapshots().unwrap();
+            assert_eq!(ready.len(), 3);
+            assert!(ready
+                .iter()
+                .any(|record| record.pma_path == new_epoch.pma_path));
+            for record in ready {
+                verify_snapshot(
+                    Path::new(&record.manifest_path),
+                    Path::new(&record.pma_path),
+                    SnapshotVerifyMode::Full,
+                )
+                .expect("cleanup preserves ready artifacts");
+            }
+        }
+        assert!(!pma_dir.join("corrupted_pma").join("epoch.pma").exists());
+        assert!(!event_log.reclamation_pending().unwrap());
+    }
+
+    #[test]
+    fn cleanup_quarantines_unpublished_epoch_and_removes_sparse_copy_temporary() {
+        let (sandbox, mut event_log, records) = compaction_fixture();
+        let pma_dir = sandbox.path().join("pma");
+        let source_manifest =
+            SnapshotManifest::read_from_path(Path::new(&records[1].manifest_path)).unwrap();
+        let unpublished = copy_compaction_fixture_snapshot(
+            &pma_dir,
+            Path::new(&records[1].pma_path),
+            &source_manifest,
+            SnapshotKind::Epoch,
+            4,
+            "epoch-unpublished",
+        );
+        let temporary = pma_dir.join(".sparse-copy-interrupted");
+        fs::write(&temporary, b"incomplete copy").unwrap();
+        cleanup_snapshot_artifacts(&mut event_log, &pma_dir).unwrap();
+
+        assert_fixture_history(&mut event_log, 0);
+        assert!(!Path::new(&unpublished.pma_path).exists());
+        assert!(!Path::new(&unpublished.manifest_path).exists());
+        assert!(pma_dir.join("corrupted_pma/epoch-unpublished.pma").exists());
+        assert!(pma_dir
+            .join("corrupted_pma/epoch-unpublished.manifest")
+            .exists());
+        assert!(!temporary.exists());
+        assert!(!pma_dir
+            .join("corrupted_pma/.sparse-copy-interrupted")
+            .exists());
+        assert_eq!(event_log.list_ready_snapshots().unwrap().len(), 3);
+        for record in records {
+            assert!(Path::new(&record.pma_path).exists());
+            assert!(Path::new(&record.manifest_path).exists());
+        }
     }
 }

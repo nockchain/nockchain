@@ -364,6 +364,7 @@ fn base_cli(stack_size: NockStackSize) -> boot::Cli {
         trace_opts: TraceOpts::default(),
         gc_interval: None,
         rotating_snapshot_interval_event_time: None,
+        epoch_compaction_interval_event_time: None,
         ephemeral: false,
         color: clap::ColorChoice::Auto,
         state_jam: None,
