@@ -53,6 +53,8 @@ row here until it is fixed.
 | 25 | Missing syntax: `~$`, sail `;%` and `;=`, namespaced sail attributes, wide `$&`, wide `~!` | same |
 | 26 | Duplicate arm or chapter names were merged instead of becoming `%eror` arms | hatch, honk: autoname bare atoms, turn duplicate arms into %eror, anchor doc spots like hoonc |
 | 27 | Under `!:`, a plain doc above `=/` anchored the spot differently | same |
+| 34 | hatch did not parse the sail `;p: text` form | hatch: port hoon-138's ++sail grammar |
+| 35 | hatch did not parse the sail `/"url"` and `@"url"` tag shorthands (and a dozen other sail forms) | same |
 
 ## Import pipeline (`crates/honk/src/pipeline.rs`, CLI)
 
@@ -64,8 +66,6 @@ row here until it is fixed.
 | 31 | honk ignored broken files the entry does not import; hoonc checks the whole tree | same |
 | 32 | Entries under an `open/hoon` root were keyed by the root marker instead of the path | same |
 | 33 | A tall arm body starting with a `/-` path segment was read as an import header | same |
-| 34 | hatch did not parse the sail `;p: text` form | hatch: port hoon-138's ++sail grammar |
-| 35 | hatch did not parse the sail `/"url"` and `@"url"` tag shorthands (and a dozen other sail forms) | same |
 
 ## Open honk bugs (no hoonc verdict)
 
