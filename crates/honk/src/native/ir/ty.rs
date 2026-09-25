@@ -19,7 +19,6 @@
 //! already normalized; `from_noun` only decodes what exists and `to_noun`
 //! re-emits it. Normalization is a Phase-2 construction concern, not a boundary
 //! one.
-#![allow(dead_code)]
 
 use std::cell::{Cell, OnceCell};
 use std::fmt;

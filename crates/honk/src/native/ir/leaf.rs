@@ -8,7 +8,6 @@
 //! checked copy (never splicing a foreign pointer). The production copy-cache
 //! lives in `docs/native-compiler/PHASE0-PROVENANCE-DESIGN.md`; this is the
 //! Phase-1 shadow form.
-#![allow(dead_code)]
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

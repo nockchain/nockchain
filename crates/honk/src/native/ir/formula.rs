@@ -12,7 +12,6 @@
 //! only producer of these Formulas and emits the canonical native shape, so the
 //! native-structure checks below are byte-exact for the native pipeline. (The
 //! noun path had to tolerate arbitrary nouns; the native path constructs them.)
-#![allow(dead_code)]
 
 use std::rc::Rc;
 

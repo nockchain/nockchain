@@ -1,4 +1,4 @@
-#![allow(dead_code, clippy::items_after_test_module)]
+#![allow(clippy::items_after_test_module)]
 
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -36,7 +36,6 @@ use smallvec::SmallVec;
 
 use self::keys::*;
 use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
-use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
 use crate::native::identity::*;
 use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
@@ -521,18 +520,6 @@ impl Sig64 {
         let mut sig = Self::new_with_dbug_spots(true);
         sig.write_hoon(hoon)?;
         sig.hoon_signatures.get(&(HoonIdentity::of(hoon))).copied()
-    }
-
-    fn hoon_signatures_spot_sensitive(
-        hoon: &Hoon,
-    ) -> Option<(HoonSignature, Vec<HoonArenaBuildNode>)> {
-        let mut sig = Self::new_with_dbug_spots(true);
-        sig.write_hoon(hoon)?;
-        let root = sig
-            .hoon_signatures
-            .get(&(HoonIdentity::of(hoon)))
-            .copied()?;
-        Some((root, sig.hoon_nodes))
     }
 
     /// `hoon_signatures_spot_sensitive` over recycled scratch storage: the
@@ -2427,7 +2414,9 @@ impl<'a> Ut<'a> {
         self.bran_semi_memo = Default::default();
     }
 
+    #[cfg(test)]
     const NEST_MUG_BUCKET_LIMIT: usize = 32;
+    #[cfg(test)]
     const NEST_MUG_KEY_LIMIT: usize = 65_536;
     const HOON_CACHE_RAW_KEY_LIMIT: usize = 16_384;
     const BURP_TYPE_CACHE_LIMIT: usize = 65_536;
@@ -2435,20 +2424,14 @@ impl<'a> Ut<'a> {
     const HOON_CACHE_STRUCT_BUCKET_LIMIT: usize = 8;
     const SPEC_CACHE_KEY_LIMIT: usize = 16_384;
     const SPEC_CACHE_BUCKET_LIMIT: usize = 8;
-    const CORE_MINT_CACHE_KEY_LIMIT: usize = 16_384;
-    const CORE_MINT_CACHE_BUCKET_LIMIT: usize = 8;
+    #[cfg(test)]
     const MINT_CACHE_BUCKET_LIMIT: usize = 4;
+    #[cfg(test)]
     const MINT_CACHE_KEY_LIMIT: usize = 16_384;
-    const MULL_CACHE_BUCKET_LIMIT: usize = 4;
-    const MULL_CACHE_KEY_LIMIT: usize = 16_384;
     const REDO_CACHE_BUCKET_LIMIT: usize = 8;
     const REDO_CACHE_KEY_LIMIT: usize = 32_768;
     const REST_CACHE_BUCKET_LIMIT: usize = 8;
     const REST_CACHE_KEY_LIMIT: usize = 32_768;
-    const FISH_CACHE_BUCKET_LIMIT: usize = 8;
-    const FISH_CACHE_KEY_LIMIT: usize = 32_768;
-    const TYPE_BINARY_BOUNDARY_CACHE_BUCKET_LIMIT: usize = 8;
-    const TYPE_BINARY_BOUNDARY_CACHE_KEY_LIMIT: usize = 32_768;
     const BRAN_SEMI_CACHE_KEY_LIMIT: usize = 65_536;
     const BRAN_SEMI_CACHE_BUCKET_LIMIT: usize = 8;
     const HOLD_TYPE_CACHE_BUCKET_LIMIT: usize = 8;
@@ -3689,6 +3672,7 @@ impl<'a> Ut<'a> {
         }
     }
 
+    #[cfg(test)]
     fn mint_cache_key(&mut self, sut: Noun, gol: Noun, gen_sig: HoonSignature) -> MintKey<NounMug> {
         // mint's result depends on the active fan scope (%hold/%rest legs) and
         // on in-progress recursive-arm state, exactly like the sibling
@@ -4084,6 +4068,7 @@ impl<'a> Ut<'a> {
         NounMug(get_mug(noun, &space).unwrap_or_else(|| slab_mug(noun, &space)))
     }
 
+    #[cfg(test)]
     fn nest_mug_lookup(&mut self, sut: Noun, ref_: Noun) -> Result<Option<bool>> {
         let semantic = self.semantic_context_key();
         let key = TypeBinaryKey {
@@ -4105,6 +4090,7 @@ impl<'a> Ut<'a> {
         Ok(None)
     }
 
+    #[cfg(test)]
     fn nest_mug_register(&mut self, sut: Noun, ref_: Noun, result: bool) {
         let semantic = self.semantic_context_key();
         let key = TypeBinaryKey {
@@ -7418,12 +7404,6 @@ impl<'a> Ut<'a> {
         self.find(sut, Way::Read, wing)
     }
 
-    /// Noun-bridged `cnts_base_port` for still-noun callers (play_cnts/mint_cnts).
-    fn cnts_base_port_noun(&mut self, sut: Noun, wing: &WingType) -> Result<Port> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        self.cnts_base_port(sut_n, wing)
-    }
-
     /// CONTENT-keyed `native_of` for the recursive-type hot path (redo/repo/fire
     /// rebuild structurally-equal nouns at fresh addresses every level). The
     /// address-keyed decode memo misses on those, forcing a full re-walk + re-jam
@@ -7738,12 +7718,6 @@ impl<'a> Ut<'a> {
         let key = atom_to_string(key_atom)
             .map_err(|err| CompilerError::Decode(format!("arm key: {err}")))?;
         Ok(Arc::<str>::from(key))
-    }
-
-    fn core_context_from_payload(&mut self, payload: Noun) -> Result<Noun> {
-        // Canonical hoon-138 core construction stores the current subject as core context.
-        // Keep one path here: context is exactly the payload subject used to build the core.
-        Ok(payload)
     }
 
     // HOON138:arm=ut:mine lines=9768-9916 map=envelope status=partial reviewed=2026-03-06
@@ -8630,7 +8604,7 @@ impl<'a> Ut<'a> {
 
     /// Native-shadow `hint_type` (INC2): on the void/noun collapse hoon-138
     /// returns `payload` itself, so the native is the payload's own native.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn hint_type_n(
         &mut self,
         inner: Noun,
@@ -9628,14 +9602,6 @@ impl<'a> Ut<'a> {
         }
     }
 
-    /// Noun-bridged `wrap_type` for not-yet-flipped callers (C3). Drops as
-    /// callers flip.
-    fn wrap_type_noun(&mut self, typ: Noun, vair: Vair) -> Result<Noun> {
-        let native = native_of(&mut self.cx, typ, &self.slab.noun_space())?;
-        let r = self.wrap_type(native, vair)?;
-        Ok(live_to_noun(&mut self.cx, &r, self.slab))
-    }
-
     fn burp_fork_set_run(&mut self, set: Noun) -> Result<Noun> {
         let mut out = D(0);
         let mut stack = vec![set];
@@ -9773,12 +9739,6 @@ impl<'a> Ut<'a> {
             current = ty;
         }
         Ok(true)
-    }
-
-    /// Noun-bridged `feel` for still-noun callers.
-    fn feel_noun(&mut self, sut: Noun, wings: &[WingType]) -> Result<bool> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        self.feel(sut_n, wings)
     }
 
     fn take<F>(
@@ -9947,20 +9907,6 @@ impl<'a> Ut<'a> {
 
     fn lose(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
         self.chip(false, sut, gen)
-    }
-
-    /// Noun-bridged `gain` for still-noun callers (play_wtcl/mint_wtcl).
-    fn gain_noun(&mut self, sut: Noun, gen: &Hoon) -> Result<Noun> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        let r = self.gain(sut_n, gen)?;
-        Ok(live_to_noun(&mut self.cx, &r, self.slab))
-    }
-
-    /// Noun-bridged `lose` for still-noun callers (play_wtcl/mint_wtcl).
-    fn lose_noun(&mut self, sut: Noun, gen: &Hoon) -> Result<Noun> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        let r = self.lose(sut_n, gen)?;
-        Ok(live_to_noun(&mut self.cx, &r, self.slab))
     }
 
     fn chip(&mut self, how: bool, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
@@ -10667,6 +10613,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Noun-bridged `fuse` for not-yet-flipped callers (C4). Drops at C-final.
+    #[cfg(test)]
     fn fuse_noun(&mut self, sut: Noun, ref_: Noun) -> Result<Noun> {
         let sn = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let rn = native_of(&mut self.cx, ref_, &self.slab.noun_space())?;
@@ -10692,6 +10639,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Noun-bridged `miss` for not-yet-flipped callers (C5b). Drops at C-final.
+    #[cfg(test)]
     fn miss_noun(&mut self, sut: Noun, ref_: Noun) -> Result<bool> {
         let sn = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let rn = native_of(&mut self.cx, ref_, &self.slab.noun_space())?;
@@ -10959,6 +10907,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Noun-bridged `crop` for not-yet-flipped callers (C5). Drops at C-final.
+    #[cfg(test)]
     fn crop_noun(&mut self, sut: Noun, ref_: Noun) -> Result<Noun> {
         let sn = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let rn = native_of(&mut self.cx, ref_, &self.slab.noun_space())?;
@@ -11217,7 +11166,7 @@ impl<'a> Ut<'a> {
     /// mug-ordered set as one opaque leaf (RT-07), and the empty/single collapses
     /// yield void/the single member — `native_of` on the result captures all
     /// three cases byte-exactly without reordering the set.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn fork_from_options_n(&mut self, options: Vec<Noun>) -> Result<(Noun, NRc<NTy>)> {
         let noun = self.fork_from_options(options)?;
         let native = native_of(&mut self.cx, noun, &self.slab.noun_space())?;
@@ -11498,7 +11447,7 @@ impl<'a> Ut<'a> {
     /// native, run native mull, lower both result types. Drops as callers flip.
     /// Currently only exercised by tests (the live noun caller in wet.rs calls
     /// native `mull` directly with native_of'd args); kept for future callers.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn mull_noun(&mut self, sut: Noun, gol: Noun, dox: Noun, gen: &Hoon) -> Result<(Noun, Noun)> {
         let space = self.slab.noun_space();
         let sut_n = native_of(&mut self.cx, sut, &space)?;
@@ -13149,6 +13098,7 @@ fn tend_big(vein: &[Option<BigUint>]) -> Result<BigUint> {
 /// is live); reclaiming the stale copies (ping-pong out-slabs or
 /// checkpoint/rewind around the subject copy) is the memory optimization to add
 /// once correctness is established.
+#[cfg(test)]
 pub(crate) fn mint_tisgar_chain_chunked(
     out_slab: &mut NounSlab,
     sut: Noun,
@@ -13193,7 +13143,7 @@ pub(crate) fn mint_tisgar_chain_chunked(
 
     let mut formula = layer_formulas.pop().expect("compose chain has a body");
     while let Some(head) = layer_formulas.pop() {
-        formula = comb(out_slab, head, formula)?;
+        formula = crate::native::formula::comb(out_slab, head, formula)?;
     }
     Ok((subject, formula))
 }
@@ -13219,6 +13169,7 @@ fn ty_atom(slab: &mut NounSlab, aura: &str, value: Option<Noun>) -> Noun {
     T(slab, &[tag, aura_noun, bits])
 }
 
+#[cfg(test)]
 fn ty_face(slab: &mut NounSlab, name: &str, inner: Noun) -> Noun {
     let name_noun = term_to_noun(slab, name);
     ty_face_tool(slab, name_noun, inner)
@@ -13375,17 +13326,16 @@ use crate::native::ir::intern::{
 use crate::native::ir::leaf::Leaf as NLeaf;
 use crate::native::ir::ty::{garb_native, visit_fork_set_members, Garb as NGarb, Type as NTy};
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_noun_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
     (ty_noun(slab), live_intern(cx, NTy::Noun))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_void_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
     (ty_void(slab), live_intern(cx, NTy::Void))
 }
 
-#[allow(dead_code)]
 fn ty_atom_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13397,7 +13347,7 @@ fn ty_atom_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_cell_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13409,7 +13359,7 @@ fn ty_cell_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_face_tool_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13434,7 +13384,7 @@ fn ty_face_tool_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_face_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13445,7 +13395,7 @@ fn ty_face_n(
     ty_face_tool_n(cx, slab, name_noun, inner)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_hint_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13480,7 +13430,7 @@ fn ty_hint_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_hold_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13499,7 +13449,7 @@ fn ty_hold_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_core_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13530,14 +13480,13 @@ fn ty_core_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_fork_n(cx: &mut Context, slab: &mut NounSlab, options: Vec<Noun>) -> (Noun, NRc<NTy>) {
     let noun = ty_fork(slab, options);
     let native = native_of(cx, noun, &slab.noun_space()).expect("ty_fork_n native");
     (noun, native)
 }
 
-#[allow(dead_code)]
 fn ty_bool_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
     let noun = ty_bool(slab);
     let native = native_of(cx, noun, &slab.noun_space()).expect("ty_bool_n native");
@@ -14550,7 +14499,7 @@ fn cell_type(slab: &mut NounSlab, head: Noun, tail: Noun) -> Result<Noun> {
 }
 
 /// Native cell type constructor: collapse cell(void,_)/cell(_,void) to void.
-#[allow(dead_code)]
+#[cfg(test)]
 fn cell_type_n(
     cx: &mut Context,
     slab: &mut NounSlab,

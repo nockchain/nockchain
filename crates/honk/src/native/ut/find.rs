@@ -56,6 +56,7 @@ impl<'a> Ut<'a> {
 
     /// Noun-bridged `find` for still-noun callers (mint/play boundary). Returns a
     /// Port carrying native types; the caller decides how to consume it.
+    #[cfg(test)]
     pub(super) fn find_noun(&mut self, sut: Noun, way: Way, wing: &WingType) -> Result<Port> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.find(sut_n, way, wing)
@@ -84,6 +85,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Noun-bridged `fend` for still-noun callers (mint_wthx). Returns a native typ.
+    #[cfg(test)]
     pub(super) fn fend_noun(
         &mut self,
         sut: Noun,

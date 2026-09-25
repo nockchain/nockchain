@@ -7,7 +7,6 @@
 //! Nouns are retained or materialized only where compiler semantics require a
 //! noun boundary. `crate::native::ut` uses these arenas throughout minting,
 //! type operations, formula construction, and seminoun completion.
-#![allow(dead_code)]
 
 pub mod core;
 pub mod formula;

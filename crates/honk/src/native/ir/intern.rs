@@ -6,7 +6,6 @@
 //! are interned bottom-up; child IDs make shallow hashing and exact comparison
 //! constant-time with respect to descendant depth. Exact Hoon nouns retained by
 //! leaves and forks remain the serialization witnesses at noun boundaries.
-#![allow(dead_code)]
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -123,24 +122,16 @@ fn pair(n: Noun, space: &NounSpace) -> Result<(Noun, Noun)> {
 }
 
 // ---------------------------------------------------------------------------
-// Live native-mint construction-port harness (flag-gated by HONK_NATIVE_TYPES).
+// Per-compile hash-consing table.
 //
-// This is the first real step of the construction port: as `mint` builds each
-// core's type noun, we build the corresponding interned native type into one
-// PERSISTENT table (shared pointer-memo across the whole compile). It runs
-// alongside the noun path (which stays the live oracle), so it is additive and
-// safe, and it measures the thing the whole migration turns on: how much the
-// intern table collapses the mint-time type duplication (subject-deepening).
-//
-// Single-thread, single-compile harness — call `live_reset` at compile start.
+// Every native type is interned into one table owned by the compile's
+// `Context`, so structurally equal types share one canonical handle.
 // ---------------------------------------------------------------------------
 
-/// The `intern_type_noun`/`native_of` decode memo: source-noun-address ->
-/// canonical interned `Rc<Type>`. Its KEYS are slab addresses; with the frame
-/// arena retired the compile slab never reclaims a frame, so an address is never
-/// recycled within a compile and an entry can never go stale (its source noun
-/// stays live for the whole compile). The memo therefore just accumulates for the
-/// life of the `Context` (one compile) — a plain map, no frame-scoped eviction.
+/// Decode memo for `intern_type_noun` and `native_of`, from source noun
+/// identity to the canonical interned type. The compile slab never reclaims
+/// memory, so a source address is never reused within a compile and an entry
+/// never goes stale. Entries accumulate for the life of the `Context`.
 struct InternMemo {
     map: HashMap<NounIdentity, Rc<Type>>,
 }
@@ -166,8 +157,6 @@ impl InternMemo {
 struct LiveIntern {
     table: TypeTable,
     memo: InternMemo,
-    cores: u64,
-    next_report: u64,
 }
 
 impl LiveIntern {
@@ -175,50 +164,34 @@ impl LiveIntern {
         LiveIntern {
             table: TypeTable::new(),
             memo: InternMemo::new(),
-            cores: 0,
-            next_report: 100_000,
         }
     }
 }
 
-/// Owned per-compile native-IR state.
+/// Per-compile native IR state, owned by `Ut` as its `cx` field.
 ///
-/// Consolidates every per-compile native-IR cache that used to be a module
-/// thread-local (the hash-cons core `live`, the encode memos, the boundary
-/// caches, and the content-keyed decode / fork caches) into one struct OWNED by
-/// `Ut` (as the `cx` field). The surface free functions in this module take
-/// `&mut Context` / `&Context`; a fresh `Ut` gets a fresh `Context`, which gives
-/// each compile an isolated cache universe (replacing the old per-compile
-/// `live_reset`).
-///
-/// `new` starts every field empty (and `live` is eagerly constructed, replacing
-/// the former thread-local's lazy `Option<LiveIntern>` + `get_or_insert_with`).
-/// Dropping the owning `Ut` drops this context and every handle together; the
-/// arena is deliberately not reset while `TypeRef` handles may be live.
+/// Holds the hash-consing table, the encode memos, and the native boundary
+/// caches. Each `Ut` gets a fresh `Context`, so compiles never share cache
+/// entries. Dropping the owning `Ut` drops this context and every handle into
+/// it together; the table is never reset while `TypeRef` handles may be live.
 pub struct Context {
-    // --- LIVE (hash-cons core): was `static LIVE: RefCell<Option<LiveIntern>>` ---
-    // `LiveIntern` bundles `table: TypeTable`, `memo: InternMemo`, `cores`,
-    // `next_report`. It was `Option` only so a thread-local could lazily create it
-    // via `get_or_insert_with(LiveIntern::new)`; an owned `Context` creates it
-    // eagerly in `new`, so the `Option` is unnecessary.
     live: LiveIntern,
 
-    // --- encode memos ---
-    to_noun_memo: HashMap<TypeId, Noun>,   // was TO_NOUN_MEMO
-    leaf_memo: HashMap<JamIdentity, Noun>, // was LEAF_MEMO
+    // Encode memos.
+    to_noun_memo: HashMap<TypeId, Noun>,
+    leaf_memo: HashMap<JamIdentity, Noun>,
 
-    // --- native boundary caches ---
-    nest_cache: HashMap<TypeBinaryKey<TypeId>, bool>, // NEST_CACHE
-    core_mint_cache: HashMap<CoreMintKey, (Rc<Type>, FormulaId)>, // CORE_MINT_CACHE
-    mint_cache: HashMap<MintKey<TypeId>, (Rc<Type>, FormulaId)>, // MINT_CACHE
-    mull_cache: HashMap<MullKey, (Rc<Type>, Rc<Type>)>, // MULL_CACHE
-    fuse_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>, // FUSE_CACHE
-    crop_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<FishKey, FormulaId>,          // FISH_CACHE
+    // Boundary caches keyed by canonical type IDs.
+    nest_cache: HashMap<TypeBinaryKey<TypeId>, bool>,
+    core_mint_cache: HashMap<CoreMintKey, (Rc<Type>, FormulaId)>,
+    mint_cache: HashMap<MintKey<TypeId>, (Rc<Type>, FormulaId)>,
+    mull_cache: HashMap<MullKey, (Rc<Type>, Rc<Type>)>,
+    fuse_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>,
+    crop_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>,
+    fish_cache: HashMap<FishKey, FormulaId>,
 
-    // --- native_of content-keyed decode cache + fork cache ---
-    native_of_mug_memo: HashMap<NounMug, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
-    fork_cache: HashMap<Vec<TypeId>, Rc<Type>>,          // FORK_CACHE
+    // Content-keyed `native_of` decode cache; mug buckets are compared exactly.
+    native_of_mug_memo: HashMap<NounMug, Vec<Rc<Type>>>,
 
     // Sorted, deduplicated hold legs reachable from each canonical type.
     // Computed bottom-up over the arena DAG once per distinct TypeId.
@@ -239,7 +212,6 @@ impl Context {
             crop_cache: HashMap::new(),
             fish_cache: HashMap::new(),
             native_of_mug_memo: HashMap::new(),
-            fork_cache: HashMap::new(),
             legset_memo: HashMap::new(),
         }
     }
@@ -254,19 +226,6 @@ impl Default for Context {
 #[inline(always)]
 fn canonical_id(ty: &Rc<Type>) -> TypeId {
     ty.arena_id()
-}
-
-static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// Look up a fork by its sorted, deduplicated canonical option IDs.
-/// Equal option sets reuse the same interned fork for the lifetime of `cx`.
-pub fn fork_cache_lookup(cx: &Context, key: &[TypeId]) -> Option<Rc<Type>> {
-    cx.fork_cache.get(key).cloned()
-}
-
-/// Store a fork keyed by its sorted, deduplicated canonical option IDs.
-pub fn fork_cache_store(cx: &mut Context, key: Vec<TypeId>, fork: Rc<Type>) {
-    cx.fork_cache.insert(key, fork);
 }
 
 /// Look up the sorted, deduplicated hold legs reachable from a canonical type.
@@ -604,7 +563,12 @@ pub fn fish_cache_store(
     cx.fish_cache.insert(key, result);
 }
 
-/// Whether the live native-type harness is on (`HONK_NATIVE_TYPES`), cached.
+#[cfg(test)]
+static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether `HONK_NATIVE_TYPES` is set. Test constructors then cross-check each
+/// native type against the noun they build.
+#[cfg(test)]
 pub fn live_enabled() -> bool {
     use std::sync::atomic::Ordering;
     match LIVE_ENABLED.load(Ordering::Relaxed) {
@@ -824,6 +788,7 @@ pub fn live_leaf_to_noun(cx: &mut Context, leaf: &Leaf, dst: &mut NounSlab) -> N
 
 /// Live byte-exact oracle: panic unless `to_noun(native)` jams identically to the
 /// `noun` it shadows. The per-node validation for the construction port.
+#[cfg(test)]
 pub fn assert_native_eq(noun: Noun, native: &Rc<Type>, space: &NounSpace) {
     let mut a: NounSlab = NounSlab::new();
     a.copy_into(noun, space);

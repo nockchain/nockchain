@@ -6,7 +6,6 @@
 //! references it, its per-arm formula cache must preserve the **defining** fan
 //! scope, and it must not be evicted while live. `%hold` is a FINITE lazy node
 //! (subject + native gene), never a cyclic `Rc` (cycles leak — plan §3.6).
-#![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
