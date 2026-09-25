@@ -5,6 +5,9 @@
 //!
 //! Added to close branch-coverage gaps; see the coverage report in the PR.
 
+// `args!` must yield a Vec for the call sites that extend it.
+#![allow(clippy::useless_vec)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -92,7 +95,9 @@ fn deps_tree(root: &Path) -> PathBuf {
     write(&deps, "common/raw.hoon", "[%raw (add 1 2)]\n");
     // Same bytes as raw.hoon: compiled once and reused by content.
     write(&deps, "common/raw-copy.hoon", "[%raw (add 1 2)]\n");
-    write(&deps, "common/deep.hoon", "/=  inner  /common/raw\n[%deep inner]\n");
+    write(
+        &deps, "common/deep.hoon", "/=  inner  /common/raw\n[%deep inner]\n",
+    );
     write(&deps, "data/blob.jam", b"hi\x01\x02\x00\x00");
     write(
         &deps,
@@ -100,9 +105,7 @@ fn deps_tree(root: &Path) -> PathBuf {
         "/=  raw  /common/raw\n/=  copy  /common/raw-copy\n/=  deep  /common/deep\n/*  blob  %jam  /data/blob/jam\n[raw copy deep p.blob q.blob]\n",
     );
     write(
-        &deps,
-        "app/kernel.hoon",
-        "/=  raw  /common/raw\n|=  hash=@uvI\n^-  *\n[hash raw]\n",
+        &deps, "app/kernel.hoon", "/=  raw  /common/raw\n|=  hash=@uvI\n^-  *\n[hash raw]\n",
     );
     write(&deps, "app/gate.hoon", "|=  a=@ud\n[a (add a 1)]\n");
     deps
@@ -144,7 +147,10 @@ fn c6_cli_argument_errors_print_usage_and_exit_2() {
         (&["--prelude"], "missing value after --prelude"),
         (&["--sut-jam"], "missing value after --sut-jam"),
         (&["--cache-dir"], "missing value after --cache-dir"),
-        (&["--batch-manifest"], "missing value after --batch-manifest"),
+        (
+            &["--batch-manifest"],
+            "missing value after --batch-manifest",
+        ),
         (
             &["--dump-wrapper-assets"],
             "missing value after --dump-wrapper-assets",
@@ -155,12 +161,7 @@ fn c6_cli_argument_errors_print_usage_and_exit_2() {
         ),
         (&["--bogus"], "unknown argument: --bogus"),
         (
-            &[
-                "--dump-wrapper-assets",
-                "d",
-                "--dump-native-wrapper-assets",
-                "e",
-            ],
+            &["--dump-wrapper-assets", "d", "--dump-native-wrapper-assets", "e"],
             "are mutually exclusive",
         ),
         (
@@ -188,13 +189,7 @@ fn c6_cli_argument_errors_print_usage_and_exit_2() {
             "cannot be combined with --output",
         ),
         (
-            &[
-                "--dump-native-wrapper-assets",
-                "d",
-                "--batch-manifest",
-                "m",
-                "deps",
-            ],
+            &["--dump-native-wrapper-assets", "d", "--batch-manifest", "m", "deps"],
             "cannot be combined with --output",
         ),
         (
@@ -311,7 +306,10 @@ fn c6_cli_subcommands_and_runtime_errors() {
             "cyclic native dependency",
         ),
         (
-            args!["--arbitrary", "--cache-dir", cache, "--output", out, "--prelude", prelude, cyclic, deps],
+            args![
+                "--arbitrary", "--cache-dir", cache, "--output", out, "--prelude", prelude, cyclic,
+                deps
+            ],
             "cyclic native dependency",
         ),
     ] {
@@ -355,7 +353,10 @@ fn c6_cli_dynock_outputs_wrap_the_formula_in_a_trap() {
     );
     // The trap is [[1 formula] 0].
     let trap = untyped.tail().as_cell().expect("trap");
-    assert_eq!(trap.tail().as_atom().expect("payload").as_u64().ok(), Some(0));
+    assert_eq!(
+        trap.tail().as_atom().expect("payload").as_u64().ok(),
+        Some(0)
+    );
     let battery = trap.head().as_cell().expect("battery");
     assert_eq!(battery.head().as_atom().expect("op").as_u64().ok(), Some(1));
 }
@@ -373,16 +374,24 @@ fn c6_cli_subject_type_override_and_relative_output() {
     let sut = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/honc-type-138.jam");
     let prelude = prelude();
     let output = honk(
-        &args!["--arbitrary", "--no-dbug", "--dbug", "--no-vet", "--strict", "--sut-jam", sut, "--output", "sut.jam", "--prelude", prelude, entry, deps],
+        &args![
+            "--arbitrary", "--no-dbug", "--dbug", "--no-vet", "--strict", "--sut-jam", sut,
+            "--output", "sut.jam", "--prelude", prelude, entry, deps
+        ],
         cwd,
     );
     assert_ok(&output);
-    assert_eq!(fs::read(cwd.join("sut.jam")).expect("sut artifact"), reference);
+    assert_eq!(
+        fs::read(cwd.join("sut.jam")).expect("sut artifact"),
+        reference
+    );
 
     // Without spots the artifact is smaller; the IR round trip checks the
     // subject type without changing the output.
     let output = honk_env(
-        &args!["--arbitrary", "--no-dbug", "--output", "nodbug.jam", "--prelude", prelude, entry, deps],
+        &args![
+            "--arbitrary", "--no-dbug", "--output", "nodbug.jam", "--prelude", prelude, entry, deps
+        ],
         cwd,
         &[("HONK_IR_ROUNDTRIP", "1")],
     );
@@ -397,7 +406,10 @@ fn c6_cli_subject_type_override_and_relative_output() {
         write(cwd, "bad-sut.jam", slab.jam())
     };
     let output = honk(
-        &args!["--arbitrary", "--sut-jam", bad_sut, "--output", "bad.jam", "--prelude", prelude, entry, deps],
+        &args![
+            "--arbitrary", "--sut-jam", bad_sut, "--output", "bad.jam", "--prelude", prelude,
+            entry, deps
+        ],
         cwd,
     );
     assert_eq!(output.status.code(), Some(1));
@@ -479,7 +491,11 @@ fn c6_cli_batch_manifest_matches_single_builds_and_reuses_the_cache() {
     )
     .expect("edit entry");
     let fresh = build(cwd, Some("--arbitrary"), &arb, &deps, "fresh-arb.jam");
-    fs::write(&manifest, format!("bare.jam\t{}\tarbitrary\n", arb.display())).expect("manifest");
+    fs::write(
+        &manifest,
+        format!("bare.jam\t{}\tarbitrary\n", arb.display()),
+    )
+    .expect("manifest");
     let output = honk(
         &args!["--batch-manifest", manifest, "--cache-dir", cache, "--prelude", prelude, deps],
         cwd,
@@ -510,7 +526,9 @@ fn c6_cli_batch_manifest_matches_single_builds_and_reuses_the_cache() {
 
     for (contents, expected) in [
         ("only\ttwo\n", "expected tab-separated output, entry, mode"),
-        ("o.jam\te.hoon\tweird\n", "unknown batch compile mode: weird"),
+        (
+            "o.jam\te.hoon\tweird\n", "unknown batch compile mode: weird",
+        ),
         ("\n\n", "batch manifest has no entries"),
     ] {
         fs::write(&manifest, contents).expect("manifest");
@@ -543,20 +561,20 @@ fn c6_cli_non_canonical_preludes_are_minted_natively() {
     let kernel = deps.join("app/kernel.hoon");
     let canonical = build(cwd, Some("--arbitrary"), &arb, &deps, "canonical.jam");
 
-    let run = |prelude: &Path, mode: Option<&str>, entry: &Path, env: &[(&str, &str)], name: &str| {
-        let output_path = cwd.join(name);
-        let mut args: Vec<Arg<'_>> = args![];
-        if let Some(mode) = mode.as_ref() {
-            args.push(mode);
-        }
-        args.extend(args!["--output", output_path, "--prelude", prelude, entry, deps]);
-        let output = honk_env(&args, cwd, env);
-        assert_ok(&output);
-        (
-            fs::read(output_path).expect("artifact"),
-            stderr(&output),
-        )
-    };
+    let run =
+        |prelude: &Path, mode: Option<&str>, entry: &Path, env: &[(&str, &str)], name: &str| {
+            let output_path = cwd.join(name);
+            let mut args: Vec<Arg<'_>> = args![];
+            if let Some(mode) = mode.as_ref() {
+                args.push(mode);
+            }
+            args.extend(args![
+                "--output", output_path, "--prelude", prelude, entry, deps
+            ]);
+            let output = honk_env(&args, cwd, env);
+            assert_ok(&output);
+            (fs::read(output_path).expect("artifact"), stderr(&output))
+        };
 
     // The data import uses the local `[p=@ud q=@]` octs type here.
     let (plain_arb, log) = run(
@@ -567,7 +585,10 @@ fn c6_cli_non_canonical_preludes_are_minted_natively() {
         "plain-arb.jam",
     );
     // The prelude is not `=<`, so it is minted whole.
-    assert!(log.contains("mint_honc_formula path: prelude root ="), "{log}");
+    assert!(
+        log.contains("mint_honc_formula path: prelude root ="),
+        "{log}"
+    );
     assert!(!log.contains("chunked prelude"), "{log}");
     assert!(log.contains("[honk] start"), "{log}");
     assert_ne!(plain_arb, canonical);
@@ -609,7 +630,17 @@ fn c6_cli_non_canonical_preludes_are_minted_natively() {
     let sut_prelude = {
         let output_path = cwd.join("plain-sut.jam");
         let output = honk(
-            &args!["--arbitrary", "--sut-jam", sut, "--output", output_path, "--prelude", plain, deps.join("app/gate.hoon"), deps],
+            &args![
+                "--arbitrary",
+                "--sut-jam",
+                sut,
+                "--output",
+                output_path,
+                "--prelude",
+                plain,
+                deps.join("app/gate.hoon"),
+                deps
+            ],
             cwd,
         );
         assert_ok(&output);
@@ -658,7 +689,13 @@ fn c6_cli_wrapper_asset_dumps_agree() {
     ));
     let mut names: Vec<String> = fs::read_dir(&native)
         .expect("native dir")
-        .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     assert_eq!(names.len(), 11, "{names:?}");
@@ -670,7 +707,12 @@ fn c6_cli_wrapper_asset_dumps_agree() {
         );
     }
     // The dynamic dump also serializes the cold jet state.
-    assert!(fs::metadata(dynamic.join("honc-cold-138.jam")).expect("cold").len() > 0);
+    assert!(
+        fs::metadata(dynamic.join("honc-cold-138.jam"))
+            .expect("cold")
+            .len()
+            > 0
+    );
 
     // An explicit subject type and the diagnostics do not change the dump.
     let sut = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/honc-type-138.jam");
@@ -681,7 +723,11 @@ fn c6_cli_wrapper_asset_dumps_agree() {
         &[("HONK_IR_ROUNDTRIP", "1"), ("NATIVE_HOON_TRACE", "1")],
     );
     assert_ok(&output);
-    assert!(stderr(&output).contains("[ir-intern] prelude TYPE"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("[ir-intern] prelude TYPE"),
+        "{}",
+        stderr(&output)
+    );
     for name in &names {
         assert_eq!(
             fs::read(native.join(name)).expect("native asset"),
@@ -699,7 +745,11 @@ fn c6_cli_wrapper_asset_dumps_agree() {
         &[("NATIVE_HOON_TRACE", "1")],
     );
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(stderr(&output).contains("[honk] failed"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("[honk] failed"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -708,8 +758,7 @@ fn c6_cli_changed_softed_constraints_are_delegated_to_hoonc() {
     let cwd = temp.path();
     let deps = cwd.join("deps");
     let softed = write(
-        &deps,
-        "common/entry.hoon",
+        &deps, "common/entry.hoon",
         "/#  softed-constraints\n|%\n++  value  softed-constraints\n--\n",
     );
     write(&deps, "dat/softed-constraints.hoon", "::  forked\n42\n");
@@ -741,5 +790,8 @@ fn c6_cli_changed_softed_constraints_are_delegated_to_hoonc() {
     ));
     assert_eq!(fs::read(cwd.join("b/softed.jam")).expect("softed"), single);
     let native_plain = build(cwd, Some("--dynock"), &plain, &deps, "plain.jam");
-    assert_eq!(fs::read(cwd.join("b/plain.jam")).expect("plain"), native_plain);
+    assert_eq!(
+        fs::read(cwd.join("b/plain.jam")).expect("plain"),
+        native_plain
+    );
 }

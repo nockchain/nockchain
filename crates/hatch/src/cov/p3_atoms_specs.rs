@@ -921,8 +921,8 @@ fn cut_edges() {
     assert_eq!(cut(0, 201, 1, &bb).to_biguint(), big(0));
     assert_eq!(lsh(3, usize::MAX, &x).to_biguint(), big(0));
     assert_eq!(rsh(3, usize::MAX, &x).to_biguint(), big(0));
-    assert_eq!(lsh(3, 1, &x).to_biguint(), big(0xdead_beef00));
-    assert_eq!(rsh(3, 1, &x).to_biguint(), big(0xdead_be));
+    assert_eq!(lsh(3, 1, &x).to_biguint(), big(0x00de_adbe_ef00));
+    assert_eq!(rsh(3, 1, &x).to_biguint(), big(0x00de_adbe));
 }
 
 #[test]

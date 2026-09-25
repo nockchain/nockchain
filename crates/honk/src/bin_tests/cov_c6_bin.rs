@@ -2,12 +2,12 @@
 //!
 //! Added to close branch-coverage gaps; see the coverage report in the PR.
 
-#[allow(unused_imports)]
-use super::*;
-
 use std::sync::atomic::AtomicU64;
 
 use hatch::ast::hoon::{Note, Pint, Spot};
+
+#[allow(unused_imports)]
+use super::*;
 
 /// A throwaway directory tree.
 struct Tree {
@@ -157,10 +157,11 @@ fn batch_manifests_parse_modes_and_directory_lists() {
 
     for (contents, expected) in [
         (
-            "a.jam\ta.hoon\n",
-            ":1: expected tab-separated output, entry, mode",
+            "a.jam\ta.hoon\n", ":1: expected tab-separated output, entry, mode",
         ),
-        ("\na.jam\ta.hoon\tbogus\n", "unknown batch compile mode: bogus"),
+        (
+            "\na.jam\ta.hoon\tbogus\n", "unknown batch compile mode: bogus",
+        ),
         ("\n   \n", "batch manifest has no entries"),
     ] {
         let manifest = tree.write("bad.tsv", contents);
@@ -178,7 +179,7 @@ fn source_line(source: &str, line: u64) -> &str {
 }
 
 /// The text a 1-based, end-exclusive single-line spot covers.
-fn spot_text<'a>(source: &'a str, start: SourcePosition, end: SourcePosition) -> &'a str {
+fn spot_text(source: &str, start: SourcePosition, end: SourcePosition) -> &str {
     assert_eq!(start.0, end.0);
     &source_line(source, start.0)[start.1 as usize - 1..end.1 as usize - 1]
 }
@@ -247,10 +248,7 @@ fn wrapper_sources_align_with_native_battery_spots() {
     );
     // Batteries that only the dynamic wrappers produce stay empty.
     for unused in [
-        batteries.dir_hash,
-        batteries.mint_gun,
-        batteries.swet_gate,
-        batteries.shot_gun,
+        batteries.dir_hash, batteries.mint_gun, batteries.swet_gate, batteries.shot_gun,
         batteries.standard_output,
     ] {
         assert!(noun_is_zero(unused));
@@ -567,9 +565,7 @@ fn subject_type_jams_decode_or_are_rejected() {
         }),
     ] {
         let err = cue_subject_type_to_slab(&mut slab, &bad).expect_err("not a type");
-        assert!(err
-            .to_string()
-            .contains("did not contain a Hoon type noun"));
+        assert!(err.to_string().contains("did not contain a Hoon type noun"));
     }
     // Well-formed jams cue onto a stack as well as into a slab.
     let mut stack = NockStack::new(1 << 16, 0);
@@ -680,8 +676,8 @@ fn nock_panics_become_errors() {
     })
     .expect_err("panic");
     assert_eq!(err.to_string(), "owned: nock stack panic: boom");
-    let err = catch_nock_panic("static", || -> Result<()> { panic!("static boom") })
-        .expect_err("panic");
+    let err =
+        catch_nock_panic("static", || -> Result<()> { panic!("static boom") }).expect_err("panic");
     assert_eq!(err.to_string(), "static: nock stack panic: static boom");
     let err = catch_nock_panic("opaque", || -> Result<()> { std::panic::panic_any(7u8) })
         .expect_err("panic");
@@ -886,7 +882,10 @@ fn entry_paths_for_directory_hashes() {
         lexical_absolute_path(Path::new("/x/../y/.")).unwrap(),
         PathBuf::from("/y")
     );
-    assert_eq!(lexical_absolute_path(Path::new("./a")).unwrap(), cwd.join("a"));
+    assert_eq!(
+        lexical_absolute_path(Path::new("./a")).unwrap(),
+        cwd.join("a")
+    );
 }
 
 #[test]
@@ -965,17 +964,12 @@ fn directory_hash_follows_the_file_set() {
     let listed = directory_mug_with_files(
         &entry,
         &deps,
-        Some(&[
-            entry.clone(),
-            raw.clone(),
-            data.clone(),
-            tree.path("deps/none.hoon"),
-        ]),
+        Some(&[entry.clone(), raw.clone(), data.clone(), tree.path("deps/none.hoon")]),
     )
     .expect("mug");
     assert_eq!(all, listed);
-    let partial = directory_mug_with_files(&entry, &deps, Some(&[entry.clone(), raw.clone()]))
-        .expect("mug");
+    let partial =
+        directory_mug_with_files(&entry, &deps, Some(&[entry.clone(), raw.clone()])).expect("mug");
     assert_ne!(all, partial);
     // Files hoonc does not read (by extension) do not change the hash.
     tree.write("deps/notes.md", "ignored");
@@ -1067,25 +1061,18 @@ fn manifest_paths_relative_to_the_dependency_root() {
     }
     // A file from another copy of the tree maps by the shared root suffix.
     assert_eq!(
-        hoonc_manifest_relative_path(
-            Path::new("/x/y/deps"),
-            Path::new("/other/deps/q/r.hoon")
-        )
-        .unwrap(),
+        hoonc_manifest_relative_path(Path::new("/x/y/deps"), Path::new("/other/deps/q/r.hoon"))
+            .unwrap(),
         "/q/r.hoon"
     );
     assert!(
         hoonc_manifest_relative_path(Path::new("/x/y/deps"), Path::new("/other/deps")).is_err()
     );
-    assert!(
-        hoonc_manifest_relative_path(Path::new("/x/y/deps"), Path::new("/p/q.hoon")).is_err()
-    );
+    assert!(hoonc_manifest_relative_path(Path::new("/x/y/deps"), Path::new("/p/q.hoon")).is_err());
 
-    let allowed = hoonc_directory_allowed_paths(
-        &directory,
-        &[file.clone(), directory.join("app/none.hoon")],
-    )
-    .expect("allowed");
+    let allowed =
+        hoonc_directory_allowed_paths(&directory, &[file.clone(), directory.join("app/none.hoon")])
+            .expect("allowed");
     assert_eq!(allowed.into_iter().collect::<Vec<_>>(), ["/app/a.hoon"]);
 }
 

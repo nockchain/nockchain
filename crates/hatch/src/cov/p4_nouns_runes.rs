@@ -2,9 +2,6 @@
 //!
 //! Added to close branch-coverage gaps; see the coverage report in the PR.
 
-#[allow(unused_imports)]
-use crate::utils::*;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,6 +14,8 @@ use nockvm_macros::tas;
 use num_bigint::BigUint;
 
 use crate::ast::hoon::*;
+#[allow(unused_imports)]
+use crate::utils::*;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -65,10 +64,7 @@ fn spot() -> Spot {
 }
 
 fn help_expr() -> NounExpr {
-    NounExpr::Cell(
-        b(atom(0)),
-        b(NounExpr::Cell(b(atom(0x6f64)), b(atom(0)))),
-    )
+    NounExpr::Cell(b(atom(0)), b(NounExpr::Cell(b(atom(0x6f64)), b(atom(0)))))
 }
 
 fn tome(arms: &[(&str, Hoon)]) -> Tome {
@@ -184,7 +180,9 @@ fn roundtrip_leaf_and_internal_hoon_forms() {
         s("ud"),
         NounExpr::Cell(
             b(atom(1)),
-            b(NounExpr::ParsedAtom(ParsedAtom::Big(BigUint::from(1u8) << 200))),
+            b(NounExpr::ParsedAtom(ParsedAtom::Big(
+                BigUint::from(1u8) << 200,
+            ))),
         ),
     ));
     roundtrip(Hoon::Tell(vec![limb("a"), rock(1)]));
@@ -279,7 +277,12 @@ fn roundtrip_bar_col_cen_dot_ket_forms() {
         b(rock(1)),
         vec![(wing("b"), rock(2))],
     ));
-    roundtrip(Hoon::CenKet(b(limb("a")), b(rock(1)), b(rock(2)), b(rock(3))));
+    roundtrip(Hoon::CenKet(
+        b(limb("a")),
+        b(rock(1)),
+        b(rock(2)),
+        b(rock(3)),
+    ));
     roundtrip(Hoon::CenLus(b(limb("a")), b(rock(1)), b(rock(2))));
     roundtrip(Hoon::CenSig(wing("a"), b(limb("b")), vec![rock(1)]));
     roundtrip(Hoon::CenTis(wing("a"), vec![(wing("b"), rock(1))]));
@@ -353,7 +356,12 @@ fn roundtrip_sig_mic_tis_wut_zap_forms() {
     roundtrip(Hoon::TisFas(Skin::Term(s("a")), b(rock(1)), b(limb("a"))));
     roundtrip(Hoon::TisMic(Skin::Term(s("a")), b(limb("a")), b(rock(1))));
     roundtrip(Hoon::TisDot(wing("a"), b(rock(1)), b(limb("a"))));
-    roundtrip(Hoon::TisWut(wing("a"), b(rock(1)), b(rock(2)), b(limb("a"))));
+    roundtrip(Hoon::TisWut(
+        wing("a"),
+        b(rock(1)),
+        b(rock(2)),
+        b(limb("a")),
+    ));
     roundtrip(Hoon::TisGal(b(rock(1)), b(rock(2))));
     roundtrip(Hoon::TisHep(b(rock(1)), b(rock(2))));
     roundtrip(Hoon::TisGar(b(rock(1)), b(rock(2))));
@@ -580,14 +588,8 @@ fn hand_core_and_face_types_encode_but_do_not_decode() {
 
     let mut tune_map = HashMap::new();
     tune_map.insert(s("a"), Some(rock(1)));
-    for face in [
-        FaceType::Term(s("a")),
-        FaceType::Tune((tune_map, vec![limb("b")])),
-    ] {
-        let hoon = Hoon::Hand(
-            b(Type::Face(face, b(Type::NounExpr))),
-            Nock::Const(atom(0)),
-        );
+    for face in [FaceType::Term(s("a")), FaceType::Tune((tune_map, vec![limb("b")]))] {
+        let hoon = Hoon::Hand(b(Type::Face(face, b(Type::NounExpr))), Nock::Const(atom(0)));
         let (slab, noun) = encode(&hoon);
         let err = decode(&slab, noun).expect_err("face types are not decodable");
         assert!(err.contains("face decoding"), "{err}");
@@ -705,7 +707,11 @@ fn tome_decoding_keeps_non_null_what() {
     // tome = [what map], with `what` a nonzero atom and then a cell
     for cell_what in [false, true] {
         let res = decode_tagged(tas!(b"brcn"), |sl| {
-            let what = if cell_what { T(sl, &[D(1), D(2)]) } else { D(7) };
+            let what = if cell_what {
+                T(sl, &[D(1), D(2)])
+            } else {
+                D(7)
+            };
             let tome = T(sl, &[what, D(0)]);
             let node = T(sl, &[D(tas!(b"chap")), tome]);
             let map = T(sl, &[node, D(0), D(0)]);
@@ -795,10 +801,7 @@ fn woof_and_term_or_pair_decoders_cover_both_shapes() {
         let h = T(sl, &[D(0), D(1)]);
         T(sl, &[D(tas!(b"foo")), h])
     });
-    assert_eq!(
-        res,
-        Ok(Hoon::SigGar(TermOrPair::Term(s("foo")), b(ax(1))))
-    );
+    assert_eq!(res, Ok(Hoon::SigGar(TermOrPair::Term(s("foo")), b(ax(1)))));
 }
 
 #[test]
@@ -913,7 +916,10 @@ fn cached_materialization_matches_direct_encoding_for_nested_forms() {
     let mut cached = NounSlab::new();
     let mut count = 0usize;
     let noun = hoon_to_noun_with_cache(&mut cached, &hoon, |_, _| count += 1);
-    assert!(count >= 3, "outer hoon, hold gene, and its child are recorded");
+    assert!(
+        count >= 3,
+        "outer hoon, hold gene, and its child are recorded"
+    );
     let (mut direct_slab, direct) = encode(&hoon);
     cached.set_root(noun);
     direct_slab.set_root(direct);
@@ -997,7 +1003,10 @@ fn cenhep_four_space_docs_attach_only_to_the_gate() {
         panic!("expected %-");
     };
     assert!(!contains_help(&p));
-    assert!(!contains_help(&q), "a four-space doc on the sample is dropped");
+    assert!(
+        !contains_help(&q),
+        "a four-space doc on the sample is dropped"
+    );
 }
 
 #[test]
@@ -1074,8 +1083,7 @@ fn kettis_tall_wide_and_irregular_forms() {
 fn nested_postfix_docs_are_not_duplicated() {
     // ^+, =/, =. keep the doc their |- child already carries
     for src in [
-        "^+  |-  5  ::  cast doc\n6\n",
-        "=/  a  |-  5  ::  bind doc\na\n",
+        "^+  |-  5  ::  cast doc\n6\n", "=/  a  |-  5  ::  bind doc\na\n",
         "=.  a  |-  6  ::  edit doc\na\n",
     ] {
         let h = parse_one(src);
@@ -1120,14 +1128,8 @@ fn wuthax_forms() {
 
 #[test]
 fn sig_wide_and_tall_hint_forms() {
-    assert!(matches!(
-        parse_one("~?(& %hi 5)\n"),
-        Hoon::SigWut(0, ..)
-    ));
-    assert!(matches!(
-        parse_one("~?(> & %hi 5)\n"),
-        Hoon::SigWut(1, ..)
-    ));
+    assert!(matches!(parse_one("~?(& %hi 5)\n"), Hoon::SigWut(0, ..)));
+    assert!(matches!(parse_one("~?(> & %hi 5)\n"), Hoon::SigWut(1, ..)));
     for (src, want) in [
         ("~>  %foo  5\n", "gar"),
         ("~>(%foo 5)\n", "gar"),
@@ -1187,7 +1189,10 @@ fn sail_attribute_values_become_beers() {
         panic!("expected sail");
     };
     let (_, beers) = &manx.g.a[0];
-    assert!(matches!(beers.as_slice(), [Beer::Char(_), Beer::Hoon(_)]), "{beers:?}");
+    assert!(
+        matches!(beers.as_slice(), [Beer::Char(_), Beer::Hoon(_)]),
+        "{beers:?}"
+    );
     let Hoon::Xray(manx) = parse_one(";div(title (add 1 2));\n") else {
         panic!("expected sail");
     };
@@ -1357,7 +1362,10 @@ fn collect_inputs_walks_directories_for_hoon_files() {
 
     let found = collect_inputs(&root);
     assert_eq!(found, vec![root.join("b.hoon"), sub.join("a.hoon")]);
-    assert_eq!(collect_inputs(&root.join("b.hoon")), vec![root.join("b.hoon")]);
+    assert_eq!(
+        collect_inputs(&root.join("b.hoon")),
+        vec![root.join("b.hoon")]
+    );
     assert!(collect_inputs(&root.join("notes.txt")).is_empty());
     std::fs::remove_dir_all(&root).unwrap();
 }

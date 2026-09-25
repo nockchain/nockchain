@@ -5,10 +5,10 @@
 //! `test-assets/type-probes/coverage/c2/`; the rest drive internal helpers
 //! (musk, seminouns, lazy resolvers, goal checks, caches) directly.
 
+use std::path::Path as FsPath;
+
 #[allow(unused_imports)]
 use super::super::*;
-
-use std::path::Path as FsPath;
 
 type TestResult<T> = std::result::Result<T, String>;
 
@@ -40,7 +40,8 @@ fn mint_with(ut: &mut Ut, src: &str, vet: bool) -> TestResult<(Noun, Noun)> {
     let sut = ty_noun(&mut *ut.slab);
     let gol = ty_noun(&mut *ut.slab);
     ut.set_vet(vet);
-    ut.mint_noun(sut, gol, &gen).map_err(|err| format!("{err:?}"))
+    ut.mint_noun(sut, gol, &gen)
+        .map_err(|err| format!("{err:?}"))
 }
 
 /// Mint `subject_src`, then mint `body` against the resulting type.
@@ -49,7 +50,8 @@ fn mint_in(ut: &mut Ut, subject_src: &str, body: &str) -> TestResult<(Noun, Noun
     let gen = try_parse(body)?;
     let gol = ty_noun(&mut *ut.slab);
     ut.set_vet(true);
-    ut.mint_noun(sut, gol, &gen).map_err(|err| format!("{err:?}"))
+    ut.mint_noun(sut, gol, &gen)
+        .map_err(|err| format!("{err:?}"))
 }
 
 fn mint_err(src: &str) -> String {
@@ -159,9 +161,7 @@ fn wtcl_with_void_gain_and_lose_uses_slot_zero_test() {
     // `a` is a %hold of a crashing arm: the subject is not void, but refining
     // `a` collapses both branches (hoon-138 `[%void %void] => |+[%0 0]`).
     let (ty, fol) = mint_in(
-        &mut ut,
-        "=>  |%  ++  bad  !!  --  =+  a=bad  .",
-        "?:  ?=(@ a)  !!  !!",
+        &mut ut, "=>  |%  ++  bad  !!  --  =+  a=bad  .", "?:  ?=(@ a)  !!  !!",
     )
     .expect("mint");
     assert_eq!(tag_of(&ut, ty), "void");
@@ -196,9 +196,15 @@ fn wtbr_wtgl_wtgr_lower_through_wtcl() {
     assert!(noun_is(ut.slab, fol, yes), "?| of constants folds to [1 &]");
     let (_ty, fol) = mint_with(&mut ut, "?<(%.n 5)", true).expect("?<");
     let five = T(&mut *ut.slab, &[D(1), D(5)]);
-    assert!(noun_is(ut.slab, fol, five), "?< with a false test is the body");
+    assert!(
+        noun_is(ut.slab, fol, five),
+        "?< with a false test is the body"
+    );
     let (_ty, fol) = mint_with(&mut ut, "?>(%.y 5)", true).expect("?>");
-    assert!(noun_is(ut.slab, fol, five), "?> with a true test is the body");
+    assert!(
+        noun_is(ut.slab, fol, five),
+        "?> with a true test is the body"
+    );
 }
 
 #[test]
@@ -227,7 +233,10 @@ fn chip_on_wthx_through_a_synthetic_port_keeps_the_subject() {
         vec![Limb::Term("a".to_string()), Limb::Term("foo".to_string())],
     );
     let out = ut.chip(true, sut_n.clone(), &gen).expect("chip");
-    assert!(NRc::ptr_eq(&out, &sut_n), "a synthetic ?# target does not refine");
+    assert!(
+        NRc::ptr_eq(&out, &sut_n),
+        "a synthetic ?# target does not refine"
+    );
 }
 
 #[test]
@@ -267,8 +276,7 @@ fn tsmc_and_dttr_mint() {
 fn fits_through_an_arm_composes_the_arm_call() {
     let mut slab = NounSlab::new();
     let mut ut = Ut::new(&mut slab);
-    let (_ty, fol) =
-        mint_in(&mut ut, "=>  |%  ++  five  5  --  .", "?=(@ five)").expect("?= arm");
+    let (_ty, fol) = mint_in(&mut ut, "=>  |%  ++  five  5  --  .", "?=(@ five)").expect("?= arm");
     // [%7 [%9 2 %0 1] fish(@, 1)] with fish(@) = flip([%3 %0 1]).
     let s = &mut *ut.slab;
     let slot1 = T(s, &[D(0), D(1)]);
@@ -278,7 +286,10 @@ fn fits_through_an_arm_composes_the_arm_call() {
     let t = T(s, &[D(1), D(0)]);
     let fish = T(s, &[D(6), is_cell, f, t]);
     let expected = T(s, &[D(7), call, fish]);
-    assert!(noun_is(ut.slab, fol, expected), "%fits on an arm composes with %7");
+    assert!(
+        noun_is(ut.slab, fol, expected),
+        "%fits on an arm composes with %7"
+    );
 }
 
 #[test]
@@ -306,8 +317,14 @@ fn skin_static_matching_covers_every_base_and_wrapper() {
     let seven = ty_atom(&mut slab, "$", Some(D(7)));
     let mut ut = Ut::new(&mut slab);
 
-    assert_eq!(ut.base_match_static(noun, &BaseType::Void).unwrap(), Some(false));
-    assert_eq!(ut.base_match_static(zero, &BaseType::Null).unwrap(), Some(true));
+    assert_eq!(
+        ut.base_match_static(noun, &BaseType::Void).unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        ut.base_match_static(zero, &BaseType::Null).unwrap(),
+        Some(true)
+    );
     assert_eq!(ut.base_match_static(atom, &BaseType::Null).unwrap(), None);
 
     let cell_skin = Skin::Cell(
@@ -318,10 +335,18 @@ fn skin_static_matching_covers_every_base_and_wrapper() {
 
     let at = || Box::new(Skin::Base(BaseType::Atom("$".to_string())));
     let help = NounExpr::ParsedAtom(ParsedAtom::Small(0));
-    assert_eq!(ut.skin_match_static(atom, &Skin::Dbug(spot(), at())).unwrap(), Some(true));
-    assert_eq!(ut.skin_match_static(atom, &Skin::Help(help, at())).unwrap(), Some(true));
     assert_eq!(
-        ut.skin_match_static(atom, &Skin::Name("x".to_string(), at())).unwrap(),
+        ut.skin_match_static(atom, &Skin::Dbug(spot(), at()))
+            .unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        ut.skin_match_static(atom, &Skin::Help(help, at())).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        ut.skin_match_static(atom, &Skin::Name("x".to_string(), at()))
+            .unwrap(),
         Some(true)
     );
     let leaf = Skin::Leaf("$".to_string(), ParsedAtom::Small(7));
@@ -332,19 +357,34 @@ fn skin_static_matching_covers_every_base_and_wrapper() {
     // %flag: statically true on a flag, false on a cell, unknown on an atom.
     let flag = ty_bool(&mut *ut.slab);
     let cell = ty_cell(&mut *ut.slab, noun, noun);
-    assert_eq!(ut.base_match_static(flag, &BaseType::Flag).unwrap(), Some(true));
-    assert_eq!(ut.base_match_static(cell, &BaseType::Flag).unwrap(), Some(false));
+    assert_eq!(
+        ut.base_match_static(flag, &BaseType::Flag).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        ut.base_match_static(cell, &BaseType::Flag).unwrap(),
+        Some(false)
+    );
     assert_eq!(ut.base_match_static(atom, &BaseType::Flag).unwrap(), None);
 
     // Cell skins: a statically false half decides, known cell or not.
     let at_skin = Skin::Base(BaseType::Atom("$".to_string()));
     let pair_of_atoms = Skin::Cell(Box::new(at_skin.clone()), Box::new(at_skin.clone()));
     let cell_head = ty_cell(&mut *ut.slab, cell, noun);
-    assert_eq!(ut.skin_match_static(cell_head, &pair_of_atoms).unwrap(), Some(false));
+    assert_eq!(
+        ut.skin_match_static(cell_head, &pair_of_atoms).unwrap(),
+        Some(false)
+    );
     let cell_atom = ty_cell(&mut *ut.slab, cell, atom);
-    assert_eq!(ut.skin_match_static(cell_atom, &pair_of_atoms).unwrap(), Some(false));
+    assert_eq!(
+        ut.skin_match_static(cell_atom, &pair_of_atoms).unwrap(),
+        Some(false)
+    );
     let maybe = ty_fork(&mut *ut.slab, vec![atom, cell_head]);
-    assert_eq!(ut.skin_match_static(maybe, &pair_of_atoms).unwrap(), Some(false));
+    assert_eq!(
+        ut.skin_match_static(maybe, &pair_of_atoms).unwrap(),
+        Some(false)
+    );
 }
 
 #[test]
@@ -360,7 +400,9 @@ fn skin_test_formula_builds_dynamic_tests() {
 
     // %leaf on a non-exact atom: [%5 [%1 7] [%0 2]].
     let leaf = Skin::Leaf("$".to_string(), ParsedAtom::Small(7));
-    let id = ut.skin_test_formula(sut, BigUint::from(2u32), &leaf).expect("leaf");
+    let id = ut
+        .skin_test_formula(sut, BigUint::from(2u32), &leaf)
+        .expect("leaf");
     let fol = formula(&mut ut, id);
     let s = &mut *ut.slab;
     let seven = T(s, &[D(1), D(7)]);
@@ -371,11 +413,16 @@ fn skin_test_formula_builds_dynamic_tests() {
     // Wrappers are transparent.
     let wrapped = [
         Skin::Dbug(spot(), Box::new(leaf.clone())),
-        Skin::Help(NounExpr::ParsedAtom(ParsedAtom::Small(0)), Box::new(leaf.clone())),
+        Skin::Help(
+            NounExpr::ParsedAtom(ParsedAtom::Small(0)),
+            Box::new(leaf.clone()),
+        ),
         Skin::Name("x".to_string(), Box::new(leaf.clone())),
     ];
     for skin in wrapped.iter() {
-        let id = ut.skin_test_formula(sut, BigUint::from(2u32), skin).expect("wrapper");
+        let id = ut
+            .skin_test_formula(sut, BigUint::from(2u32), skin)
+            .expect("wrapper");
         let fol = formula(&mut ut, id);
         assert!(noun_is(ut.slab, fol, expected), "{skin:?} is transparent");
     }
@@ -387,18 +434,24 @@ fn skin_test_formula_builds_dynamic_tests() {
         ty_cell(&mut *ut.slab, pair, noun)
     };
     let at_skin = Skin::Base(BaseType::Atom("$".to_string()));
-    let id = ut.skin_test_formula(cell_sut, BigUint::from(2u32), &at_skin).expect("static");
+    let id = ut
+        .skin_test_formula(cell_sut, BigUint::from(2u32), &at_skin)
+        .expect("static");
     let fol = formula(&mut ut, id);
     assert!(is_const_bool_formula(fol, false, &ut.slab.noun_space()));
 
     // %wash is always [%1 &].
-    let id = ut.skin_test_formula(sut, BigUint::from(3u32), &Skin::Wash(1)).expect("wash");
+    let id = ut
+        .skin_test_formula(sut, BigUint::from(3u32), &Skin::Wash(1))
+        .expect("wash");
     let fol = formula(&mut ut, id);
     assert!(is_const_bool_formula(fol, true, &ut.slab.noun_space()));
 
     // %over pegs the wing axis onto the tested axis.
     let over = Skin::Over(vec![Limb::Axis(3u64.into())], Box::new(leaf.clone()));
-    let id = ut.skin_test_formula(sut, BigUint::from(1u32), &over).expect("over");
+    let id = ut
+        .skin_test_formula(sut, BigUint::from(1u32), &over)
+        .expect("over");
     let fol = formula(&mut ut, id);
     let s = &mut *ut.slab;
     let seven = T(s, &[D(1), D(7)]);
@@ -422,7 +475,9 @@ fn base_test_formula_noun_void_and_flag() {
     let mut slab = NounSlab::new();
     let mut ut = Ut::new(&mut slab);
     let slot = ut.formula_slot_u64(6);
-    let id = ut.base_test_formula(&BaseType::NounExpr, slot).expect("noun");
+    let id = ut
+        .base_test_formula(&BaseType::NounExpr, slot)
+        .expect("noun");
     let fol = formula(&mut ut, id);
     assert!(is_const_bool_formula(fol, true, &ut.slab.noun_space()));
     let id = ut.base_test_formula(&BaseType::Void, slot).expect("void");
@@ -517,7 +572,10 @@ fn musk_stops_on_malformed_and_unfoldable_formulas() {
     let q_crash_core = T(s, &[D(1), crash_core]);
     let crashing = T(s, &[D(9), D(2), q_crash_core]);
     assert!(matches!(musk_out(&mut ut, zero, missing), MuskOutput::Stop));
-    assert!(matches!(musk_out(&mut ut, zero, crashing), MuskOutput::Stop));
+    assert!(matches!(
+        musk_out(&mut ut, zero, crashing),
+        MuskOutput::Stop
+    ));
 }
 
 #[test]
@@ -559,7 +617,10 @@ fn musk_folds_hints_conditionals_and_increments() {
     let a64 = big_atom(s, &big(64));
     let slot1 = T(s, &[D(0), D(1)]);
     let wide_call = T(s, &[D(9), a64, slot1]);
-    assert!(!matches!(musk_out(&mut ut, partial, wide_call), MuskOutput::Done(_)));
+    assert!(!matches!(
+        musk_out(&mut ut, partial, wide_call),
+        MuskOutput::Done(_)
+    ));
 
     // Increments that overflow a u64, carry through bytes, and grow a byte.
     let cases = [
@@ -638,12 +699,18 @@ fn musk_handles_axes_wider_than_a_u64() {
         MuskOutput::Done(noun) => assert!(noun_is(ut.slab, noun, D(5))),
         other => panic!("wide mack: {other:?}"),
     }
-    assert!(matches!(musk_out(&mut ut, zero, bad_call), MuskOutput::Stop));
+    assert!(matches!(
+        musk_out(&mut ut, zero, bad_call),
+        MuskOutput::Stop
+    ));
     match musk_out(&mut ut, zero, edit) {
         MuskOutput::Done(noun) => assert!(noun_is(ut.slab, noun, edited)),
         other => panic!("wide edit: {other:?}"),
     }
-    assert!(matches!(musk_out(&mut ut, zero, bad_edit), MuskOutput::Stop));
+    assert!(matches!(
+        musk_out(&mut ut, zero, bad_edit),
+        MuskOutput::Stop
+    ));
 }
 
 #[test]
@@ -660,23 +727,38 @@ fn semi_fragment_big_walks_every_node_kind() {
     let c_pair = ut.semi_full_complete(pair);
     assert!(ut.semi_fragment_big(&two64, c_pair).unwrap().is_none());
     let c_deep = ut.semi_full_complete(deep);
-    let hit = ut.semi_fragment_big(&two64, c_deep).unwrap().expect("deep head");
+    let hit = ut
+        .semi_fragment_big(&two64, c_deep)
+        .unwrap()
+        .expect("deep head");
     assert!(ut.semi_full_complete_data(hit).is_some());
     let c_tail = ut.semi_full_complete(tail_deep);
     let three64 = BigUint::from(3u32) << 64u32;
-    let hit = ut.semi_fragment_big(&three64, c_tail).unwrap().expect("deep tail");
+    let hit = ut
+        .semi_fragment_big(&three64, c_tail)
+        .unwrap()
+        .expect("deep tail");
     let (noun, _) = ut.semi_full_complete_data(hit).expect("complete");
     assert!(noun_is(ut.slab, noun, D(9)));
 
     let c_atom = ut.semi_full_complete(D(0));
     assert!(ut.semi_fragment_big(&two64, c_atom).unwrap().is_none());
     let blocked = ut.semi_full_blocked();
-    assert_eq!(ut.semi_fragment_big(&two64, blocked).unwrap(), Some(blocked));
+    assert_eq!(
+        ut.semi_fragment_big(&two64, blocked).unwrap(),
+        Some(blocked)
+    );
     let tail_half = ut.semi_combine(c_pair, blocked).unwrap();
-    let got = ut.semi_fragment_big(&three64, tail_half).unwrap().expect("half tail");
+    let got = ut
+        .semi_fragment_big(&three64, tail_half)
+        .unwrap()
+        .expect("half tail");
     assert!(matches!(ut.semi_arena.node(got), SemiNode::Blocked));
     let half = ut.semi_combine(blocked, c_pair).unwrap();
-    let got = ut.semi_fragment_big(&two64, half).unwrap().expect("half head");
+    let got = ut
+        .semi_fragment_big(&two64, half)
+        .unwrap()
+        .expect("half head");
     assert!(matches!(ut.semi_arena.node(got), SemiNode::Blocked));
     let lazy = ut.semi_arena.lazy(BigUint::from(1u32), LazyResolverId(99));
     let got = ut.semi_fragment_big(&two64, lazy).unwrap().expect("lazy");
@@ -689,7 +771,10 @@ fn semi_fragment_big_walks_every_node_kind() {
         ut.semi_fragment_big(&BigUint::from(1u32), c_pair).unwrap(),
         Some(c_pair)
     );
-    assert!(ut.semi_fragment_big(&BigUint::from(0u32), c_pair).unwrap().is_none());
+    assert!(ut
+        .semi_fragment_big(&BigUint::from(0u32), c_pair)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -726,18 +811,30 @@ fn semi_mutate_small_and_wide_axes() {
     assert!(ut.semi_mutate_big(&big(64), rep, atom).unwrap().is_none());
     assert!(ut.semi_mutate_big(&big(64), rep, c_pair).unwrap().is_none());
     let c_deep = ut.semi_full_complete(deep);
-    let out = ut.semi_mutate_big(&big(64), rep, c_deep).unwrap().expect("deep edit");
+    let out = ut
+        .semi_mutate_big(&big(64), rep, c_deep)
+        .unwrap()
+        .expect("deep edit");
     let (noun, _) = ut.semi_full_complete_data(out).expect("complete");
     let want = nest_heads(&mut *ut.slab, 64, D(3));
     assert!(noun_is(ut.slab, noun, want));
     let c_tail = ut.semi_full_complete(tail_deep);
     let axis = BigUint::from(3u32) << 63u32;
-    let out = ut.semi_mutate_big(&axis, rep, c_tail).unwrap().expect("tail edit");
+    let out = ut
+        .semi_mutate_big(&axis, rep, c_tail)
+        .unwrap()
+        .expect("tail edit");
     assert!(ut.semi_full_complete_data(out).is_some());
     let wide_tail = BigUint::from(3u32) << 64u32;
-    assert!(ut.semi_mutate_big(&wide_tail, rep, c_pair).unwrap().is_none());
+    assert!(ut
+        .semi_mutate_big(&wide_tail, rep, c_pair)
+        .unwrap()
+        .is_none());
 
-    assert!(ut.semi_require(None, |_ut, _noun| Ok(None)).unwrap().is_none());
+    assert!(ut
+        .semi_require(None, |_ut, _noun| Ok(None))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -868,9 +965,7 @@ fn bran_blocks_a_self_referential_hold_but_folds_its_constant_head() {
     let mut slab = NounSlab::new();
     let mut ut = Ut::new(&mut slab);
     let (_ty, fol) = mint_in(
-        &mut ut,
-        "=>  |%  ++  foo  [%5 foo]  --  =/  x  foo  .",
-        "^~(-.x)",
+        &mut ut, "=>  |%  ++  foo  [%5 foo]  --  =/  x  foo  .", "^~(-.x)",
     )
     .expect("fold");
     let want = T(&mut *ut.slab, &[D(1), D(5)]);
@@ -892,7 +987,10 @@ fn bran_cache_and_hold_guards() {
     let semi = ut.bran_canonical_semi(broken_n.clone()).expect("bran");
     assert!(matches!(ut.semi_arena.node(semi), SemiNode::Blocked));
 
-    assert!(!Ut::bran_seen_holds_equal(&[broken_n.clone()], &[]));
+    assert!(!Ut::bran_seen_holds_equal(
+        std::slice::from_ref(&broken_n),
+        &[]
+    ));
     let sut = cons_noun(&mut ut.cx);
     let blocked = ut.semi_full_blocked();
     for _ in 0..=Ut::BRAN_SEMI_CACHE_BUCKET_LIMIT {
@@ -905,7 +1003,8 @@ fn bran_cache_and_hold_guards() {
     );
     // Same signature (order-insensitive), different order: no entry matches.
     assert_eq!(
-        ut.bran_semi_cache_lookup(&sut, &[other_n, broken_n]).unwrap(),
+        ut.bran_semi_cache_lookup(&sut, &[other_n, broken_n])
+            .unwrap(),
         None
     );
 }
@@ -940,36 +1039,67 @@ fn lazy_resolver_guards_and_caches() {
 
     // Unknown resolvers answer nothing.
     let unknown = LazyResolverId(4242);
-    assert!(ut.lazy_resolver_resolve_axis(unknown, &two).unwrap().is_none());
-    assert!(ut.lazy_resolver_compile_arm(unknown, two.clone()).unwrap().is_none());
+    assert!(ut
+        .lazy_resolver_resolve_axis(unknown, &two)
+        .unwrap()
+        .is_none());
+    assert!(ut
+        .lazy_resolver_compile_arm(unknown, two.clone())
+        .unwrap()
+        .is_none());
 
     let id = ut.lazy_resolver_new_id();
     let mut arms = HashMap::new();
     arms.insert(two.clone(), entry());
     ut.lazy_resolver_register_context(id, core_n.clone(), Poly::Dry, arms);
     // Not an arm axis.
-    assert!(ut.lazy_resolver_resolve_axis(id, &BigUint::from(3u32)).unwrap().is_none());
-    assert!(ut.lazy_resolver_compile_arm(id, BigUint::from(3u32)).unwrap().is_none());
+    assert!(ut
+        .lazy_resolver_resolve_axis(id, &BigUint::from(3u32))
+        .unwrap()
+        .is_none());
+    assert!(ut
+        .lazy_resolver_compile_arm(id, BigUint::from(3u32))
+        .unwrap()
+        .is_none());
     // Already in progress.
     ut.lazy_resolvers
         .get_mut(&id)
         .unwrap()
         .in_progress_axes
         .insert(two.clone());
-    assert!(ut.lazy_resolver_compile_arm(id, two.clone()).unwrap().is_none());
-    ut.lazy_resolvers.get_mut(&id).unwrap().in_progress_axes.clear();
+    assert!(ut
+        .lazy_resolver_compile_arm(id, two.clone())
+        .unwrap()
+        .is_none());
+    ut.lazy_resolvers
+        .get_mut(&id)
+        .unwrap()
+        .in_progress_axes
+        .clear();
     // Compiles, then answers from the cache.
-    let first = ut.lazy_resolver_compile_arm(id, two.clone()).unwrap().expect("arm");
-    let again = ut.lazy_resolver_compile_arm(id, two.clone()).unwrap().expect("cached");
+    let first = ut
+        .lazy_resolver_compile_arm(id, two.clone())
+        .unwrap()
+        .expect("arm");
+    let again = ut
+        .lazy_resolver_compile_arm(id, two.clone())
+        .unwrap()
+        .expect("cached");
     assert_eq!(first, again);
-    assert_eq!(ut.lazy_resolver_resolve_axis(id, &two).unwrap(), Some(first));
+    assert_eq!(
+        ut.lazy_resolver_resolve_axis(id, &two).unwrap(),
+        Some(first)
+    );
 
     // A wet resolver compiles with vet off.
     let wet = ut.lazy_resolver_new_id();
     let mut arms = HashMap::new();
     arms.insert(two.clone(), entry());
     ut.lazy_resolver_register_context(wet, core_n.clone(), Poly::Wet, arms);
-    assert!(ut.lazy_resolver_compile_arm(wet, two.clone()).unwrap().is_some());
+    assert!(ut
+        .lazy_resolver_compile_arm(wet, two.clone())
+        .unwrap()
+        .is_some());
 
     // An arm already being minted against the same core declines.
     let busy = ut.lazy_resolver_new_id();
@@ -1002,7 +1132,10 @@ fn lazy_resolver_guards_and_caches() {
         .arm_goal_for_hoon_in_progress(core_n.clone(), arm_hoon, noun_goal.clone(), vet)
         .unwrap()
         .is_some());
-    assert!(ut.lazy_resolver_compile_arm(busy, two.clone()).unwrap().is_none());
+    assert!(ut
+        .lazy_resolver_compile_arm(busy, two.clone())
+        .unwrap()
+        .is_none());
     assert!(ut.lazy_resolvers[&busy].in_progress_axes.is_empty());
     ut.arm_goal_in_progress.clear();
 
@@ -1031,13 +1164,11 @@ fn lazy_resolver_guards_and_caches() {
 fn core_goal_mismatches_reject() {
     for (src, needle) in [
         (
-            "^+  |%  +|  %aa  ++  y  1  --  |%  +|  %bb  ++  y  1  --",
-            "unexpcted-chapter",
+            "^+  |%  +|  %aa  ++  y  1  --  |%  +|  %bb  ++  y  1  --", "unexpcted-chapter",
         ),
         ("^+  |%  ++  y  1  --  |%  ++  z  1  --", "unexpected-arm"),
         (
-            "^+  |%  ++  y  1  ++  z  2  --  |%  ++  y  1  --",
-            "core-number-of-arms",
+            "^+  |%  ++  y  1  ++  z  2  --  |%  ++  y  1  --", "core-number-of-arms",
         ),
         (
             "^+  |%  +|  %a  ++  y  1  +|  %b  ++  z  1  --  |%  ++  y  1  --",
@@ -1185,13 +1316,9 @@ fn core_nesting_by_poly_context_and_variance() {
     mint_ok("^+(|*(a=@ a) |*(a=@ a))");
     assert!(mint_err("^+(|*(a=@ a) |*(a=@ +(a)))").contains("mint-nice"));
     // The value's context rejects its edited payload.
-    assert!(
-        mint_err("=/  g  |=(a=@ +(a))  ^+(|=(a=@ a) g(a [1 2]))").contains("mint-nice")
-    );
+    assert!(mint_err("=/  g  |=(a=@ +(a))  ^+(|=(a=@ a) g(a [1 2]))").contains("mint-nice"));
     // The goal's context rejects its edited payload.
-    assert!(
-        mint_err("=/  g  |=(a=@ +(a))  ^+(g(a [1 2]) |=(a=@ a))").contains("mint-nice")
-    );
+    assert!(mint_err("=/  g  |=(a=@ +(a))  ^+(g(a [1 2]) |=(a=@ a))").contains("mint-nice"));
     // Variance: iron goal against a zinc value fails; lead accepts; zinc nests zinc.
     assert!(mint_err("^+(^|(|=(a=@ a)) ^&(|=(a=@ +(a))))").contains("mint-nice"));
     mint_ok("^+(^?(|=(a=@ a)) ^|(|=(a=@ +(a))))");
@@ -1274,13 +1401,28 @@ fn hike_merges_siblings_and_drops_covered_edits() {
     let only_c = ut.formula_arena.edit(ax(2), c, root);
     // A later ancestor drops the earlier descendant, and a descendant after
     // its ancestor is skipped.
-    assert_eq!(ut.hike_formula(one.clone(), &[(ax(4), a), (ax(2), c)]).unwrap(), only_c);
-    assert_eq!(ut.hike_formula(one.clone(), &[(ax(2), c), (ax(4), a)]).unwrap(), only_c);
+    assert_eq!(
+        ut.hike_formula(one.clone(), &[(ax(4), a), (ax(2), c)])
+            .unwrap(),
+        only_c
+    );
+    assert_eq!(
+        ut.hike_formula(one.clone(), &[(ax(2), c), (ax(4), a)])
+            .unwrap(),
+        only_c
+    );
     // Siblings merge into their parent in both orders.
     let ab = ut.formula_cons(a, b);
     let merged = ut.formula_arena.edit(ax(2), ab, root);
-    assert_eq!(ut.hike_formula(one.clone(), &[(ax(4), a), (ax(5), b)]).unwrap(), merged);
-    assert_eq!(ut.hike_formula(one, &[(ax(5), b), (ax(4), a)]).unwrap(), merged);
+    assert_eq!(
+        ut.hike_formula(one.clone(), &[(ax(4), a), (ax(5), b)])
+            .unwrap(),
+        merged
+    );
+    assert_eq!(
+        ut.hike_formula(one, &[(ax(5), b), (ax(4), a)]).unwrap(),
+        merged
+    );
 }
 
 #[test]
@@ -1295,7 +1437,11 @@ fn toss_requires_matching_axes_across_arms() {
     let mur = to_native(&mut ut, at);
     let wing = vec![Limb::Term("a".to_string())];
     let (axis, out) = ut
-        .cnts_toss(&wing, mur.clone(), &[(g1.clone(), D(0)), (g1.clone(), D(0))])
+        .cnts_toss(
+            &wing,
+            mur.clone(),
+            &[(g1.clone(), D(0)), (g1.clone(), D(0))],
+        )
         .expect("same axis");
     assert_eq!(axis, BigUint::from(6u32));
     assert_eq!(out.len(), 2);
@@ -1316,7 +1462,9 @@ fn cnts_through_an_alias_is_synthetic() {
     let gol = ty_noun(&mut *ut.slab);
     let ty = ut.play_noun(sut, &parse("a.foo")).expect("play a.foo");
     assert_eq!(tag_of(&ut, ty), "atom");
-    let err = ut.play_noun(sut, &parse("a.foo(b 3)")).expect_err("edit synthetic");
+    let err = ut
+        .play_noun(sut, &parse("a.foo(b 3)"))
+        .expect_err("edit synthetic");
     assert!(format!("{err:?}").contains("hoon"), "{err:?}");
     let (ty, _fol) = ut.mint_noun(sut, gol, &parse("a.foo")).expect("mint a.foo");
     assert_eq!(tag_of(&ut, ty), "atom");
@@ -1326,9 +1474,13 @@ fn cnts_through_an_alias_is_synthetic() {
     );
     let (ty, _fol) = ut.mint_noun(sut, gol, &bare).expect("mint %= a.foo");
     assert_eq!(tag_of(&ut, ty), "atom");
-    let err = ut.mint_noun(sut, gol, &parse("a.foo(b 3)")).expect_err("edit synthetic");
+    let err = ut
+        .mint_noun(sut, gol, &parse("a.foo(b 3)"))
+        .expect_err("edit synthetic");
     assert!(format!("{err:?}").contains("hoon"), "{err:?}");
-    let err = ut.mint_noun(sut, gol, &parse(".(a.foo 3)")).expect_err("tack synthetic");
+    let err = ut
+        .mint_noun(sut, gol, &parse(".(a.foo 3)"))
+        .expect_err("tack synthetic");
     assert!(format!("{err:?}").contains("tack"), "{err:?}");
     // !@ feels through the synthetic port.
     let (_ty, fol) = ut.mint_noun(sut, gol, &parse("!@(a.foo 1 2)")).expect("!@");
@@ -1354,9 +1506,7 @@ fn take_through_holds_voids_and_core_batteries() {
     let mut ut = Ut::new(&mut slab);
     // Refinement into a hold that repos to void, and into a core battery.
     let (ty, _) = mint_in(
-        &mut ut,
-        "=>  |%  ++  bad  !!  --  =+  a=bad  .",
-        "?:(?=(@ -.a) !! !!)",
+        &mut ut, "=>  |%  ++  bad  !!  --  =+  a=bad  .", "?:(?=(@ -.a) !! !!)",
     )
     .expect("void hold");
     assert_eq!(tag_of(&ut, ty), "void");
@@ -1413,15 +1563,21 @@ fn play_rock_sand_hint_and_lost() {
 
     // Hints over void and noun payloads collapse to the payload.
     let void = cons_void(&mut ut.cx);
-    let hinted = ut.hint_type(noun.clone(), D(0), void.clone()).expect("hint void");
+    let hinted = ut
+        .hint_type(noun.clone(), D(0), void.clone())
+        .expect("hint void");
     assert!(NRc::ptr_eq(&hinted, &void));
-    let hinted = ut.hint_type(noun.clone(), D(0), noun.clone()).expect("hint noun");
+    let hinted = ut
+        .hint_type(noun.clone(), D(0), noun.clone())
+        .expect("hint noun");
     assert!(NRc::ptr_eq(&hinted, &noun));
 
     // %lost mints to void with vet off and rejects with vet on.
     let lost = Hoon::Lost(Box::new(Hoon::Axis(1u64.into())));
     ut.set_vet(false);
-    let (ty, _fol) = ut.mint(noun.clone(), noun.clone(), &lost).expect("lost, vet off");
+    let (ty, _fol) = ut
+        .mint(noun.clone(), noun.clone(), &lost)
+        .expect("lost, vet off");
     assert!(matches!(&*ty, NTy::Void));
     ut.set_vet(true);
     assert!(format!("{:?}", ut.mint(noun.clone(), noun, &lost).unwrap_err()).contains("mint-lost"));
@@ -1437,7 +1593,8 @@ fn play_brcb_wraps_arms_in_aliases() {
     assert_eq!(tag_of(&ut, with_alias), "core");
     let without = play_src(&mut ut, "|_  a=@  ++  c  a  --").expect("door");
     assert!(!noun_is(ut.slab, with_alias, without));
-    let (ty, _fol) = mint_with(&mut ut, "|_  a=@  +*  b  a  ++  c  b  --", true).expect("mint door");
+    let (ty, _fol) =
+        mint_with(&mut ut, "|_  a=@  +*  b  a  ++  c  b  --", true).expect("mint door");
     assert_eq!(tag_of(&ut, ty), "core");
 }
 
@@ -1490,7 +1647,10 @@ fn exact_hoon_ast_caches_hit_and_evict() {
 
     // Twins fill the raw map eight times faster than the structural map, so a
     // lone gene can leave the raw map while its structural bucket survives.
-    let lone = Hoon::Sand("ud".to_string(), NounExpr::ParsedAtom(ParsedAtom::Small(424242)));
+    let lone = Hoon::Sand(
+        "ud".to_string(),
+        NounExpr::ParsedAtom(ParsedAtom::Small(424242)),
+    );
     ut.cache_hoon_ast_for_node(&lone);
     let lone_fresh = hoon_to_noun(&mut *ut.slab, &lone);
     let space = ut.slab.noun_space();
@@ -1512,7 +1672,10 @@ fn exact_hoon_ast_caches_hit_and_evict() {
     for twin in twins.iter() {
         ut.cache_hoon_ast_for_node(twin);
     }
-    assert!(ut.hoon_ast_lookup_cached(lone_noun).is_some(), "bucket raw hit");
+    assert!(
+        ut.hoon_ast_lookup_cached(lone_noun).is_some(),
+        "bucket raw hit"
+    );
 
     // Distinct genes past the key limits evict the oldest entries.
     let gens: Vec<Hoon> = (0..=(Ut::HOON_CACHE_RAW_KEY_LIMIT as u128 + 1))

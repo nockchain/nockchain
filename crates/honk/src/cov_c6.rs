@@ -2,9 +2,6 @@
 //!
 //! Added to close branch-coverage gaps; see the coverage report in the PR.
 
-#[allow(unused_imports)]
-use super::*;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +9,8 @@ use hatch::ast::hoon::{BaseType, Hoon, NounExpr, Skin};
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, D, T};
 
+#[allow(unused_imports)]
+use super::*;
 use crate::errors::CompilerError;
 use crate::native::noun::term_to_noun;
 use crate::pipeline::{
@@ -151,10 +150,7 @@ fn error_kind_display_names_every_kind() {
     assert_eq!(
         rendered,
         [
-            "parse error",
-            "unsupported Hoon expression",
-            "backend error",
-            "decode error",
+            "parse error", "unsupported Hoon expression", "backend error", "decode error",
             "noun error"
         ]
     );
@@ -213,7 +209,11 @@ fn error_accessors_cover_every_variant() {
             CompilerErrorKind::Decode,
             "d",
         ),
-        (CompilerError::Noun("n".into()), CompilerErrorKind::Noun, "n"),
+        (
+            CompilerError::Noun("n".into()),
+            CompilerErrorKind::Noun,
+            "n",
+        ),
     ];
     let location = CompilerErrorLocation {
         file: Some("x.hoon".into()),
@@ -378,8 +378,7 @@ fn import_tree() -> Tree {
     tree.write("sur/kinds.hoon", "|%\n+$  kind  ?(%a %b)\n--\n");
     tree.write("lib/util.hoon", "|%\n++  double  |=(a=@ (mul 2 a))\n--\n");
     tree.write(
-        "lib/math/extra.hoon",
-        "|%\n++  triple  |=(a=@ (mul 3 a))\n--\n",
+        "lib/math/extra.hoon", "|%\n++  triple  |=(a=@ (mul 3 a))\n--\n",
     );
     tree.write("lib/star-lib.hoon", "|%\n++  flat  1\n--\n");
     tree.write("lib/star/lib.hoon", "|%\n++  nested  1\n--\n");
@@ -396,25 +395,12 @@ fn import_block_resolves_every_rune_kind_in_order() {
     let entry = tree.write(
         "app/entry.hoon",
         concat!(
-            "/?  310\n",
-            "::  a comment line before the imports\n",
-            "\n",
-            "/-  *shapes, kinds\n",
-            "/+  util,\n",
-            "    ::  a comment line inside a continued clause\n",
-            "    \n",
-            "    alias=math-extra,,\n",
-            "\t*star-lib\n",
-            "/=  raw  /common/raw  ::  a trailing comment\n",
-            "/=  *  /common/star\n",
-            "/=\n",
-            "    twice\n",
-            "    //common//raw\n",
-            "/*  blob  %jam  /data/blob/jam\n",
-            "/*  *  jam  /data/blob/jam\n",
-            "/#  const\n",
-            "|%\n",
-            "--\n",
+            "/?  310\n", "::  a comment line before the imports\n", "\n", "/-  *shapes, kinds\n",
+            "/+  util,\n", "    ::  a comment line inside a continued clause\n", "    \n",
+            "    alias=math-extra,,\n", "\t*star-lib\n",
+            "/=  raw  /common/raw  ::  a trailing comment\n", "/=  *  /common/star\n", "/=\n",
+            "    twice\n", "    //common//raw\n", "/*  blob  %jam  /data/blob/jam\n",
+            "/*  *  jam  /data/blob/jam\n", "/#  const\n", "|%\n", "--\n",
         ),
     );
     let imports = resolved(&entry, tree.root());
@@ -454,8 +440,7 @@ fn import_block_ends_at_the_first_non_import_line() {
         // `/~` is not an import rune.
         "/~  missing\n/-  missing\n42\n",
         // Code ends the block even if import-looking lines follow.
-        "42\n/-  missing\n",
-        "",
+        "42\n/-  missing\n", "",
     ] {
         let entry = tree.write("app/stop.hoon", source);
         assert!(
@@ -467,8 +452,7 @@ fn import_block_ends_at_the_first_non_import_line() {
     // The import block may run to the end of the file, including inside a
     // continued clause.
     let entry = tree.write(
-        "app/eof.hoon",
-        "/=  raw  /common/raw\n/+  util,\n    star-lib",
+        "app/eof.hoon", "/=  raw  /common/raw\n/+  util,\n    star-lib",
     );
     let faces: Vec<Option<String>> = resolved(&entry, tree.root())
         .into_iter()
@@ -476,29 +460,16 @@ fn import_block_ends_at_the_first_non_import_line() {
         .collect();
     assert_eq!(
         faces,
-        [
-            Some("raw".to_string()),
-            Some("util".to_string()),
-            Some("star-lib".to_string())
-        ]
+        [Some("raw".to_string()), Some("util".to_string()), Some("star-lib".to_string())]
     );
 }
 
 #[test]
 fn malformed_import_clauses_are_parse_errors() {
     for source in [
-        "/=\n",
-        "/=  ::  only a comment\n",
-        "/=  onlyface\n",
-        "/=  a  /b  extra\n",
-        "/*\n",
-        "/*  ::  only a comment\n",
-        "/*  a  %jam\n",
-        "/*  a  %jam  /b/jam  extra\n",
-        "/+  *\n",
-        "/+  =x\n",
-        "/+  x=\n",
-        "/-  util, *  \n",
+        "/=\n", "/=  ::  only a comment\n", "/=  onlyface\n", "/=  a  /b  extra\n", "/*\n",
+        "/*  ::  only a comment\n", "/*  a  %jam\n", "/*  a  %jam  /b/jam  extra\n", "/+  *\n",
+        "/+  =x\n", "/+  x=\n", "/-  util, *  \n",
     ] {
         match resolve_err(source) {
             CompilerError::Parse(message) => {
@@ -719,20 +690,12 @@ fn arvo_tree() -> (Tree, PathBuf) {
     tree.write(
         "pkg/arvo/sys/lull.hoon",
         concat!(
-            "!:\n",
-            "=>  ..part\n",
-            "~%  %lull  ..part  ~\n",
-            "|%\n",
-            "++  l  1\n",
-            "++  m\n",
-            "  ~%  %keep  ..part  ~\n",
-            "  |=(a=@ a)\n",
-            "--\n",
+            "!:\n", "=>  ..part\n", "~%  %lull  ..part  ~\n", "|%\n", "++  l  1\n", "++  m\n",
+            "  ~%  %keep  ..part  ~\n", "  |=(a=@ a)\n", "--\n",
         ),
     );
     tree.write(
-        "pkg/arvo/sys/zuse.hoon",
-        "=>  ..lull\n|_  a=@\n++  z  a\n--\n",
+        "pkg/arvo/sys/zuse.hoon", "=>  ..lull\n|_  a=@\n++  z  a\n--\n",
     );
     tree.write("pkg/arvo/sys/arvo.hoon", "=>  +\n|*  a=@\na\n");
     tree.write("pkg/arvo/lib/helper.hoon", "|%\n++  h  1\n--\n");
@@ -815,8 +778,7 @@ fn urbit_leaf_parse_adds_ambient_faces_and_sanitizes_sys_headers() {
     // A header-only sys file sanitizes to nothing and falls back to the
     // original source, which does not parse.
     let header_only = tree.write(
-        "pkg/arvo/sys/header.hoon",
-        "=>  ..part\n~%  %x  ..part  ~\n",
+        "pkg/arvo/sys/header.hoon", "=>  ..part\n~%  %x  ..part  ~\n",
     );
     assert!(
         parse_native_hoon_leaf_with_mode(&header_only, &arvo, false, ScopeMode::Urbit).is_err()
@@ -827,10 +789,7 @@ fn urbit_leaf_parse_adds_ambient_faces_and_sanitizes_sys_headers() {
     let loose = Tree::new();
     let not_pkg = loose.write("notpkg/arvo/sys/zuse.hoon", "|%\n++  z  1\n--\n");
     let no_sys = loose.write("pkg/arvo/app/x.hoon", "42\n");
-    for (entry, deps) in [
-        (not_pkg, loose.path("notpkg/arvo")),
-        (no_sys, loose.path("pkg/arvo")),
-    ] {
+    for (entry, deps) in [(not_pkg, loose.path("notpkg/arvo")), (no_sys, loose.path("pkg/arvo"))] {
         let imports = resolve_native_imports(&entry, &deps, ScopeMode::Urbit).expect("resolve");
         assert!(imports.is_empty(), "{entry:?}: {imports:?}");
     }

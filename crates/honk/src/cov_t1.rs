@@ -1373,7 +1373,7 @@ fn cache_failed_atomic_writes_leave_no_temporary_files() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect();
-    assert_eq!(leftovers, [metadata.clone()]);
+    assert_eq!(leftovers, std::slice::from_ref(&metadata));
 
     // The same for the pack path; no metadata is written without its pack.
     let root = temp.path().join("pack-blocked");
@@ -1385,7 +1385,7 @@ fn cache_failed_atomic_writes_leave_no_temporary_files() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect();
-    assert_eq!(leftovers, [pack.clone()]);
+    assert_eq!(leftovers, std::slice::from_ref(&pack));
     assert!(!metadata_file(&root, key).exists());
 }
 

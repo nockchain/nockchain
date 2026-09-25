@@ -6,11 +6,11 @@
 //! exact types pinned here are hoonc's too. Rejection cases were checked
 //! against hoonc with the same sources (both compilers reject them).
 
-#[allow(unused_imports)]
-use super::super::*;
-
 use chumsky::Parser as _;
 use hatch::utils::LineMap;
+
+#[allow(unused_imports)]
+use super::super::*;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -247,7 +247,10 @@ fn c3_skin_name_term_and_over() {
 fn c3_skin_flag_noun_cell_and_synthetic_ports() {
     // %flag on a noun ref: gain the two loobeans; lose both leaves (still %noun).
     let flag = skin_ok("?:(?#(? a) a a)");
-    assert!(flag.contains("[%atom [%f [0 0]]]") && flag.contains("[%atom [%f [0 1]]]"), "{flag}");
+    assert!(
+        flag.contains("[%atom [%f [0 0]]]") && flag.contains("[%atom [%f [0 1]]]"),
+        "{flag}"
+    );
     assert!(flag.contains("%noun"), "{flag}");
     // A non-generic cell skin loses nothing from a noun ref.
     let cell = skin_ok("?:(?#([@ @] a) !! a)");
@@ -298,15 +301,23 @@ fn c3_gain_lose_base_skins_not_built_by_flay() {
         let void = cons_void(&mut ut.cx);
 
         // %null gains the ~ constant; losing it from a noun ref keeps %noun.
-        let t = ut.gain_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Null)).unwrap();
+        let t = ut
+            .gain_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Null))
+            .unwrap();
         assert_eq!(lower(ut, &t), "[%atom [%n [0 0]]]");
-        let t = ut.lose_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Null)).unwrap();
+        let t = ut
+            .lose_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Null))
+            .unwrap();
         assert_eq!(lower(ut, &t), "%noun");
 
         // %void gains nothing and loses nothing.
-        let t = ut.gain_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Void)).unwrap();
+        let t = ut
+            .gain_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Void))
+            .unwrap();
         assert_eq!(lower(ut, &t), "%void");
-        let t = ut.lose_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Void)).unwrap();
+        let t = ut
+            .lose_skin(sut.clone(), noun.clone(), &Skin::Base(BaseType::Void))
+            .unwrap();
         assert_eq!(lower(ut, &t), "%noun");
 
         // %dbug and %help wrappers: gain adds a %help hint, lose passes through.
@@ -325,9 +336,13 @@ fn c3_gain_lose_base_skins_not_built_by_flay() {
         assert_eq!(lower(ut, &t), CELL_NOUN);
 
         // %wash leaves the ref alone on both sides.
-        let t = ut.gain_skin(sut.clone(), noun.clone(), &Skin::Wash(0)).unwrap();
+        let t = ut
+            .gain_skin(sut.clone(), noun.clone(), &Skin::Wash(0))
+            .unwrap();
         assert_eq!(lower(ut, &t), "%noun");
-        let t = ut.lose_skin(sut.clone(), noun.clone(), &Skin::Wash(0)).unwrap();
+        let t = ut
+            .lose_skin(sut.clone(), noun.clone(), &Skin::Wash(0))
+            .unwrap();
         assert_eq!(lower(ut, &t), "%noun");
 
         // A void head under a cell skin collapses the gain on a noun ref.
@@ -363,7 +378,9 @@ fn c3_gain_skin_any_aura_leaves_keep_ref_aura() {
             let t = ut.gain_skin(sut.clone(), ud.clone(), &leaf).unwrap();
             assert_eq!(lower(ut, &t), "[%atom [%ud [0 5]]]", "leaf aura {aura:?}");
         }
-        let t = ut.gain_skin(sut.clone(), ud.clone(), &atom_skin("@")).unwrap();
+        let t = ut
+            .gain_skin(sut.clone(), ud.clone(), &atom_skin("@"))
+            .unwrap();
         assert_eq!(lower(ut, &t), "[%atom [%ud 0]]");
         // A narrower atom skin on a wider ref takes the larger aura.
         let u = atom_ty(ut, "u", None);
@@ -705,14 +722,25 @@ fn mull_types(
 fn c3_mull_direct_forms() {
     with_ut(|ut| {
         let noun = cons_noun(&mut ut.cx);
-        let sand = |n: u128| Box::new(Hoon::Sand("ud".to_string(), NounExpr::ParsedAtom(ParsedAtom::Small(n))));
+        let sand = |n: u128| {
+            Box::new(Hoon::Sand(
+                "ud".to_string(),
+                NounExpr::ParsedAtom(ParsedAtom::Small(n)),
+            ))
+        };
         // ~| with a %tas sand message lowers to a %mean hint around q.
         let sgbr = Hoon::SigBar(
-            Box::new(Hoon::Sand("tas".to_string(), NounExpr::ParsedAtom(ParsedAtom::Small(0x6f)))),
+            Box::new(Hoon::Sand(
+                "tas".to_string(),
+                NounExpr::ParsedAtom(ParsedAtom::Small(0x6f)),
+            )),
             sand(5),
         );
         let (p, q) = mull_types(ut, noun.clone(), noun.clone(), &sgbr).unwrap();
-        assert_eq!((p.as_str(), q.as_str()), ("[%atom [%ud 0]]", "[%atom [%ud 0]]"));
+        assert_eq!(
+            (p.as_str(), q.as_str()),
+            ("[%atom [%ud 0]]", "[%atom [%ud 0]]")
+        );
         // ~! plays p for the trace and mulls q.
         let sgzp = Hoon::SigZap(sand(1), sand(2));
         let (p, _) = mull_types(ut, noun.clone(), noun.clone(), &sgzp).unwrap();
@@ -790,7 +818,14 @@ fn c3_mull_cnts_synthetic_ports() {
             formula,
         };
         let (p, q) = ut
-            .mull_cnts_with_ports(noun.clone(), noun.clone(), noun.clone(), &port(&atom), &port(&atom), &[])
+            .mull_cnts_with_ports(
+                noun.clone(),
+                noun.clone(),
+                noun.clone(),
+                &port(&atom),
+                &port(&atom),
+                &[],
+            )
             .unwrap();
         assert_eq!(lower(ut, &p), "[%atom [%ud 0]]");
         assert_eq!(lower(ut, &q), "[%atom [%ud 0]]");
@@ -824,7 +859,14 @@ fn c3_mull_endo_axis_mismatches() {
             vein: Vec::new(),
             opal: Opal::Leg(t.clone()),
         };
-        let err = noun_err(ut.mull_endo(noun.clone(), noun.clone(), noun.clone(), &leg(&ab), &leg(&ba), &edit));
+        let err = noun_err(ut.mull_endo(
+            noun.clone(),
+            noun.clone(),
+            noun.clone(),
+            &leg(&ab),
+            &leg(&ba),
+            &edit,
+        ));
         assert!(err.contains("endo leg axis mismatch"), "{err}");
 
         let arm = |axis: u32, arms: Vec<(NRc<NTy>, Noun)>| Palo {
@@ -962,12 +1004,24 @@ fn c3_set_uni_and_map_put_treaps() {
     // Re-putting the root key with its value returns the tree itself.
     let root_key = {
         let space = slab.noun_space();
-        let root = m.in_space(&space).as_cell().unwrap().head().as_cell().unwrap();
+        let root = m
+            .in_space(&space)
+            .as_cell()
+            .unwrap()
+            .head()
+            .as_cell()
+            .unwrap();
         root.head().noun()
     };
     let root_val = {
         let space = slab.noun_space();
-        let root = m.in_space(&space).as_cell().unwrap().head().as_cell().unwrap();
+        let root = m
+            .in_space(&space)
+            .as_cell()
+            .unwrap()
+            .head()
+            .as_cell()
+            .unwrap();
         root.tail().noun()
     };
     let same = map_put_mug(&mut slab, m, root_key, root_val).unwrap();
@@ -982,19 +1036,22 @@ fn c3_set_uni_and_map_put_treaps() {
 #[test]
 fn c3_type_tag_helpers() {
     let mut slab = NounSlab::new();
-    let space_kinds = [
-        ("void", TypeTagKind::Void),
-        ("noun", TypeTagKind::Noun),
-    ];
+    let space_kinds = [("void", TypeTagKind::Void), ("noun", TypeTagKind::Noun)];
     for (tag, kind) in space_kinds {
         let n = term_to_noun(&mut slab, tag);
         assert_eq!(type_tag_kind(n, &slab.noun_space()).unwrap(), kind);
     }
     let atom = ty_atom(&mut slab, "ud", None);
     let fork = ty_fork(&mut slab, vec![atom, D(0)]);
-    assert_eq!(type_tag_kind(fork, &slab.noun_space()).unwrap(), TypeTagKind::Fork);
+    assert_eq!(
+        type_tag_kind(fork, &slab.noun_space()).unwrap(),
+        TypeTagKind::Fork
+    );
     let hold = ty_hold(&mut slab, atom, D(0));
-    assert_eq!(type_tag_kind(hold, &slab.noun_space()).unwrap(), TypeTagKind::Hold);
+    assert_eq!(
+        type_tag_kind(hold, &slab.noun_space()).unwrap(),
+        TypeTagKind::Hold
+    );
     let zzz = term_to_noun(&mut slab, "zzz");
     let bogus = T(&mut slab, &[zzz, D(0)]);
     assert!(type_tag_kind(bogus, &slab.noun_space()).is_err());
@@ -1008,14 +1065,21 @@ fn c3_type_tag_helpers() {
     // Face names: atom tools give the name, cell tools give none.
     let face = ty_face(&mut slab, "x", atom);
     assert_eq!(
-        type_face_name_if_atom(face, &slab.noun_space()).unwrap().as_deref(),
+        type_face_name_if_atom(face, &slab.noun_space())
+            .unwrap()
+            .as_deref(),
         Some("x")
     );
     let tune = T(&mut slab, &[D(0), D(0)]);
     let tuned = ty_face_tool(&mut slab, tune, atom);
-    assert_eq!(type_face_name_if_atom(tuned, &slab.noun_space()).unwrap(), None);
+    assert_eq!(
+        type_face_name_if_atom(tuned, &slab.noun_space()).unwrap(),
+        None
+    );
     // Fork sets: an empty set has no options; a malformed node is rejected.
-    assert!(fork_set_options(D(0), &slab.noun_space()).unwrap().is_empty());
+    assert!(fork_set_options(D(0), &slab.noun_space())
+        .unwrap()
+        .is_empty());
     let bad_set = T(&mut slab, &[D(1), D(2)]);
     assert!(fork_set_options(bad_set, &slab.noun_space()).is_err());
     assert!(type_fork_options(D(3), &slab.noun_space()).is_err());
@@ -1083,7 +1147,10 @@ fn c3_axis_helpers_reject_degenerate_axes() {
     assert!(axis_cap_mas(0).is_err());
     assert_eq!(axis_cap_mas(6).unwrap(), (3, 2));
     assert!(axis_big_cap_mas(&BigUint::from(1u32)).is_err());
-    assert_eq!(axis_big_cap_mas(&BigUint::from(5u32)).unwrap(), (2, BigUint::from(3u32)));
+    assert_eq!(
+        axis_big_cap_mas(&BigUint::from(5u32)).unwrap(),
+        (2, BigUint::from(3u32))
+    );
     assert!(peg_axis_big_pair(BigUint::from(2u32), &BigUint::from(0u32)).is_err());
     assert_eq!(
         peg_axis_big_pair(BigUint::from(2u32), &BigUint::from(3u32)).unwrap(),
@@ -1114,7 +1181,10 @@ fn c3_foot_parts_rejects_unknown_poly() {
     let mut slab: NounSlab = NounSlab::new();
     let wet = term_to_noun(&mut slab, "wet");
     let foot = T(&mut slab, &[wet, D(0)]);
-    assert!(matches!(foot_parts(foot, &slab.noun_space()).unwrap().0, Poly::Wet));
+    assert!(matches!(
+        foot_parts(foot, &slab.noun_space()).unwrap().0,
+        Poly::Wet
+    ));
     let odd = term_to_noun(&mut slab, "odd");
     let foot = T(&mut slab, &[odd, D(0)]);
     assert!(foot_parts(foot, &slab.noun_space()).is_err());
@@ -1140,7 +1210,14 @@ fn c3_chunked_tisgar_chain_composes_layers() {
 
 fn sample_spec_zoo() -> Spec {
     let atom = || Box::new(Spec::Base(BaseType::Atom("ud".to_string())));
-    let wing = || vec![Limb::Term("a".to_string()), Limb::Axis((2u64).into()), Limb::Parent(1, Some("b".to_string())), Limb::Parent(0, None)];
+    let wing = || {
+        vec![
+            Limb::Term("a".to_string()),
+            Limb::Axis((2u64).into()),
+            Limb::Parent(1, Some("b".to_string())),
+            Limb::Parent(0, None),
+        ]
+    };
     let hoon = || Hoon::Sand("ud".to_string(), NounExpr::ParsedAtom(ParsedAtom::Small(1)));
     let mut map = HashMap::new();
     map.insert("k".to_string(), Spec::Base(BaseType::Cell));
@@ -1180,9 +1257,15 @@ fn sample_spec_zoo() -> Spec {
     let skins = vec![
         Skin::Term("s".to_string()),
         Skin::Base(BaseType::NounExpr),
-        Skin::Cell(Box::new(Skin::Wash(1)), Box::new(Skin::Base(BaseType::Cell))),
+        Skin::Cell(
+            Box::new(Skin::Wash(1)),
+            Box::new(Skin::Base(BaseType::Cell)),
+        ),
         Skin::Dbug(spot(), Box::new(Skin::Wash(0))),
-        Skin::Help(NounExpr::ParsedAtom(ParsedAtom::Small(2)), Box::new(Skin::Wash(0))),
+        Skin::Help(
+            NounExpr::ParsedAtom(ParsedAtom::Small(2)),
+            Box::new(Skin::Wash(0)),
+        ),
         Skin::Leaf("ud".to_string(), ParsedAtom::Small(3)),
         Skin::Name("x".to_string(), Box::new(Skin::Wash(0))),
         Skin::Over(wing(), Box::new(Skin::Wash(0))),
@@ -1201,7 +1284,10 @@ fn type_zoo() -> Type {
     let mut arms = HashMap::new();
     arms.insert("arm".to_string(), hoon.clone());
     let mut tomes = HashMap::new();
-    tomes.insert("a".to_string(), (Some(NounExpr::ParsedAtom(ParsedAtom::Small(9))), arms));
+    tomes.insert(
+        "a".to_string(),
+        (Some(NounExpr::ParsedAtom(ParsedAtom::Small(9))), arms),
+    );
     tomes.insert("ch".to_string(), (None, HashMap::new()));
     let stencil = Stencil::Half {
         left: Box::new(Stencil::Full {
@@ -1209,7 +1295,10 @@ fn type_zoo() -> Type {
         }),
         rite: Box::new(Stencil::Lazy {
             fragment: (3u64).into(),
-            resolve: (Box::new(sample_spec_zoo()), Box::new(Spec::Base(BaseType::NounExpr))),
+            resolve: (
+                Box::new(sample_spec_zoo()),
+                Box::new(Spec::Base(BaseType::NounExpr)),
+            ),
         }),
     };
     let coil = |vair: AstVair, poly: AstPoly, name: Option<&str>| Coil {
@@ -1219,7 +1308,10 @@ fn type_zoo() -> Type {
             vair,
         },
         q: Type::NounExpr,
-        r: ((stencil.clone(), NounExpr::ParsedAtom(ParsedAtom::Small(0))), tomes.clone()),
+        r: (
+            (stencil.clone(), NounExpr::ParsedAtom(ParsedAtom::Small(0))),
+            tomes.clone(),
+        ),
     };
     let mut tune_map = HashMap::new();
     tune_map.insert("t".to_string(), Some(hoon.clone()));
@@ -1229,17 +1321,32 @@ fn type_zoo() -> Type {
         Type::Void,
         Type::ParsedAtom("".to_string(), None),
         Type::Cell(atom(), atom()),
-        Type::Core(atom(), Box::new(coil(AstVair::Gold, AstPoly::Wet, Some("c")))),
+        Type::Core(
+            atom(),
+            Box::new(coil(AstVair::Gold, AstPoly::Wet, Some("c"))),
+        ),
         Type::Core(atom(), Box::new(coil(AstVair::Iron, AstPoly::Dry, None))),
         Type::Core(atom(), Box::new(coil(AstVair::Lead, AstPoly::Dry, None))),
         Type::Core(atom(), Box::new(coil(AstVair::Zinc, AstPoly::Dry, None))),
         Type::Face(FaceType::Term("f".to_string()), atom()),
         Type::Face(FaceType::Tune((tune_map, vec![hoon.clone()])), atom()),
-        Type::Hint((atom(), Note::Help(NounExpr::ParsedAtom(ParsedAtom::Small(1)))), atom()),
+        Type::Hint(
+            (
+                atom(),
+                Note::Help(NounExpr::ParsedAtom(ParsedAtom::Small(1))),
+            ),
+            atom(),
+        ),
         Type::Hint((atom(), Note::Know("k".to_string())), atom()),
         Type::Hint((atom(), Note::Made("m".to_string(), None)), atom()),
         Type::Hint(
-            (atom(), Note::Made("m".to_string(), Some(vec![vec![Limb::Term("a".to_string())]]))),
+            (
+                atom(),
+                Note::Made(
+                    "m".to_string(),
+                    Some(vec![vec![Limb::Term("a".to_string())]]),
+                ),
+            ),
             atom(),
         ),
         Type::Hold(atom(), hoon),
@@ -1252,12 +1359,12 @@ fn c3_type_to_noun_lowers_every_ast_form() {
     let noun = type_to_noun(&mut slab, &type_zoo()).unwrap();
     let text = show(&slab, noun);
     for needle in [
-        "%fork", "%noun", "%void", "%cell", "%core", "%face", "%tune", "%hint", "%hold",
-        "%help", "%know", "%made", "%half", "%full", "%lazy", "%gold", "%iron", "%lead",
-        "%zinc", "%wet", "%dry", "%bccl", "%bcts", "%bcwt", "%bczp", "%base", "%flag",
-        "%null", "%dbug", "%gist", "%leaf", "%like", "%loop", "%make", "%name", "%over",
-        "%bcgr", "%bcbc", "%bcbr", "%bccb", "%bccn", "%bcdt", "%bcgl", "%bchp", "%bckt",
-        "%bcls", "%bcfs", "%bcmc", "%bcpm", "%bcsg", "%bctc", "%bcpt", "%wash", "%spec",
+        "%fork", "%noun", "%void", "%cell", "%core", "%face", "%tune", "%hint", "%hold", "%help",
+        "%know", "%made", "%half", "%full", "%lazy", "%gold", "%iron", "%lead", "%zinc", "%wet",
+        "%dry", "%bccl", "%bcts", "%bcwt", "%bczp", "%base", "%flag", "%null", "%dbug", "%gist",
+        "%leaf", "%like", "%loop", "%make", "%name", "%over", "%bcgr", "%bcbc", "%bcbr", "%bccb",
+        "%bccn", "%bcdt", "%bcgl", "%bchp", "%bckt", "%bcls", "%bcfs", "%bcmc", "%bcpm", "%bcsg",
+        "%bctc", "%bcpt", "%wash", "%spec",
     ] {
         assert!(text.contains(needle), "missing {needle}");
     }
@@ -1273,7 +1380,10 @@ fn c3_hand_genes_through_mint_play_and_mull() {
         let hand = Hoon::Hand(Box::new(Type::ParsedAtom("ud".to_string(), None)), nock);
         let noun = cons_noun(&mut ut.cx);
         let (p, q) = mull_types(ut, noun.clone(), noun.clone(), &hand).unwrap();
-        assert_eq!((p.as_str(), q.as_str()), ("[%atom [%ud 0]]", "[%atom [%ud 0]]"));
+        assert_eq!(
+            (p.as_str(), q.as_str()),
+            ("[%atom [%ud 0]]", "[%atom [%ud 0]]")
+        );
         let played = ut.play(noun.clone(), &hand).unwrap();
         assert_eq!(lower(ut, &played), "[%atom [%ud 0]]");
         let gol = cons_noun(&mut ut.cx);
@@ -1299,9 +1409,15 @@ fn c3_nock_to_noun_lowers_every_opcode() {
         (Nock::SerialCompose(ax(), c(1)), "[8 [2 [1 1]]]"),
         (Nock::PushSubject(ax(), c(1)), "[9 [2 [1 1]]]"),
         (Nock::SelectArm((2u64).into(), ax()), "[10 [2 2]]"),
-        (Nock::Edit(((2u64).into(), c(1)), ax()), "[11 [[2 [1 1]] 2]]"),
+        (
+            Nock::Edit(((2u64).into(), c(1)), ax()),
+            "[11 [[2 [1 1]] 2]]",
+        ),
         (Nock::Hint(NockHint::ParsedAtom(7), ax()), "[12 [7 2]]"),
-        (Nock::Hint(NockHint::Pair(7, c(1)), ax()), "[12 [[7 [1 1]] 2]]"),
+        (
+            Nock::Hint(NockHint::Pair(7, c(1)), ax()),
+            "[12 [[7 [1 1]] 2]]",
+        ),
         (Nock::GrabData(ax(), c(1)), "[13 [2 [1 1]]]"),
     ];
     for (nock, want) in cases {
@@ -1315,7 +1431,10 @@ fn c3_note_to_noun_made_wings_and_tunes() {
     let mut slab = NounSlab::new();
     let note = Note::Made(
         "m".to_string(),
-        Some(vec![vec![Limb::Term("a".to_string())], vec![Limb::Axis((3u64).into())]]),
+        Some(vec![
+            vec![Limb::Term("a".to_string())],
+            vec![Limb::Axis((3u64).into())],
+        ]),
     );
     let n = note_to_noun(&mut slab, &note).unwrap();
     assert_eq!(show(&slab, n), "[%made [%m [0 [[%a 0] [[[0 3] 0] 0]]]]]");
