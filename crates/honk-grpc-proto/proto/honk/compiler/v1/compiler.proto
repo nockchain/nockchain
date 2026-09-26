@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package honk.compiler.v1;
+
+// Loopback compiler protocol. Package and request versioning are both explicit
+// so clients can negotiate before sending potentially expensive work.
+service HonkCompiler {
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  rpc Compile(CompileRequest) returns (CompileResponse);
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  uint32 protocol_version = 1;
+  string protocol_name = 2;
+  string server_version = 3;
+  repeated string capabilities = 4;
+  uint64 max_compiles = 5;
+  uint64 completed_compiles = 6;
+}
+
+enum ArtifactMode {
+  ARTIFACT_MODE_UNSPECIFIED = 0;
+  ARTIFACT_MODE_STANDARD = 1;
+  ARTIFACT_MODE_ARBITRARY = 2;
+  ARTIFACT_MODE_DYNOCK = 3;
+  ARTIFACT_MODE_DYNOCK_TYPED = 4;
+}
+
+message DirectoryFiles {
+  repeated string paths = 1;
+}
+
+message CompileRequest {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  string entry_path = 3;
+  ArtifactMode artifact_mode = 4;
+  optional DirectoryFiles directory_files = 5;
+}
+
+message CompileResponse {
+  string request_id = 1;
+  bytes artifact = 2;
+  repeated Diagnostic diagnostics = 3;
+  bool cache_invalidated = 4;
+  uint64 compile_index = 5;
+  // The bounded compiler process will shut down after this response. Clients
+  // should reconnect to a freshly launched process.
+  bool restart_required = 6;
+}
+
+enum DiagnosticKind {
+  DIAGNOSTIC_KIND_UNSPECIFIED = 0;
+  DIAGNOSTIC_KIND_PARSE = 1;
+  DIAGNOSTIC_KIND_UNSUPPORTED_EXPR = 2;
+  DIAGNOSTIC_KIND_BACKEND = 3;
+  DIAGNOSTIC_KIND_DECODE = 4;
+  DIAGNOSTIC_KIND_NOUN = 5;
+  DIAGNOSTIC_KIND_IO = 6;
+  DIAGNOSTIC_KIND_INTERNAL = 7;
+}
+
+message SourceLocation {
+  optional string file = 1;
+  optional uint64 start_byte = 2;
+  optional uint64 end_byte = 3;
+  optional uint64 start_line = 4;
+  optional uint64 start_column = 5;
+  optional uint64 end_line = 6;
+  optional uint64 end_column = 7;
+}
+
+message Diagnostic {
+  DiagnosticKind kind = 1;
+  string message = 2;
+  optional SourceLocation location = 3;
+}

@@ -16,8 +16,21 @@ rust_library(
         exclude = ["src/bin/**"],
     ),
     aliases = aliases(),
+    compile_data = [
+        "//hoon/common:hoon.hoon",
+        "assets/honc-type-138.jam",
+        "assets/honc-formula-138.jam",
+        "assets/hoonc-octs-type-138.jam",
+    ],
     crate_name = "honk",
     edition = "2021",
+    rustc_env = {
+        "HONK_HOON_138_SOURCE": "$(location //hoon/common:hoon.hoon)",
+        "HONK_HONC_TYPE_138_JAM": "$(location assets/honc-type-138.jam)",
+        "HONK_HONC_FORMULA_138_JAM": "$(location assets/honc-formula-138.jam)",
+        "HONK_HOONC_OCTS_TYPE_138_JAM": "$(location assets/hoonc-octs-type-138.jam)",
+    },
+    rustc_env_files = [":native_compiler_fingerprint_env"],
     proc_macro_deps = [
         "//crates/nockvm/rust/nockvm_macros",
     ] + all_crate_deps(proc_macro = True),
@@ -61,42 +74,18 @@ genrule(
           "\"$$(cat $(SRCS) | $$hash_tool | cut -d' ' -f1)\" > $@",
 )
 
-# honk binary: the CLI. It embeds the hoonc-built hoon-138 prelude
-# (formula+type), the canonical $octs type, and the hoon-138 source via
-# include_bytes!(env!(...)), and stamps the cache-namespace fingerprint via
-# env!(...). The crate's build.rs only sets those env vars; under Bazel we
-# replicate that with rustc_env + compile_data + rustc_env_files (same idiom
-# as crates/kernels/*), so no cargo_build_script is needed.
+# honk binary: the thin CLI wrapper around the library-owned workspace compiler.
 rust_binary(
     name = "honk",
     srcs = ["src/bin/honk.rs"],
     aliases = aliases(),
-    compile_data = [
-        "//hoon/common:hoon.hoon",
-        "assets/honc-type-138.jam",
-        "assets/honc-formula-138.jam",
-        "assets/hoonc-octs-type-138.jam",
-    ],
     crate_name = "honk",
     crate_root = "src/bin/honk.rs",
     edition = "2021",
-    rustc_env = {
-        "HONK_HOON_138_SOURCE": "$(location //hoon/common:hoon.hoon)",
-        "HONK_HONC_TYPE_138_JAM": "$(location assets/honc-type-138.jam)",
-        "HONK_HONC_FORMULA_138_JAM": "$(location assets/honc-formula-138.jam)",
-        "HONK_HOONC_OCTS_TYPE_138_JAM": "$(location assets/hoonc-octs-type-138.jam)",
-    },
-    rustc_env_files = [":native_compiler_fingerprint_env"],
     proc_macro_deps = [
         "//crates/nockvm/rust/nockvm_macros",
     ] + all_crate_deps(proc_macro = True),
     deps = [
         ":honk_lib",
-        "//crates/hatch",
-        "//crates/honc-cold-138",
-        "//crates/hoonc:hoonc_lib",
-        "//crates/nockapp",
-        "//crates/nockvm/rust/nockvm",
-        "//crates/zkvm-jetpack",
     ] + all_crate_deps(),
 )

@@ -1,0 +1,44 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "honk-lsp",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**"],
+    ),
+    aliases = aliases(),
+    crate_name = "honk_lsp",
+    edition = "2021",
+    deps = [
+        "//crates/honk:honk_lib",
+        "//crates/honk-service:honk-service",
+    ] + all_crate_deps(),
+)
+
+rust_binary(
+    name = "honk-lsp-bin",
+    srcs = ["src/bin/honk-lsp.rs"],
+    aliases = aliases(),
+    crate_name = "honk_lsp_bin",
+    crate_root = "src/bin/honk-lsp.rs",
+    edition = "2021",
+    deps = [
+        ":honk-lsp",
+        "//crates/honk-service:honk-service",
+    ] + all_crate_deps(),
+)
+
+rust_test(
+    name = "honk_lsp_unit_tests",
+    size = "small",
+    timeout = "short",
+    crate = ":honk-lsp",
+)

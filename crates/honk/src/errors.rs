@@ -36,6 +36,24 @@ pub struct CompilerErrorLocation {
     pub end_col: Option<u64>,
 }
 
+/// Owned editor-only fact captured while type-checking a debug-spotted Hoon
+/// node. The summary contains no noun or compiler-arena references and may
+/// safely cross the compiler actor boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerSemanticFact {
+    pub location: CompilerErrorLocation,
+    pub type_summary: String,
+}
+
+/// Owned editor-only provenance for a compiler-resolved arm reference.
+/// Locations and the arm name are detached from compiler nouns and arenas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerResolutionFact {
+    pub use_location: CompilerErrorLocation,
+    pub definition_location: CompilerErrorLocation,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompilerErrorMetadata {
     pub location: Option<CompilerErrorLocation>,

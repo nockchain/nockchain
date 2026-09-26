@@ -1,0 +1,26 @@
+# Editor service conformance coverage
+
+| Requirement | Test | Method |
+|---|---|---|
+| Filesystem behavior remains the reference when no document is open | `open_documents_shadow_disk_and_close_restores_it` | Differential artifact comparison before open and after close |
+| Unsaved dependency text participates in parsing, type checking, and artifacts | same | Replaces a transitive leaf's `add` with `mul` in memory and requires a different artifact without a disk write |
+| Overlay and filesystem paths are artifact-equivalent for identical text | same | Reopens the dependency with disk-equivalent text and requires byte-identical output |
+| Content-only edits invalidate the changed dependency and its transitive dependents | same | Uses `entry -> helper -> leaf` and requires at least two invalidated cached paths plus a miss |
+| Content-only edits preserve unrelated dependency results | same | Imports a second unchanged library and requires a path-cache hit after editing the leaf |
+| Editor checks do not evaluate, shape, or serialize artifacts | same | Calls the artifact-free `check` operation, requires a fresh root-check miss followed by a detached root-check hit, and proves artifacts are produced only by `compile` |
+| Editor checks expose noun-free compiler type facts | same | A fresh check must return owned source locations and nonempty type summaries; the observer is enabled only by the editor check path |
+| Editor checks expose noun-free resolution facts | same | A fresh check must return owned use and definition locations for compiler-resolved core arms; the observer is enabled only by the editor check path |
+| Repeated editor checks reuse detached root results | same | Requires an unchanged check and a same-content version update to hit the root-check cache with byte-for-byte identical owned semantic facts |
+| Dependency edits invalidate cached root checks | same | Changes `leaf`, requires the cached `entry` check to be evicted through the reverse dependency graph, then proves the next check misses and its repetition hits |
+| Unsaved new files participate in import resolution | `pipeline::tests::overlay_resolves_import_that_does_not_exist_on_disk` | Resolves `/+` against an open `lib/*.hoon` document absent from disk |
+| Unsaved malformed entry text produces a structured parse diagnostic | same | Compiles a malformed open buffer while verifying the on-disk entry is unchanged |
+| Document versions are monotonic | same plus `document_versions_are_strictly_monotonic` | Duplicate versions must return `StaleDocumentVersion` |
+| Results identify their document snapshot | same | Checks the global document revision on compile and check replies |
+| Closing documents restores filesystem semantics | same | Closes all buffers and requires byte-identical output to the initial disk compile |
+| Editor semantic state is separate from compiler noun ownership | `semantic_snapshot_indexes_arms_and_hover` plus editor conformance | Builds traced syntax/arm side tables without a compiler arena and exports compiler types and resolutions only as owned locations and strings |
+| Semantic IDs survive source movement and body edits | `symbol_ids_survive_position_and_body_changes` | Reconciles the same arm across two document revisions and requires the ID to remain stable |
+
+The gRPC adapter remains covered separately by
+`crates/honk-grpc/tests/daemon_conformance.rs`; it exercises the same service
+handle through protobuf conversion, health, reflection, invalidation, and
+bounded-lifetime behavior.

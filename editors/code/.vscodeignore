@@ -1,0 +1,10 @@
+.npmrc
+.gitignore
+src/**
+test/**
+tsconfig.json
+*.vsix
+node_modules/**
+dist/*.map
+dist/config.js
+dist/codeLens.js

@@ -34,10 +34,14 @@ use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, T};
 use num_bigint::BigUint;
 use smallvec::SmallVec;
 
-use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
+use crate::errors::{
+    CompilerError, CompilerErrorLocation, CompilerErrorMetadata, CompilerResolutionFact,
+    CompilerSemanticFact, Result,
+};
 use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
 use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
+use crate::native::ir::leaf::Leaf;
 use crate::native::ir::semi_dag::{SemiArena, SemiId, SemiNode};
 use crate::native::ir::value_dag::{ValueArena, ValueId};
 use crate::native::noun::{
@@ -50,6 +54,7 @@ use crate::native::noun::{noun_eq_direct, noun_pair};
 mod find;
 mod fire;
 mod repo;
+mod semantic;
 #[cfg(test)]
 pub mod test;
 pub mod types;
@@ -269,6 +274,11 @@ impl Drop for HoonAstScope<'_, '_, '_> {
     }
 }
 
+type SemanticLocationKey = (String, u64, u64, u64, u64);
+type SemanticResolutionKey = (SemanticLocationKey, SemanticLocationKey, String);
+/// A hold's editor name and, failing one, the head of the call its arm
+/// body makes; see `Ut::semantic_hold_name`.
+type SemanticHoldName = (Option<Arc<str>>, Option<Arc<str>>);
 pub struct Ut<'a> {
     pub slab: &'a mut NounSlab,
     // Canonical Nock formula graph. Formula-producing compiler paths migrate to
@@ -290,6 +300,16 @@ pub struct Ut<'a> {
     // - recursion guards: in-progress arm state and wet `rib`
     pub vet: bool,
     dbug_locations: Vec<CompilerErrorLocation>,
+    semantic_recording: bool,
+    semantic_type_facts: Vec<CompilerSemanticFact>,
+    semantic_type_fact_keys: HashSet<SemanticLocationKey>,
+    semantic_resolution_facts: Vec<CompilerResolutionFact>,
+    semantic_resolution_fact_keys: HashSet<SemanticResolutionKey>,
+    // Editor names for interned holds, keyed by arena id (stable for this
+    // compile context, like `hold_repo_fan_leg_id_by_ptr`), and the mold
+    // each normalizing gate was built for, keyed by its `$` arm body noun.
+    semantic_hold_names: FastHashMap<u32, SemanticHoldName>,
+    semantic_factory_molds: FastHashMap<u64, Arc<str>>,
     // Memoization tables. New cache keys should derive semantic/memo state from the helper
     // accessors below rather than hand-assembling context tuples at each cache surface.
     // Recursion / in-progress guards. These are not caches; they constrain valid memo reuse and
@@ -2129,6 +2149,13 @@ impl<'a> Ut<'a> {
             cx: Context::new(),
             vet: true,
             dbug_locations: Vec::new(),
+            semantic_recording: false,
+            semantic_type_facts: Vec::new(),
+            semantic_type_fact_keys: HashSet::new(),
+            semantic_resolution_facts: Vec::new(),
+            semantic_resolution_fact_keys: HashSet::new(),
+            semantic_hold_names: Default::default(),
+            semantic_factory_molds: Default::default(),
             arm_in_progress: HashSet::new(),
             arm_goal_in_progress: Vec::new(),
             arm_placeholder_play_in_progress: HashSet::new(),
@@ -2392,6 +2419,24 @@ impl<'a> Ut<'a> {
 
     pub fn set_vet(&mut self, vet: bool) {
         self.vet = vet;
+    }
+
+    pub fn begin_semantic_recording(&mut self) {
+        self.semantic_type_facts.clear();
+        self.semantic_type_fact_keys.clear();
+        self.semantic_resolution_facts.clear();
+        self.semantic_resolution_fact_keys.clear();
+        self.semantic_recording = true;
+    }
+
+    pub fn finish_semantic_recording(
+        &mut self,
+    ) -> (Vec<CompilerSemanticFact>, Vec<CompilerResolutionFact>) {
+        self.semantic_recording = false;
+        (
+            std::mem::take(&mut self.semantic_type_facts),
+            std::mem::take(&mut self.semantic_resolution_facts),
+        )
     }
 
     /// Run `f` with `vet` forced off, restoring the previous value afterward
@@ -4233,6 +4278,9 @@ impl<'a> Ut<'a> {
         let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
             if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
+                if let Hoon::Dbug(spot, inner) = gen {
+                    self.record_semantic_type(spot, &cached.0, inner);
+                }
                 return Ok(cached);
             }
         }
@@ -4495,6 +4543,59 @@ impl<'a> Ut<'a> {
             };
         }
         Some(node)
+    }
+
+    fn record_semantic_resolution(&mut self, name: &str, definition: Noun) {
+        if !self.semantic_recording
+            || self.semantic_resolution_facts.len() >= Self::SEMANTIC_FACT_LIMIT
+        {
+            return;
+        }
+        let Some(use_location) = self.dbug_locations.last().cloned() else {
+            return;
+        };
+        let Some(use_key) = Self::semantic_location_key(&use_location) else {
+            return;
+        };
+        let Some(definition_ast) = self.hoon_ast_lookup(definition) else {
+            return;
+        };
+        let Some(definition_location) = Self::semantic_definition_location(&definition_ast) else {
+            return;
+        };
+        let Some(definition_key) = Self::semantic_location_key(&definition_location) else {
+            return;
+        };
+        let name = name.to_string();
+        if !self
+            .semantic_resolution_fact_keys
+            .insert((use_key, definition_key, name.clone()))
+        {
+            return;
+        }
+        self.semantic_resolution_facts.push(CompilerResolutionFact {
+            use_location,
+            definition_location,
+            name,
+        });
+    }
+
+    fn semantic_definition_location(hoon: &Hoon) -> Option<CompilerErrorLocation> {
+        match hoon {
+            Hoon::Dbug(spot, _) => Some(Self::location_from_spot(spot)),
+            Hoon::Note(_, inner) => Self::semantic_definition_location(inner),
+            _ => None,
+        }
+    }
+
+    fn semantic_location_key(location: &CompilerErrorLocation) -> Option<SemanticLocationKey> {
+        Some((
+            location.file.clone()?,
+            location.start_line?,
+            location.start_col?,
+            location.end_line?,
+            location.end_col?,
+        ))
     }
 
     fn decorate_error(&self, err: CompilerError) -> CompilerError {
@@ -5594,7 +5695,9 @@ impl<'a> Ut<'a> {
         spec: &Spec,
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let opened = self.spec_factory_open_cached(spec);
-        self.mint(sut, gol, opened.as_ref())
+        let minted = self.mint(sut, gol, opened.as_ref())?;
+        self.note_factory_mold(spec, &minted.0);
+        Ok(minted)
     }
 
     fn mint_ktsg(
@@ -6970,7 +7073,9 @@ impl<'a> Ut<'a> {
 
     fn play_ktcl(&mut self, sut: NRc<NTy>, spec: &Spec) -> Result<NRc<NTy>> {
         let gen = Hoon::KetCol(Box::new(spec.clone()));
-        self.play_opened(sut, &gen)
+        let played = self.play_opened(sut, &gen)?;
+        self.note_factory_mold(spec, &played);
+        Ok(played)
     }
 
     fn play_dtls(&mut self, _sut: NRc<NTy>, _p: &Hoon) -> Result<NRc<NTy>> {
@@ -8506,6 +8611,7 @@ impl<'a> Ut<'a> {
         let result = self.mint(sut, gol, inner);
         self.dbug_locations.pop();
         let (ty, formula) = result?;
+        self.record_semantic_type(spot, &ty, inner);
         let spot_noun = spot_to_noun(self.slab, spot)?;
         let hint_inner = T(self.slab, &[D(1), spot_noun]);
         let spot_tag = term_to_noun(self.slab, "spot");

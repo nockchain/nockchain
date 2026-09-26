@@ -1,0 +1,18 @@
+[package]
+name = "honk-grpc-proto"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+prost = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+glob = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+tonic-prost-build = { workspace = true }
+
+[lints]
+workspace = true

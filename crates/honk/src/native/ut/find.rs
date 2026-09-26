@@ -536,6 +536,7 @@ impl<'a> Ut<'a> {
                     let mut rem = skip;
                     if let Some((arm_axis, hoon)) = ut.loot(cog, tomes)? {
                         if rem == 0 {
+                            ut.record_semantic_resolution(name_str, hoon);
                             let axis = peg_axis_big_pair(BigUint::from(2u32), &arm_axis)?;
                             let foot = foot_from_poly(ut.slab, poly, hoon);
                             let mut vein = Vec::with_capacity(lon.len() + 1);
