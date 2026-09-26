@@ -5,8 +5,8 @@ This package covers `native/ut/{find,wet,repo,fire,types,keys}.rs`,
 and `native/mod.rs`; `hot.rs`, `identity.rs` and `keys.rs` have no gaps.
 
 Uncovered by unit tests only (`U`): 0 lines and 0 branch outcomes. By the parity
-corpus only (`P`): 698 lines and 180 branch outcomes. By both (`UP`): 13 lines
-and 14 branch outcomes. `L<n>` is a line and `B<n>T`/`B<n>F` a branch outcome;
+corpus only (`P`): 773 lines and 192 branch outcomes. By both (`UP`): 26 lines
+and 21 branch outcomes. `L<n>` is a line and `B<n>T`/`B<n>F` a branch outcome;
 `c<k>` names the k-th condition of a compound test. `P` entries are covered by
 unit tests. Where an entry says both compilers reject, hoonc fails on the same
 program.
@@ -89,11 +89,15 @@ program.
 - L32 [UP]: the argument line of `debug_assert!`. Neither coverage build
   records it as executed.
 - L75-80 [P]: a hold gene that does not decode as hoon. Defensive.
-- L156, L169, L180, L195, B155T, B166T, B168T, B172F, B173F, B194T [P]:
+- L165, L178, L189, L204, B164T, B175T, B177T, B181F, B182F, B203T [P]:
   hold-type memo raw hits, structural hits, key collisions and bucket
   eviction. Performance cache only.
-- L231 [P]: repo-fltt. Every caller passes only face, hint, core, hold or noun
+- L240 [P]: repo-fltt. Every caller passes only face, hint, core, hold or noun
   types.
+- L140-144, B139T B143T [P]: `repo_hold`'s `HONK_MEMO_VERIFY` check, covered
+  by the verify CLI test; the parity corpus runs without the variable.
+  L145-146, B143F [UP]: a recompute that disagrees with its hit, which no
+  build produces.
 
 ## wet.rs
 
@@ -116,10 +120,13 @@ program.
   prints %dear-many, then %redo-match, for `|*  a=?(b=@ @)  a` applied to `5`.
 - B202F, L203 [UP]: `redo_subject_hold_in_fan` on a type that is not a hold.
   Its only caller is the `%hold` arm of `redo_dext`.
-- B307T [UP]: a `gil` hit on the original reference without a hit on the
+- B319T [UP]: a `gil` hit on the original reference without a hit on the
   reduced one. `redo_sint` with `hod` off is deterministic and idempotent on
   its output, so a repeated reference always reduces to a recorded reduced
   reference, which the first check finds.
+- L218-227, B217T B224T/F [UP]: `redo_wet_payload`'s `HONK_MEMO_VERIFY`
+  check. The verify CLI test's program never hits the redo cache, and the
+  parity corpus runs without the variable.
 
 ## types.rs
 
@@ -181,9 +188,22 @@ program.
   `[0 a]` nor `[x [0 1]]`, and no right side is `[0 1]`, so every fold falls
   through to `[7 mal buz]`.
 
+
 ## mod.rs
 
 - L25-67, B53T, B53F [P]: `NativeCompiler` backs the library `honk::Compiler`.
   The `honk` binary that builds the probes drives `Ut` directly, so none of
   this runs under the parity corpus. B53T and L54 are the diagnostics-only
   `HONK_IR_ROUNDTRIP` self-check, covered by `tests/cov_c4_ir_roundtrip.rs`.
+
+## verify.rs
+
+- `index` L55-60; `sites` L68-77, B76T; `due` B105F; `take_bypass` L112-113,
+  B111T; `enter` L119-122; `leave` L124-127; `record` L131-140, B134T/F B136T;
+  `record_perturbed` L144-152, B146T; `memo_verify_report` L158-172, 174-178,
+  B156F B168T/F; `brief` L182-185, 187 [P]: `HONK_MEMO_VERIFY` bookkeeping,
+  covered by its unit tests and the verify CLI test; the parity corpus runs
+  without the variable.
+- `sites` L79, B76F [UP]: a variable value that names sites, which no test
+  sets. `record` B136F and `record_perturbed` B146F [UP]: more than ten
+  mismatches or context changes in one process, which no build produces.

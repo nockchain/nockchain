@@ -61,37 +61,37 @@ covered by unit tests, `P` = not covered by the parity corpus plus the
 
 - L44-47, 107-109; B42F B100F [P]: malformed type nouns with unknown tags.
   Defensive: compiler-built type nouns are always well-formed. Unit-covered.
-- L217-219 [P]: `Context::default` has no compiler caller (`Ut` uses
+- L219-221 [P]: `Context::default` has no compiler caller (`Ut` uses
   `Context::new`). Unit-covered.
-- B247F [P]: `native_of_mug_insert` with a handle already in the bucket.
+- B249F [P]: `native_of_mug_insert` with a handle already in the bucket.
   `native_of_cached` returns early on any structurally equal candidate, so a
   freshly decoded handle is never already present. Performance cache only.
   Unit-covered.
-- L560, 562, 564, 566-568, 571; B567F [P], and L563, B567T [UP]:
+- L571, 573, 575, 577-579, 582; B578F [P], and L574, B578T [UP]:
   `live_enabled` is `#[cfg(test)]`, so the parity binary does not contain it.
   Its `HONK_NATIVE_TYPES` branch is a process-wide toggle that only the
   environment sets. Test-only code.
-- L711 [P]: `cons_hint(_, %noun)`. `hint_type` returns `%noun` payloads before
+- L722 [P]: `cons_hint(_, %noun)`. `hint_type` returns `%noun` payloads before
   calling it, and take/gain/lose/wrap never turn a non-noun hint payload into
   exactly `%noun`. Unit-covered.
-- L739-743, 745-747; B741T/F [P]: `live_leaf_to_noun` of `Leaf::Jammed`. Live
+- L750-754, 756-758; B752T/F [P]: `live_leaf_to_noun` of `Leaf::Jammed`. Live
   types carry only `Direct`/`Noun` leaves; `Jammed` exists only on the debug
   path. Unit-covered.
-- L754-763, 765-766, 768 [P]: `assert_native_eq` is the `#[cfg(test)]` type
+- L765-774, 776-777, 779 [P]: `assert_native_eq` is the `#[cfg(test)]` type
   oracle, absent from the parity binary. Test-only code.
-- L808, B807F [P]: a live leaf for an indirect atom that still fits a u64
+- L819, B818F [P]: a live leaf for an indirect atom that still fits a u64
   (2^63..2^64). Source type leaves are ASCII terms or cells, never in that
   range. Unit-covered.
-- L816, B815F [UP]: unreachable. Live mug buckets hold only `Leaf::Noun`.
-- L839-848, 851-876, 878-883, 885-888, 890-891 [P]: `intern_boundary`, used
+- L827, B826F [UP]: unreachable. Live mug buckets hold only `Leaf::Noun`.
+- L850-859, 862-887, 889-894, 896-899, 901-902 [P]: `intern_boundary`, used
   only by the debug `type_intern_stats`. Unit-covered.
-- L1023; B977F B991F B991c2F B991c3F B1022F [UP]: `node_eq` returning false
+- L1034; B988F B1002F B1002c2F B1002c3F B1033F [UP]: `node_eq` returning false
   on child `TypeId`s, garb, or variant. These fields are hashed exactly, so
   reaching this needs a 64-bit `NodeHash` (SipHash) collision, which cannot be
   constructed. The leaf-carried cases are reachable: `c5_mug_collision` covers
-  B976F and B1001F in parity with real 31-bit mug collisions, and unit tests
+  B987F and B1012F in parity with real 31-bit mug collisions, and unit tests
   that forge mugs cover all three.
-- B1011F [P]: hint heads with colliding mugs over an equal payload. A hint
+- B1022F [P]: hint heads with colliding mugs over an equal payload. A hint
   head embeds its subject type, and that differs whenever the note differs
   (tried with `+$` `%made` notes). Unit-covered with a forged mug.
 
