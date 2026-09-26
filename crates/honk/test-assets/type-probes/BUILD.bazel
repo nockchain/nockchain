@@ -193,8 +193,26 @@ test_suite(
 # Run it locally with:
 #   bazel test //crates/honk/test-assets/type-probes:reject_rest_loop_alias_test
 REJECTION_PROBES = [
+    "c2_battery_left_chapter",
+    "c2_battery_right_chapter",
+    "c2_fish_core_head",
+    "c2_mull_lazy_arm_fold",
+    "c2_nest_cell_fork_hold",
+    "c2_nest_core_context_hold",
+    "c2_nest_core_payload_hold",
+    "c2_nest_core_ref_payload_hold",
+    "c2_nest_deep_arm_hold",
+    "c2_nest_fork_option_hold",
+    "c2_nest_hold_loop",
+    "c3_lose_cell_core_base_tail",
+    "c4_fond_void_tail",
+    "c6_header_comment_del",
+    "c6_import_trailing_slash",
+    "censig_atom_door_gate",
+    "censig_test_src",
     "core_cast_arms",
     "door_sample_nest",
+    "dup_arm_played",
     "edit_arm_tack",
     "edit_nest_fail",
     "edit_unknown_limb",
@@ -205,19 +223,78 @@ REJECTION_PROBES = [
     "fork_edit_synthetic",
     "fork_wing_missing",
     "lead_sample_edit",
+    "mile_mint_ktdt_core_meet",
+    "mile_mull_ktdt_core_meet",
     "mint_lost_case",
     "mint_vain_case",
     "mint_vain_wtcl",
     "mull_wet_body",
     "nest_fail_cast",
     "nest_fail_sample",
+    "p1_spore_free_loop",
+    "p1_zpwt_pair_reversed",
+    "p2_cord_block_opener_comment_no_space",
+    "p2_cord_empty_block_col1",
+    "p2_cord_trailing_continuation",
+    "p2_knot_utf32_control_char",
+    "p2_tape_upper_hex_escape",
+    "p2_ux_uppercase_group",
+    "p2_ux_uppercase_lead",
+    "p2_ux_zero_then_group",
+    "p2_zero_head_digit_group",
+    "p2_zero_head_digit_group_ub",
+    "p2_zero_head_digit_group_ud",
+    "p2_zero_head_digit_group_uv",
+    "p2_zero_head_digit_group_uw",
+    "p2_zero_head_ui",
+    "p3_da_bc_year_zero",
+    "p3_da_day_leading_zero",
+    "p3_da_frac_five_groups",
+    "p3_da_frac_three_digits",
+    "p3_da_frac_uppercase",
+    "p3_da_month_leading_zero",
+    "p3_dr_frac_five_groups",
+    "p3_dr_frac_uppercase",
+    "p3_is_leading_zero_group",
+    "p3_is_uppercase_hex",
+    "p3_path_knot_bad_utf8",
+    "p3_path_knot_control",
+    "p3_path_many_knot_bad_escape",
+    "p3_path_many_knot_control",
+    "p4_duplicate_arm",
+    "p4_duplicate_chapter",
     "redo_fork_ambiguous",
     "redo_shape_mismatch",
+    "reek_cncb_empty_alias",
+    "reek_flay_tsls_reject",
+    "reek_synthetic_alias_edit",
+    "reek_synthetic_alias_tisdot",
     "rest_loop_alias",
+    "sail_attr_comma",
+    "sail_block_partial_indent",
+    "sail_cram_back_partial",
+    "sail_cram_columns_advanced",
+    "sail_cram_expected_indent",
+    "sail_cram_fence_info",
+    "sail_cram_heading_text",
+    "sail_cram_par_then_item",
+    "sail_cram_rule_last",
+    "sail_cram_tab",
+    "sail_cram_unterminated",
+    "sail_cram_verse",
+    "sail_empty_kids",
+    "sail_tall_quote",
+    "sail_wide_in_tall",
     "skin_shape_mismatch",
     "test_not_flag",
     "tissig_empty",
+    "wet_dear_empty_wec_face_use",
+    "wet_rib_subject_key_arm_control",
+    "wet_rib_subject_key_trap_control",
     "wet_slag_tail",
+    "wtzp_mint_vain",
+    "zpwt_dotted_version",
+    "zpwt_pair_gap",
 ]
 
 # The divergent-bunt probe is intentionally native-only. Canonical hoonc also
@@ -236,6 +313,25 @@ sh_test(
     ],
     data = [
         "reject/divergent_bunt.hoon",
+        "//crates/honk:honk",
+        "//hoon/common:hoon.hoon",
+    ],
+)
+
+# A wash skin (,) as a ?: condition sends hoon-138's ar:gain into infinite
+# recursion, so hoonc never finishes; like divergent_bunt it is native-only.
+sh_test(
+    name = "reject_wash_gain_loop_native_test",
+    size = "small",
+    srcs = ["native_rejection_test.sh"],
+    args = [
+        "$(rootpath //crates/honk:honk)",
+        "$(rootpath //hoon/common:hoon.hoon)",
+        "$(rootpath reject/wash_gain_loop.hoon)",
+        "gain-wash",
+    ],
+    data = [
+        "reject/wash_gain_loop.hoon",
         "//crates/honk:honk",
         "//hoon/common:hoon.hoon",
     ],
@@ -265,7 +361,10 @@ sh_test(
 
 test_suite(
     name = "rejection_parity_test",
-    tests = [":reject_divergent_bunt_native_test"] + [
+    tests = [
+        ":reject_divergent_bunt_native_test",
+        ":reject_wash_gain_loop_native_test",
+    ] + [
         "reject_{}_test".format(name)
         for name in REJECTION_PROBES
         # explicitly listed suite members override the manual tag, so the
@@ -274,11 +373,26 @@ test_suite(
     ],
 )
 
+# Everything the "type probe parity" CI job runs: curated probes, compiler
+# fixtures, the rejection corpus, the coverage probe packages, and the
+# correctness regressions.
 test_suite(
     name = "all_parity_test",
     tests = [
         ":type_probe_parity_test",
         ":fixture_parity_test",
         ":rejection_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p1:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p2:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p3:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/p4:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c1:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c2:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c3:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c4:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c5:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/c6:coverage_parity_test",
+        "//crates/honk/test-assets/type-probes/coverage/regressions:coverage_parity_test",
+        "//crates/honk/test-assets:correctness_regression_parity_test",
     ],
 )

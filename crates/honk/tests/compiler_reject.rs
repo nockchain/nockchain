@@ -2,9 +2,9 @@
 //!
 //! Bazel pair-tests the same .hoon files against hoonc at the artifact level
 //! in //crates/honk/test-assets/type-probes (strict cmp for accepts,
-//! both-must-reject for rejects). `divergent_bunt` is native-only there
-//! because canonical hoonc runs away instead of rejecting within the test
-//! budget. This harness runs each probe through `ut.mint_noun` against the
+//! both-must-reject for rejects). `divergent_bunt` and `wash_gain_loop` are
+//! native-only there because canonical hoonc runs away instead of rejecting
+//! within the test budget. This harness runs each probe through `ut.mint_noun` against the
 //! embedded canonical hoon-138 subject type, the same subject the honk binary
 //! compiles files against, so the type-checker branches they exercise
 //! (mint-nice/vain/lost, find/find-fork, fish-core/loop, fire-dry, mull,
@@ -125,8 +125,20 @@ fn rejection_probes_all_rejected() {
             Err(_) => continue,
             Ok(expr) => expr,
         };
-        if ut.mint_noun(sut, gol, &expr).is_ok() {
-            accepted.push(name);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ut.mint_noun(sut, gol, &expr).is_ok()
+        }));
+        match outcome {
+            Ok(true) => accepted.push(name),
+            Ok(false) => {}
+            // hatch's `open` crashes on some hoons, as hoon-138's does (e.g.
+            // p1_zpwt_pair_reversed: a `!?` version out of range), and the
+            // honk binary reports that as a failed compile. The panic may
+            // leave `ut` inconsistent, so continue with a fresh one.
+            Err(_) => {
+                drop(ut);
+                ut = Ut::new(&mut slab);
+            }
         }
     }
     assert!(

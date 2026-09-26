@@ -177,40 +177,36 @@ const ALPH64: &str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV
 
 //  @uw to @
 pub fn base64_to_atom(s: String) -> ParsedAtom {
-    let mut n: u128 = 0;
+    let mut n = BigUint::zero();
 
     for ch in s.chars() {
         let v = match ALPH64.find(ch) {
-            Some(i) => i as u128,
+            Some(i) => i as u32,
             None => panic!("invalid digit '{ch}' in base64"),
         };
 
-        n = n.checked_mul(64).expect("value exceeds u128 range (mul)");
-
-        n = n.checked_add(v).expect("value exceeds u128 range (add)");
+        n = (n << 6u32) + v;
     }
 
-    ParsedAtom::Small(n)
+    ParsedAtom::from_biguint(n)
 }
 
 const ALPH32: &str = "0123456789abcdefghijklmnopqrstuv";
 
 //  @uv to @
 pub fn base32_to_atom(s: String) -> ParsedAtom {
-    let mut n: u128 = 0;
+    let mut n = BigUint::zero();
 
     for ch in s.chars() {
         let v = match ALPH32.find(ch) {
-            Some(i) => i as u128,
+            Some(i) => i as u32,
             None => panic!("invalid digit '{ch}' in base32"),
         };
 
-        n = n.checked_mul(32).expect("value exceeds u128 range (mul)");
-
-        n = n.checked_add(v).expect("value exceeds u128 range (add)");
+        n = (n << 5u32) + v;
     }
 
-    ParsedAtom::Small(n)
+    ParsedAtom::from_biguint(n)
 }
 
 // +fim
@@ -226,18 +222,36 @@ pub fn base58_to_atom(s: String) -> Option<ParsedAtom> {
     den_fa(&a)
 }
 
+// +lip:ag: four `ted:ab` groups (up to 999 each, not just 255) in base 256
 pub fn ipv4_to_atom(s: String) -> Option<ParsedAtom> {
-    let addr = s.parse::<std::net::Ipv4Addr>().ok()?;
-
-    let ip_num = u32::from_be_bytes(addr.octets());
-
-    Some(ParsedAtom::Small(ip_num.into()))
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for part in parts {
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        n = n * 256 + part.parse::<u128>().ok()?;
+    }
+    Some(ParsedAtom::Small(n))
 }
 
+// +bip:ag: eight `qex:ab` groups (up to 4 hex digits each) in base 0x1.0000
 pub fn ipv6_to_atom(s: String) -> Option<ParsedAtom> {
-    let addr = s.parse::<std::net::Ipv6Addr>().ok()?;
-    let num = u128::from_be_bytes(addr.octets());
-    Some(ParsedAtom::Small(num))
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 8 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for part in parts {
+        if part.is_empty() || part.len() > 4 || !part.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        n = (n << 16) | u128::from_str_radix(part, 16).ok()?;
+    }
+    Some(ParsedAtom::Small(n))
 }
 
 pub fn basal(bas: BaseType) -> Hoon {
@@ -2688,12 +2702,14 @@ pub fn open(gen: Hoon) -> Hoon {
         }
 
         Hoon::ZapWut(arg, q) => {
-            const HOON_VERSION: u64 = 138; // hardcoded...
-
+            //  hoon-138: an atom p admits hoon-version <= p, a pair [p q]
+            //  admits q <= hoon-version <= p.
+            let hoon_version = BigUint::from(138u32);
+            let version = |s: &str| BigUint::from_str(s).ok();
             let version_ok = match &arg {
-                ZpwtArg::ParsedAtom(s) => s.parse::<u64>().map_or(false, |v| HOON_VERSION <= v),
-                ZpwtArg::Pair(min_s, max_s) => match (min_s.parse::<u64>(), max_s.parse::<u64>()) {
-                    (Ok(min), Ok(max)) => min <= HOON_VERSION && HOON_VERSION <= max,
+                ZpwtArg::ParsedAtom(p) => version(p).is_some_and(|p| hoon_version <= p),
+                ZpwtArg::Pair(p, q) => match (version(p), version(q)) {
+                    (Some(p), Some(q)) => hoon_version <= p && hoon_version >= q,
                     _ => false,
                 },
             };
@@ -2996,8 +3012,9 @@ pub fn autoname(mod_spec: Spec) -> Option<String> {
     match mod_spec {
         Spec::Base(base) => match base {
             BaseType::Atom(aura) => {
-                if aura == "$" {
-                    //  how empty terms will be represented here in rust land?...
+                //  the empty aura `%$` is spelled "" by the aura parser (bare
+                //  `@`) and "$" by the desugarer
+                if aura == "$" || aura.is_empty() {
                     Some("atom".to_string())
                 } else {
                     Some(aura)
@@ -3542,22 +3559,18 @@ pub fn sea(w: u128, p: u128, b: u128, a: &ParsedAtom) -> BinaryFloat {
 //  inner function for drg_fl
 pub fn drg(e: u128, a: BigUint, p: u128, v: u128, w: u128, d: char) -> (u128, BigUint) {
     assert!(!a.is_zero(), "drg: mantissa must be nonzero");
-    eprintln!("drg caleed e {} a {} p {} v {} w {} d {}", e, a, p, v, w, d);
-    // drg caleed e 43 a 13176795 p 24 v 299 w 253 d d
-    //  it should return (13, 31.415.927)
-    //  but it returns 0 and 13176795
 
     let (e, a) = xpd(e, a, d, p, v);
-    eprintln!("xpd result: e:{} a:{}", e, a);
     assert!(!a.is_zero(), "xpd must not produce zero in drg");
 
+    //  r = a * 2^e and mn = mp = 2^e for e >= 0; s = 2^-e otherwise
     let (mut r, mut s, mut mn, mut mp) = {
         if syn_si(e) {
             let shift = abs_si(e) as usize;
             let r = lsh_big(0, shift, &a.clone());
             let s = BigUint::one();
-            let mn = BigUint::one();
-            let mp = BigUint::one();
+            let mn = lsh_big(0, shift, &BigUint::one());
+            let mp = mn.clone();
             (r, s, mn, mp)
         } else {
             let shift = abs_si(e) as usize;
@@ -3568,8 +3581,6 @@ pub fn drg(e: u128, a: BigUint, p: u128, v: u128, w: u128, d: char) -> (u128, Bi
             (r, s, mn, mp)
         }
     };
-
-    eprintln!("r: {} s: {} mn: {} mp: {}", r, s, mn, mp);
 
     let a_orig = BigUint::from(1u128) << sub_or_panic(prc(p), 1); // 2^(p-1)
     let halfway = a == a_orig;
@@ -3633,7 +3644,6 @@ pub fn drg(e: u128, a: BigUint, p: u128, v: u128, w: u128, d: char) -> (u128, Bi
         o = o * &ten + digit;
         break;
     }
-    eprintln!("drg returning {} {}", k, o);
     (k, o)
 }
 
@@ -3648,8 +3658,9 @@ pub fn drg_fl(a: BinaryFloat, p: u128, w: u128, b: u128) -> DecimalFloat {
                     mant: BigUint::zero(),
                 }
             } else {
-                let p = p + 1;
+                //  +pa:ff: fl with p=+(p), v=me (of the field width p)
                 let v = me(b, p);
+                let p = p + 1;
                 let w = bex(w) - 3;
                 let d = 'd';
                 let (k, digits) = drg(exp, mant, p, v, w, d);
@@ -3803,11 +3814,9 @@ fn lug(
 
     let q = max_p.max(max_q);
 
-    let b = end_big(0, q as usize, &a)
-        .to_u128()
-        .expect("value too large for u128");
+    let b = end_big(0, q as usize, &a);
 
-    a = rsh(0, q as usize, &ParsedAtom::Big(a)).to_biguint();
+    a = rsh_big(0, q as usize, &a);
 
     e = sum_si(e, sun_si(q));
 
@@ -3825,7 +3834,7 @@ fn lug(
                 mant: BigUint::one(),
             },
             Nearest | NearestTowards => {
-                let half = bex(q.saturating_sub(1));
+                let half = bex_big(q.saturating_sub(1));
                 if s {
                     if b <= half {
                         return Finite {
@@ -3854,7 +3863,7 @@ fn lug(
                 };
             }
             NearestAway => {
-                let half = bex(q.saturating_sub(1));
+                let half = bex_big(q.saturating_sub(1));
                 if b < half {
                     return Finite {
                         sign: true,
@@ -3877,7 +3886,7 @@ fn lug(
         Floor => { /* no change */ }
         Larger => a = a + BigUint::one(),
         Smaller => {
-            if b == 0 && s {
+            if b.is_zero() && s {
                 if e == v && d != 'i' {
                     a = sub_or_panic_big(&a, &BigUint::one());
                 } else {
@@ -3893,13 +3902,13 @@ fn lug(
             }
         }
         Ceiling => {
-            if !(b == 0 && !s) {
+            if !(b.is_zero() && s) {
                 a = a + BigUint::one();
             }
         }
         Nearest => {
-            if b != 0 {
-                let y = bex(sub_or_panic(q, 1));
+            if !b.is_zero() {
+                let y = bex_big(sub_or_panic(q, 1));
                 if b == y && s {
                     if dis_big(&a, &BigUint::one()) != BigUint::zero() {
                         a = a + BigUint::one();
@@ -3911,22 +3920,21 @@ fn lug(
             }
         }
         NearestAway => {
-            if b != 0 {
-                let y = bex(sub_or_panic(q, 1));
+            if !b.is_zero() {
+                let y = bex_big(sub_or_panic(q, 1));
                 if !(b < y) {
                     a = a + BigUint::one();
                 }
             }
         }
         NearestTowards => {
-            if b != 0 {
-                let y = bex(sub_or_panic(q, 1));
+            if !b.is_zero() {
+                let y = bex_big(sub_or_panic(q, 1));
                 if b == y {
                     if !s {
                         a = a + BigUint::one();
                     }
-                }
-                if !(b < y) {
+                } else if !(b < y) {
                     a = a + BigUint::one();
                 }
             }
@@ -3936,10 +3944,7 @@ fn lug(
     (e, a) = if (met_big(0, &a.clone()) as u128) != (prc_res + 1) {
         (e, a)
     } else {
-        a = rsh(0, 1, &ParsedAtom::Big(a))
-            .to_u128()
-            .expect("lug: cast failled")
-            .into();
+        a = rsh_big(0, 1, &a);
         e = sum_si(e, 2);
         (e, a)
     };
@@ -3978,7 +3983,7 @@ fn lug(
             exp,
             ref mant,
         } => {
-            if met_big(0, &mant.clone()) as u128 == prc(p) {
+            if met_big(0, &mant.clone()) as u128 != prc(p) {
                 return Finite {
                     sign: true,
                     exp: 0,
@@ -4060,6 +4065,10 @@ pub fn bex(a: u128) -> u128 {
         assert!(a < 128, "bex: exponent too large for u128");
         1u128 << a
     }
+}
+
+fn bex_big(a: u128) -> BigUint {
+    BigUint::one() << a
 }
 
 fn xpd(e: u128, a: BigUint, d: char, p: u128, v: u128) -> (u128, BigUint) {
@@ -4150,7 +4159,7 @@ pub fn binaryfloat_mul(
         };
     }
 
-    if ma == BigUint::zero() || mb == BigUint::zero() {
+    if sa == sb {
         return binaryfloat_mul_internal(ea, ma, eb, mb, p, v, w, r, d);
     }
     r = swr(r);
@@ -4958,22 +4967,35 @@ pub fn chapters<'src>(
         .then_ignore(just("--"))
         .map(
             |chapters_vec: Vec<(Option<(String, Option<NounExpr>)>, Vec<(String, Hoon)>)>| {
-                let mut map_term_tome = HashMap::new();
-                for (opt_label, arms_vec) in chapters_vec {
+                //  hoon-138 ++whap and ++wisp fold from the last arm and the
+                //  last chapter: an arm named again later in its chapter, or in
+                //  any later chapter, becomes an %eror arm, and a chapter
+                //  named again later becomes a lone %eror arm `$` (the build
+                //  fails only if that arm is ever minted or played).
+                let dup = |sigil: &str, name: &str| {
+                    let name = if name == "$" { "" } else { name };
+                    Hoon::Eror(format!("duplicate {sigil}{name}"))
+                };
+                let mut map_term_tome: HashMap<String, Tome> = HashMap::new();
+                let mut later_arms: HashSet<String> = HashSet::new();
+                for (opt_label, arms_vec) in chapters_vec.into_iter().rev() {
                     let (key, what) = opt_label.unwrap_or_else(|| ("$".to_string(), None));
-                    // hoon.hoon repeats chapter labels (`+| %containers`, etc.) across layers.
-                    // Treat these as append-to-existing rather than overwriting the previous chapter.
-                    let tome = map_term_tome
-                        .entry(key)
-                        .or_insert_with(|| (what.clone(), HashMap::new()));
-                    if tome.0.is_none() {
-                        tome.0 = what;
+                    let mut arms: HashMap<String, Hoon> = HashMap::new();
+                    for (name, hoon) in arms_vec.into_iter().rev() {
+                        let hoon = if arms.contains_key(&name) || later_arms.contains(&name) {
+                            dup("arm: +", &name)
+                        } else {
+                            hoon
+                        };
+                        arms.insert(name, hoon);
                     }
-                    for (name, hoon) in arms_vec {
-                        // If an arm is redefined within a later chunk of the same chapter, keep the
-                        // last definition (matches typical "last wins" parse behavior).
-                        tome.1.insert(name, hoon);
-                    }
+                    later_arms.extend(arms.keys().cloned());
+                    let arms = if map_term_tome.contains_key(&key) {
+                        HashMap::from([("$".to_string(), dup("chapter: |", &key))])
+                    } else {
+                        arms
+                    };
+                    map_term_tome.insert(key, (what, arms));
                 }
                 map_term_tome
             },
@@ -5067,10 +5089,31 @@ pub fn soil<'src>(
         .map(|h| Woof::Hoon(Hoon::ColTar(h)))
         .boxed();
 
+    //  hoonc parses the bytes of the source, so a non-ASCII character is one
+    //  tape element per byte of its UTF-8 encoding (++prn admits every byte
+    //  from 0x80 up).
+    let text_bytes = |c: char| {
+        let mut encoded = [0; 4];
+        c.encode_utf8(&mut encoded)
+            .bytes()
+            .map(|b| Woof::ParsedAtom(ParsedAtom::Small(b as u128)))
+            .collect::<Vec<Woof>>()
+    };
+
+    //  \HH hex escape (++bix:ab: two ++six digits, so lowercase only)
+    let hex_escape = || {
+        let six = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'));
+        six.clone().then(six).map(|(a, b)| {
+            let hx = format!("{}{}", a, b);
+            let byte = u8::from_str_radix(&hx, 16).expect("hex tape escape was validated");
+            byte as char
+        })
+    };
+
     // non-control 32-256, excluding DEL, {,  ", \
     let wide_char = any().filter(|c: &char| {
         let x = *c as u32;
-        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '"' && *c != '\\') || (x >= 0x80 && x <= 0xFF)
+        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '"' && *c != '\\') || x >= 0x80
     });
 
     //
@@ -5085,34 +5128,26 @@ pub fn soil<'src>(
                 just("\\").to('\\'),
                 just("\"").to('\"'),
                 just("{").to('{'),
-                // \HH hex escape
-                any()
-                    .filter(|c: &char| c.is_ascii_hexdigit())
-                    .then(any().filter(|c: &char| c.is_ascii_hexdigit()))
-                    .map(|(a, b)| {
-                        let hx = format!("{}{}", a, b);
-                        let byte =
-                            u8::from_str_radix(&hx, 16).expect("hex tape escape was validated");
-                        byte as char
-                    }),
+                hex_escape(),
             )))
-            .map(|c: char| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+            .map(|c: char| vec![Woof::ParsedAtom(ParsedAtom::Small(c as u128))]),
         //
         //  {hoon}
         //
-        sump.clone(),
+        sump.clone().map(|w| vec![w]),
         ///
-        wide_char.map(|c| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+        wide_char.map(text_bytes),
     ))
     .repeated()
-    .collect::<Vec<Woof>>()
+    .collect::<Vec<Vec<Woof>>>()
+    .map(|chunks| chunks.into_iter().flatten().collect::<Vec<Woof>>())
     .delimited_by(just("\""), just("\""))
     .labelled("Tape");
 
     // non-control 32-256, excluding DEL, {,  \
     let tall_char = any().filter(|c: &char| {
         let x = *c as u32;
-        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '\\') || (x >= 0x80 && x <= 0xFF)
+        (x >= 0x20 && x <= 0x7E && *c != '{' && *c != '\\') || x >= 0x80
     });
 
     // let tall_tape_line_break =
@@ -5128,27 +5163,19 @@ pub fn soil<'src>(
             .ignore_then(choice((
                 just("\\").to('\\'),
                 just("{").to('{'),
-                // \HH hex escape
-                any()
-                    .filter(|c: &char| c.is_ascii_hexdigit())
-                    .then(any().filter(|c: &char| c.is_ascii_hexdigit()))
-                    .map(|(a, b)| {
-                        let hx = format!("{}{}", a, b);
-                        let byte =
-                            u8::from_str_radix(&hx, 16).expect("hex tape escape was validated");
-                        byte as char
-                    }),
+                hex_escape(),
             )))
-            .map(|c: char| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+            .map(|c: char| vec![Woof::ParsedAtom(ParsedAtom::Small(c as u128))]),
         //
-        tall_char.map(|c| Woof::ParsedAtom(ParsedAtom::Small(c as u128))),
+        tall_char.map(text_bytes),
         //
         //  {hoon}
         //
-        sump,
+        sump.map(|w| vec![w]),
     ))
     .repeated()
-    .collect::<Vec<Woof>>();
+    .collect::<Vec<Vec<Woof>>>()
+    .map(|chunks| chunks.into_iter().flatten().collect::<Vec<Woof>>());
 
     let prefix_spaces = just(' ').repeated();
 
@@ -5331,12 +5358,17 @@ pub fn constant<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, Coi
         .labelled("Constant<%foo>")
 }
 
-pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
-    let empty_triple_quoted = just("'''")
-        .then_ignore(newline())
-        .then_ignore(just("'''"))
-        .to(cord_chars_to_atom(Vec::new()));
+//  ++gon: a \ / continuation inside a cord or ++hex digits; the whitespace
+//  between is ++gay, an optional gap
+fn gon<'src>() -> impl Parser<'src, &'src str, (), Err<'src>> {
+    just("\\")
+        .ignore_then(gap().or_not())
+        .ignore_then(just("/"))
+        .ignored()
+        .labelled("Multiline Separator")
+}
 
+pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     //  \\, \' and \AA where A is a hex digit. Escapes produce bytes, not
     //  Unicode scalar values: `\d7` is one byte while a literal `×` is the two
     //  bytes of its UTF-8 encoding.
@@ -5369,17 +5401,11 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
             encoded[..len].to_vec()
         });
 
-    let gon = just("\\") // multiline separator
-        .ignore_then(gap())
-        .ignore_then(just("/"))
-        .ignored()
-        .labelled("Cord Multiline Separator");
-
     let char_in_singled_quoted = choice((escape, raw_char)).labelled("Cord Character");
 
+    //  (more gon qit): a continuation only separates two characters
     let single_quoted = char_in_singled_quoted
-        .then_ignore(gon.or_not())
-        .repeated()
+        .separated_by(gon().or_not())
         .collect::<Vec<Vec<u8>>>()
         .delimited_by(just("'"), just("'"))
         .map(|chunks| cord_bytes_to_atom(chunks.into_iter().flatten()));
@@ -5395,7 +5421,14 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
             }
             return 0 as usize;
         })
-        .then_ignore(vul().or(newline()));
+        //  ++qut hed: a comment after at least one space, or a newline
+        .then_ignore(
+            just(' ')
+                .repeated()
+                .at_least(1)
+                .ignore_then(vul())
+                .or(newline()),
+        );
 
     let triple_quoted_close = newline()
         .ignore_then(just(' ').repeated().count())
@@ -5467,7 +5500,7 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
         })
         .map(cord_chars_to_atom);
 
-    choice((empty_triple_quoted, triple_quoted, single_quoted)).labelled("Cord")
+    choice((triple_quoted, single_quoted)).labelled("Cord")
 }
 
 pub fn increment<'src>(
@@ -5643,7 +5676,7 @@ fn tok(a: &ParsedAtom) -> ParsedAtom {
 
     let padded = lsh(3, b, &swapped);
 
-    let len = b + met(3, a);
+    let len = b + if a.is_zero() { 0 } else { met(3, a) };
 
     let hashed = shay(len as u64, &padded.to_biguint());
 
@@ -5752,7 +5785,12 @@ fn pad_fa_big(a: &BigUint) -> usize {
 }
 
 pub fn pad_fa(atom: &ParsedAtom) -> usize {
-    21usize.saturating_sub(met(3, atom))
+    // hoon's (met 3 0) is 0, so zero pads to 21; hatch's met(3, 0) is 1
+    if atom.is_zero() {
+        21
+    } else {
+        21usize.saturating_sub(met(3, atom))
+    }
 }
 
 pub fn enc_fa(atom: &ParsedAtom) -> ParsedAtom {
@@ -5811,41 +5849,41 @@ fn wick(s: &str) -> Option<String> {
 }
 
 pub fn urx<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
+    //  (cook tuft (ifix [sig dot] hex)): ++hex is (most gon hit), and ++tuft
+    //  encodes every 32-bit lane of the value, not just the low one
     let hex_escape = any()
         .filter(|c: &char| c.is_ascii_hexdigit())
-        .repeated()
+        .separated_by(gon().or_not())
         .at_least(1)
         .collect::<String>()
         .delimited_by(just('~'), just('.'))
         .map(|hex_str: String| {
             let big = BigUint::from_str_radix(&hex_str, 16).unwrap_or_default();
-            let value_32 = big.iter_u32_digits().next().unwrap_or(0); // low 32 bits
-
-            let tuft_result = tuft(&ParsedAtom::Small(value_32 as u128));
-
-            match tuft_result {
-                ParsedAtom::Small(n) => n,
-                ParsedAtom::Big(_) => panic!("tuft overflow"),
+            let encoded = tuft(&ParsedAtom::from_biguint(big));
+            if encoded.is_zero() {
+                Vec::new()
+            } else {
+                encoded.to_biguint().to_bytes_le()
             }
         });
 
     let special = choice((
-        just("~~").to(b'~' as u128),
-        just("~.").to(b'.' as u128),
-        just('.').to(b' ' as u128),
+        just("~~").to(vec![b'~']),
+        just("~.").to(vec![b'.']),
+        just('.').to(vec![b' ']),
     ));
 
     let ascii = any()
         .filter(|c: &char| c.is_ascii_digit() || c.is_ascii_lowercase() || *c == '-' || *c == '_')
-        .map(|c| c as u128);
+        .map(|c| vec![c as u8]);
 
     let token = choice((hex_escape, special, ascii));
 
-    token
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<u128>>()
-        .map(|chars: Vec<u128>| rap(3, &chars))
+    //  ++urx is a star: ~~ and ~- alone are the empty @t and @c
+    token.repeated().collect::<Vec<Vec<u8>>>().map(|chunks| {
+        let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
+        ParsedAtom::from_biguint(BigUint::from_bytes_le(&bytes))
+    })
 }
 
 fn atom_shl(a: &ParsedAtom, bits: usize) -> ParsedAtom {
@@ -5952,13 +5990,10 @@ pub fn tuft(atom: &ParsedAtom) -> ParsedAtom {
         bytes.push((0b1000_0000 | (b & 0x3f)) as u8);
     }
 
-    // rap 3: pack bytes little-endian into @t
-    let mut acc: u128 = 0;
-    for (i, byte) in bytes.iter().enumerate() {
-        acc |= (*byte as u128) << (i * 8);
-    }
-
-    ParsedAtom::Small(acc)
+    // rap 3: pack bytes little-endian into @t. A zero byte (from an empty
+    // lane below a nonzero one) has no width, so rap drops it.
+    bytes.retain(|&byte| byte != 0);
+    ParsedAtom::from_biguint(BigUint::from_bytes_le(&bytes))
 }
 // --- Extract low byte as u8 ---
 fn atom_to_u8(atom: &ParsedAtom) -> u8 {
@@ -5968,100 +6003,63 @@ fn atom_to_u8(atom: &ParsedAtom) -> u8 {
     }
 }
 
-// --- UTF-8 continuation byte check ---
-fn is_continuation(b: u8) -> bool {
-    b & 0xC0 == 0x80
-}
-
-// --- teff: UTF-8 leading byte → length (1–4) ---
-fn teff(atom: &ParsedAtom) -> usize {
+// --- teff: UTF-8 leading byte → length (1–4), as ++teff ---
+// None where ++teff crashes: a zero low byte under nonzero bytes, or a
+// control byte other than newline.
+fn teff(atom: &ParsedAtom) -> Option<usize> {
     let b = atom_to_u8(atom);
     if b == 0 {
-        return 0;
+        return atom.is_zero().then_some(0);
     }
-    if b <= 0x7F {
-        1
-    } else if b <= 0xDF {
-        2
-    } else if b <= 0xEF {
-        3
-    } else if b <= 0xF4 {
-        4
-    } else {
-        1
-    } // invalid → skip 1 byte
+    if b < 32 && b != 10 {
+        return None;
+    }
+    Some(match b {
+        0..=127 => 1,
+        128..=223 => 2,
+        224..=239 => 3,
+        _ => 4,
+    })
 }
 
-// --- Decode one UTF-8 codepoint ---
-fn decode_one_utf8(atom: &ParsedAtom, len: usize) -> u32 {
+// --- One ++taft step: the code point bits of a `len`-byte character,
+// cut out without validation ---
+fn taft_cut(atom: &ParsedAtom, len: usize) -> u32 {
+    let byte = |i: usize| atom_to_u8(&rsh(3, i, atom)) as u32;
     match len {
-        1 => atom_to_u8(atom) as u32,
-        2 => {
-            let b0 = atom_to_u8(atom);
-            let b1 = atom_to_u8(&rsh(3, 1, atom));
-            if !is_continuation(b1) {
-                return 0xFFFD;
-            }
-            let cp = ((b0 & 0x1F) as u32) << 6 | (b1 & 0x3F) as u32;
-            if cp < 0x80 {
-                0xFFFD
-            } else {
-                cp
-            }
+        1 => byte(0) & 0x7f,
+        2 => (byte(0) & 0x1f) << 6 | byte(1) & 0x3f,
+        3 => (byte(0) & 0x0f) << 12 | (byte(1) & 0x3f) << 6 | byte(2) & 0x3f,
+        _ => {
+            (byte(0) & 0x07) << 18 | (byte(1) & 0x3f) << 12 | (byte(2) & 0x3f) << 6 | byte(3) & 0x3f
         }
-        3 => {
-            let b0 = atom_to_u8(atom);
-            let b1 = atom_to_u8(&rsh(3, 1, atom));
-            let b2 = atom_to_u8(&rsh(3, 2, atom));
-            if !is_continuation(b1) || !is_continuation(b2) {
-                return 0xFFFD;
-            }
-            let cp = ((b0 & 0x0F) as u32) << 12 | ((b1 & 0x3F) as u32) << 6 | (b2 & 0x3F) as u32;
-            if cp < 0x800 || (0xD800..=0xDFFF).contains(&cp) {
-                0xFFFD
-            } else {
-                cp
-            }
-        }
-        4 => {
-            let b0 = atom_to_u8(atom);
-            let b1 = atom_to_u8(&rsh(3, 1, atom));
-            let b2 = atom_to_u8(&rsh(3, 2, atom));
-            let b3 = atom_to_u8(&rsh(3, 3, atom));
-            if !is_continuation(b1) || !is_continuation(b2) || !is_continuation(b3) {
-                return 0xFFFD;
-            }
-            let cp = ((b0 & 0x07) as u32) << 18
-                | ((b1 & 0x3F) as u32) << 12
-                | ((b2 & 0x3F) as u32) << 6
-                | (b3 & 0x3F) as u32;
-            if !(0x1_0000..=0x10_FFFF).contains(&cp) {
-                0xFFFD
-            } else {
-                cp
-            }
-        }
-        _ => 0xFFFD,
     }
 }
 
-// @t (UTF-8 atom) -> @c (UTF-32 packed atom)
-pub fn taft(atom: &ParsedAtom) -> ParsedAtom {
+// @t (UTF-8 atom) -> @c (UTF-32 packed atom), as ++taft. Surrogates and code
+// points above U+10FFFF are kept. None where ++taft crashes: ++teff rejects a
+// byte, or a character does not survive the round trip through ++tuft
+// (malformed or overlong UTF-8).
+pub fn taft(atom: &ParsedAtom) -> Option<ParsedAtom> {
     let mut codepoints = Vec::new();
     let mut current = atom.clone();
 
     loop {
-        let len = teff(&current);
+        let len = teff(&current)?;
         if len == 0 {
             break;
         }
-        let cp = decode_one_utf8(&current, len);
+        let cp = taft_cut(&current, len);
+        // ?>  =((tuft c) (end [3 b] a))
+        if tuft(&ParsedAtom::Small(cp as u128)).to_biguint() != end(3, len, &current).to_biguint() {
+            return None;
+        }
         codepoints.push(cp);
         current = rsh(3, len, &current); // shift by `len` bytes
     }
 
     // Pack into @c: each u32 in 32-bit lane, LSB-first (rap 5)
-    if codepoints.is_empty() {
+    Some(if codepoints.is_empty() {
         ParsedAtom::Small(0)
     } else if codepoints.len() <= 4 {
         let mut acc: u128 = 0;
@@ -6075,23 +6073,22 @@ pub fn taft(atom: &ParsedAtom) -> ParsedAtom {
             acc |= BigUint::from(cp) << (i * 32);
         }
         ParsedAtom::from_biguint(acc)
-    }
+    })
 }
 
 pub fn binary_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
     let bit = any().filter(|c: &char| *c == '0' || *c == '1');
 
-    let first_group = just('0').to("0".to_string()).or(just('1')
+    let first_group = just('1')
         .then(bit.repeated().at_most(3).collect::<String>())
-        .map(|(h, t)| h.to_string() + &t));
-
-    let first = just("0b").ignore_then(first_group);
+        .map(|(h, t)| h.to_string() + &t);
 
     let rest = just('.')
         .ignore_then(gap().or_not())
         .ignore_then(bit.repeated().exactly(4).collect::<String>());
 
-    first
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first_group
         .then(rest.repeated().collect::<Vec<String>>())
         .map(|(first, rest)| {
             if rest.is_empty() {
@@ -6103,48 +6100,38 @@ pub fn binary_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> 
                 }
                 s
             }
-        })
+        });
+
+    just("0b")
+        .ignore_then(just('0').to("0".to_string()).or(groups))
         .labelled("Binary")
 }
 
 pub fn hexadecimal_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
+    // hex:ag is (ape (bass 0x1.0000 ;~(plug qex:ab (star ;~(pfix dog qix:ab))))):
+    // a lone '0', or a qex:ab group (a lowercase sex:ab digit, then up to three
+    // hit digits of either case) and then qix:ab groups (four lowercase digits)
     let hex = any().filter(|c: &char| c.is_ascii_hexdigit());
+    let six = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'));
 
-    let first_group = hex
+    let first_group = any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='f'))
         .then(hex.repeated().at_most(3).collect::<String>())
-        .map(|(head, tail)| {
-            if head == '0' && !tail.is_empty() {
-                String::new()
-            } else {
-                let mut s = String::new();
-                s.push(head);
-                s.push_str(&tail);
-                s
-            }
-        })
-        .filter(|s| !s.is_empty());
-
-    let first = just("0x").ignore_then(first_group);
+        .map(|(head, tail)| format!("{head}{tail}"));
 
     let rest = just('.')
         .ignore_then(gap().or_not())
-        .ignore_then(hex.repeated().exactly(4).collect::<String>())
+        .ignore_then(six.repeated().exactly(4).collect::<String>())
         .repeated()
         .collect::<Vec<String>>();
 
-    first
-        .then(rest)
-        .map(|(first, rest)| {
-            if rest.is_empty() {
-                first
-            } else {
-                let mut s = first;
-                for r in rest {
-                    s.push_str(&r);
-                }
-                s
-            }
-        })
+    just("0x")
+        .ignore_then(choice((
+            just('0').to("0".to_string()),
+            first_group
+                .then(rest)
+                .map(|(first, rest)| first + &rest.concat()),
+        )))
         .labelled("Hexadecimal")
 }
 
@@ -6155,13 +6142,9 @@ pub fn ipv4_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
         .at_least(1)
         .at_most(3)
         .collect::<String>()
-        .filter(|s: &String| {
-            if s.is_empty() || s.starts_with('0') && s.len() > 1 {
-                return false;
-            }
-            let n = s.parse::<u16>().unwrap_or(256);
-            n <= 255
-        });
+        // +lip:ag octets are `(ape ted:ab)`: '0', or up to 999 without a
+        // leading zero (no 255 limit)
+        .filter(|s: &String| !(s.is_empty() || s.starts_with('0') && s.len() > 1));
 
     octet
         .separated_by(just('.').ignore_then(gap().or_not()))
@@ -6172,14 +6155,27 @@ pub fn ipv4_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
 }
 
 pub fn ipv6_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
+    // +bip:ag groups are `(ape qex:ab)`: '0', or a `sex:ab` digit (1-9, a-f;
+    // lowercase only) and up to three `hit` digits (0-9, a-f, A-F)
+    let group = just('0').to("0".to_string()).or(any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='f'))
+        .then(
+            any()
+                .filter(|c: &char| c.is_ascii_hexdigit())
+                .repeated()
+                .at_most(3)
+                .collect::<String>(),
+        )
+        .map(|(h, t)| format!("{h}{t}")));
+
     let rest = just('.')
         .ignore_then(gap().or_not())
-        .ignore_then(alphanumeric())
+        .ignore_then(group.clone())
         .repeated()
         .exactly(7)
         .collect::<Vec<_>>();
 
-    alphanumeric()
+    group
         .then(rest)
         .map(|(first, mut rest)| {
             if rest.is_empty() {
@@ -6196,13 +6192,10 @@ pub fn ipv6_address<'src>() -> impl Parser<'src, &'src str, String, Err<'src>> {
 pub fn base32_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let base32_digit = any().filter(|c: &char| c.is_ascii_digit() || ('a'..='v').contains(c));
 
-    let first = just("0v").ignore_then(choice((
-        just('0').to("0".to_string()),
-        any()
-            .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='v'))
-            .then(base32_digit.repeated().at_most(4).collect::<String>())
-            .map(|(h, t)| h.to_string() + &t),
-    )));
+    let first = any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='v'))
+        .then(base32_digit.repeated().at_most(4).collect::<String>())
+        .map(|(h, t)| h.to_string() + &t);
 
     let rest = just('.')
         .ignore_then(gap().or_not())
@@ -6210,35 +6203,36 @@ pub fn base32_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'sr
         .repeated()
         .collect::<Vec<String>>();
 
-    first
-        .then(rest)
-        .map(|(first, mut rest)| {
-            if rest.is_empty() {
-                base32_to_atom(first.to_string())
-            } else {
-                let mut parts = vec![first];
-                parts.append(&mut rest);
-                base32_to_atom(parts.join(""))
-            }
-        })
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first.then(rest).map(|(first, mut rest)| {
+        if rest.is_empty() {
+            base32_to_atom(first.to_string())
+        } else {
+            let mut parts = vec![first];
+            parts.append(&mut rest);
+            base32_to_atom(parts.join(""))
+        }
+    });
+
+    just("0v")
+        .ignore_then(choice((just('0').to(ParsedAtom::Small(0)), groups)))
         .labelled("Base32")
 }
 
 pub fn base64_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let digit = any().filter(|c: &char| matches!(c, '0'..='9' | 'a'..='z' | 'A'..='Z' | '-' | '~'));
 
-    let first = just("0w").ignore_then(
-        just('0').to("0".to_string()).or(any()
-            .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='z' | 'A'..='Z' | '-' | '~'))
-            .then(digit.repeated().at_most(4).collect::<String>())
-            .map(|(h, t)| h.to_string() + &t)),
-    );
+    let first = any()
+        .filter(|c: &char| matches!(c, '1'..='9' | 'a'..='z' | 'A'..='Z' | '-' | '~'))
+        .then(digit.repeated().at_most(4).collect::<String>())
+        .map(|(h, t)| h.to_string() + &t);
 
     let group = just('.')
         .ignore_then(gap().or_not())
         .ignore_then(digit.repeated().exactly(5).collect::<String>());
 
-    first
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first
         .then(group.repeated().collect::<Vec<String>>())
         .map(|(first, rest)| {
             if rest.is_empty() {
@@ -6248,7 +6242,10 @@ pub fn base64_number<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'sr
                 parts.extend(rest);
                 base64_to_atom(parts.join(""))
             }
-        })
+        });
+
+    just("0w")
+        .ignore_then(just('0').to(ParsedAtom::Small(0)).or(groups))
         .labelled("Base64")
 }
 
@@ -6281,14 +6278,14 @@ pub fn decimal_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>>
 
     let non_zero_digit = any().filter(|c: &char| matches!(c, '1'..='9'));
 
-    let first = just('0').to("0".to_string()).or(non_zero_digit
+    let first = non_zero_digit
         .then(digit.repeated().at_most(2).collect::<Vec<char>>())
         .map(|(h, t)| {
             let mut s = String::with_capacity(3);
             s.push(h);
             s.extend(t);
             s
-        }));
+        });
 
     let three_digits = digit.repeated().exactly(3).collect::<String>();
 
@@ -6298,15 +6295,18 @@ pub fn decimal_number<'src>() -> impl Parser<'src, &'src str, String, Err<'src>>
         .repeated()
         .collect::<Vec<String>>();
 
-    first
-        .then(rest)
-        .map(|(first_digits, rest_digits)| {
-            let mut out = first_digits;
-            for chunk in rest_digits {
-                out.push_str(&chunk);
-            }
-            out
-        })
+    //  +ape: a lone 0 ends the number, so it takes no further groups
+    let groups = first.then(rest).map(|(first_digits, rest_digits)| {
+        let mut out = first_digits;
+        for chunk in rest_digits {
+            out.push_str(&chunk);
+        }
+        out
+    });
+
+    just('0')
+        .to("0".to_string())
+        .or(groups)
         .labelled("Decimal Number")
 }
 
@@ -6355,6 +6355,14 @@ pub struct LineMap {
     col_offsets: Vec<u64>,
     source: Arc<str>,
     docs_enabled: bool,
+    //  the hoon position (line, column) of the first byte: (1, 1) for a
+    //  file, elsewhere for text that hoon-138 reparses from the middle of
+    //  a file (sail markdown)
+    origin: (u64, u64),
+    //  columns by which hoon-138's position runs ahead of its text from a
+    //  byte to the end of that byte's line, by byte (sail markdown can end
+    //  with its column set past the indentation it has not consumed)
+    drifts: Arc<std::sync::RwLock<std::collections::BTreeMap<usize, u64>>>,
 }
 
 fn leading_spaces(bytes: &[u8]) -> usize {
@@ -6418,6 +6426,14 @@ impl LineMap {
                 if trimmed.starts_with(b"\"\"\"") {
                     in_tall_tape = true;
                     tall_indent = indent;
+                } else if trimmed.len() > 3
+                    && trimmed.ends_with(b"\"\"\"")
+                    && matches!(trimmed[trimmed.len() - 4], b';' | b':')
+                {
+                    //  a sail `"""` block (`;"""`, `;p:"""`): its lines are
+                    //  indented as far as the `"""`
+                    in_tall_tape = true;
+                    tall_indent = indent + trimmed.len() - 3;
                 }
             } else if indent == tall_indent && trimmed.starts_with(b"\"\"\"") {
                 in_tall_tape = false;
@@ -6432,7 +6448,68 @@ impl LineMap {
             col_offsets,
             source,
             docs_enabled,
+            origin: (1, 1),
+            drifts: Default::default(),
         }
+    }
+
+    /// A map for text that hoon-138 parses from the position `origin`
+    /// (line, column) of a file rather than from its start.
+    pub fn with_origin(src: &str, docs_enabled: bool, origin: (u64, u64)) -> Self {
+        let mut starts = vec![0];
+        starts.extend(src.match_indices('\n').map(|(i, _)| i + 1));
+        Self {
+            col_offsets: vec![0; starts.len()],
+            starts,
+            source: Arc::<str>::from(src),
+            docs_enabled,
+            origin,
+            drifts: Default::default(),
+        }
+    }
+
+    /// Record that hoon-138's column at `byte` is `col`, so the rest of the
+    /// line runs that far ahead of the text.
+    pub fn set_column(&self, byte: usize, col: u64) {
+        let line = self.line_index(byte);
+        let raw = (byte - self.starts[line] + 1) as u64;
+        if let Ok(mut drifts) = self.drifts.write() {
+            if col > raw {
+                drifts.insert(byte, col - raw);
+            } else {
+                drifts.remove(&byte);
+            }
+        }
+    }
+
+    /// Columns by which hoon-138's position at `byte` (on line `line`) runs
+    /// ahead of the text.
+    fn drift(&self, line: usize, byte: usize) -> u64 {
+        let Ok(drifts) = self.drifts.read() else {
+            return 0;
+        };
+        if drifts.is_empty() {
+            return 0;
+        }
+        match drifts.range(..=byte).next_back() {
+            Some((&from, &cols)) if from >= self.starts[line] => cols,
+            _ => 0,
+        }
+    }
+
+    pub fn docs_enabled(&self) -> bool {
+        self.docs_enabled
+    }
+
+    /// The byte offset of a hoon position, if it is in this text.
+    fn hair_offset(&self, line: u64, col: u64) -> Option<usize> {
+        let idx = line.checked_sub(self.origin.0)? as usize;
+        let col = if idx == 0 {
+            col.checked_sub(self.origin.1 - 1)?
+        } else {
+            col
+        };
+        Some(self.starts.get(idx)? + (col as usize).saturating_sub(1))
     }
 
     #[inline(always)]
@@ -6449,8 +6526,33 @@ impl LineMap {
                 col = 1;
             }
         }
+        if line == 0 {
+            col += self.origin.1 - 1;
+        }
+        col += self.drift(line, byte);
 
-        ((line + 1) as u64, col)
+        (line as u64 + self.origin.0, col)
+    }
+
+    /// The hoon position (line, column) of `byte`, without the column
+    /// offsets of tall-tape lines.
+    pub fn hair(&self, byte: usize) -> (u64, u64) {
+        let line = match self.starts.binary_search(&byte) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        let mut col = (byte - self.starts[line] + 1) as u64;
+        if line == 0 {
+            col += self.origin.1 - 1;
+        }
+        col += self.drift(line, byte);
+        (line as u64 + self.origin.0, col)
+    }
+
+    /// The column of `byte` from 0, without the column offsets of
+    /// tall-tape lines.
+    pub fn raw_column(&self, byte: usize) -> usize {
+        (self.hair(byte).1 - 1) as usize
     }
 
     #[inline(always)]
@@ -8386,12 +8488,19 @@ pub fn path<'src>(
             NounExpr::ParsedAtom(ParsedAtom::Small(0)),
         )),
         cord(linemap).map(|s| Hoon::Sand("t".to_string(), NounExpr::ParsedAtom(s))),
-        nuck().map(|coin| {
+        nuck().try_map(|coin, span| {
+            //  +hasp renders the knot with +scot, which crashes where ++wood does
+            if rend_crashes(&coin) {
+                return Err(Rich::custom(span, "unrenderable path knot"));
+            }
             let aura = match &coin {
                 Coin::Dime(a, _) if a == "tas" => "tas",
                 _ => "ta",
             };
-            Hoon::Sand(aura.to_string(), NounExpr::ParsedAtom(rent_co(&coin)))
+            Ok(Hoon::Sand(
+                aura.to_string(),
+                NounExpr::ParsedAtom(rent_co(&coin)),
+            ))
         }),
     ));
 
@@ -8585,7 +8694,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             rep = newest_rep
                         }
 
-                        let d_atom = ParsedAtom::Small(t.d as u128);
+                        let d_atom = ParsedAtom::from_biguint(t.d.clone());
                         let mut new_rep = vec![".".to_string()];
                         new_rep.extend(a_co(&d_atom));
                         new_rep.extend(rep);
@@ -8603,7 +8712,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             rep = newest_rep;
                         }
 
-                        let y_atom = ParsedAtom::Small(yod.y as u128);
+                        let y_atom = ParsedAtom::from_biguint(yod.y.clone());
                         let mut res = vec!["~".to_string()];
                         res.extend(a_co(&y_atom));
                         res.extend(rep);
@@ -8625,7 +8734,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
 
                         let mut res = vec!["~".to_string()];
 
-                        if yug.d == 0 && yug.m == 0 && yug.h == 0 && yug.s == 0 {
+                        if yug.d.is_zero() && yug.m == 0 && yug.h == 0 && yug.s == 0 {
                             res.extend(vec!["s".to_string(), "0".to_string()]);
                             res.extend(rep);
                             return res;
@@ -8655,8 +8764,8 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             rep = new_rep;
                         }
 
-                        if yug.d != 0 {
-                            let d_atom = ParsedAtom::Small(yug.d as u128);
+                        if !yug.d.is_zero() {
+                            let d_atom = ParsedAtom::from_biguint(yug.d.clone());
                             let mut new_rep = vec![".".to_string(), "d".to_string()];
                             new_rep.extend(a_co(&d_atom));
                             new_rep.extend(rep);
@@ -8840,11 +8949,7 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                             let padded_ones = reap(pad_fa(&q), '1'.to_string());
                             let mut res = vec!['0'.to_string(), 'c'.to_string()];
                             res.extend(padded_ones);
-                            if q.is_zero() {
-                                res.push("0".to_string());
-                            } else {
-                                res.extend(c_co(&encoded));
-                            }
+                            res.extend(c_co(&encoded));
                             res.extend(rep);
                             res
                         }
@@ -8858,16 +8963,20 @@ fn rend_with_rep(lot: &Coin, mut rep: Tape) -> Tape {
                 }
 
                 's' => {
-                    let q = q.to_u128().expect("signed number is bigger than 128 bits");
-                    let sign_prefix_chars = if syn_si(q) {
-                        vec!['-'.to_string(), '-'.to_string()]
-                    } else {
+                    //  $(yed 'u', q.p.lot (abs:si q.p.lot)): hay is kept, so
+                    //  -0x10 stays hexadecimal
+                    let q = q.to_biguint();
+                    let negative = q.bit(0);
+                    let sign_prefix_chars = if negative {
                         vec!['-'.to_string()]
+                    } else {
+                        vec!['-'.to_string(), '-'.to_string()]
                     };
-                    let abs_val = abs_si(q);
+                    let abs_val = (&q >> 1u32) + u32::from(negative);
+                    let aura: String = std::iter::once('u').chain(prefix.chars().skip(1)).collect();
                     let mut res: Tape = sign_prefix_chars.into_iter().collect();
                     res.extend(rend_with_rep(
-                        &Coin::Dime("u".into(), ParsedAtom::Small(abs_val)),
+                        &Coin::Dime(aura, ParsedAtom::from_biguint(abs_val)),
                         rep,
                     ));
                     res
@@ -8983,14 +9092,47 @@ fn ed_co(exp: &u128, int: &Tape) -> Tape {
     out
 }
 
+//  Whether ++rend crashes on `lot`: its `~~` and `~-` knots go through
+//  ++wood, which crashes on a character ++teff or ++taft rejects.
+pub fn rend_crashes(lot: &Coin) -> bool {
+    match lot {
+        Coin::Blob(_) => false,
+        Coin::Many(coins) => coins.iter().any(rend_crashes),
+        Coin::Dime(prefix, q) => match prefix.as_bytes() {
+            [b'c', ..] => wood_crashes(&tuft(q)),
+            [b't', b'a', ..] => false,
+            [b't', ..] => wood_crashes(q),
+            _ => false,
+        },
+    }
+}
+
+fn wood_crashes(a: &ParsedAtom) -> bool {
+    let mut a = a.clone();
+    while !a.is_zero() {
+        let Some(b) = teff(&a) else {
+            return true;
+        };
+        if taft(&end(3, b, &a)).is_none() {
+            return true;
+        }
+        a = rsh(3, b, &a);
+    }
+    false
+}
+
 fn wood_go(a: &ParsedAtom) -> Vec<u128> {
     if a.is_zero() {
         return Vec::new();
     }
 
-    let b = teff(a);
-    let c_atom = taft(&end(3, b, a));
-    let c = c_atom.to_u32().expect("cord byte should fit in u32");
+    //  hoonc's ++wood crashes where ++teff or ++taft do (see rend_crashes);
+    //  render the raw bits of such a character instead
+    let b = teff(a).unwrap_or(1);
+    let c = match taft(&end(3, b, a)) {
+        Some(c_atom) => c_atom.to_u32().expect("cord byte should fit in u32"),
+        None => taft_cut(a, b),
+    };
     let mut d = wood_go(&rsh(3, b, a));
 
     // alnum or '-'
@@ -9083,19 +9225,15 @@ fn v_ne(tig: u128) -> char {
 }
 
 fn w_ne(tig: u128) -> char {
-    // base64 with - and ~ for 62/63
+    // ++w:ne: 0-9 a-z A-Z, then - and ~ for 62/63 (the ALPH64 order)
     if tig == 62 {
         '-'
     } else if tig == 63 {
         '~'
-    } else if tig < 26 {
-        (b'A' + tig as u8) as char
-    } else if tig < 52 {
-        (b'a' + (tig - 26) as u8) as char
-    } else if tig < 62 {
-        (b'0' + (tig - 52) as u8) as char
+    } else if tig >= 36 {
+        (b'A' + (tig - 36) as u8) as char
     } else {
-        unreachable!()
+        x_ne(tig)
     }
 }
 
@@ -9311,8 +9449,9 @@ pub fn number<'src>() -> impl Parser<'src, &'src str, (String, ParsedAtom), Err<
 
     let uw_number = base64_number().map(|a| ("uw".to_string(), a));
 
+    //  dim:ag: a lone 0 ends the number
     let ui_number = just("0i")
-        .ignore_then(digits())
+        .ignore_then(decimal_without_leading_zero())
         .map(|s| ("ui".to_string(), decimal_to_atom(s)));
 
     let negative = choice((
@@ -9322,13 +9461,13 @@ pub fn number<'src>() -> impl Parser<'src, &'src str, (String, ParsedAtom), Err<
             let maybe_base58 = base58_to_atom(s);
             match maybe_base58 {
                 None => Err(Rich::custom(span, "Invalid BTC address.")),
-                Some(atom) => Ok(("uc".to_string(), atom)),
+                Some(atom) => Ok(("sc".to_string(), atom)),
             }
         }),
         base32_number().map(|a| ("sv".to_string(), a)),
         base64_number().map(|a| ("sw".to_string(), a)),
         just("0i")
-            .ignore_then(digits())
+            .ignore_then(decimal_without_leading_zero())
             .map(|s| ("si".to_string(), decimal_to_atom(s))),
         decimal_number().map(|s| ("sd".to_string(), decimal_to_atom(s))),
     ))
@@ -9361,141 +9500,99 @@ pub fn decimal_without_leading_zero<'src>() -> impl Parser<'src, &'src str, Stri
         .map(|(h, t)| format!("{h}{t}")))
 }
 
+// decimal atom from a string of ASCII digits
+fn decimal_to_big(s: &str) -> BigUint {
+    BigUint::parse_bytes(s.as_bytes(), 10).expect("decimal digits")
+}
+
+// ++most dot qix:ab after `..`: 16-bit fraction words, exactly four lowercase
+// hex digits each
+fn date_fractions<'src>() -> impl Parser<'src, &'src str, Vec<u16>, Err<'src>> {
+    just("..").ignore_then(
+        any()
+            .filter(|c: &char| matches!(c, '0'..='9' | 'a'..='f'))
+            .repeated()
+            .exactly(4)
+            .collect::<String>()
+            .map(|s| u16::from_str_radix(&s, 16).expect("four hex digits"))
+            .separated_by(just('.'))
+            .at_least(1)
+            .collect::<Vec<u16>>(),
+    )
+}
+
+// ++when. The year and day are dim:ag/dip:ag and the clock fields dum:ag:
+// bignums with no range checks. The month is mot:ag (1-12, no leading zero).
 pub fn absolute_date<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let era_year = decimal_without_leading_zero()
-        .then(just('-').to(false).or_not().map(|opt| opt.unwrap_or(true)))
-        .try_map(|(year_str, era), span| {
-            let year: u64 = year_str
-                .parse()
-                .map_err(|_| Rich::custom(span, "invalid year number"))?;
-
-            if year == 0 {
-                return Err(Rich::custom(span, "year must be ≥ 1"));
-            }
-
-            Ok((era, year))
-        });
-    let month = just('.').ignore_then(digits()).try_map(|s: String, span| {
-        let m: u64 = s.parse().map_err(|_| Rich::custom(span, "invalid month"))?;
-        if (1..=12).contains(&m) {
-            Ok(m)
-        } else {
-            Err(Rich::custom(span, "month out of range (1–12)"))
-        }
-    });
-    let day = just('.').ignore_then(digits()).try_map(|s, span| {
-        let d: u64 = s.parse().map_err(|_| Rich::custom(span, "invalid day"))?;
-        if (1..=31).contains(&d) {
-            Ok(d)
-        } else {
-            Err(Rich::custom(span, "day out of range (1–31)"))
-        }
-    });
+        .map(|s| decimal_to_big(&s))
+        .then(just('-').to(false).or_not().map(|opt| opt.unwrap_or(true)));
+    let month = just('.').ignore_then(choice((
+        just('1')
+            .ignore_then(one_of("012"))
+            .map(|c: char| 10 + (c as u64 - '0' as u64)),
+        one_of("123456789").map(|c: char| c as u64 - '0' as u64),
+    )));
+    let day = just('.').ignore_then(
+        any()
+            .filter(|c: &char| matches!(c, '1'..='9'))
+            .then(
+                any()
+                    .filter(|c: &char| c.is_ascii_digit())
+                    .repeated()
+                    .collect::<String>(),
+            )
+            .map(|(h, t)| decimal_to_big(&format!("{h}{t}"))),
+    );
+    let clock_field = || digits().map(|s| decimal_to_big(&s));
     let hour_min_secs_fractions = just("..")
-        .ignore_then(
-            digits()
-                .try_map(|s, span| {
-                    let h: u64 = s
-                        .parse::<u64>()
-                        .map_err(|_| Rich::custom(span, "invalid hour"))?;
-                    if h < 24 {
-                        Ok(h)
-                    } else {
-                        Err(Rich::custom(span, "hour out of range (0–23)"))
-                    }
-                })
-                .then_ignore(just("."))
-                .then(digits().try_map(|s, span| {
-                    let m: u64 = s
-                        .parse::<u64>()
-                        .map_err(|_| Rich::custom(span, "invalid minute"))?;
-                    if m < 60 {
-                        Ok(m)
-                    } else {
-                        Err(Rich::custom(span, "minute out of range (0–59)"))
-                    }
-                }))
-                .then_ignore(just("."))
-                .then(digits().try_map(|s, span| {
-                    let s: u64 = s
-                        .parse::<u64>()
-                        .map_err(|_| Rich::custom(span, "invalid second"))?;
-                    if s < 60 {
-                        Ok(s)
-                    } else {
-                        Err(Rich::custom(span, "second out of range (0–59)"))
-                    }
-                })),
-        )
-        .then(
-            just("..")
-                .ignore_then(
-                    alphanumeric()
-                        .separated_by(just("."))
-                        .at_least(1)
-                        .collect::<Vec<String>>(),
-                )
-                .or_not()
-                .map(|opt| opt.unwrap_or_default()),
-        )
-        .try_map(|(((h, m), s), frags), span| {
-            let mut fractions = Vec::new();
-
-            for f in frags {
-                let val = u16::from_str_radix(&f, 16)
-                    .map_err(|_| Rich::custom(span, "invalid fraction digits"))?;
-                fractions.push(val);
-            }
-
-            Ok((h, m, s, fractions))
-        })
+        .ignore_then(clock_field())
+        .then(just('.').ignore_then(clock_field()))
+        .then(just('.').ignore_then(clock_field()))
+        .then(date_fractions().or_not().map(|opt| opt.unwrap_or_default()))
+        .map(|(((h, m), s), f)| (h, m, s, f))
         .or_not()
-        .map(|opt| opt.unwrap_or((0, 0, 0, Vec::new())));
+        .map(|opt| {
+            opt.unwrap_or_else(|| {
+                (
+                    BigUint::zero(),
+                    BigUint::zero(),
+                    BigUint::zero(),
+                    Vec::new(),
+                )
+            })
+        });
 
     era_year
         .then(month)
         .then(day)
         .then(hour_min_secs_fractions)
-        .map(|((((era, y), m), d), (hour, min, sec, f))| {
-            ParsedAtom::Small(year(era, y, m, d, hour, min, sec, &f))
+        .try_map(|((((y, era), m), d), (hour, min, sec, f)), span| {
+            year_big(era, &y, m, &d, &hour, &min, &sec, &f)
+                .map(ParsedAtom::from_biguint)
+                .ok_or_else(|| Rich::custom(span, "++year crashes on this date"))
         })
 }
 
-fn unit_value_pair<'src>() -> impl Parser<'src, &'src str, (char, u64), Err<'src>> {
-    one_of("dhms").then(decimal_without_leading_zero().try_map(|s, span| {
-        s.parse::<u64>()
-            .map_err(|_| Rich::custom(span, "Invalid Number"))
-    }))
+fn unit_value_pair<'src>() -> impl Parser<'src, &'src str, (char, BigUint), Err<'src>> {
+    one_of("dhms").then(decimal_without_leading_zero().map(|s| decimal_to_big(&s)))
 }
 
 pub fn relative_date<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'src>> {
     let time_part = unit_value_pair()
         .separated_by(just('.'))
         .at_least(1)
-        .collect::<Vec<(char, u64)>>();
+        .collect::<Vec<(char, BigUint)>>();
 
-    let hex_part = just("..")
-        .ignore_then(
-            any()
-                .filter(|c: &char| c.is_ascii_hexdigit())
-                .repeated()
-                .exactly(4)
-                .collect::<String>()
-                .map(|s| u16::from_str_radix(&s, 16).unwrap_or(0))
-                .separated_by(just('.'))
-                .at_least(1)
-                .collect::<Vec<u16>>(),
-        )
-        .or_not()
-        .map(|v| v.unwrap_or_default());
+    let hex_part = date_fractions().or_not().map(|v| v.unwrap_or_default());
 
     time_part
         .then(hex_part)
-        .map(|(pairs, hex_vec): (Vec<(char, u64)>, Vec<u16>)| {
-            let mut days = 0u64;
-            let mut hours = 0u64;
-            let mut minutes = 0u64;
-            let mut seconds = 0u64;
+        .try_map(|(pairs, hex_vec): (Vec<(char, BigUint)>, Vec<u16>), span| {
+            let mut days = BigUint::zero();
+            let mut hours = BigUint::zero();
+            let mut minutes = BigUint::zero();
+            let mut seconds = BigUint::zero();
 
             for (unit, value) in pairs {
                 match unit {
@@ -9507,22 +9604,61 @@ pub fn relative_date<'src>() -> impl Parser<'src, &'src str, ParsedAtom, Err<'sr
                 }
             }
 
-            ParsedAtom::Small(yule(days, hours, minutes, seconds, &hex_vec))
+            yule_big(&days, &hours, &minutes, &seconds, &hex_vec)
+                .map(ParsedAtom::from_biguint)
+                .ok_or_else(|| Rich::custom(span, "++yule crashes on a fifth fraction word"))
         })
 }
 
 // ++year: date -> @da
 pub fn year(a: bool, y: u64, m: u64, d: u64, h: u64, min: u64, s: u64, f: &[u16]) -> u128 {
+    year_big(
+        a,
+        &y.into(),
+        m,
+        &d.into(),
+        &h.into(),
+        &min.into(),
+        &s.into(),
+        f,
+    )
+    .and_then(|n| n.to_u128())
+    .expect("++year: date out of range")
+}
+
+// ++year over bignum fields. `None` where hoon crashes: BC year 0 or a BC
+// year before the pivot (`dec`/`sub` underflow), day 0, or more than four
+// fraction words (++yule).
+pub fn year_big(
+    a: bool,
+    y: &BigUint,
+    m: u64,
+    d: &BigUint,
+    h: &BigUint,
+    min: &BigUint,
+    s: &BigUint,
+    f: &[u16],
+) -> Option<BigUint> {
+    let pivot = BigUint::from(YEAR_OFFSET);
     let yer = if a {
-        YEAR_OFFSET + y
+        pivot + y
     } else {
         // (sub 292.277.024.400 (dec y))
-        YEAR_OFFSET - (y - 1)
+        if y.is_zero() || y - 1u32 > pivot {
+            return None;
+        }
+        pivot - (y - 1u32)
     };
+    if d.is_zero() || !(1..=12).contains(&m) {
+        return None;
+    }
 
-    let day_count = yawn(yer, m, d);
+    // ++yawn only looks at the year modulo 400 until it adds whole eras
+    let eras = &yer / 400u32;
+    let rem = (&yer % 400u32).to_u64()?;
+    let day_count = BigUint::from(yawn(rem, m, 1)) + (d - 1u32) + eras * ERA;
 
-    yule(day_count, h, min, s, f)
+    yule_big(&day_count, h, min, s, f)
 }
 
 pub fn yell(now: &ParsedAtom) -> Tarp {
@@ -9546,17 +9682,14 @@ pub fn yell(now: &ParsedAtom) -> Tarp {
         current_raw = end(4, muc, &current_raw);
     }
 
-    let sec_u64: u64 = match &sec_atom {
-        ParsedAtom::Small(x) => *x as u64,
-        ParsedAtom::Big(b) => b.clone().try_into().expect("yell: sec too large"),
-    };
-
-    let day = (sec_u64 / DAY) as u64;
-    let sec = (sec_u64 % DAY) as u64;
-    let hor = (sec / HOR) as u64;
-    let sec = (sec % HOR) as u64;
-    let mit = (sec / MIT) as u64;
-    let sec = (sec % MIT) as u64;
+    // days are a bignum; the rest of the tarp is below a day
+    let sec_big = sec_atom.to_biguint();
+    let day = &sec_big / DAY;
+    let sec = (&sec_big % DAY).to_u64().expect("below a day");
+    let hor = sec / HOR;
+    let sec = sec % HOR;
+    let mit = sec / MIT;
+    let sec = sec % MIT;
 
     Tarp {
         d: day,
@@ -9569,14 +9702,19 @@ pub fn yell(now: &ParsedAtom) -> Tarp {
 
 pub fn yore(now: &ParsedAtom) -> Date {
     let rip: Tarp = yell(now);
-    let (y_ger, m_ger, d_ger) = yall(rip.d);
+    // ++yall splits off whole 400-year eras first; the remainder fits a u64
+    let eras = &rip.d / ERA;
+    let rest = (&rip.d % ERA).to_u64().expect("below an era");
+    let (y_rest, m_ger, d_ger) = yall(rest);
+    let y_ger = eras * 400u32 + y_rest;
 
-    const PIVOT: u64 = 292_277_024_400;
+    let pivot = BigUint::from(YEAR_OFFSET);
 
-    let (era, y_out) = if y_ger > PIVOT {
-        (true, y_ger - PIVOT)
+    let (era, y_out) = if y_ger > pivot {
+        (true, y_ger - pivot)
     } else {
-        (false, PIVOT - y_ger)
+        // [a=| y=+((sub 292.277.024.400 y.ger))]
+        (false, pivot - y_ger + 1u32)
     };
 
     Date {
@@ -9584,7 +9722,7 @@ pub fn yore(now: &ParsedAtom) -> Date {
         y: y_out,
         m: m_ger,
         t: Tarp {
-            d: d_ger,
+            d: BigUint::from(d_ger),
             h: rip.h,
             m: rip.m,
             s: rip.s,
@@ -9653,16 +9791,27 @@ pub fn is_leap_year(year: i32) -> bool {
 }
 
 pub fn yule(d: u64, h: u64, m: u64, s: u64, f: &[u16]) -> u128 {
+    yule_big(&d.into(), &h.into(), &m.into(), &s.into(), f)
+        .and_then(|n| n.to_u128())
+        .expect("++yule: time out of range")
+}
+
+// ++yule over bignum fields. `None` where hoon crashes: a fifth fraction
+// word decrements `muc` below zero.
+pub fn yule_big(d: &BigUint, h: &BigUint, m: &BigUint, s: &BigUint, f: &[u16]) -> Option<BigUint> {
+    if f.len() > 4 {
+        return None;
+    }
     let sec = d * DAY + h * HOR + m * MIT + s;
 
     let mut fac: u64 = 0;
     let mut muc = 4i32; // starts at 4
-    for &val in f.iter().take(4) {
+    for &val in f {
         muc -= 1; // decrement *before* shift
         fac += (val as u64) << (muc as u32 * 16);
     }
 
-    ((sec as u128) << 64) | (fac as u128)
+    Some((sec << 64u32) | BigUint::from(fac))
 }
 
 fn bloq_bits(bloq: u32) -> u32 {
@@ -10942,9 +11091,12 @@ pub fn crub<'src>() -> impl Parser<'src, &'src str, Coin, Err<'src>> {
         just('~')
             .ignore_then(urx())
             .map(|atom| Coin::Dime("t".to_string(), atom)),
-        just('-')
-            .ignore_then(urx())
-            .map(|atom| Coin::Dime("c".to_string(), taft(&atom))),
+        just('-').ignore_then(urx()).try_map(|atom, span| {
+            //  ++taft crashes on text it cannot round-trip (~-~1., ~-~200000.)
+            taft(&atom)
+                .map(|c| Coin::Dime("c".to_string(), c))
+                .ok_or_else(|| Rich::custom(span, "invalid UTF-8 in @c knot"))
+        }),
     ))
 }
 
@@ -11487,10 +11639,9 @@ fn unanchor_spec_spot(spec: &mut Spec, linemap: &LineMap) {
 fn unanchor_spot_start(spot: &mut Spot, linemap: &LineMap) {
     let bytes = linemap.source.as_bytes();
     let (line, col) = spot.q.p;
-    let Some(&line_start) = linemap.starts.get((line as usize).saturating_sub(1)) else {
+    let Some(mut pos) = linemap.hair_offset(line, col) else {
         return;
     };
-    let mut pos = line_start + (col as usize).saturating_sub(1);
     if pos + 1 >= bytes.len() || bytes[pos] != b':' || bytes[pos + 1] != b':' {
         return;
     }
@@ -11521,41 +11672,6 @@ pub fn wrap_hoon_with_trace(
         let node = apply_hoon_docs(node, span, &linemap);
         if let Hoon::Dbug(existing_spot, inner) = node {
             if existing_spot == spot {
-                return Hoon::Dbug(existing_spot, inner);
-            }
-
-            let line_idx = spot.q.p.0;
-            let should_skip_outer = if spot.p == existing_spot.p {
-                let idx = line_idx.saturating_sub(1) as usize;
-                if idx < linemap.starts.len() {
-                    let start = linemap.starts[idx];
-                    let mut end = linemap
-                        .starts
-                        .get(idx + 1)
-                        .copied()
-                        .unwrap_or(linemap.source.len());
-                    let bytes = linemap.source.as_bytes();
-                    if end > start && bytes[end - 1] == b'\n' {
-                        end -= 1;
-                    }
-                    let line = &bytes[start..end];
-                    let mut cursor = 0;
-                    while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') {
-                        cursor += 1;
-                    }
-                    matches!(
-                        line.get(cursor),
-                        Some(b'/')
-                            if matches!(line.get(cursor + 1), Some(b'=') | Some(b'*') | Some(b'#'))
-                    )
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if should_skip_outer {
                 return Hoon::Dbug(existing_spot, inner);
             }
 
@@ -11796,18 +11912,6 @@ fn skip_plain_doc_before_equals_slash_start(
     if bytes.get(raw_cursor) != Some(&b'=') || bytes.get(raw_cursor + 1) != Some(&b'/') {
         return start;
     }
-    let mut name_cursor = raw_cursor + 2;
-    while name_cursor < bytes.len() && matches!(bytes[name_cursor], b' ' | b'\t') {
-        name_cursor += 1;
-    }
-    let name_start = name_cursor;
-    while name_cursor < bytes.len()
-        && (bytes[name_cursor].is_ascii_alphanumeric() || bytes[name_cursor] == b'-')
-    {
-        name_cursor += 1;
-    }
-    let raw_name = (name_cursor > name_start).then_some(&bytes[name_start..name_cursor]);
-
     let mut doc_line_start = start.min(bytes.len());
     while doc_line_start > 0 && bytes[doc_line_start - 1] != b'\n' {
         doc_line_start -= 1;
@@ -11852,21 +11956,13 @@ fn skip_plain_doc_before_equals_slash_start(
         }
 
         let mut content = cursor + 2;
-        let mut spaces = 0usize;
         while content < line_end && bytes[content] == b' ' {
-            spaces += 1;
             content += 1;
         }
         if content < line_end {
-            if let Some(name) = raw_name {
-                let after_plus = content + 1;
-                if bytes.get(content) == Some(&b'+')
-                    && bytes.get(after_plus..after_plus + name.len()) == Some(name)
-                {
-                    return start;
-                }
-            }
-            if spaces >= 4 {
+            //  a doccord (`++larg`/`++smol`, whatever it links to) is parsed
+            //  as the binder's prefix doc, so the span keeps it
+            if doccord_comment_anchors(&bytes[cursor..line_end]) {
                 return start;
             }
             saw_plain_doc = true;
@@ -12179,7 +12275,9 @@ fn hoon_to_noun_uncached(slab: &mut NounSlab, hoon: &Hoon) -> Noun {
             T(slab, &[D(tas!(b"dbug")), spot_noun, h_noun])
         }
         Eror(msg) => {
-            let msg_noun = cord_to_noun(slab, msg);
+            //  [%eror p=tape]
+            let chars = msg.bytes().map(|b| D(b as u64)).collect();
+            let msg_noun = list_to_noun(slab, chars);
             T(slab, &[D(tas!(b"eror")), msg_noun])
         }
         Hand(typ, nock) => {
@@ -13713,18 +13811,18 @@ fn term_or_pair_to_noun(slab: &mut NounSlab, top: &TermOrPair) -> Noun {
     }
 }
 
+//  hoon-138 `p=$@(p=@ [p=@ q=@])`: the version numbers as bare atoms.
 fn zpwt_arg_to_noun(slab: &mut NounSlab, arg: &ZpwtArg) -> Noun {
+    fn version_to_noun(slab: &mut NounSlab, s: &str) -> Noun {
+        let value = BigUint::from_str(s).expect("!? version is decimal digits");
+        atom_to_noun(slab, &ParsedAtom::from_biguint(value))
+    }
     match arg {
-        ZpwtArg::ParsedAtom(s) => {
-            let tag = D(tas!(b"atom"));
-            let s_noun = cord_to_noun(slab, s);
-            T(slab, &[tag, s_noun])
-        }
-        ZpwtArg::Pair(s1, s2) => {
-            let tag = D(tas!(b"pair"));
-            let s1_noun = cord_to_noun(slab, s1);
-            let s2_noun = cord_to_noun(slab, s2);
-            T(slab, &[tag, s1_noun, s2_noun])
+        ZpwtArg::ParsedAtom(p) => version_to_noun(slab, p),
+        ZpwtArg::Pair(p, q) => {
+            let p_noun = version_to_noun(slab, p);
+            let q_noun = version_to_noun(slab, q);
+            T(slab, &[p_noun, q_noun])
         }
     }
 }
@@ -14495,24 +14593,20 @@ fn noun_to_tyre(noun: NounHandle<'_>) -> Result<Vec<(String, Hoon)>, String> {
 }
 
 fn noun_to_zpwt_arg(noun: NounHandle<'_>) -> Result<ZpwtArg, String> {
+    fn version(noun: NounHandle<'_>) -> Result<String, String> {
+        Ok(noun_to_parsed_atom(noun)?.to_biguint().to_string())
+    }
+    if noun.as_atom().is_ok() {
+        return Ok(ZpwtArg::ParsedAtom(version(noun)?));
+    }
     let cell = noun.as_cell().map_err(|_| "zpwt_arg")?;
-    let tag = noun_to_direct(cell.head())?;
-    if tag == tas!(b"atom") {
-        return Ok(ZpwtArg::ParsedAtom(noun_to_cord(cell.tail())?));
-    }
-    if tag == tas!(b"pair") {
-        let r = cell.tail().as_cell().map_err(|_| "zpwt pair")?;
-        return Ok(ZpwtArg::Pair(
-            noun_to_cord(r.head())?,
-            noun_to_cord(r.tail())?,
-        ));
-    }
-    Err(format!("zpwt_arg: unknown tag {tag}"))
+    Ok(ZpwtArg::Pair(version(cell.head())?, version(cell.tail())?))
 }
 
 fn noun_to_mane(noun: NounHandle<'_>) -> Result<Mane, String> {
     if let Ok(_) = noun.as_atom() {
-        return Ok(Mane::Tag(noun_to_term(noun)?));
+        //  a text node's mane is %$, which `open` must lower to 0, not '$'
+        return Ok(Mane::Tag(noun_to_cord(noun)?));
     }
     let cell = noun.as_cell().map_err(|_| "mane")?;
     Ok(Mane::TagSpace(
@@ -14523,6 +14617,11 @@ fn noun_to_mane(noun: NounHandle<'_>) -> Result<Mane, String> {
 
 fn noun_to_beer(noun: NounHandle<'_>) -> Result<Beer, String> {
     if let Ok(_) = noun.as_atom() {
+        //  a beer char is one text byte, held as the char with that code
+        //  point (see runes/sail.rs); a lone non-ASCII byte is not UTF-8
+        if let Some(byte @ 0x80..) = noun_to_parsed_atom(noun)?.to_u8() {
+            return Ok(Beer::Char(char::from(byte).to_string()));
+        }
         return Ok(Beer::Char(noun_to_cord(noun)?));
     }
     let cell = noun.as_cell().map_err(|_| "beer")?;
@@ -14791,7 +14890,16 @@ pub fn noun_to_hoon(noun: NounHandle<'_>) -> Result<Hoon, String> {
         ));
     }
     if tag == tas!(b"eror") {
-        return Ok(Hoon::Eror(noun_to_cord(tail)?));
+        let bytes = noun_to_list(tail, |c| {
+            let byte = c.as_atom().ok().and_then(|a| a.as_direct().ok());
+            match byte.map(|d| d.data()) {
+                Some(b) if b <= 0xff => Ok(b as u8),
+                _ => Err("eror: expected a tape".to_string()),
+            }
+        })?;
+        return Ok(Hoon::Eror(
+            String::from_utf8(bytes).map_err(|e| format!("eror: invalid UTF-8: {e}"))?,
+        ));
     }
     if tag == tas!(b"hand") {
         let r = tail.as_cell().map_err(|_| "hand")?;

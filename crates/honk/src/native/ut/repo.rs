@@ -136,6 +136,15 @@ impl<'a> Ut<'a> {
         let legs_noun = self.rest_legs_noun(&[(inner, hoon_noun)]);
         let result_noun = self.with_rest_leg_id(leg_id, |ut| {
             if let Some(cached) = ut.rest_boundary_lookup(typ, legs_noun)? {
+                if ut.memo_verify.due(MemoSite::Rest) {
+                    let fresh = ut.memo_verify_recompute(MemoSite::Rest, false, |ut| {
+                        ut.rest_inner(&native_legs)
+                    });
+                    let matched = matches!(fresh, Ok(noun) if ut.memo_verify_noun_eq(noun, cached));
+                    verify::record(MemoSite::Rest, matched, || {
+                        format!("recomputed ok: {}", fresh.is_ok())
+                    });
+                }
                 return Ok(cached);
             }
             let result = ut.rest_inner(&native_legs)?;

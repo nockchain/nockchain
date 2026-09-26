@@ -137,6 +137,7 @@ fn hoon_wide_parser<'src>(
     hoon_wide_no_trace: impl ParserExt<'src, Hoon>,
     wer: Path,
     linemap: Arc<LineMap>,
+    trace: bool,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> + Clone {
     let parsers = vec![
         rune_branch!(
@@ -186,6 +187,17 @@ fn hoon_wide_parser<'src>(
             )))
             .boxed(),
         rune_branch!('$', buc_runes_wide(hoon_wide.clone(), spec_wide.clone())),
+        //  $$, $'foo', $5: obsolete %leaf forms hoon-138's +scat still parses
+        just('$')
+            .ignore_then(choice((
+                just('$').to(Hoon::Leaf("tas".to_string(), ParsedAtom::Small(0))),
+                cord(linemap.clone()).map(|s| Hoon::Leaf("t".to_string(), s)),
+                nuck().try_map(|coin, span| match coin {
+                    Coin::Dime(p, q) => Ok(Hoon::Leaf(p, q)),
+                    _ => Err(Rich::custom(span, "invalid leaf constant")),
+                }),
+            )))
+            .boxed(),
         rune_branch!('^', ket_runes_wide(hoon_wide.clone(), spec_wide.clone())),
         rune_branch!(
             '!',
@@ -199,8 +211,13 @@ fn hoon_wide_parser<'src>(
         rune_branch!(
             ';',
             choice((
-                sail_wide(hoon.clone(), hoon_wide.clone()),
                 mic_runes_wide(hoon_wide.clone(), spec_wide.clone()),
+                sail_wide(
+                    hoon.clone(),
+                    hoon_wide.clone(),
+                    linemap.clone(),
+                    SailCtx::new(wer.clone(), trace)
+                ),
             ))
         ),
         just('.')
@@ -297,6 +314,7 @@ pub fn hoon_parser<'src>(
     hoon_wide_no_trace: impl ParserExt<'src, Hoon>,
     wer: Path,
     linemap: Arc<LineMap>,
+    trace: bool,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     let parsers = vec![
         rune_branch_pair!(
@@ -370,15 +388,18 @@ pub fn hoon_parser<'src>(
                 hoon_wide_no_trace.clone()
             )
         ),
-        rune_branch_pair!(
+        //  hoon-138 `++tall`: the `;` runes, then tall-form sail only
+        rune_branch!(
             ';',
             choice((
-                sail_tall(hoon.clone(), hoon_wide.clone()),
                 mic_runes_tall(hoon.clone(), spec.clone()),
-            )),
-            choice((
-                sail_wide(hoon.clone(), hoon_wide.clone()),
                 mic_runes_wide(hoon_wide.clone(), spec_wide.clone()),
+                sail_tall(
+                    hoon.clone(),
+                    hoon_wide.clone(),
+                    linemap.clone(),
+                    SailCtx::new(wer.clone(), trace)
+                ),
             ))
         ),
         rune_branch_pair!(
@@ -386,26 +407,26 @@ pub fn hoon_parser<'src>(
             dot_runes_tall(hoon.clone(), spec.clone()),
             dot_runes_wide(hoon_wide.clone(), spec_wide.clone())
         ),
-        just('/') // skip imports...
-            .ignore_then(fas_runes_tall(
-                hoon.clone(),
-                hoon_wide.clone(),
-                wer.clone(),
-                linemap.clone(),
-            ))
-            .boxed(),
-        hoon_wide.clone().boxed(),
+        //  wide-form sail is not a tall hoon
+        just(';').not().ignore_then(hoon_wide.clone()).boxed(),
         noun_tall(hoon.clone()).boxed(),
     ];
 
     choice(parsers)
 }
 
-pub fn parser<'src>(
+type BoxedHoon<'src> = chumsky::Boxed<'src, 'src, &'src str, Hoon, Err<'src>>;
+
+/// The tall and wide hoon parsers with dbug spots, then without them.
+pub fn grammar<'src>(
     wer: Path,
-    bug: bool,
     linemap: Arc<LineMap>,
-) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
+) -> (
+    BoxedHoon<'src>,
+    BoxedHoon<'src>,
+    BoxedHoon<'src>,
+    BoxedHoon<'src>,
+) {
     let mut hoon = Recursive::declare();
     let mut hoon_wide = Recursive::declare();
     let mut spec = Recursive::declare();
@@ -444,6 +465,7 @@ pub fn parser<'src>(
         hoon_wide_no_trace.clone(),
         wer.clone(),
         linemap.clone(),
+        true,
     )
     .map_with(wrap_hoon_with_trace(wer.clone(), linemap.clone()))
     .labelled("Hoon Wide")
@@ -462,6 +484,7 @@ pub fn parser<'src>(
         hoon_wide_no_trace.clone(),
         wer.clone(),
         linemap.clone(),
+        true,
     )
     .map_with(wrap_hoon_with_trace(wer.clone(), linemap.clone()))
     .labelled("Hoon")
@@ -480,6 +503,7 @@ pub fn parser<'src>(
         hoon_wide_no_trace.clone(),
         wer.clone(),
         linemap.clone(),
+        false,
     )
     .map_with(wrap_hoon_with_docs(linemap.clone()))
     .labelled("Hoon")
@@ -495,6 +519,7 @@ pub fn parser<'src>(
         hoon_wide_no_trace.clone(),
         wer.clone(),
         linemap.clone(),
+        false,
     )
     .map_with(wrap_hoon_with_docs(linemap.clone()))
     .labelled("Hoon Wide")
@@ -526,13 +551,34 @@ pub fn parser<'src>(
 
     spec_wide_no_trace.define(spec_wide_no_trace_body);
 
+    (
+        hoon.boxed(),
+        hoon_wide.boxed(),
+        hoon_no_trace.boxed(),
+        hoon_wide_no_trace.boxed(),
+    )
+}
+
+pub fn parser<'src>(
+    wer: Path,
+    bug: bool,
+    linemap: Arc<LineMap>,
+) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
+    let (hoon, _, hoon_no_trace, _) = grammar(wer, linemap);
     let hoon = if bug { hoon } else { hoon_no_trace };
 
-    hoon.separated_by(gap())
-        .at_least(1)
-        .collect::<Vec<Hoon>>()
-        .map(|hoons| Hoon::TisSig(hoons))
-        .delimited_by(gap().or_not(), gap().or_not())
+    // An import block may open the file; the body's first spot starts after
+    // it, as hoonc parses the block apart from the body.
+    gap()
+        .or_not()
+        .ignore_then(import_header().or_not())
+        .ignore_then(
+            hoon.separated_by(gap())
+                .at_least(1)
+                .collect::<Vec<Hoon>>()
+                .map(|hoons| Hoon::TisSig(hoons)),
+        )
+        .then_ignore(gap().or_not())
         .boxed()
 }
 

@@ -15,14 +15,14 @@ use std::{cmp, env, fs, process};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use hatch::ast::hoon::{Hoon, Limb};
+use hatch::ast::hoon::{Hoon, Limb, Spot as HoonSpot};
 use hatch::utils::hoon_to_noun;
 use honk::build_cache::{BuildCache, CacheObjectKind, CacheRead, CacheWrite};
 use honk::nasm_bridge::SlabToNockasm;
 use honk::native::formula::comb;
 use honk::native::hot::native_hot_state;
 use honk::native::noun::term_to_noun;
-use honk::native::ut::{ty_noun, Ut};
+use honk::native::ut::{spot_hint_formula, ty_noun, Ut};
 use honk::pipeline;
 use honk::pipeline::{NativeImportKind, ScopeMode};
 use nockapp::noun::slab::{NockJammer, NounSlab};
@@ -607,6 +607,9 @@ fn main() {
     };
 
     report_native_timing_totals();
+    if let Some(report) = honk::native::ut::memo_verify_report() {
+        eprintln!("{report}");
+    }
 
     if let Err(err) = result {
         eprintln!("native hoon compile failed: {err}");
@@ -637,6 +640,29 @@ async fn run(cli: Cli) -> Result<()> {
         if entry_uses_unpinned_softed_constraints(entry, &cli.directory)? {
             return compile_entry_with_hoonc(entry, &cli.directory, output, cli.mode).await;
         }
+    }
+
+    if cli.wrapper_asset_dump.is_none() && cli.native_wrapper_asset_dump.is_none() {
+        let started = Instant::now();
+        let mut memo = DependencyTreeMemo::default();
+        if let Some(entries) = batch_entries.as_deref() {
+            for entry in entries {
+                check_dependency_tree(
+                    &entry.entry,
+                    &cli.directory,
+                    entry.directory_files.as_deref(),
+                    &mut memo,
+                )?;
+            }
+        } else if let Some(entry) = cli.entry.as_deref() {
+            check_dependency_tree(entry, &cli.directory, None, &mut memo)?;
+        }
+        info!(
+            hoon_files = memo.imports.len(),
+            parsed_unimported = memo.parsed.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+            "checked the dependency tree"
+        );
     }
 
     let prelude_source = fs::read_to_string(&cli.prelude)?;
@@ -716,6 +742,177 @@ async fn run(cli: Cli) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(output, jam)?;
+    Ok(())
+}
+
+/// Memo for `check_dependency_tree` across the entries of a batch: each Hoon
+/// file's resolved imports, and the files whose whole source was parsed.
+#[derive(Default)]
+struct DependencyTreeMemo {
+    imports: HashMap<PathBuf, Vec<PathBuf>>,
+    parsed: HashSet<PathBuf>,
+}
+
+/// hoonc reads and parses every file of the dependency tree before it builds
+/// anything (`+parse-dir`, then `+build-merk-dag` over all the nodes), so a
+/// file the entry never imports still fails the build when it is empty, sits
+/// at a path `+stab` cannot read, does not parse, has an import that does not
+/// resolve, or is part of an import cycle. Files the entry imports are parsed
+/// when they are compiled (or were, for a cached product of the same source),
+/// so only the others are parsed here.
+fn check_dependency_tree(
+    entry: &Path,
+    directory: &Path,
+    directory_files: Option<&[PathBuf]>,
+    memo: &mut DependencyTreeMemo,
+) -> Result<()> {
+    let root = directory.canonicalize()?;
+    let allowed_files = directory_files
+        .map(|files| hoonc_directory_allowed_paths(&root, files))
+        .transpose()?;
+    let mut files = Vec::new();
+    // Sorted so the error reported for a tree with several problems is stable.
+    for dir_entry in WalkDir::new(&root)
+        .follow_links(true)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(hoonc::is_valid_file_or_dir)
+    {
+        let dir_entry = dir_entry?;
+        if !dir_entry.metadata()?.is_file() {
+            continue;
+        }
+        let path = dir_entry.path();
+        let relative = path.strip_prefix(&root).map_err(|_| {
+            format!(
+                "dependency path does not share base prefix: {}",
+                path.display()
+            )
+        })?;
+        if let Some(allowed_files) = &allowed_files {
+            if !allowed_files.contains(&format!("/{}", relative.to_string_lossy())) {
+                continue;
+            }
+        }
+        // hoonc keys the directory with `+stab`, whose knots allow only
+        // `[0-9a-z-.~_]`.
+        let stab_knot = |knot: &str| {
+            knot.bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'-' | b'.' | b'~' | b'_'))
+        };
+        if !relative
+            .components()
+            .all(|knot| stab_knot(&knot.as_os_str().to_string_lossy()))
+        {
+            return Err(format!(
+                "hoonc cannot load dependency {}: its path is not a Hoon path",
+                path.display()
+            )
+            .into());
+        }
+        files.push(path.to_path_buf());
+    }
+    files.push(entry.to_path_buf());
+
+    // Every Hoon file's import header must parse and resolve.
+    let mut graph: HashMap<PathBuf, (PathBuf, Vec<PathBuf>)> = HashMap::new();
+    for file in files {
+        let canonical = file.canonicalize()?;
+        if graph.contains_key(&canonical) {
+            continue;
+        }
+        // An empty file hangs hoonc's loader, so it never builds.
+        if fs::metadata(&file)?.len() == 0 {
+            return Err(format!("hoonc cannot load empty dependency {}", file.display()).into());
+        }
+        let is_hoon = file
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains(".hoon"));
+        if !is_hoon {
+            continue;
+        }
+        let imports = match memo.imports.get(&canonical) {
+            Some(imports) => imports.clone(),
+            None => {
+                let imports =
+                    pipeline::resolve_native_imports(&file, directory, ScopeMode::Standard)?
+                        .into_iter()
+                        .map(|import| import.path.canonicalize())
+                        .collect::<std::io::Result<Vec<_>>>()?;
+                memo.imports.insert(canonical.clone(), imports.clone());
+                imports
+            }
+        };
+        graph.insert(canonical, (file, imports));
+    }
+
+    // Depth-first search for a cycle; hoonc's topological sort fails on one.
+    let mut done: HashSet<&PathBuf> = HashSet::new();
+    for start in graph.keys() {
+        if done.contains(start) {
+            continue;
+        }
+        let mut on_path: HashSet<&PathBuf> = HashSet::from([start]);
+        let mut stack: Vec<(&PathBuf, usize)> = vec![(start, 0)];
+        while let Some((node, next)) = stack.last_mut() {
+            let imports = graph
+                .get(*node)
+                .map(|(_, imports)| imports.as_slice())
+                .unwrap_or_default();
+            let Some(import) = imports.get(*next) else {
+                on_path.remove(*node);
+                done.insert(*node);
+                stack.pop();
+                continue;
+            };
+            *next += 1;
+            if on_path.contains(import) {
+                return Err(format!(
+                    "import cycle in the dependency tree through {}",
+                    import.display()
+                )
+                .into());
+            }
+            if let Some((key, _)) = graph.get_key_value(import) {
+                if !done.contains(key) {
+                    on_path.insert(key);
+                    stack.push((key, 0));
+                }
+            }
+        }
+    }
+
+    // Parse the Hoon files the entry does not reach.
+    let mut reached: HashSet<&PathBuf> = HashSet::new();
+    let mut pending: Vec<&PathBuf> = graph
+        .get_key_value(&entry.canonicalize()?)
+        .map(|(key, _)| key)
+        .into_iter()
+        .collect();
+    while let Some(node) = pending.pop() {
+        if reached.insert(node) {
+            if let Some((_, imports)) = graph.get(node) {
+                pending.extend(
+                    imports
+                        .iter()
+                        .filter_map(|import| graph.get_key_value(import).map(|(key, _)| key)),
+                );
+            }
+        }
+    }
+    let mut unreached: Vec<(&PathBuf, &PathBuf)> = graph
+        .iter()
+        .filter(|(canonical, _)| !reached.contains(canonical))
+        .map(|(canonical, (file, _))| (canonical, file))
+        .collect();
+    unreached.sort();
+    for (canonical, file) in unreached {
+        if memo.parsed.contains(canonical) {
+            continue;
+        }
+        pipeline::parse_dependency_tree_file(file)?;
+        memo.parsed.insert(canonical.clone());
+    }
     Ok(())
 }
 
@@ -889,16 +1086,6 @@ fn path_is_inside_dir(path: &Path, dir: &Path) -> bool {
     let canonical_path = path.canonicalize().unwrap_or(lexical_path);
     let canonical_dir = dir.canonicalize().unwrap_or(lexical_dir);
     canonical_path.strip_prefix(&canonical_dir).is_ok()
-        || matching_hoon_root_marker(path, dir).is_some()
-}
-
-fn matching_hoon_root_marker(path: &Path, dir: &Path) -> Option<String> {
-    let path_marker = hoon_root_marker(&lexical_absolute_path(path).ok()?);
-    let dir_marker = hoon_root_marker(&lexical_absolute_path(dir).ok()?);
-    match (path_marker, dir_marker) {
-        (Some(path_marker), Some(dir_marker)) if path_marker == dir_marker => Some(path_marker),
-        _ => None,
-    }
 }
 
 fn build_import_wer(path: &Path, deps_dir: &Path) -> Vec<String> {
@@ -919,32 +1106,11 @@ fn build_import_wer(path: &Path, deps_dir: &Path) -> Vec<String> {
     if let Ok(relative) = wer_path.strip_prefix(&wer_base) {
         return path_components_for_dbug(relative);
     }
-    if matching_hoon_root_marker(path, deps_dir).is_some() {
-        if let Some(components) = hoon_relative_components(path) {
-            return components;
-        }
-    }
     path_components_for_dbug(&wer_path)
 }
 
 fn hoon_source_content_key(path: &Path) -> Result<blake3::Hash> {
     Ok(blake3::hash(&fs::read(path)?))
-}
-
-fn hoon_root_marker(path: &Path) -> Option<String> {
-    for ancestor in path.ancestors() {
-        if ancestor.file_name().and_then(|seg| seg.to_str()) != Some("hoon") {
-            continue;
-        }
-        let parent = ancestor
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|seg| seg.to_str());
-        if matches!(parent, Some("open" | "closed")) {
-            return parent.map(ToOwned::to_owned);
-        }
-    }
-    None
 }
 
 fn path_components_for_dbug(path: &Path) -> Vec<String> {
@@ -954,15 +1120,6 @@ fn path_components_for_dbug(path: &Path) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-
-fn hoon_relative_components(path: &Path) -> Option<Vec<String>> {
-    let path = lexical_absolute_path(path).ok()?;
-    let components = normal_path_components(&path);
-    let marker_idx = components.windows(2).position(|window| {
-        matches!(window, [scope, hoon] if matches!(scope.as_str(), "open" | "closed") && hoon == "hoon")
-    })?;
-    Some(components[marker_idx + 2..].to_vec())
 }
 
 /// True when HONK_NATIVE_PARITY is set. The canonical hoon-138 build then mints
@@ -2373,9 +2530,17 @@ impl<'a> NativeBuildContext<'a> {
             }
             None => {
                 let subject_trap = subject_trap.expect("subject trap should be present");
-                trace_timed(format!("swetting {label}"), || {
+                let (ty, formula, trap) = trace_timed(format!("swetting {label}"), || {
                     self.native_swet_vase_trap(subject_ty, subject_trap, &expr, vet)
-                })?
+                })?;
+                if self.is_hoonc_dat_node(path, canonical_entry_dbug)? {
+                    // hoonc kicks a `/dat` node's trap while building it and
+                    // keeps the value (`++compile` in hoonc.hoon, `eval.nod`).
+                    let value = self.kick_vase_trap_value(trap, &label)?;
+                    (ty, formula, self.eval_vase_trap(ty, value)?)
+                } else {
+                    (ty, formula, trap)
+                }
             }
         };
         if keep_product {
@@ -2547,6 +2712,40 @@ impl<'a> NativeBuildContext<'a> {
             deps_trap = self.slat_vase_trap(deps_trap, import.trap)?;
         }
         self.slat_vase_trap(deps_trap, self.prelude_vase.trap)
+    }
+
+    /// Whether hoonc evaluates this node eagerly: its key in hoonc's
+    /// directory map starts with `/dat` (`+is-dat` in hoonc.hoon).
+    fn is_hoonc_dat_node(&self, path: &Path, is_entry: bool) -> Result<bool> {
+        let first_knot = if is_entry {
+            entry_path_for_hoon(path, &self.directory)?
+                .split('/')
+                .find(|knot| !knot.is_empty())
+                .map(ToOwned::to_owned)
+        } else {
+            build_import_wer(path, &self.directory).into_iter().next()
+        };
+        Ok(first_knot.as_deref() == Some("dat"))
+    }
+
+    /// Kicks a `(trap vase)` and returns the vase's value, in the eval stack.
+    fn kick_vase_trap_value(&mut self, trap: Noun, label: &str) -> Result<Noun> {
+        // [7 [9 2 0 1] 0 3]: kick the trap, keep the tail of the vase.
+        let slab = &mut *self.ut.slab;
+        let kick = {
+            let whole = T(slab, &[D(0), D(1)]);
+            T(slab, &[D(9), D(2), whole])
+        };
+        let value_axis = T(slab, &[D(0), D(3)]);
+        let formula = T(slab, &[D(7), kick, value_axis]);
+        let space = self.ut.slab.noun_space();
+        eval_formula_noun_in_context(
+            &mut self.eval_context,
+            formula,
+            &space,
+            &format!("kicking /dat node {label}"),
+            |stack| copy_noun_to_allocator(stack, trap, &space),
+        )
     }
 
     fn eval_vase_trap(&mut self, ty: Noun, value: Noun) -> Result<Noun> {
@@ -3044,20 +3243,77 @@ fn seed_honc_type_with_ut(
     })
 }
 
-/// Strips the wrappers the parser puts around the prelude (a one-element `=~`,
-/// `Dbug` spots, `Note` hints) to reach the compose node. Peeling drops any
-/// outer `Dbug` location stack, so chunked output matches hoonc only for a
-/// prelude parsed with `dbug=false`, as the native-parity route does (see
-/// `prelude_dbug` in `run`).
-fn peel_transparent(mut hoon: &Hoon) -> &Hoon {
+/// Strips the wrappers the parser puts around a prelude compose node (a
+/// one-element `=~` and `Dbug` spots), collecting each spot outermost first so
+/// the chunked mint can put its hint back. `None` at a `Note`: its hint type
+/// would wrap the product of every later layer, so such a prelude mints whole.
+fn peel_prelude_wrappers<'a>(
+    mut hoon: &'a Hoon,
+    spots: &mut Vec<&'a HoonSpot>,
+) -> Option<&'a Hoon> {
     loop {
         hoon = match hoon {
             Hoon::TisSig(list) if list.len() == 1 => &list[0],
-            Hoon::Dbug(_, inner) => inner.as_ref(),
-            Hoon::Note(_, inner) => inner.as_ref(),
-            other => return other,
+            Hoon::Dbug(spot, inner) => {
+                spots.push(spot);
+                inner.as_ref()
+            }
+            Hoon::Note(_, _) => return None,
+            other => return Some(other),
         };
     }
+}
+
+/// A prelude `=< ride stdlib` split for `mint_honc_prelude_chunked`, where
+/// `stdlib` is the chain `=> p0 => p1 … body`. `layers` holds `p0 … body`;
+/// `root_spots`, `stdlib_spots` and `tail_spots[i]` are the `Dbug` spots peeled
+/// from the root, from `stdlib`, and from the `q` of the `=>` whose `p` is
+/// `layers[i]`.
+struct ChunkedPrelude<'a> {
+    root_spots: Vec<&'a HoonSpot>,
+    ride: &'a Hoon,
+    stdlib_spots: Vec<&'a HoonSpot>,
+    layers: Vec<&'a Hoon>,
+    tail_spots: Vec<Vec<&'a HoonSpot>>,
+}
+
+/// Splits a `=<` prelude into chunks, or `None` if it is not `=<` or a `Note`
+/// wraps its chain.
+fn chunk_prelude(prelude: &Hoon) -> Option<ChunkedPrelude<'_>> {
+    let mut root_spots = Vec::new();
+    let Hoon::TisGal(ride, stdlib) = peel_prelude_wrappers(prelude, &mut root_spots)? else {
+        return None;
+    };
+    let mut stdlib_spots = Vec::new();
+    let mut cur = peel_prelude_wrappers(stdlib, &mut stdlib_spots)?;
+    let mut layers = Vec::new();
+    let mut tail_spots = Vec::new();
+    while let Hoon::TisGar(p, q) = cur {
+        layers.push(p.as_ref());
+        let mut spots = Vec::new();
+        cur = peel_prelude_wrappers(q, &mut spots)?;
+        tail_spots.push(spots);
+    }
+    layers.push(cur);
+    Some(ChunkedPrelude {
+        root_spots,
+        ride,
+        stdlib_spots,
+        layers,
+        tail_spots,
+    })
+}
+
+/// Wraps `formula` in the spot hints of the peeled `Dbug`s, innermost first.
+fn restore_spot_hints(
+    slab: &mut NounSlab<NockJammer>,
+    spots: &[&HoonSpot],
+    mut formula: Noun,
+) -> Result<Noun> {
+    for spot in spots.iter().rev() {
+        formula = spot_hint_formula(slab, spot, formula)?;
+    }
+    Ok(formula)
 }
 
 fn prelude_variant_name(hoon: &Hoon) -> &'static str {
@@ -3089,24 +3345,16 @@ fn prelude_variant_name(hoon: &Hoon) -> &'static str {
 /// Each layer, then `ride`, mints in its own cold-loaded `Ut` and working slab.
 /// The subject type moves between two ping-ponged slabs and formulas collect in
 /// `out_slab`, so peak memory is one layer plus the current subject and the
-/// formulas. Formulas fold with `comb` as in `mint_tsgr_arena`. The unit test
-/// `chunked_tisgar_chain_matches_monolithic_mint` exercises only the library
-/// prototype `mint_tisgar_chain_chunked`, not this function; this function's
-/// output is compared byte-for-byte with hoonc by `just honk-138-parity`.
+/// formulas. Formulas fold with `comb` as in `mint_tsgr_arena`, with the spot
+/// hints of the peeled `Dbug`s restored, so the result matches the whole-prelude
+/// mint. The hoon-138 self-mint compares this function's output byte-for-byte
+/// with hoonc.
 fn mint_honc_prelude_chunked(
     out_slab: &mut NounSlab<NockJammer>,
-    prelude: &Hoon,
+    plan: &ChunkedPrelude<'_>,
 ) -> Result<(Noun, Noun)> {
-    let Hoon::TisGal(ride, stdlib) = peel_transparent(prelude) else {
-        return Err("chunked prelude mint: root is not =<".into());
-    };
-    let mut layers: Vec<&Hoon> = Vec::new();
-    let mut cur: &Hoon = peel_transparent(stdlib);
-    while let Hoon::TisGar(p, q) = cur {
-        layers.push(p.as_ref());
-        cur = peel_transparent(q);
-    }
-    layers.push(cur);
+    let layers = &plan.layers;
+    let ride = plan.ride;
     eprintln!(
         "[honk] chunked prelude: {} layers + ride; layer variants = [{}]",
         layers.len(),
@@ -3130,7 +3378,7 @@ fn mint_honc_prelude_chunked(
     for (i, expr) in layers
         .iter()
         .copied()
-        .chain(std::iter::once(ride.as_ref()))
+        .chain(std::iter::once(ride))
         .enumerate()
     {
         let mut work: NounSlab<NockJammer> = NounSlab::new();
@@ -3164,14 +3412,18 @@ fn mint_honc_prelude_chunked(
         }
     }
 
-    // formulas = [layer0 … body, ride]. `=> stdlib ride` = comb(stdlib, ride);
-    // stdlib chain folds right: comb(l0, comb(l1, … comb(l_{k-1}, body))).
+    // formulas = [p0 … p_{k-1}, body, ride]. `=> stdlib ride` = comb(stdlib,
+    // ride), and the stdlib chain folds right: comb(p0, comb(p1, … body)), with
+    // each `=>`'s peeled `q` spots around its tail.
     let ride_formula = formulas.pop().expect("ride formula");
     let mut stdlib_formula = formulas.pop().expect("stdlib body formula");
-    while let Some(head) = formulas.pop() {
+    for (head, spots) in formulas.into_iter().zip(&plan.tail_spots).rev() {
+        stdlib_formula = restore_spot_hints(out_slab, spots, stdlib_formula)?;
         stdlib_formula = comb(out_slab, head, stdlib_formula)?;
     }
+    let stdlib_formula = restore_spot_hints(out_slab, &plan.stdlib_spots, stdlib_formula)?;
     let formula = comb(out_slab, stdlib_formula, ride_formula)?;
+    let formula = restore_spot_hints(out_slab, &plan.root_spots, formula)?;
     Ok((
         prelude_type_out.expect("chunked prelude ride type"),
         formula,
@@ -3183,15 +3435,16 @@ fn mint_honc_formula_with_ut(
     _context: &mut Context,
     prelude: &Hoon,
 ) -> Result<(Noun, Noun)> {
-    // The canonical prelude is `=< …`; mint it chunked to bound memory.
+    // The canonical prelude is `=< …`; mint it chunked to bound memory. The
+    // chunked and whole routes produce the same artifact.
     eprintln!(
         "[honk] mint_honc_formula path: prelude root = {}",
         prelude_variant_name(prelude)
     );
-    if std::env::var_os("NATIVE_HOON_NO_CHUNK").is_none()
-        && matches!(peel_transparent(prelude), Hoon::TisGal(_, _))
-    {
-        return mint_honc_prelude_chunked(&mut *ut.slab, prelude);
+    if std::env::var_os("NATIVE_HOON_NO_CHUNK").is_none() {
+        if let Some(plan) = chunk_prelude(prelude) {
+            return mint_honc_prelude_chunked(&mut *ut.slab, &plan);
+        }
     }
     let sut = empty_subject_type(&mut *ut.slab);
     let gol = ty_noun(&mut *ut.slab);
@@ -4717,12 +4970,6 @@ fn entry_path_for_hoon(entry: &Path, deps_dir: &Path) -> Result<String> {
         return Ok(hoon_path_from_relative(stripped));
     }
 
-    if matching_hoon_root_marker(entry, deps_dir).is_some() {
-        if let Some(components) = hoon_relative_components(entry) {
-            return Ok(format!("/{}", components.join("/")));
-        }
-    }
-
     // Same reproducibility concern as build_entry_wer: an absolute target
     // key makes the dir-hash (and so the artifact) depend on where the
     // repo happens to be checked out.
@@ -4789,7 +5036,7 @@ mod tests {
 
     use crate::{
         axis_formula, build_entry_wer, entry_path_for_hoon, entry_uses_unpinned_softed_constraints,
-        softed_constraints_pins_match,
+        path_components_for_dbug, softed_constraints_pins_match,
     };
 
     fn temp_test_dir(name: &str) -> std::path::PathBuf {
@@ -4909,7 +5156,9 @@ mod tests {
     }
 
     #[test]
-    fn entry_paths_match_by_hoon_root_across_sandbox_copies() {
+    fn entry_paths_outside_deps_stay_absolute_across_hoon_roots() {
+        // hoonc keys an entry outside the dependency root by its canonical
+        // path, even when both sit under same-named `open/hoon` trees.
         let temp_dir = temp_test_dir("entry-root-marker");
         let workspace_hoon = temp_dir.join("workspace/open/hoon");
         let sandbox_hoon = temp_dir.join("sandbox/open/hoon");
@@ -4917,13 +5166,18 @@ mod tests {
         fs::create_dir_all(&sandbox_hoon).expect("sandbox dir");
         let entry = workspace_hoon.join("tests/hoon-compiler/ketcol.hoon");
         fs::write(&entry, ":: real hoon").expect("entry file");
+        let canonical = entry.canonicalize().expect("canonical entry");
 
         let path = entry_path_for_hoon(&entry, &sandbox_hoon).expect("entry path");
-        assert_eq!(path, "/tests/hoon-compiler/ketcol.hoon");
+        assert_eq!(path, canonical.to_string_lossy());
 
         let wer = build_entry_wer(&entry, &sandbox_hoon, true);
-        assert_eq!(wer, ["tests", "hoon-compiler", "ketcol.hoon"]);
+        assert_eq!(wer, path_components_for_dbug(&canonical));
 
         fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 }
+
+#[cfg(test)]
+#[path = "../bin_tests/cov_c6_bin.rs"]
+mod cov_c6_bin;

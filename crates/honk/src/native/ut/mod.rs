@@ -56,8 +56,12 @@ mod repo;
 #[cfg(test)]
 pub mod test;
 pub mod types;
+mod verify;
 mod wet;
 pub use types::*;
+pub use verify::memo_verify_report;
+
+use self::verify::{MemoSite, MemoVerify};
 
 #[derive(Clone, Copy)]
 struct HoldRepoFanLegIdEntry {
@@ -70,6 +74,25 @@ struct HoldRepoFanLegIdEntry {
 struct HoldRepoFanHoldIdEntry {
     hold: Noun,
     id: FanLegId,
+}
+
+/// Lazy resolver IDs made for one `LazyCoreKey`, each with the tomes map and
+/// prefix it was made for: the key's `TomesSignature` is a 31-bit mug, so a hit
+/// is confirmed structurally.
+type LazyResolverBucket = Vec<(Noun, Option<String>, LazyResolverId)>;
+
+fn lazy_resolver_id_in(
+    bucket: Option<&LazyResolverBucket>,
+    tomes_map: Noun,
+    prefix: Option<&str>,
+    space: &NounSpace,
+) -> Result<Option<LazyResolverId>> {
+    for (stored_map, stored_prefix, id) in bucket.into_iter().flatten() {
+        if stored_prefix.as_deref() == prefix && noun_eq(*stored_map, tomes_map, space)? {
+            return Ok(Some(*id));
+        }
+    }
+    Ok(None)
 }
 
 const SEMI_TAG_FULL: u64 = 1_819_047_270; // %full
@@ -290,7 +313,13 @@ pub struct Ut<'a> {
     // (subject type ID, tome signature, poly) to one resolver ID, so structurally
     // equal lazy cores intern to one type and identity-keyed recursion cuts
     // converge. Lives as long as `lazy_resolvers`, for the whole compile.
-    pub lazy_resolver_canonical_ids: HashMap<LazyCoreKey, LazyResolverId>,
+    pub lazy_resolver_canonical_ids: HashMap<LazyCoreKey, LazyResolverBucket>,
+    // Resolver IDs for the `%lazy` battery seminoun of mulled cores (hoon-138
+    // `++mile`'s `laze`), keyed like `lazy_resolver_canonical_ids` but drawn
+    // separately and never registered: a mulled core never resolves arms, but
+    // its seminoun must differ from `*seminoun`, full batteries, and `++mine`'s
+    // lazy root, while staying equal across mulls of the same core.
+    pub mull_lazy_resolver_ids: HashMap<LazyCoreKey, LazyResolverBucket>,
     // Exact AST recovery from structurally equal hoon nouns. The honk binary
     // enables it for prelude builds; the normal compile path keeps it off.
     pub exact_hoon_ast_lookup_enabled: bool,
@@ -363,6 +392,8 @@ pub struct Ut<'a> {
     // `rest`) and related memo tables.
     pub boundary_memo: BoundaryMemoSet,
     pub bran_semi_memo: BucketMemo<BranSemiKey, BranSemiCacheEntry>,
+    /// `HONK_MEMO_VERIFY` state (see `verify.rs`).
+    memo_verify: MemoVerify,
     pub spec_example_cache: HashMap<SpecSignature, VecDeque<(Spec, Arc<Hoon>)>>,
     pub spec_example_cache_order: VecDeque<SpecSignature>,
     pub spec_factory_open_cache: HashMap<SpecSignature, VecDeque<(Spec, Arc<Hoon>)>>,
@@ -393,7 +424,7 @@ pub struct Ut<'a> {
     pub arm_key_term_cache: HashMap<NounIdentity, Arc<str>>,
     pub arm_key_term_cache_order: VecDeque<NounIdentity>,
     #[cfg(test)]
-    pub skin_match_static_calls: usize,
+    pub skin_fish_calls: usize,
     #[cfg(test)]
     pub stack_guard_calls: usize,
 }
@@ -2091,6 +2122,7 @@ impl<'a> Ut<'a> {
             lazy_resolver_next_id: LazyResolverId(1),
             lazy_resolvers: HashMap::new(),
             lazy_resolver_canonical_ids: HashMap::new(),
+            mull_lazy_resolver_ids: HashMap::new(),
             exact_hoon_ast_lookup_enabled: false,
             hoon_identity_cache_raw: HashMap::new(),
             hoon_identity_cache_order: VecDeque::new(),
@@ -2130,6 +2162,7 @@ impl<'a> Ut<'a> {
             hold_repo_fan_subset_by_signature: Default::default(),
             boundary_memo: Default::default(),
             bran_semi_memo: Default::default(),
+            memo_verify: Default::default(),
             spec_example_cache: HashMap::new(),
             spec_example_cache_order: VecDeque::new(),
             spec_factory_open_cache: HashMap::new(),
@@ -2145,7 +2178,7 @@ impl<'a> Ut<'a> {
             arm_key_term_cache: HashMap::new(),
             arm_key_term_cache_order: VecDeque::new(),
             #[cfg(test)]
-            skin_match_static_calls: 0,
+            skin_fish_calls: 0,
             #[cfg(test)]
             stack_guard_calls: 0,
         }
@@ -3541,10 +3574,18 @@ impl<'a> Ut<'a> {
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
         ));
         let poly_key = PolyKey::from(poly);
-        Ok(native_core_mint_cache_lookup(
+        let Some(entry) = native_core_mint_cache_lookup(
             &self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key,
-        ))
+        ) else {
+            return Ok(None);
+        };
+        // The signature is a 31-bit mug: trust the hit only for the same arms.
+        if entry.prefix != *prefix || !noun_eq(entry.tomes_map, tomes_map, &self.slab.noun_space())?
+        {
+            return Ok(None);
+        }
+        Ok(Some((entry.core_type, entry.formula)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3564,9 +3605,15 @@ impl<'a> Ut<'a> {
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
         ));
         let poly_key = PolyKey::from(poly);
+        let entry = CoreMintEntry {
+            core_type,
+            formula,
+            tomes_map,
+            prefix: prefix.clone(),
+        };
         native_core_mint_cache_store(
             &mut self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
-            context.memo.arm_epoch_key, context.memo.placeholder_context_key, core_type, formula,
+            context.memo.arm_epoch_key, context.memo.placeholder_context_key, entry,
         );
         Ok(())
     }
@@ -3611,6 +3658,88 @@ impl<'a> Ut<'a> {
             arm_epoch_key: self.arm_cache_epoch_key(),
             placeholder_context_key: self.arm_placeholder_context_signature(),
         }
+    }
+
+    /// Runs `f` as a `HONK_MEMO_VERIFY` recompute for `site`. Hits inside it are
+    /// not verified, and with `bypass` the next lookup at `site` misses so `f`
+    /// reaches the uncached body.
+    fn memo_verify_recompute<T>(
+        &mut self,
+        site: MemoSite,
+        bypass: bool,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let before = self.cache_context_key();
+        self.memo_verify.enter(bypass.then_some(site));
+        let out = f(self);
+        self.memo_verify.leave();
+        // A recompute that re-plays an arm bumps the monotonic arm epoch, which
+        // only makes later lookups in that arm miss and recompute. Any other
+        // change to the context would let the verified build diverge.
+        let after = self.cache_context_key();
+        let after_same_epoch = CacheContextKey {
+            memo: MemoContextKey {
+                arm_epoch_key: before.memo.arm_epoch_key,
+                ..after.memo
+            },
+            ..after
+        };
+        if after_same_epoch != before {
+            verify::record_perturbed(site, || format!("{before:?} -> {after:?}"));
+        }
+        out
+    }
+
+    fn memo_verify_type_eq(&mut self, a: &NRc<NTy>, b: &NRc<NTy>) -> bool {
+        if NRc::ptr_eq(a, b) {
+            return true;
+        }
+        let a = live_to_noun(&mut self.cx, a, self.slab);
+        let b = live_to_noun(&mut self.cx, b, self.slab);
+        noun_eq(a, b, &self.slab.noun_space()).unwrap_or(false)
+    }
+
+    fn memo_verify_formula_eq(&mut self, a: FormulaId, b: FormulaId) -> bool {
+        if a == b {
+            return true;
+        }
+        let a = self.formula_materialize(a);
+        let b = self.formula_materialize(b);
+        noun_eq(a, b, &self.slab.noun_space()).unwrap_or(false)
+    }
+
+    fn memo_verify_noun_eq(&self, a: Noun, b: Noun) -> bool {
+        noun_eq(a, b, &self.slab.noun_space()).unwrap_or(false)
+    }
+
+    /// Verifies a cached `(type, formula)` against `recompute` and returns
+    /// whether they match.
+    fn memo_verify_typed_formula(
+        &mut self,
+        site: MemoSite,
+        cached: &(NRc<NTy>, FormulaId),
+        bypass: bool,
+        what: impl FnOnce() -> String,
+        recompute: impl FnOnce(&mut Self) -> Result<(NRc<NTy>, FormulaId)>,
+    ) -> bool {
+        let fresh = self.memo_verify_recompute(site, bypass, recompute);
+        let outcome = match &fresh {
+            Ok((ty, formula)) => {
+                if !self.memo_verify_type_eq(&cached.0, ty) {
+                    Some("type differs".to_string())
+                } else if !self.memo_verify_formula_eq(cached.1, *formula) {
+                    Some("formula differs".to_string())
+                } else {
+                    None
+                }
+            }
+            Err(err) => Some(format!("recompute failed: {err}")),
+        };
+        let matched = outcome.is_none();
+        verify::record(site, matched, || {
+            format!("{}: {}", what(), outcome.unwrap_or_default())
+        });
+        matched
     }
 
     fn cache_context_key(&self) -> CacheContextKey {
@@ -4114,8 +4243,22 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
-            if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
-                return Ok(cached);
+            if !self.memo_verify.take_bypass(MemoSite::Mint) {
+                if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
+                    if self.memo_verify.due(MemoSite::Mint) {
+                        let matched = self.memo_verify_typed_formula(
+                            MemoSite::Mint,
+                            &cached,
+                            true,
+                            || verify::brief(format!("{gen:?}")),
+                            |ut| ut.mint_inner(sut.clone(), gol.clone(), gen, gen_id),
+                        );
+                        if !matched {
+                            self.mint_cache_store(&sut, &gol, gen_sig, cached.0.clone(), cached.1)?;
+                        }
+                    }
+                    return Ok(cached);
+                }
             }
         }
 
@@ -4152,12 +4295,11 @@ impl<'a> Ut<'a> {
                 let formula = self.formula_quote(value);
                 Ok((ty, formula))
             }
-            Hoon::ZapZap | Hoon::Eror(_) => {
-                let ty = cons_void(&mut self.cx);
-                let ty = self.nice(sut, gol, ty)?;
-                let formula = self.formula_slot_u64(0);
-                Ok((ty, formula))
-            }
+            //  hoon-138 `[%zpzp ~]  [%void [%0 0]]`: no `nice`, which could
+            //  only succeed, but would expand (and so crash on) holds in `gol`
+            Hoon::ZapZap => Ok((cons_void(&mut self.cx), self.formula_slot_u64(0))),
+            //  hoon-138 `open` crashes on `%eror` with its tape as the trace
+            Hoon::Eror(msg) => Err(CompilerError::Noun(msg.clone())),
             Hoon::Dbug(spot, inner) => self.mint_dbug(sut, gol, spot, inner),
             Hoon::Note(note, inner) => self.mint_note(sut, gol, note, inner),
             Hoon::Lost(_) => self.mint_lost(sut, gol),
@@ -4172,7 +4314,6 @@ impl<'a> Ut<'a> {
             Hoon::WutBar(list) => self.mint_wtbr(sut, gol, list),
             Hoon::WutPat(wing, q, r) => self.mint_wtpt(sut, gol, wing, q, r),
             Hoon::WutSig(wing, q, r) => self.mint_wtsg(sut, gol, wing, q, r),
-            Hoon::WutZap(p) => self.mint_wtzp(sut, gol, p),
             Hoon::WutKet(wing, q, r) => self.mint_wtkt(sut, gol, wing, q, r),
             Hoon::WutGal(p, q) => self.mint_wtgl(sut, gol, p, q),
             Hoon::WutGar(p, q) => self.mint_wtgr(sut, gol, p, q),
@@ -4323,10 +4464,10 @@ impl<'a> Ut<'a> {
                 }
             },
             Hoon::Axis(axis) => {
-                let ty = self.peek(sut.clone(), Way::Free, axis.as_biguint().clone())?;
-                let ty = self.nice(sut, gol, ty)?;
-                let formula = self.formula_slot(axis.as_biguint().clone());
-                Ok((ty, formula))
+                // hoon-138 `++open`: `[%$ p]` => `[%cnts [[%& p] ~] ~]`, so the leg is
+                // resolved by `++find %read` and `++peel` hides blocked core payloads.
+                let wing = vec![Limb::Axis(axis.clone())];
+                self.emin(sut, gol, &wing, &[])
             }
             Hoon::BarCen(prefix, tomes) => {
                 self.mine(sut, gol, Vair::Gold, prefix.as_deref(), Poly::Dry, tomes)
@@ -4470,7 +4611,8 @@ impl<'a> Ut<'a> {
                 }
                 Hoon::Rock(aura, expr) => Ok(self.play_rock(aura, expr)),
                 Hoon::Sand(aura, expr) => self.play_sand(aura, expr),
-                Hoon::ZapZap | Hoon::Eror(_) => Ok(cons_void(&mut self.cx)),
+                Hoon::ZapZap => Ok(cons_void(&mut self.cx)),
+                Hoon::Eror(msg) => Err(CompilerError::Noun(msg.clone())),
                 Hoon::Dbug(_, inner) => self.play_dbug(sut, inner),
                 Hoon::Note(note, inner) => self.play_note(sut, note, inner),
                 Hoon::Lost(_) => Ok(cons_void(&mut self.cx)),
@@ -4503,7 +4645,6 @@ impl<'a> Ut<'a> {
                     let expanded = expand_wutsig(wing, q, r);
                     self.play(sut, &expanded)
                 }
-                Hoon::WutZap(_p) => Ok(ty_bool_n(&mut self.cx, self.slab).1),
                 Hoon::WutKet(wing, q, r) => {
                     let test = Hoon::WutTis(
                         Box::new(Spec::Base(BaseType::Atom("$".to_string()))),
@@ -4716,7 +4857,11 @@ impl<'a> Ut<'a> {
                         self.play(sut, &acc)
                     }
                 },
-                Hoon::Axis(axis) => self.peek(sut, Way::Free, axis.as_biguint().clone()),
+                Hoon::Axis(axis) => {
+                    // hoon-138 `++open`: `[%$ p]` => `[%cnts [[%& p] ~] ~]` (`++find %read`).
+                    let wing = vec![Limb::Axis(axis.clone())];
+                    self.epla(sut, &wing, &[])
+                }
                 Hoon::BarCen(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Dry),
                 Hoon::BarPat(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Wet),
                 _ => self.play_opened(sut, gen),
@@ -5026,7 +5171,7 @@ impl<'a> Ut<'a> {
                 self.type_test_formula_on_axis(ref_type.clone(), axis)?
             }
             _ => {
-                let (_ty, base_formula) = self.fine(&port)?;
+                let (_ty, base_formula) = self.fine(&sut, &port)?;
                 let test = self.type_test_formula_on_axis(ref_type.clone(), 1u64)?;
                 // hoon-138 emits an explicit `%7` in this branch.
                 self.formula_op(NockOpcode::COMPOSE, &[base_formula, test])
@@ -5044,123 +5189,28 @@ impl<'a> Ut<'a> {
         skin: &Skin,
         wing: &WingType,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // The skin matchers take noun types, so the hit type and subject are lowered.
-        let (hit_ty, axis) = self.fend(sut.clone(), Way::Read, wing)?;
-        let hit_ty = live_to_noun(&mut self.cx, &hit_ty, self.slab);
-        let static_match = self.skin_match_static(hit_ty, skin)?;
-        let formula = if let Some(matches) = static_match {
-            self.formula_quote(D(if matches { 0 } else { 1 }))
-        } else {
-            let sut_noun = live_to_noun(&mut self.cx, &sut, self.slab);
-            self.skin_test_formula(sut_noun, axis, skin)?
-        };
+        // hoon-138: `=+  fid=(fend %read [[%& 1] q.gen])` then
+        // `(~(fish ar p.fid p.gen) q.fid)`. The `[%& 1]` limb turns an arm into
+        // its core as a leg.
+        let (ref_ty, axis) = self.fend(sut.clone(), Way::Read, &wthx_wing(wing))?;
+        let formula = self.skin_test_formula(ref_ty, sut.clone(), axis, skin)?;
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let ty = self.nice(sut, gol, bool_ty)?;
         Ok((ty, formula))
     }
 
-    fn base_match_static(&mut self, ty: Noun, base: &BaseType) -> Result<Option<bool>> {
-        match base {
-            BaseType::NounExpr => Ok(Some(true)),
-            BaseType::Void => Ok(Some(false)),
-            BaseType::Cell => {
-                let head = Skin::Base(BaseType::NounExpr);
-                let tail = Skin::Base(BaseType::NounExpr);
-                self.cell_skin_match_static(ty, &head, &tail)
-            }
-            BaseType::Flag => {
-                let bool_ty = ty_bool(self.slab);
-                if self.nest_noun(bool_ty, ty)? {
-                    return Ok(Some(true));
-                }
-                let head = ty_noun(self.slab);
-                let tail = ty_noun(self.slab);
-                let cell_ty = ty_cell(self.slab, head, tail);
-                if self.nest_noun(cell_ty, ty)? {
-                    return Ok(Some(false));
-                }
-                Ok(None)
-            }
-            BaseType::Atom(_) => {
-                let atom_ty = ty_atom(self.slab, "$", None);
-                if self.nest_noun(atom_ty, ty)? {
-                    return Ok(Some(true));
-                }
-                let head = ty_noun(self.slab);
-                let tail = ty_noun(self.slab);
-                let cell_ty = ty_cell(self.slab, head, tail);
-                if self.nest_noun(cell_ty, ty)? {
-                    return Ok(Some(false));
-                }
-                Ok(None)
-            }
-            BaseType::Null => {
-                let exact = ty_atom(self.slab, "$", Some(D(0)));
-                if self.nest_noun(exact, ty)? {
-                    Ok(Some(true))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+    /// `(~(nest ut [%atom %$ value]) | ref)`, as `++fish:ar` asks it.
+    fn fish_nests_atom(&mut self, ref_: NRc<NTy>, value: Option<Noun>) -> Result<bool> {
+        let atom = ty_atom(self.slab, "$", value);
+        let atom = native_of(&mut self.cx, atom, &self.slab.noun_space())?;
+        self.nest(atom, ref_)
     }
 
-    fn cell_skin_match_static(
-        &mut self,
-        ty: Noun,
-        head: &Skin,
-        tail: &Skin,
-    ) -> Result<Option<bool>> {
-        let atom_ty = ty_atom(self.slab, "$", None);
-        if self.nest_noun(atom_ty, ty)? {
-            return Ok(Some(false));
-        }
-
-        let cell_head = ty_noun(self.slab);
-        let cell_tail = ty_noun(self.slab);
-        let cell_ty = ty_cell(self.slab, cell_head, cell_tail);
-        let known_cell = self.nest_noun(cell_ty, ty)?;
-
-        let head_ty = self.peek_noun(ty, Way::Free, 2u64)?;
-        let tail_ty = self.peek_noun(ty, Way::Free, 3u64)?;
-        let head_match = self.skin_match_static(head_ty, head)?;
-        let tail_match = self.skin_match_static(tail_ty, tail)?;
-
-        if known_cell {
-            Ok(match (head_match, tail_match) {
-                (Some(h), Some(t)) => Some(h && t),
-                (Some(false), _) | (_, Some(false)) => Some(false),
-                _ => None,
-            })
-        } else if matches!(head_match, Some(false)) || matches!(tail_match, Some(false)) {
-            Ok(Some(false))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn skin_match_static(&mut self, ty: Noun, skin: &Skin) -> Result<Option<bool>> {
-        #[cfg(test)]
-        {
-            self.skin_match_static_calls = self.skin_match_static_calls.saturating_add(1);
-        }
-        match skin {
-            Skin::Dbug(_, inner) => self.skin_match_static(ty, inner),
-            Skin::Help(_, inner) => self.skin_match_static(ty, inner),
-            Skin::Name(_, inner) => self.skin_match_static(ty, inner),
-            Skin::Base(base) => self.base_match_static(ty, base),
-            Skin::Leaf(_aura, atom) => {
-                let value = parsed_atom_to_noun(self.slab, atom);
-                let exact = ty_atom(self.slab, "$", Some(value));
-                if self.nest_noun(exact, ty)? {
-                    Ok(Some(true))
-                } else {
-                    Ok(None)
-                }
-            }
-            Skin::Cell(head, tail) => self.cell_skin_match_static(ty, head.as_ref(), tail.as_ref()),
-            _ => Ok(None),
-        }
+    /// `(~(nest ut [%cell %noun %noun]) | ref)`, as `++fish:ar` asks it.
+    fn fish_nests_cell(&mut self, ref_: NRc<NTy>) -> Result<bool> {
+        let noun = cons_noun(&mut self.cx);
+        let cell = cons_cell(&mut self.cx, noun.clone(), noun);
+        self.nest(cell, ref_)
     }
 
     fn mint_wtts(
@@ -5176,33 +5226,6 @@ impl<'a> Ut<'a> {
         self.mint_fits(sut, gol, example.as_ref(), wing)
     }
 
-    fn base_test_formula(&mut self, base: &BaseType, slot: FormulaId) -> Result<FormulaId> {
-        match base {
-            BaseType::NounExpr => Ok(self.formula_quote(D(0))),
-            BaseType::Void => Ok(self.formula_quote(D(1))),
-            BaseType::Cell => Ok(self.formula_op(NockOpcode::CELL, &[slot])),
-            BaseType::Atom(_) => {
-                let test = self.formula_op(NockOpcode::CELL, &[slot]);
-                let false_formula = self.formula_quote(D(1));
-                let true_formula = self.formula_quote(D(0));
-                Ok(self.formula_cond(test, false_formula, true_formula))
-            }
-            BaseType::Null => {
-                let zero = self.formula_quote(D(0));
-                Ok(self.formula_op(NockOpcode::EQUAL, &[zero, slot]))
-            }
-            BaseType::Flag => {
-                let zero = self.formula_quote(D(0));
-                let one = self.formula_quote(D(1));
-                let eq_zero = self.formula_op(NockOpcode::EQUAL, &[slot, zero]);
-                let eq_one = self.formula_op(NockOpcode::EQUAL, &[slot, one]);
-                let atom_test = self.base_test_formula(&BaseType::Atom("$".to_string()), slot)?;
-                let flag_value_test = self.formula_flor(eq_zero, eq_one);
-                Ok(self.formula_flan(atom_test, flag_value_test))
-            }
-        }
-    }
-
     fn type_test_formula_on_axis<A: Into<BigUint>>(
         &mut self,
         typ: NRc<NTy>,
@@ -5210,6 +5233,15 @@ impl<'a> Ut<'a> {
     ) -> Result<FormulaId> {
         let axis = axis.into();
         if let Some(cached) = self.fish_boundary_lookup(&typ, &axis)? {
+            if self.memo_verify.due(MemoSite::Fish) {
+                let fresh = self.memo_verify_recompute(MemoSite::Fish, false, |ut| {
+                    ut.type_test_formula_on_axis_inner(typ.clone(), axis.clone(), &mut Vec::new())
+                });
+                let matched = matches!(&fresh, Ok(f) if self.memo_verify_formula_eq(cached, *f));
+                verify::record(MemoSite::Fish, matched, || {
+                    format!("axis {axis}, recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
@@ -5286,71 +5318,116 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn skin_test_formula(&mut self, sut: Noun, axis: BigUint, skin: &Skin) -> Result<FormulaId> {
-        let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
-        if let Some(matches) = self.skin_match_static(ref_type, skin)? {
-            return Ok(self.formula_quote(D(if matches { 0 } else { 1 })));
+    /// hoon-138 `++fish:ar`: a formula testing the noun at `axis`, of type
+    /// `ref_`, against `skin`. `%over` and `%spec` skins resolve in `sut`;
+    /// `%over` swaps `sut` for the wing's type and pegs the axis but keeps `ref_`.
+    fn skin_test_formula(
+        &mut self,
+        ref_: NRc<NTy>,
+        sut: NRc<NTy>,
+        axis: BigUint,
+        skin: &Skin,
+    ) -> Result<FormulaId> {
+        #[cfg(test)]
+        {
+            self.skin_fish_calls = self.skin_fish_calls.saturating_add(1);
         }
-
-        let slot = self.formula_slot(axis.clone());
         match skin {
-            Skin::Base(BaseType::Flag) => {
-                let atom_skin = Skin::Base(BaseType::Atom("$".to_string()));
-                let atom_test = self.skin_test_formula(sut, axis.clone(), &atom_skin)?;
-                let zero = self.formula_quote(D(0));
-                let one = self.formula_quote(D(1));
-                let eq_zero = self.formula_op(NockOpcode::EQUAL, &[slot, zero]);
-                let eq_one = self.formula_op(NockOpcode::EQUAL, &[slot, one]);
-                let flag_value_test = self.formula_flor(eq_zero, eq_one);
-                Ok(self.formula_flan(atom_test, flag_value_test))
-            }
-            Skin::Base(base) => self.base_test_formula(base, slot),
-            Skin::Leaf(_aura, atom) => {
-                let value = parsed_atom_to_noun(self.slab, atom);
-                let const_val = self.formula_quote(value);
-                Ok(self.formula_op(NockOpcode::EQUAL, &[const_val, slot]))
-            }
-            Skin::Cell(head, tail) => {
-                let is_cell = self.formula_op(NockOpcode::CELL, &[slot]);
-                let head_axis = peg_axis_big(axis.clone(), 2)?;
-                let tail_axis = peg_axis_big(axis, 3)?;
-                let head_test = self.skin_test_formula(sut, head_axis, head)?;
-                let tail_test = self.skin_test_formula(sut, tail_axis, tail)?;
-                let both = self.formula_arena.and(head_test, tail_test);
-                let false_formula = self.formula_quote(D(1));
-                Ok(self.formula_cond(is_cell, both, false_formula))
-            }
-            Skin::Dbug(_, inner) => self.skin_test_formula(sut, axis, inner),
-            Skin::Help(_, inner) => self.skin_test_formula(sut, axis, inner),
-            Skin::Name(_, inner) => self.skin_test_formula(sut, axis, inner),
-            Skin::Over(wing, inner) => {
-                let rel_axis = self.resolve_wing_axis_noun(sut, wing)?;
-                let axis = peg_axis_big_pair(axis, &rel_axis)?;
-                self.skin_test_formula(sut, axis, inner)
-            }
-            Skin::Spec(spec, inner) => {
-                let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
-                let example = self.spec_example_cached(spec);
-                let hit = self.play_noun(sut, example.as_ref())?;
-                if !self.nest_noun(hit, ref_type)? {
-                    return Err(CompilerError::Noun("native mint: wthx spec".to_string()));
-                }
-                self.skin_test_formula(sut, axis, inner)
-            }
-            Skin::Wash(_) => Ok(self.formula_quote(D(0))),
             Skin::Term(name) => {
-                // Canonical `ar` treats an atomic skin as a `%spec` skin whose
-                // spec is a like-reference to that term and whose inner skin is
-                // `%noun`.  Do not resolve the term directly with `find`: in a
-                // gate such as `|=  a=pair  ?#(pair a)`, direct lookup can see
-                // the sample/core namespace rather than the mold spec path and
-                // incorrectly reject a statically valid test.
+                // An atomic skin is `spec+[[%like [skin]~ ~] [%base %noun]]`.
+                // Do not resolve the term directly with `find`: in a gate such
+                // as `|=  a=pair  ?#(pair a)`, direct lookup can see the
+                // sample/core namespace rather than the mold spec path.
                 let wing = vec![Limb::Term(name.clone())];
                 let spec = Spec::Like(wing, Vec::new());
                 let converted =
                     Skin::Spec(Box::new(spec), Box::new(Skin::Base(BaseType::NounExpr)));
-                self.skin_test_formula(sut, axis, &converted)
+                self.skin_test_formula(ref_, sut, axis, &converted)
             }
+            Skin::Base(base) => match base {
+                BaseType::Cell => {
+                    let noun = || Box::new(Skin::Base(BaseType::NounExpr));
+                    let cell = Skin::Cell(noun(), noun());
+                    self.skin_test_formula(ref_, sut, axis, &cell)
+                }
+                BaseType::Flag => {
+                    let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
+                    if self.nest(bool_ty, ref_.clone())? {
+                        return Ok(self.formula_quote(D(0)));
+                    }
+                    let atom_skin = Skin::Base(BaseType::Atom("$".to_string()));
+                    let atom_test = self.skin_test_formula(ref_, sut, axis.clone(), &atom_skin)?;
+                    let slot = self.formula_slot(axis);
+                    let yes = self.formula_quote(D(0));
+                    let no = self.formula_quote(D(1));
+                    let eq_yes = self.formula_op(NockOpcode::EQUAL, &[slot, yes]);
+                    let eq_no = self.formula_op(NockOpcode::EQUAL, &[slot, no]);
+                    let value_test = self.formula_flor(eq_yes, eq_no);
+                    Ok(self.formula_flan(atom_test, value_test))
+                }
+                BaseType::NounExpr => Ok(self.formula_quote(D(0))),
+                BaseType::Null => {
+                    let leaf = Skin::Leaf("n".to_string(), ParsedAtom::Small(0));
+                    self.skin_test_formula(ref_, sut, axis, &leaf)
+                }
+                BaseType::Void => Ok(self.formula_quote(D(1))),
+                BaseType::Atom(_) => {
+                    if self.fish_nests_atom(ref_.clone(), None)? {
+                        return Ok(self.formula_quote(D(0)));
+                    }
+                    if self.fish_nests_cell(ref_)? {
+                        return Ok(self.formula_quote(D(1)));
+                    }
+                    let slot = self.formula_slot(axis);
+                    let is_cell = self.formula_op(NockOpcode::CELL, &[slot]);
+                    Ok(self.formula_flip(is_cell))
+                }
+            },
+            Skin::Cell(head, tail) => {
+                if self.fish_nests_atom(ref_.clone(), None)? {
+                    return Ok(self.formula_quote(D(1)));
+                }
+                let is_cell = if self.fish_nests_cell(ref_.clone())? {
+                    self.formula_quote(D(0))
+                } else {
+                    let slot = self.formula_slot(axis.clone());
+                    self.formula_op(NockOpcode::CELL, &[slot])
+                };
+                let head_ref = self.peek(ref_.clone(), Way::Free, 2u64)?;
+                let head_axis = peg_axis_big(axis.clone(), 2)?;
+                let head_test = self.skin_test_formula(head_ref, sut.clone(), head_axis, head)?;
+                let tail_ref = self.peek(ref_, Way::Free, 3u64)?;
+                let tail_axis = peg_axis_big(axis, 3)?;
+                let tail_test = self.skin_test_formula(tail_ref, sut, tail_axis, tail)?;
+                let both = self.formula_flan(head_test, tail_test);
+                Ok(self.formula_flan(is_cell, both))
+            }
+            Skin::Leaf(_aura, atom) => {
+                let value = parsed_atom_to_noun(self.slab, atom);
+                if self.fish_nests_atom(ref_, Some(value))? {
+                    return Ok(self.formula_quote(D(0)));
+                }
+                let const_val = self.formula_quote(value);
+                let slot = self.formula_slot(axis);
+                Ok(self.formula_op(NockOpcode::EQUAL, &[const_val, slot]))
+            }
+            Skin::Dbug(_, inner) => self.skin_test_formula(ref_, sut, axis, inner),
+            Skin::Help(_, inner) => self.skin_test_formula(ref_, sut, axis, inner),
+            Skin::Name(_, inner) => self.skin_test_formula(ref_, sut, axis, inner),
+            Skin::Over(wing, inner) => {
+                let (wing_ty, wing_axis) = self.fend(sut, Way::Read, wing)?;
+                let axis = peg_axis_big_pair(axis, &wing_axis)?;
+                self.skin_test_formula(ref_, wing_ty, axis, inner)
+            }
+            Skin::Spec(spec, inner) => {
+                let example = self.spec_example_cached(spec);
+                let hit = self.play(sut.clone(), example.as_ref())?;
+                if !self.nest(hit, ref_.clone())? {
+                    return Err(CompilerError::Noun("native mint: wthx spec".to_string()));
+                }
+                self.skin_test_formula(ref_, sut, axis, inner)
+            }
+            Skin::Wash(_) => Ok(self.formula_quote(D(0))),
         }
     }
 
@@ -5475,6 +5552,32 @@ impl<'a> Ut<'a> {
             formula,
         };
         if let Some(cached) = self.ktsg_fold_cache.get(&fold_key).copied() {
+            if self.memo_verify.due(MemoSite::KtsgFold) {
+                let fresh = self.memo_verify_recompute(MemoSite::KtsgFold, false, |ut| {
+                    let formula_noun = ut.formula_materialize(formula);
+                    ut.musk_apex_output(bran, formula_noun)
+                });
+                let matched = match (&fresh, cached) {
+                    (Ok(MuskOutput::Done(noun)), Some(cached_noun)) => {
+                        self.memo_verify_noun_eq(*noun, cached_noun)
+                    }
+                    (Ok(MuskOutput::Stop | MuskOutput::Wait), None) => true,
+                    _ => false,
+                };
+                verify::record(MemoSite::KtsgFold, matched, || {
+                    let fresh = match &fresh {
+                        Ok(MuskOutput::Done(_)) => "a constant".to_string(),
+                        Ok(_) => "no fold".to_string(),
+                        Err(err) => format!("an error: {err}"),
+                    };
+                    let cached = if cached.is_some() {
+                        "a constant"
+                    } else {
+                        "no fold"
+                    };
+                    format!("cached {cached}, recomputed {fresh}")
+                });
+            }
             return Ok(match cached {
                 Some(noun) => (ty, self.formula_quote(noun)),
                 None => (ty, formula),
@@ -5577,19 +5680,58 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         tomes_sig: TomesSignature,
         poly: Poly,
-    ) -> LazyResolverId {
+        tomes_map: Noun,
+        prefix: Option<&str>,
+    ) -> Result<LazyResolverId> {
         let poly_key = PolyKey::from(poly);
         let key = LazyCoreKey {
             subject: sut.arena_id(),
             tomes: tomes_sig,
             poly: poly_key,
         };
-        if let Some(&id) = self.lazy_resolver_canonical_ids.get(&key) {
-            return id;
+        let space = self.slab.noun_space();
+        let bucket = self.lazy_resolver_canonical_ids.get(&key);
+        if let Some(id) = lazy_resolver_id_in(bucket, tomes_map, prefix, &space)? {
+            return Ok(id);
         }
         let id = self.lazy_resolver_new_id();
-        self.lazy_resolver_canonical_ids.insert(key, id);
-        id
+        self.lazy_resolver_canonical_ids
+            .entry(key)
+            .or_default()
+            .push((tomes_map, prefix.map(str::to_string), id));
+        Ok(id)
+    }
+
+    /// The resolver ID of hoon-138 `++mile`'s `(laze nym hud dom)`: one per
+    /// `(sut, tomes_sig, poly)` like `lazy_resolver_canonical_id`, but from a
+    /// separate table so it never equals `++mine`'s lazy root for the same
+    /// core. `mull_mile` registers it against the mulled core over `sut`, so a
+    /// fold in a mulled body resolves arms as hoon-138's `++laze` does.
+    fn mull_lazy_resolver_id(
+        &mut self,
+        sut: &NRc<NTy>,
+        tomes_sig: TomesSignature,
+        poly: Poly,
+        tomes_map: Noun,
+        prefix: Option<&str>,
+    ) -> Result<LazyResolverId> {
+        let key = LazyCoreKey {
+            subject: sut.arena_id(),
+            tomes: tomes_sig,
+            poly: PolyKey::from(poly),
+        };
+        let space = self.slab.noun_space();
+        let bucket = self.mull_lazy_resolver_ids.get(&key);
+        if let Some(id) = lazy_resolver_id_in(bucket, tomes_map, prefix, &space)? {
+            return Ok(id);
+        }
+        let id = self.lazy_resolver_new_id();
+        self.mull_lazy_resolver_ids.entry(key).or_default().push((
+            tomes_map,
+            prefix.map(str::to_string),
+            id,
+        ));
+        Ok(id)
     }
 
     fn lazy_resolver_register_context(
@@ -6621,6 +6763,22 @@ impl<'a> Ut<'a> {
             return Ok(self.semi_full_blocked());
         }
         if let Some(cached) = self.bran_semi_cache_lookup(&sut, seen_holds)? {
+            if self.memo_verify.due(MemoSite::BranSemi) {
+                let fresh = self.memo_verify_recompute(MemoSite::BranSemi, false, |ut| {
+                    ut.bran_canonical_semi_inner_impl(sut.clone(), &mut seen_holds.clone())
+                });
+                verify::record(
+                    MemoSite::BranSemi,
+                    matches!(fresh, Ok(semi) if semi == cached),
+                    || {
+                        format!(
+                            "{} seen holds, recomputed ok: {}",
+                            seen_holds.len(),
+                            fresh.is_ok()
+                        )
+                    },
+                );
+            }
             return Ok(cached);
         }
 
@@ -7010,7 +7168,7 @@ impl<'a> Ut<'a> {
                     let (_axis, next_hag) = self.toss(sub_wing, patch_type, &hag)?;
                     hag = next_hag;
                 }
-                self.fire(&hag)
+                self.fire(&sut, &hag)
             }
         }
     }
@@ -7227,7 +7385,7 @@ impl<'a> Ut<'a> {
         wing: &WingType,
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let port = self.find(sut.clone(), Way::Read, wing)?;
-        let (ty, formula) = self.fine(&port)?;
+        let (ty, formula) = self.fine(&sut, &port)?;
         let ty = self.nice(sut, gol, ty)?;
         Ok((ty, formula))
     }
@@ -7348,7 +7506,7 @@ impl<'a> Ut<'a> {
 
                 let hike = self.hike_formula(base_axis, &edits)?;
                 let formula = self.formula_arena.kick(arm_axis, hike);
-                let arm_ty = self.fire(&hag)?;
+                let arm_ty = self.fire(&sut, &hag)?;
                 let ty = self.nice(sut, gol, arm_ty)?;
                 Ok((ty, formula))
             }
@@ -7553,7 +7711,15 @@ impl<'a> Ut<'a> {
         let ptr = Self::hoon_ast_ptr_key(gen);
         if let Some((cached_sig, cached)) = self.open_cache.get(&ptr) {
             if *cached_sig == sig {
-                return cached.clone();
+                let cached = cached.clone();
+                if self.memo_verify.due(MemoSite::Open) {
+                    let opened = open(gen.clone());
+                    let fresh = (&opened != gen).then_some(&opened);
+                    verify::record(MemoSite::Open, cached.as_deref() == fresh, || {
+                        verify::brief(format!("{gen:?}"))
+                    });
+                }
+                return cached;
             }
         }
 
@@ -7599,10 +7765,37 @@ impl<'a> Ut<'a> {
         // walk in `goal_core_for_mine`. The core's payload and context are both `sut`.
         let gol_noun = live_to_noun(&mut self.cx, &gol, self.slab);
         let tomes_map = self.tomes_map_from_ast(tomes)?;
-        if let Some((cached_ty, cached_formula)) =
-            self.core_mint_cache_lookup(&sut, &gol, tomes_map, prefix, poly)?
-        {
-            return Ok((cached_ty, cached_formula));
+        if !self.memo_verify.take_bypass(MemoSite::CoreMint) {
+            if let Some(cached) =
+                self.core_mint_cache_lookup(&sut, &gol, tomes_map, prefix, poly)?
+            {
+                if self.memo_verify.due(MemoSite::CoreMint) {
+                    let matched = self.memo_verify_typed_formula(
+                        MemoSite::CoreMint,
+                        &cached,
+                        true,
+                        || {
+                            let mut arms: Vec<&String> =
+                                tomes.values().flat_map(|tome| tome.1.keys()).collect();
+                            arms.sort();
+                            verify::brief(format!("core with arms {arms:?}"))
+                        },
+                        |ut| ut.mint_core(sut.clone(), gol.clone(), prefix, tomes, poly),
+                    );
+                    if !matched {
+                        self.core_mint_cache_store(
+                            &sut,
+                            &gol,
+                            tomes_map,
+                            prefix,
+                            poly,
+                            cached.0.clone(),
+                            cached.1,
+                        )?;
+                    }
+                }
+                return Ok(cached);
+            }
         }
         let garb = garb_native(prefix.as_deref(), poly, Vair::Gold);
         // Match hoon-138/hoonc layered-core payload layout and formula shape.
@@ -7634,7 +7827,8 @@ impl<'a> Ut<'a> {
         let tomes_sig = TomesSignature(u64::from(
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
         ));
-        let resolver_id = self.lazy_resolver_canonical_id(&sut, tomes_sig, poly);
+        let resolver_id =
+            self.lazy_resolver_canonical_id(&sut, tomes_sig, poly, tomes_map, prefix.as_deref())?;
         let lazy_semi = self.semi_noun_lazy_root(resolver_id);
         let lazy_rest = T(self.slab, &[lazy_semi, tomes_map]);
         // Build the lazy core once, with payload and context both `sut`. Every arm
@@ -8278,10 +8472,7 @@ impl<'a> Ut<'a> {
         let result = self.mint(sut, gol, inner);
         self.dbug_locations.pop();
         let (ty, formula) = result?;
-        let spot_noun = spot_to_noun(self.slab, spot)?;
-        let hint_inner = T(self.slab, &[D(1), spot_noun]);
-        let spot_tag = term_to_noun(self.slab, "spot");
-        let hint = T(self.slab, &[spot_tag, hint_inner]);
+        let hint = spot_hint_clue(self.slab, spot)?;
         let space = self.slab.noun_space();
         let formula = self.formula_arena.hint(hint, formula, &space);
         Ok((ty, formula))
@@ -8335,21 +8526,6 @@ impl<'a> Ut<'a> {
         // Match hoon-138 open() lowering: wtkt -> wtcl(wtts atom p, r, q)
         let expanded = Hoon::WutCol(Box::new(test), Box::new(r.clone()), Box::new(q.clone()));
         self.mint(sut, gol, &expanded)
-    }
-
-    fn mint_wtzp(
-        &mut self,
-        sut: NRc<NTy>,
-        gol: NRc<NTy>,
-        p: &Hoon,
-    ) -> Result<(NRc<NTy>, FormulaId)> {
-        let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
-        let (_p_ty, p_formula) = self.mint(sut.clone(), bool_ty.clone(), p)?;
-        let false_formula = self.formula_quote(D(1));
-        let true_formula = self.formula_quote(D(0));
-        let formula = self.formula_cond(p_formula, false_formula, true_formula);
-        let ty = self.nice(sut, gol, bool_ty)?;
-        Ok((ty, formula))
     }
 
     fn play_rock(&mut self, aura: &str, expr: &NounExpr) -> NRc<NTy> {
@@ -8530,6 +8706,24 @@ impl<'a> Ut<'a> {
         // scoped on the union of both legsets.
         let fan = self.fan_context_key_scoped_pair(&sut, &ref_)?;
         if let Some(cached) = nest_cache_lookup(&self.cx, &sut, &ref_, semantic.vet_key, fan) {
+            if self.memo_verify.due(MemoSite::Nest) {
+                let fresh = self.memo_verify_recompute(MemoSite::Nest, false, |ut| {
+                    ut.nest_inner(
+                        sut.clone(),
+                        ref_.clone(),
+                        0,
+                        &mut NestSeenSet::new(),
+                        &mut NestSeenSet::new(),
+                        &mut NestPairSet::new(),
+                        &mut Default::default(),
+                    )
+                });
+                verify::record(
+                    MemoSite::Nest,
+                    matches!(fresh, Ok(r) if r == cached),
+                    || format!("cached {cached}, recomputed {fresh:?}"),
+                );
+            }
             return Ok(cached);
         }
         let mut seen_sut_holds = NestSeenSet::new();
@@ -9307,8 +9501,22 @@ impl<'a> Ut<'a> {
     pub fn burp_type(&mut self, typ: Noun) -> Result<Noun> {
         let space = self.slab.noun_space();
         let raw = NounIdentity::of(typ);
-        if let Some(cached) = self.burp_type_cache.get(&raw) {
-            return Ok(*cached);
+        if !self.memo_verify.take_bypass(MemoSite::Burp) {
+            if let Some(cached) = self.burp_type_cache.get(&raw).copied() {
+                if self.memo_verify.due(MemoSite::Burp) {
+                    let fresh =
+                        self.memo_verify_recompute(MemoSite::Burp, true, |ut| ut.burp_type(typ));
+                    let matched =
+                        matches!(fresh, Ok(noun) if self.memo_verify_noun_eq(noun, cached));
+                    verify::record(MemoSite::Burp, matched, || {
+                        format!("recomputed ok: {}", fresh.is_ok())
+                    });
+                    if !matched {
+                        self.burp_type_cache.insert(raw, cached);
+                    }
+                }
+                return Ok(cached);
+            }
         }
 
         let tag = type_tag(typ, &self.slab.noun_space())?;
@@ -9409,13 +9617,13 @@ impl<'a> Ut<'a> {
     fn feel(&mut self, sut: NRc<NTy>, wings: &[WingType]) -> Result<bool> {
         let mut current = sut;
         for wing in wings.iter().rev() {
-            let pony = self.fond(current, Way::Free, wing)?;
+            let pony = self.fond(current.clone(), Way::Free, wing)?;
             let port = match pony {
                 Pony::Void | Pony::Unmatched(_) => return Ok(false),
                 Pony::Palo(palo) => Port::Palo(palo),
                 Pony::Synthetic { typ, formula } => Port::Synthetic { typ, formula },
             };
-            let (ty, _formula) = self.fine(&port)?;
+            let (ty, _formula) = self.fine(&current, &port)?;
             current = ty;
         }
         Ok(true)
@@ -9756,7 +9964,14 @@ impl<'a> Ut<'a> {
                 }
                 self.fuse(ref_, hit)
             }
-            Skin::Wash(_) => Ok(ref_),
+            // hoon-138 `ar:gain` `%wash` recurses on the same skin with
+            // `(~(play ut ref) [%wing ~])`, which never terminates (hoonc hangs
+            // and writes no artifact), so reject it instead.
+            Skin::Wash(_) => Err(CompilerError::Noun(
+                "gain-wash: a wash skin (,) cannot be used as a ?: condition \
+                 (hoon-138 ar:gain recurses forever)"
+                    .to_string(),
+            )),
         }
     }
 
@@ -9877,10 +10092,11 @@ impl<'a> Ut<'a> {
                 if matches!(&*head_ty, NTy::Void) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                // hoon-138 `ar:gain` preserves a core only for the generic cell skin tail
-                // (`[%cell head %noun]`). More specific tail skins refine the core as an
-                // ordinary cell and must not leave the arm namespace available.
-                if matches!(tail, Skin::Base(BaseType::NounExpr)) {
+                // hoon-138 `ar:gain` keeps the core only when the tail skin is the
+                // term `%noun` (`=(%noun ^skin.skin)`), not the base `[%base %noun]`.
+                // Any other tail refines the core as an ordinary cell and must not
+                // leave the arm namespace available.
+                if is_noun_term_skin(tail) {
                     Ok(cons_core(&mut self.cx, head_ty, garb, context, rest))
                 } else {
                     let noun = cons_noun(&mut self.cx);
@@ -10173,7 +10389,7 @@ impl<'a> Ut<'a> {
                     return Ok(cons_void(&mut self.cx));
                 }
                 // hoon-138 `ar:lose` uses the same core-vs-cell split as `ar:gain` here.
-                if matches!(tail, Skin::Base(BaseType::NounExpr)) {
+                if is_noun_term_skin(tail) {
                     Ok(cons_core(&mut self.cx, head_ty, garb, context, rest))
                 } else {
                     let noun = cons_noun(&mut self.cx);
@@ -10181,11 +10397,10 @@ impl<'a> Ut<'a> {
                     Ok(cons_cell(&mut self.cx, head_ty, tail_ty))
                 }
             }
-            NTy::Face { tool, inner } => {
-                let tool = tool.clone();
+            // hoon-138 `ar:lose` `%cell` strips the face: `[%face *]  $(ref q.ref)`.
+            NTy::Face { inner, .. } => {
                 let inner = inner.clone();
-                let inner = self.lose_cell_skin(sut, inner, head, tail, seen)?;
-                Ok(cons_face(&mut self.cx, tool, inner))
+                self.lose_cell_skin(sut, inner, head, tail, seen)
             }
             NTy::Fork { .. } => {
                 let options = self.fork_options_native(&ref_)?;
@@ -10278,6 +10493,15 @@ impl<'a> Ut<'a> {
     fn fuse(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<NRc<NTy>> {
         // The boundary cache keys on canonical type IDs, so `sut` is never lowered.
         if let Some(cached) = self.fuse_boundary_lookup(&sut, &ref_)? {
+            if self.memo_verify.due(MemoSite::Fuse) {
+                let fresh = self.memo_verify_recompute(MemoSite::Fuse, false, |ut| {
+                    ut.fuse_inner(sut.clone(), ref_.clone(), &mut HashSet::new())
+                });
+                let matched = matches!(&fresh, Ok(ty) if self.memo_verify_type_eq(&cached, ty));
+                verify::record(MemoSite::Fuse, matched, || {
+                    format!("recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         let mut seen: HashSet<(TypeId, TypeId)> = HashSet::new();
@@ -10333,11 +10557,17 @@ impl<'a> Ut<'a> {
     }
 
     #[inline]
-    fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>) -> MissKey {
+    fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>, seen: &[(TypeId, TypeId)]) -> MissKey {
+        let mut assumptions: Vec<(TypeId, TypeId)> = seen
+            .iter()
+            .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+            .collect();
+        assumptions.sort_unstable();
         MissKey {
             subject: sut.arena_id(),
             reference: ref_.arena_id(),
             vet: VetMode(self.vet),
+            assumptions,
         }
     }
     /// Memo over (sut, ref, vet) keys. Without it, sibling fork branches
@@ -10355,8 +10585,25 @@ impl<'a> Ut<'a> {
         seen: &mut Vec<(TypeId, TypeId)>,
         memo: &mut FastHashMap<MissKey, bool>,
     ) -> Result<bool> {
-        let key = self.miss_memo_key(&sut, &ref_);
+        let key = self.miss_memo_key(&sut, &ref_, seen);
         if let Some(&cached) = memo.get(&key) {
+            if self.memo_verify.due(MemoSite::Miss) {
+                // Recompute this verdict from its parts; the memo's entries for
+                // the parts are keyed exactly, so they are reused.
+                let fresh = self.memo_verify_recompute(MemoSite::Miss, false, |ut| {
+                    ut.miss_dext_uncached(sut.clone(), ref_.clone(), &mut seen.clone(), memo)
+                });
+                verify::record(
+                    MemoSite::Miss,
+                    matches!(fresh, Ok(r) if r == cached),
+                    || {
+                        format!(
+                            "cached {cached}, recomputed {fresh:?}, {} assumptions",
+                            seen.len()
+                        )
+                    },
+                );
+            }
             return Ok(cached);
         }
         let result = self.miss_dext_uncached(sut, ref_, seen, memo)?;
@@ -10454,9 +10701,12 @@ impl<'a> Ut<'a> {
                 };
                 let rh = rh.clone();
                 let rt = rt.clone();
-                let head_miss = self.miss_dext(sh, rh, seen, memo)?;
-                let tail_miss = self.miss_dext(st, rt, seen, memo)?;
-                Ok(head_miss || tail_miss)
+                // `?|` short-circuits: the tails are not compared when the heads
+                // miss.
+                if self.miss_dext(sh, rh, seen, memo)? {
+                    return Ok(true);
+                }
+                self.miss_dext(st, rt, seen, memo)
             }
             _ => self.miss_dext(ref_, sut, seen, memo),
         }
@@ -10564,6 +10814,15 @@ impl<'a> Ut<'a> {
     fn crop(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<NRc<NTy>> {
         // The boundary cache keys on the interned (sut, ref) `Rc` pointers.
         if let Some(cached) = self.crop_boundary_lookup(&sut, &ref_)? {
+            if self.memo_verify.due(MemoSite::Crop) {
+                let fresh = self.memo_verify_recompute(MemoSite::Crop, false, |ut| {
+                    ut.crop_inner(sut.clone(), ref_.clone(), &mut HashSet::new())
+                });
+                let matched = matches!(&fresh, Ok(ty) if self.memo_verify_type_eq(&cached, ty));
+                verify::record(MemoSite::Crop, matched, || {
+                    format!("recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         let mut seen: HashSet<(TypeId, TypeId)> = HashSet::new();
@@ -11028,6 +11287,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Noun-bridged `peek`: lifts `sut`, runs native `peek`, lowers the result.
+    #[cfg(test)]
     fn peek_noun<A: Into<BigUint>>(&mut self, sut: Noun, way: Way, axis: A) -> Result<Noun> {
         let native = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let r = self.peek(native, way, axis)?;
@@ -11077,6 +11337,23 @@ impl<'a> Ut<'a> {
             }
         };
         if let Some(cached) = self.mull_cache_lookup(&sut, &gol, &dox, gen_sig)? {
+            if self.memo_verify.due(MemoSite::Mull) {
+                let fresh = self.memo_verify_recompute(MemoSite::Mull, false, |ut| {
+                    ut.with_stack_guard(|ut| {
+                        ut.mull_inner(sut.clone(), gol.clone(), dox.clone(), gen)
+                    })
+                });
+                let matched = match &fresh {
+                    Ok((a, b)) => {
+                        self.memo_verify_type_eq(&cached.0, a)
+                            && self.memo_verify_type_eq(&cached.1, b)
+                    }
+                    Err(_) => false,
+                };
+                verify::record(MemoSite::Mull, matched, || {
+                    verify::brief(format!("{gen:?}"))
+                });
+            }
             return Ok(cached);
         }
         // hoon-138 pre-check: mull-none if sut is void
@@ -11385,9 +11662,10 @@ impl<'a> Ut<'a> {
 
             // ---- Aura test: %wthx ----
             Hoon::WutHax(_skin, wing) => {
-                // fend from both perspectives.
-                let (new_type, new_axis) = self.fend(sut.clone(), Way::Read, wing)?;
-                let (old_type, old_axis) = self.fend(dox.clone(), Way::Read, wing)?;
+                // fend `[[%& 1] q.gen]` from both perspectives.
+                let wing = wthx_wing(wing);
+                let (new_type, new_axis) = self.fend(sut.clone(), Way::Read, &wing)?;
+                let (old_type, old_axis) = self.fend(dox.clone(), Way::Read, &wing)?;
 
                 // Assert axes match
                 if new_axis != old_axis {
@@ -11469,11 +11747,8 @@ impl<'a> Ut<'a> {
                 self.mull_beth(sut, gol, void_ty)
             }
 
-            // ---- Error sentinel ----
-            Hoon::Eror(_) => {
-                let void_ty = cons_void(&mut self.cx);
-                self.mull_beth(sut, gol, void_ty)
-            }
+            // ---- Error sentinel: hoon-138 `open` crashes on it ----
+            Hoon::Eror(msg) => Err(CompilerError::Noun(msg.clone())),
 
             // ---- Sugar forms lowered before mull ----
             // TisLus (=+) lowers to TisGar => handled above
@@ -11592,12 +11867,19 @@ impl<'a> Ut<'a> {
         tomes: &HashMap<String, Tome>,
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
         // Payload and context stay shared native types. The coil rest is a noun
-        // leaf pairing a fully blocked seminoun (standing in for `laze`) with the
+        // leaf pairing a `%lazy` root seminoun (standing in for `laze`) with the
         // arm map; cons_core collapses a void payload to void, like ty_core.
+        // hoon-138 computes one `(laze nym hud dom)` against `sut` for both
+        // cores. It is never `*seminoun`, so a mulled core's coil differs from
+        // the played core's and nest takes its slow path, as in hoonc.
         let tomes_map = self.tomes_map_from_ast(tomes)?;
+        let tomes_sig = TomesSignature(u64::from(
+            self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(nym).0,
+        ));
+        let resolver_id = self.mull_lazy_resolver_id(&sut, tomes_sig, hud, tomes_map, nym)?;
         // Construct yet = core(sut, [nym hud gold], sut, laze, dom)
         let garb = garb_native(nym, hud, Vair::Gold);
-        let semi_noun = self.semi_noun_blocked();
+        let semi_noun = self.semi_noun_lazy_root(resolver_id);
         let rest = T(self.slab, &[semi_noun, tomes_map]);
         let yet = {
             let space = self.slab.noun_space();
@@ -11610,6 +11892,20 @@ impl<'a> Ut<'a> {
                 rest_leaf,
             )
         };
+
+        // hoon-138's `laze` thunk mints an arm on demand against a core over
+        // `sut`, so a fold in a mulled body (a `?=` whose wing is an alias to
+        // `^~`) can read the battery. Register the resolver once, as
+        // `mint_core` does.
+        if !self.lazy_resolvers.contains_key(&resolver_id) {
+            let mut lazy_arms = HashMap::new();
+            self.collect_lazy_resolver_arms_from_tomes_map(
+                tomes_map,
+                BigUint::from(1u32),
+                &mut lazy_arms,
+            )?;
+            self.lazy_resolver_register_context(resolver_id, yet.clone(), hud, lazy_arms);
+        }
 
         // Construct hum = core(dox, [nym hud gold], dox, laze, dom)
         let garb_hum = garb_native(nym, hud, Vair::Gold);
@@ -11793,8 +12089,8 @@ impl<'a> Ut<'a> {
                     hag_q = dix_q.1;
                 }
                 // Fire the sut side with the current vet, the dox side with vet off.
-                let p_ty = ut.fire(&hag_p)?;
-                let q_ty = ut.with_vet_off(|ut| ut.fire(&hag_q))?;
+                let p_ty = ut.fire(&sut, &hag_p)?;
+                let q_ty = ut.with_vet_off(|ut| ut.fire(&sut, &hag_q))?;
                 Ok((p_ty, q_ty))
             }
             // Mismatched opal types: one leg, one arm
@@ -12705,6 +13001,21 @@ fn peg_axis_big(a: BigUint, b: u64) -> Result<BigUint> {
     peg_axis_big_pair(a, &BigUint::from(b))
 }
 
+/// hoon-138 `ar` tests a cell skin's tail with `=(%noun ^skin.skin)`: only the
+/// term skin `noun`, never `[%base %noun]`.
+fn is_noun_term_skin(skin: &Skin) -> bool {
+    matches!(skin, Skin::Term(name) if name == "noun")
+}
+
+/// hoon-138 `%wthx` resolves `[[%& 1] q.gen]`: the leading axis-1 limb turns an
+/// arm into its core as a leg.
+fn wthx_wing(wing: &WingType) -> WingType {
+    let mut out = Vec::with_capacity(wing.len() + 1);
+    out.push(Limb::Axis((1u64).into()));
+    out.extend(wing.iter().cloned());
+    out
+}
+
 fn tend_big(vein: &[Option<BigUint>]) -> Result<BigUint> {
     let mut axis = BigUint::from(1u32);
     for step in vein.iter().rev() {
@@ -12944,7 +13255,7 @@ use crate::native::ir::intern::{
     live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
     mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,
     mull_cache_store as native_mull_cache_store, native_of, native_of_mug_candidates,
-    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context,
+    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context, CoreMintEntry,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
 use crate::native::ir::ty::{garb_native, visit_fork_set_members, Garb as NGarb, Type as NTy};
@@ -13990,6 +14301,21 @@ fn skin_to_noun(slab: &mut NounSlab, skin: &Skin) -> Result<Noun> {
     })
 }
 
+/// `[%spot %1 spot]`, the hint clue `mint` puts on a `%dbug` node's formula.
+fn spot_hint_clue(slab: &mut NounSlab, spot: &Spot) -> Result<Noun> {
+    let spot_noun = spot_to_noun(slab, spot)?;
+    let hint_inner = T(slab, &[D(1), spot_noun]);
+    let spot_tag = term_to_noun(slab, "spot");
+    Ok(T(slab, &[spot_tag, hint_inner]))
+}
+
+/// `[%11 [%spot %1 spot] formula]`: the formula `mint` gives a `%dbug` node
+/// whose inner hoon mints to `formula`.
+pub fn spot_hint_formula(slab: &mut NounSlab, spot: &Spot, formula: Noun) -> Result<Noun> {
+    let hint = spot_hint_clue(slab, spot)?;
+    Ok(T(slab, &[D(11), hint, formula]))
+}
+
 fn spot_to_noun(slab: &mut NounSlab, spot: &Spot) -> Result<Noun> {
     let path_noun = path_to_noun(slab, &spot.p)?;
     let pint_noun = pint_to_noun(slab, &spot.q)?;
@@ -14137,3 +14463,6 @@ fn cell_type_n(
     }
     Ok(ty_cell_n(cx, slab, head, tail))
 }
+
+#[cfg(test)]
+mod cov;
