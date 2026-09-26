@@ -1007,3 +1007,31 @@ fn c6_cli_dynamic_wrapper_dumps_with_a_minted_prelude_formula() {
         );
     }
 }
+
+#[test]
+fn c6_cli_memo_verify_rechecks_cache_hits_without_changing_the_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path();
+    let deps = cwd.join("deps");
+    let entry = write(
+        &deps,
+        "app/verify.hoon",
+        "=>  |%\n    +$  shape  $%([%a p=@] [%b q=@ r=@])\n    ++  area  |=(s=shape ?-(-.s %a p.s, %b (add q.s r.s)))\n    ++  twice  |*(a=* [a a])\n    ++  five  ^~((add 2 3))\n    --\n:*  (area [%a 1])\n    (area [%b 2 3])\n    (twice 1)\n    (twice %foo)\n    five\n    ?:(?=([%a *] [%a 1]) 1 2)\n==\n",
+    );
+    let prelude = prelude();
+    let build = |env: &[(&str, &str)], name: &str| {
+        let output = honk_env(
+            &args!["--arbitrary", "--output", name, "--prelude", prelude, entry, deps],
+            cwd,
+            env,
+        );
+        assert_ok(&output);
+        (fs::read(cwd.join(name)).expect("artifact"), stderr(&output))
+    };
+    let (normal, log) = build(&[], "normal.jam");
+    assert!(!log.contains("[memo-verify]"), "{log}");
+    let (verified, log) = build(&[("HONK_MEMO_VERIFY", "1")], "verified.jam");
+    assert_eq!(verified, normal);
+    assert!(log.contains("[memo-verify] total:"), "{log}");
+    assert!(log.contains(" 0 mismatched, 0 context changes"), "{log}");
+}

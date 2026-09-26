@@ -56,8 +56,12 @@ mod repo;
 #[cfg(test)]
 pub mod test;
 pub mod types;
+mod verify;
 mod wet;
 pub use types::*;
+pub use verify::memo_verify_report;
+
+use self::verify::{MemoSite, MemoVerify};
 
 #[derive(Clone, Copy)]
 struct HoldRepoFanLegIdEntry {
@@ -388,6 +392,8 @@ pub struct Ut<'a> {
     // `rest`) and related memo tables.
     pub boundary_memo: BoundaryMemoSet,
     pub bran_semi_memo: BucketMemo<BranSemiKey, BranSemiCacheEntry>,
+    /// `HONK_MEMO_VERIFY` state (see `verify.rs`).
+    memo_verify: MemoVerify,
     pub spec_example_cache: HashMap<SpecSignature, VecDeque<(Spec, Arc<Hoon>)>>,
     pub spec_example_cache_order: VecDeque<SpecSignature>,
     pub spec_factory_open_cache: HashMap<SpecSignature, VecDeque<(Spec, Arc<Hoon>)>>,
@@ -2156,6 +2162,7 @@ impl<'a> Ut<'a> {
             hold_repo_fan_subset_by_signature: Default::default(),
             boundary_memo: Default::default(),
             bran_semi_memo: Default::default(),
+            memo_verify: Default::default(),
             spec_example_cache: HashMap::new(),
             spec_example_cache_order: VecDeque::new(),
             spec_factory_open_cache: HashMap::new(),
@@ -3653,6 +3660,88 @@ impl<'a> Ut<'a> {
         }
     }
 
+    /// Runs `f` as a `HONK_MEMO_VERIFY` recompute for `site`. Hits inside it are
+    /// not verified, and with `bypass` the next lookup at `site` misses so `f`
+    /// reaches the uncached body.
+    fn memo_verify_recompute<T>(
+        &mut self,
+        site: MemoSite,
+        bypass: bool,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let before = self.cache_context_key();
+        self.memo_verify.enter(bypass.then_some(site));
+        let out = f(self);
+        self.memo_verify.leave();
+        // A recompute that re-plays an arm bumps the monotonic arm epoch, which
+        // only makes later lookups in that arm miss and recompute. Any other
+        // change to the context would let the verified build diverge.
+        let after = self.cache_context_key();
+        let after_same_epoch = CacheContextKey {
+            memo: MemoContextKey {
+                arm_epoch_key: before.memo.arm_epoch_key,
+                ..after.memo
+            },
+            ..after
+        };
+        if after_same_epoch != before {
+            verify::record_perturbed(site, || format!("{before:?} -> {after:?}"));
+        }
+        out
+    }
+
+    fn memo_verify_type_eq(&mut self, a: &NRc<NTy>, b: &NRc<NTy>) -> bool {
+        if NRc::ptr_eq(a, b) {
+            return true;
+        }
+        let a = live_to_noun(&mut self.cx, a, self.slab);
+        let b = live_to_noun(&mut self.cx, b, self.slab);
+        noun_eq(a, b, &self.slab.noun_space()).unwrap_or(false)
+    }
+
+    fn memo_verify_formula_eq(&mut self, a: FormulaId, b: FormulaId) -> bool {
+        if a == b {
+            return true;
+        }
+        let a = self.formula_materialize(a);
+        let b = self.formula_materialize(b);
+        noun_eq(a, b, &self.slab.noun_space()).unwrap_or(false)
+    }
+
+    fn memo_verify_noun_eq(&self, a: Noun, b: Noun) -> bool {
+        noun_eq(a, b, &self.slab.noun_space()).unwrap_or(false)
+    }
+
+    /// Verifies a cached `(type, formula)` against `recompute` and returns
+    /// whether they match.
+    fn memo_verify_typed_formula(
+        &mut self,
+        site: MemoSite,
+        cached: &(NRc<NTy>, FormulaId),
+        bypass: bool,
+        what: impl FnOnce() -> String,
+        recompute: impl FnOnce(&mut Self) -> Result<(NRc<NTy>, FormulaId)>,
+    ) -> bool {
+        let fresh = self.memo_verify_recompute(site, bypass, recompute);
+        let outcome = match &fresh {
+            Ok((ty, formula)) => {
+                if !self.memo_verify_type_eq(&cached.0, ty) {
+                    Some("type differs".to_string())
+                } else if !self.memo_verify_formula_eq(cached.1, *formula) {
+                    Some("formula differs".to_string())
+                } else {
+                    None
+                }
+            }
+            Err(err) => Some(format!("recompute failed: {err}")),
+        };
+        let matched = outcome.is_none();
+        verify::record(site, matched, || {
+            format!("{}: {}", what(), outcome.unwrap_or_default())
+        });
+        matched
+    }
+
     fn cache_context_key(&self) -> CacheContextKey {
         CacheContextKey {
             semantic: self.semantic_context_key(),
@@ -4154,8 +4243,22 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
-            if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
-                return Ok(cached);
+            if !self.memo_verify.take_bypass(MemoSite::Mint) {
+                if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
+                    if self.memo_verify.due(MemoSite::Mint) {
+                        let matched = self.memo_verify_typed_formula(
+                            MemoSite::Mint,
+                            &cached,
+                            true,
+                            || verify::brief(format!("{gen:?}")),
+                            |ut| ut.mint_inner(sut.clone(), gol.clone(), gen, gen_id),
+                        );
+                        if !matched {
+                            self.mint_cache_store(&sut, &gol, gen_sig, cached.0.clone(), cached.1)?;
+                        }
+                    }
+                    return Ok(cached);
+                }
             }
         }
 
@@ -5130,6 +5233,15 @@ impl<'a> Ut<'a> {
     ) -> Result<FormulaId> {
         let axis = axis.into();
         if let Some(cached) = self.fish_boundary_lookup(&typ, &axis)? {
+            if self.memo_verify.due(MemoSite::Fish) {
+                let fresh = self.memo_verify_recompute(MemoSite::Fish, false, |ut| {
+                    ut.type_test_formula_on_axis_inner(typ.clone(), axis.clone(), &mut Vec::new())
+                });
+                let matched = matches!(&fresh, Ok(f) if self.memo_verify_formula_eq(cached, *f));
+                verify::record(MemoSite::Fish, matched, || {
+                    format!("axis {axis}, recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
@@ -5440,6 +5552,32 @@ impl<'a> Ut<'a> {
             formula,
         };
         if let Some(cached) = self.ktsg_fold_cache.get(&fold_key).copied() {
+            if self.memo_verify.due(MemoSite::KtsgFold) {
+                let fresh = self.memo_verify_recompute(MemoSite::KtsgFold, false, |ut| {
+                    let formula_noun = ut.formula_materialize(formula);
+                    ut.musk_apex_output(bran, formula_noun)
+                });
+                let matched = match (&fresh, cached) {
+                    (Ok(MuskOutput::Done(noun)), Some(cached_noun)) => {
+                        self.memo_verify_noun_eq(*noun, cached_noun)
+                    }
+                    (Ok(MuskOutput::Stop | MuskOutput::Wait), None) => true,
+                    _ => false,
+                };
+                verify::record(MemoSite::KtsgFold, matched, || {
+                    let fresh = match &fresh {
+                        Ok(MuskOutput::Done(_)) => "a constant".to_string(),
+                        Ok(_) => "no fold".to_string(),
+                        Err(err) => format!("an error: {err}"),
+                    };
+                    let cached = if cached.is_some() {
+                        "a constant"
+                    } else {
+                        "no fold"
+                    };
+                    format!("cached {cached}, recomputed {fresh}")
+                });
+            }
             return Ok(match cached {
                 Some(noun) => (ty, self.formula_quote(noun)),
                 None => (ty, formula),
@@ -6625,6 +6763,22 @@ impl<'a> Ut<'a> {
             return Ok(self.semi_full_blocked());
         }
         if let Some(cached) = self.bran_semi_cache_lookup(&sut, seen_holds)? {
+            if self.memo_verify.due(MemoSite::BranSemi) {
+                let fresh = self.memo_verify_recompute(MemoSite::BranSemi, false, |ut| {
+                    ut.bran_canonical_semi_inner_impl(sut.clone(), &mut seen_holds.clone())
+                });
+                verify::record(
+                    MemoSite::BranSemi,
+                    matches!(fresh, Ok(semi) if semi == cached),
+                    || {
+                        format!(
+                            "{} seen holds, recomputed ok: {}",
+                            seen_holds.len(),
+                            fresh.is_ok()
+                        )
+                    },
+                );
+            }
             return Ok(cached);
         }
 
@@ -7557,7 +7711,15 @@ impl<'a> Ut<'a> {
         let ptr = Self::hoon_ast_ptr_key(gen);
         if let Some((cached_sig, cached)) = self.open_cache.get(&ptr) {
             if *cached_sig == sig {
-                return cached.clone();
+                let cached = cached.clone();
+                if self.memo_verify.due(MemoSite::Open) {
+                    let opened = open(gen.clone());
+                    let fresh = (&opened != gen).then_some(&opened);
+                    verify::record(MemoSite::Open, cached.as_deref() == fresh, || {
+                        verify::brief(format!("{gen:?}"))
+                    });
+                }
+                return cached;
             }
         }
 
@@ -7603,10 +7765,37 @@ impl<'a> Ut<'a> {
         // walk in `goal_core_for_mine`. The core's payload and context are both `sut`.
         let gol_noun = live_to_noun(&mut self.cx, &gol, self.slab);
         let tomes_map = self.tomes_map_from_ast(tomes)?;
-        if let Some((cached_ty, cached_formula)) =
-            self.core_mint_cache_lookup(&sut, &gol, tomes_map, prefix, poly)?
-        {
-            return Ok((cached_ty, cached_formula));
+        if !self.memo_verify.take_bypass(MemoSite::CoreMint) {
+            if let Some(cached) =
+                self.core_mint_cache_lookup(&sut, &gol, tomes_map, prefix, poly)?
+            {
+                if self.memo_verify.due(MemoSite::CoreMint) {
+                    let matched = self.memo_verify_typed_formula(
+                        MemoSite::CoreMint,
+                        &cached,
+                        true,
+                        || {
+                            let mut arms: Vec<&String> =
+                                tomes.values().flat_map(|tome| tome.1.keys()).collect();
+                            arms.sort();
+                            verify::brief(format!("core with arms {arms:?}"))
+                        },
+                        |ut| ut.mint_core(sut.clone(), gol.clone(), prefix, tomes, poly),
+                    );
+                    if !matched {
+                        self.core_mint_cache_store(
+                            &sut,
+                            &gol,
+                            tomes_map,
+                            prefix,
+                            poly,
+                            cached.0.clone(),
+                            cached.1,
+                        )?;
+                    }
+                }
+                return Ok(cached);
+            }
         }
         let garb = garb_native(prefix.as_deref(), poly, Vair::Gold);
         // Match hoon-138/hoonc layered-core payload layout and formula shape.
@@ -8517,6 +8706,24 @@ impl<'a> Ut<'a> {
         // scoped on the union of both legsets.
         let fan = self.fan_context_key_scoped_pair(&sut, &ref_)?;
         if let Some(cached) = nest_cache_lookup(&self.cx, &sut, &ref_, semantic.vet_key, fan) {
+            if self.memo_verify.due(MemoSite::Nest) {
+                let fresh = self.memo_verify_recompute(MemoSite::Nest, false, |ut| {
+                    ut.nest_inner(
+                        sut.clone(),
+                        ref_.clone(),
+                        0,
+                        &mut NestSeenSet::new(),
+                        &mut NestSeenSet::new(),
+                        &mut NestPairSet::new(),
+                        &mut Default::default(),
+                    )
+                });
+                verify::record(
+                    MemoSite::Nest,
+                    matches!(fresh, Ok(r) if r == cached),
+                    || format!("cached {cached}, recomputed {fresh:?}"),
+                );
+            }
             return Ok(cached);
         }
         let mut seen_sut_holds = NestSeenSet::new();
@@ -9294,8 +9501,22 @@ impl<'a> Ut<'a> {
     pub fn burp_type(&mut self, typ: Noun) -> Result<Noun> {
         let space = self.slab.noun_space();
         let raw = NounIdentity::of(typ);
-        if let Some(cached) = self.burp_type_cache.get(&raw) {
-            return Ok(*cached);
+        if !self.memo_verify.take_bypass(MemoSite::Burp) {
+            if let Some(cached) = self.burp_type_cache.get(&raw).copied() {
+                if self.memo_verify.due(MemoSite::Burp) {
+                    let fresh =
+                        self.memo_verify_recompute(MemoSite::Burp, true, |ut| ut.burp_type(typ));
+                    let matched =
+                        matches!(fresh, Ok(noun) if self.memo_verify_noun_eq(noun, cached));
+                    verify::record(MemoSite::Burp, matched, || {
+                        format!("recomputed ok: {}", fresh.is_ok())
+                    });
+                    if !matched {
+                        self.burp_type_cache.insert(raw, cached);
+                    }
+                }
+                return Ok(cached);
+            }
         }
 
         let tag = type_tag(typ, &self.slab.noun_space())?;
@@ -10272,6 +10493,15 @@ impl<'a> Ut<'a> {
     fn fuse(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<NRc<NTy>> {
         // The boundary cache keys on canonical type IDs, so `sut` is never lowered.
         if let Some(cached) = self.fuse_boundary_lookup(&sut, &ref_)? {
+            if self.memo_verify.due(MemoSite::Fuse) {
+                let fresh = self.memo_verify_recompute(MemoSite::Fuse, false, |ut| {
+                    ut.fuse_inner(sut.clone(), ref_.clone(), &mut HashSet::new())
+                });
+                let matched = matches!(&fresh, Ok(ty) if self.memo_verify_type_eq(&cached, ty));
+                verify::record(MemoSite::Fuse, matched, || {
+                    format!("recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         let mut seen: HashSet<(TypeId, TypeId)> = HashSet::new();
@@ -10357,6 +10587,23 @@ impl<'a> Ut<'a> {
     ) -> Result<bool> {
         let key = self.miss_memo_key(&sut, &ref_, seen);
         if let Some(&cached) = memo.get(&key) {
+            if self.memo_verify.due(MemoSite::Miss) {
+                // Recompute this verdict from its parts; the memo's entries for
+                // the parts are keyed exactly, so they are reused.
+                let fresh = self.memo_verify_recompute(MemoSite::Miss, false, |ut| {
+                    ut.miss_dext_uncached(sut.clone(), ref_.clone(), &mut seen.clone(), memo)
+                });
+                verify::record(
+                    MemoSite::Miss,
+                    matches!(fresh, Ok(r) if r == cached),
+                    || {
+                        format!(
+                            "cached {cached}, recomputed {fresh:?}, {} assumptions",
+                            seen.len()
+                        )
+                    },
+                );
+            }
             return Ok(cached);
         }
         let result = self.miss_dext_uncached(sut, ref_, seen, memo)?;
@@ -10567,6 +10814,15 @@ impl<'a> Ut<'a> {
     fn crop(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<NRc<NTy>> {
         // The boundary cache keys on the interned (sut, ref) `Rc` pointers.
         if let Some(cached) = self.crop_boundary_lookup(&sut, &ref_)? {
+            if self.memo_verify.due(MemoSite::Crop) {
+                let fresh = self.memo_verify_recompute(MemoSite::Crop, false, |ut| {
+                    ut.crop_inner(sut.clone(), ref_.clone(), &mut HashSet::new())
+                });
+                let matched = matches!(&fresh, Ok(ty) if self.memo_verify_type_eq(&cached, ty));
+                verify::record(MemoSite::Crop, matched, || {
+                    format!("recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         let mut seen: HashSet<(TypeId, TypeId)> = HashSet::new();
@@ -11081,6 +11337,23 @@ impl<'a> Ut<'a> {
             }
         };
         if let Some(cached) = self.mull_cache_lookup(&sut, &gol, &dox, gen_sig)? {
+            if self.memo_verify.due(MemoSite::Mull) {
+                let fresh = self.memo_verify_recompute(MemoSite::Mull, false, |ut| {
+                    ut.with_stack_guard(|ut| {
+                        ut.mull_inner(sut.clone(), gol.clone(), dox.clone(), gen)
+                    })
+                });
+                let matched = match &fresh {
+                    Ok((a, b)) => {
+                        self.memo_verify_type_eq(&cached.0, a)
+                            && self.memo_verify_type_eq(&cached.1, b)
+                    }
+                    Err(_) => false,
+                };
+                verify::record(MemoSite::Mull, matched, || {
+                    verify::brief(format!("{gen:?}"))
+                });
+            }
             return Ok(cached);
         }
         // hoon-138 pre-check: mull-none if sut is void

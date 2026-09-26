@@ -214,6 +214,18 @@ impl<'a> Ut<'a> {
 
     pub(super) fn redo_wet_payload(&mut self, payload: Noun, reference: Noun) -> Result<Noun> {
         if let Some(cached) = self.redo_boundary_lookup(payload, reference)? {
+            if self.memo_verify.due(MemoSite::Redo) {
+                let fresh = self.memo_verify_recompute(MemoSite::Redo, false, |ut| {
+                    let payload_n = ut.native_of_cached(payload)?;
+                    let reference_n = ut.native_of_cached(reference)?;
+                    let result_n = ut.redo_dext(payload_n, reference_n, RedoState::default())?;
+                    Ok(live_to_noun(&mut ut.cx, &result_n, ut.slab))
+                });
+                let matched = matches!(fresh, Ok(noun) if self.memo_verify_noun_eq(noun, cached));
+                verify::record(MemoSite::Redo, matched, || {
+                    format!("recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         // Decode payload and reference once, run the native redo, and lower the

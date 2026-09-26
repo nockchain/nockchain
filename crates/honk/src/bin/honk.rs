@@ -607,6 +607,9 @@ fn main() {
     };
 
     report_native_timing_totals();
+    if let Some(report) = honk::native::ut::memo_verify_report() {
+        eprintln!("{report}");
+    }
 
     if let Err(err) = result {
         eprintln!("native hoon compile failed: {err}");
