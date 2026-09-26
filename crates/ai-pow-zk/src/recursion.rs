@@ -50,6 +50,7 @@ use thiserror::Error;
 use crate::circuit::{
     Challenge, FriSoundnessProfile, Tip5Compress, Tip5Sponge, PROD_FRI_OPERATIONAL_FLOOR_BITS,
 };
+use crate::proof_rules::ProofRules;
 use crate::{AiPowStarkConfig, CompositeFullAirWithLookupsPinned, Val};
 
 /// Outer circuit-prover proof produced after recursively verifying Layer 0.
@@ -179,6 +180,17 @@ impl AiPowCompactBatchRecursiveCertificate {
     ) -> &p3_circuit_prover::GoldilocksBlake3PathPrunedCompactBatchStarkProofBody {
         &self.l2_compact_body
     }
+
+    /// Check the zero-valued PoW witnesses required by the selected admission rules.
+    /// The consensus caller selects those rules from the candidate block height.
+    pub fn has_canonical_pow_witnesses(&self) -> bool {
+        let fri = &self.l2_compact_body.proof.opening_proof;
+        fri.query_pow_witness == Val::ZERO
+            && fri
+                .commit_pow_witnesses
+                .iter()
+                .all(|witness| *witness == Val::ZERO)
+    }
 }
 
 /// Verifier-owned setup for the compact final-layer batch-STARK route.
@@ -189,12 +201,13 @@ impl AiPowCompactBatchRecursiveCertificate {
 /// and binds statement-specific public values separately.
 #[derive(Serialize, Deserialize)]
 pub struct AiPowCompactBatchVerifierContext {
+    rules: ProofRules,
     verifier_key_digest: AiPowCompactBatchVerifierKeyDigest,
     metadata: p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
-    // The circuit prover data serializes in its VERIFIER-ONLY projection
-    // (CommonData + preprocessed columns; prover-only LDEs reconstructed empty) —
-    // see `p3_circuit_prover::CircuitProverData`'s serde. The `Arc` is
-    // transparently (de)serialized via its inner value (no serde `rc` feature).
+    // Proving runs share this data with their prover cache. Boot-rebuilt verifier
+    // contexts retain only CommonData: neither raw columns nor PCS prover data
+    // are needed by the compact verifier. Serde preserves whichever projection
+    // the context owns; Arc is serialized through its inner value.
     #[serde(with = "serde_arc_circuit_prover_data")]
     circuit_prover_data: std::sync::Arc<
         p3_circuit_prover::CircuitProverData<p3_circuit_prover::config::GoldilocksBlake3Config>,
@@ -229,6 +242,10 @@ mod serde_arc_circuit_prover_data {
 }
 
 impl AiPowCompactBatchVerifierContext {
+    pub const fn proof_rules(&self) -> ProofRules {
+        self.rules
+    }
+
     pub const fn verifier_key_digest(&self) -> &AiPowCompactBatchVerifierKeyDigest {
         &self.verifier_key_digest
     }
@@ -823,14 +840,12 @@ fn compact_batch_l2_statement_public_values_for_l1(
 }
 
 fn tip5_recompose_table_provers_for_compact_l2(
+    rules: ProofRules,
 ) -> Vec<Box<dyn p3_circuit_prover::TableProver<p3_circuit_prover::config::GoldilocksTipsConfig>>> {
-    use p3_circuit_prover::{recompose_table_provers, ConstraintProfile, TableProver, Tip5Prover};
+    use p3_circuit_prover::{recompose_table_provers, TableProver};
 
     let mut provers: Vec<Box<dyn TableProver<p3_circuit_prover::config::GoldilocksTipsConfig>>> =
-        vec![Box::new(Tip5Prover::new(
-            Tip5Config::GOLDILOCKS_W16,
-            ConstraintProfile::Standard,
-        ))];
+        vec![crate::hardened_tip5::table_prover(rules)];
     provers.extend(recompose_table_provers::<
         p3_circuit_prover::config::GoldilocksTipsConfig,
         2,
@@ -958,6 +973,8 @@ impl Permutation<[Challenge; 16]> for LiftTip5 {
 /// everything needed to run it.
 #[doc(hidden)]
 pub struct BuiltCompositeL1 {
+    /// Rules used for the L0 AIR and every recursive Tip5 table.
+    pub rules: ProofRules,
     /// The L1 verifier circuit (proves "I verified the composite proof").
     pub circuit: p3_circuit::Circuit<Challenge>,
     /// Layer-0 AI-PoW statement values that are exposed and bound by the L1
@@ -1104,7 +1121,11 @@ fn build_composite_l1_verifier_circuit_with_recompose_coeff_ctl(
         );
     }
 
-    let circuit = cb.build()?;
+    let rules = composite_air.proof_rules();
+    let mut circuit = cb.build()?;
+    if rules == ProofRules::Hardened {
+        crate::hardened_tip5::bind_state(&mut circuit)?;
+    }
     // The expected statement digest must fold in the same commitment the
     // in-circuit sponge absorbs above — the VALUE flatten of the L0 program's
     // preprocessed commitment (`get_values`), base-extracted to match the base
@@ -1123,6 +1144,7 @@ fn build_composite_l1_verifier_circuit_with_recompose_coeff_ctl(
     public_inputs.extend(verifier_public_inputs);
 
     Ok(BuiltCompositeL1 {
+        rules,
         circuit,
         statement_public_values,
         public_inputs,
@@ -1236,15 +1258,14 @@ fn l1_circuit_prover_data_with_config_and_table_packing(
     use p3_circuit_prover::common::{get_airs_and_degrees_with_prep, NpoPreprocessor};
     use p3_circuit_prover::{
         config, recompose_air_builders, strip_public_binding_for_lookup_metadata,
-        tip5_air_builders, CircuitProverData, ConstraintProfile, RecomposePreprocessor,
-        Tip5Preprocessor,
+        CircuitProverData, ConstraintProfile, RecomposePreprocessor, Tip5Preprocessor,
     };
 
     type OuterConfig = config::GoldilocksTipsConfig;
 
     let npo_prep: Vec<Box<dyn NpoPreprocessor<Val>>> =
         vec![Box::new(Tip5Preprocessor), Box::new(RecomposePreprocessor::new(true))];
-    let mut air_builders = tip5_air_builders::<OuterConfig, 2>();
+    let mut air_builders = crate::hardened_tip5::air_builders::<OuterConfig>(built.rules);
     air_builders.extend(recompose_air_builders::<OuterConfig, 2>(1, true));
 
     let (airs_degrees, primitive_columns, non_primitive_columns) =
@@ -1369,7 +1390,7 @@ fn build_compact_batch_l1_prep(
         )?;
     let mut prover = BatchStarkProver::new(compact_batch_l1_stark_config())
         .with_table_packing(table_packing.clone());
-    prover.register_tip5_table::<2>(Tip5Config::GOLDILOCKS_W16);
+    crate::hardened_tip5::register(&mut prover, built.rules);
     prover.register_recompose_table::<2>(true);
 
     Ok(CompactBatchL1Prep {
@@ -1471,7 +1492,7 @@ fn prove_composite_l1_outer_cert_with_config_and_table_packing(
         l1_circuit_prover_data_with_config_and_table_packing(built, &outer_config, table_packing)?;
     let traces = run_composite_l1_verifier_traces(built, proof)?;
     let mut prover = BatchStarkProver::new(outer_config).with_table_packing(table_packing);
-    prover.register_tip5_table::<2>(Tip5Config::GOLDILOCKS_W16);
+    crate::hardened_tip5::register(&mut prover, built.rules);
     prover.register_recompose_table::<2>(true);
 
     let batch_proof = prover
@@ -1552,7 +1573,7 @@ fn verify_recursive_certificate_inner(
 
     let mut expected_outer_prover = BatchStarkProver::new(production_l1_stark_config())
         .with_table_packing(expected_circuit_packing.clone());
-    expected_outer_prover.register_tip5_table::<2>(Tip5Config::GOLDILOCKS_W16);
+    crate::hardened_tip5::register(&mut expected_outer_prover, built.rules);
     expected_outer_prover.register_recompose_table::<2>(true);
     let expected_outer_proof = expected_outer_prover
         .prove_all_tables(&traces, &expected_circuit_prover_data)
@@ -1697,11 +1718,9 @@ pub struct CompactBatchCertificateRun {
     pub l2_compact_verify_ms: u128,
     pub compact_cert: AiPowCompactBatchRecursiveCertificate,
     pub verifier_context: AiPowCompactBatchVerifierContext,
-    /// The L1 outer proof — the COMPACT input from which the (large) verifier
-    /// context is rebuilt via [`rebuild_compact_verifier_context`]. Caching THIS
-    /// (small) + `verifier_context.metadata` lets the boot table rebuild the
-    /// per-bucket verifier setup cheaply, instead of serializing the ~866 MB
-    /// preprocessed Merkle tree the context carries.
+    /// The L1 outer proof used to rebuild canonical setup from a seed. The build
+    /// derives the preprocessed commitment, then discards prover-only trees and
+    /// columns before returning a compact verifier context.
     pub l1_outer_proof: AiPowL1OuterProof,
     /// Newly-built reusable L2 setup, present only when this run did not use
     /// a caller-supplied cache.
@@ -1718,9 +1737,9 @@ pub struct CompactBatchCertificateRun {
 /// compilation — no proving), (2) its `CommonData` INCLUDING the per-AIR `lookups`
 /// (`l1_circuit_prover_data_...` → `Lookups::from_air`), which serde drops from the
 /// L1 proof (`Lookups` is not Serialize) but which the L2 build needs, (3) the L2
-/// verifier circuit + its preprocessed commitment (`build_compact_batch_l2_over_l1_prep`,
-/// the ~866 MB tree — deterministic, rebuilt in memory, never cached), then the
-/// FRI shape (constant) + derived digest. All fast (compile + Merkle commit, no FRI).
+/// verifier circuit + its preprocessed commitment (`build_compact_batch_l2_over_l1_prep`),
+/// then the FRI shape and derived digest. The build needs large temporary prover
+/// structures; the returned verifier context drops them. No FRI proving occurs.
 #[allow(clippy::too_many_arguments)]
 pub fn rebuild_compact_verifier_context(
     zk_params: &crate::params::ZkParams,
@@ -1732,10 +1751,37 @@ pub fn rebuild_compact_verifier_context(
     l1_outer_proof: AiPowL1OuterProof,
     metadata: p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
 ) -> Result<AiPowCompactBatchVerifierContext, VerificationError> {
+    rebuild_compact_verifier_context_with_rules(
+        zk_params,
+        profile,
+        l0_program,
+        l0_proof,
+        l0_public_inputs,
+        sx_bound,
+        l1_outer_proof,
+        metadata,
+        ProofRules::Hardened,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn rebuild_compact_verifier_context_with_rules(
+    zk_params: &crate::params::ZkParams,
+    profile: &crate::circuit::CircuitConfig,
+    l0_program: &crate::AiPowProgram,
+    l0_proof: &BatchProof<AiPowStarkConfig>,
+    l0_public_inputs: &crate::composite_public::CompositePublicInputs,
+    sx_bound: bool,
+    l1_outer_proof: AiPowL1OuterProof,
+    metadata: p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
+    rules: ProofRules,
+) -> Result<AiPowCompactBatchVerifierContext, VerificationError> {
     // (1) Rebuild the L1 verifier circuit (compile-only, no proving).
     let cfg = crate::composite_proof::build_config(zk_params, profile);
-    let air = CompositeFullAirWithLookupsPinned::new_with(l0_program.clone(), sx_bound);
-    let pd = crate::composite_proof::logup_common_for(&cfg, l0_program, sx_bound);
+    let air =
+        CompositeFullAirWithLookupsPinned::try_new_with_rules(l0_program.clone(), sx_bound, rules)
+            .map_err(|e| VerificationError::InvalidProofShape(format!("rebuild program: {e:?}")))?;
+    let pd = crate::composite_proof::logup_common_for_with_rules(&cfg, l0_program, sx_bound, rules);
     let built = build_composite_l1_verifier_circuit(
         &cfg,
         &air,
@@ -1754,7 +1800,7 @@ pub fn rebuild_compact_verifier_context(
     let mut l1 = l1_outer_proof;
     l1.stark_common = l1_cpd.prover_data.common;
     // (3) Rebuild the L2 preprocessed commitment + assemble the context.
-    let l2_prep = build_compact_batch_l2_over_l1_prep(&l1)?;
+    let l2_prep = build_compact_batch_l2_over_l1_prep(&l1, rules)?;
     let fri_shape = compact_batch_l2_fri_shape();
     let verifier_key_digest = compact_batch_verifier_key_digest_from_parts(&metadata, fri_shape)
         .map_err(|e| {
@@ -1762,18 +1808,25 @@ pub fn rebuild_compact_verifier_context(
                 "rebuild: compact batch verifier-key digest construction failed: {e:?}"
             ))
         })?;
-    // This context only ever VERIFIES (it is the boot verifier setup): drop the
-    // prove-only raw preprocessed columns, which the path-pruned compact verifier
-    // never reads, to cut resident memory. The preprocessed Merkle tree in
-    // `prover_data` — which verification DOES need to restore omitted openings — is
-    // kept, so verification is bit-identical. The Arc is freshly built on this
-    // rebuild path (refcount 1) so `try_unwrap` succeeds; the shared fallback keeps
-    // the full data (still correct, just not slimmed).
-    let circuit_prover_data = match std::sync::Arc::try_unwrap(l2_prep.circuit_prover_data) {
-        Ok(cpd) => std::sync::Arc::new(cpd.into_verifier_only()),
-        Err(shared) => shared,
-    };
+    // The pinned compact verifier checks CommonData and verifies the openings
+    // carried in the proof; it does not reconstruct them from the PCS prover
+    // tree. Drop that tree as well as the raw columns for this verify-only path.
+    // This freshly built Arc has no other owners. Do not modify the shared data
+    // returned by proving runs, which their prover caches still need.
+    let mut verifier_data = std::sync::Arc::try_unwrap(l2_prep.circuit_prover_data)
+        .map_err(|_| {
+            VerificationError::InvalidProofShape(
+                "rebuilt verifier setup unexpectedly shares prover data".to_string(),
+            )
+        })?
+        .into_verifier_only();
+    verifier_data
+        .prover_data
+        .prover_only
+        .preprocessed_prover_data = None;
+    let circuit_prover_data = std::sync::Arc::new(verifier_data);
     Ok(AiPowCompactBatchVerifierContext {
+        rules,
         verifier_key_digest,
         metadata,
         circuit_prover_data,
@@ -1784,10 +1837,10 @@ pub fn rebuild_compact_verifier_context(
 /// The SMALL, serializable per-bucket seed for the boot verifier-setup table.
 ///
 /// It carries exactly the inputs [`rebuild_compact_verifier_context`] needs to
-/// rebuild the (large, ~866 MB) compact verifier context WITHOUT proving: the L0
+/// derive the canonical compact verifier context WITHOUT proving: the L0
 /// program + proof + public inputs and the L1 outer proof + metadata. Sized in
-/// KB-MB (the L0 program + proof dominate), so a full 8-bucket table caches in
-/// tens of MB rather than gigabytes.
+/// KB-MB per entry (the L0 program + proof dominate). These seeds are separate
+/// from the much smaller verifier contexts produced by rebuilding them.
 ///
 /// `sx_bound` and the FRI/circuit profile are pure functions of
 /// `(zk_params, trace_height)` and are DERIVED at rebuild, not stored — so a
@@ -1795,6 +1848,7 @@ pub fn rebuild_compact_verifier_context(
 /// the L0 program height (the preprocessed program has one row per trace row).
 #[derive(Serialize, Deserialize)]
 pub struct AiPowCompactVerifierSetupSeed {
+    pub rules: ProofRules,
     pub zk_params: crate::params::ZkParams,
     pub l0_program: crate::AiPowProgram,
     pub l0_proof: BatchProof<AiPowStarkConfig>,
@@ -1829,8 +1883,10 @@ impl AiPowCompactVerifierSetupSeed {
             proof,
             public_inputs,
             common_data: _,
+            rules,
         } = verified_l0;
         Self {
+            rules,
             zk_params: *zk_params,
             l0_program: program,
             l0_proof: proof,
@@ -1848,9 +1904,9 @@ impl AiPowCompactVerifierSetupSeed {
         let profile = crate::circuit::CircuitConfig::for_layer0_trace(self.trace_height());
         let sx_bound = (self.zk_params.k / self.zk_params.noise_rank) as usize
             <= crate::composite_layout::STRIPE_MAX;
-        rebuild_compact_verifier_context(
+        rebuild_compact_verifier_context_with_rules(
             &self.zk_params, &profile, &self.l0_program, &self.l0_proof, &self.l0_public_inputs,
-            sx_bound, self.l1_outer_proof, self.metadata,
+            sx_bound, self.l1_outer_proof, self.metadata, self.rules,
         )
     }
 }
@@ -1862,6 +1918,7 @@ pub struct ChainVerifiedCompositeProof<'a> {
     proof: BatchProof<AiPowStarkConfig>,
     public_inputs: &'a crate::composite_public::CompositePublicInputs,
     common_data: Option<CommonData<AiPowStarkConfig>>,
+    rules: ProofRules,
 }
 
 impl<'a> ChainVerifiedCompositeProof<'a> {
@@ -1887,6 +1944,7 @@ impl<'a> ChainVerifiedCompositeProof<'a> {
             proof,
             public_inputs,
             common_data: None,
+            rules: ProofRules::Hardened,
         }
     }
 
@@ -1909,7 +1967,18 @@ impl<'a> ChainVerifiedCompositeProof<'a> {
             proof,
             public_inputs,
             common_data: Some(common_data),
+            rules: ProofRules::Hardened,
         }
+    }
+
+    /// Select the AIR used to produce the supplied, chain-verified L0 proof.
+    ///
+    /// # Safety
+    /// The caller must supply the consensus-selected rules used by the proof
+    /// and its common data. This is not a proof-carried version selection.
+    pub unsafe fn with_rules(mut self, rules: ProofRules) -> Self {
+        self.rules = rules;
+        self
     }
 
     /// The Layer-0 composite trace height (the preprocessed program has one row
@@ -1947,6 +2016,7 @@ struct CompactBatchL2Prep {
 /// carries only a verifier-key/setup digest, and verification still requires
 /// verifier-owned context.
 pub struct AiPowCompactBatchProverCache {
+    rules: ProofRules,
     l1_prep: Option<CompactBatchL1Prep>,
     l2_prep: CompactBatchL2Prep,
 }
@@ -1962,6 +2032,7 @@ impl AiPowCompactBatchProverCache {
 
     pub fn into_l2_only(self) -> Self {
         Self {
+            rules: self.rules,
             l1_prep: None,
             l2_prep: self.l2_prep,
         }
@@ -1979,8 +2050,12 @@ pub fn build_compact_batch_prover_cache_from_l1_certificate(
     l1_cert: &AiPowRecursiveCertificate,
 ) -> Result<AiPowCompactBatchProverCache, VerificationError> {
     Ok(AiPowCompactBatchProverCache {
+        rules: ProofRules::Hardened,
         l1_prep: None,
-        l2_prep: build_compact_batch_l2_over_l1_prep(l1_cert.l1_outer_proof())?,
+        l2_prep: build_compact_batch_l2_over_l1_prep(
+            l1_cert.l1_outer_proof(),
+            ProofRules::Hardened,
+        )?,
     })
 }
 
@@ -2007,13 +2082,19 @@ pub fn prove_recursive_certificate_from_chain_verified_composite_proof(
     // Derived from the trusted (verified) params; matches the compact path.
     let sx_bound =
         (zk_params.k / zk_params.noise_rank) as usize <= crate::composite_layout::STRIPE_MAX;
-    let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), sx_bound);
+    let air = CompositeFullAirWithLookupsPinned::try_new_with_rules(
+        verified.program.clone(),
+        sx_bound,
+        verified.rules,
+    )
+    .expect("validated program");
     let rebuilt_l0_common;
     let l0_common = if let Some(common) = verified.common_data.as_ref() {
         common
     } else {
-        rebuilt_l0_common =
-            crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
+        rebuilt_l0_common = crate::composite_proof::logup_common_for_with_rules(
+            &cfg, &verified.program, sx_bound, verified.rules,
+        );
         &rebuilt_l0_common.common
     };
     let built = build_composite_l1_verifier_circuit(
@@ -2045,13 +2126,13 @@ pub fn prove_recursive_certificate_from_chain_verified_composite_proof(
 
 fn build_compact_batch_l2_over_l1_prep(
     l1: &AiPowL1OuterProof,
+    rules: ProofRules,
 ) -> Result<CompactBatchL2Prep, VerificationError> {
     use p3_batch_stark::ProverData;
     use p3_circuit_prover::common::{get_airs_and_degrees_with_prep, NpoPreprocessor};
     use p3_circuit_prover::{
-        recompose_air_builders, strip_public_binding_for_lookup_metadata, tip5_air_builders,
-        BatchStarkProver, CircuitProverData, ConstraintProfile, RecomposePreprocessor,
-        Tip5Preprocessor,
+        recompose_air_builders, strip_public_binding_for_lookup_metadata, BatchStarkProver,
+        CircuitProverData, ConstraintProfile, RecomposePreprocessor, Tip5Preprocessor,
     };
 
     const TRACE_D: usize = 2;
@@ -2071,7 +2152,7 @@ fn build_compact_batch_l2_over_l1_prep(
     circuit_builder.set_recompose_coeff_ctl_for_decompose_links(true);
 
     let lookup_gadget = LogUpGadget::new();
-    let l1_table_provers = tip5_recompose_table_provers_for_compact_l2();
+    let l1_table_provers = tip5_recompose_table_provers_for_compact_l2(rules);
     let (verifier_inputs, mmcs_op_ids) = p3_recursion::verifier::verify_p3_batch_proof_circuit::<
         p3_circuit_prover::config::GoldilocksTipsConfig,
         CompactBatchL2Comm,
@@ -2098,12 +2179,69 @@ fn build_compact_batch_l2_over_l1_prep(
         ))
     })?;
 
-    let verification_circuit = circuit_builder.build()?;
+    if rules == ProofRules::Hardened {
+        // Bind the L1 circuit identity to the node-owned L2 verifier key.
+        let targets = verifier_inputs
+            .common_data
+            .preprocessed_commitment()
+            .ok_or_else(|| {
+                VerificationError::InvalidProofShape(
+                    "compact L2 requires an L1 preprocessed commitment".to_string(),
+                )
+            })?
+            .to_observation_targets();
+        let prep = l1.stark_common.preprocessed.as_ref().ok_or_else(|| {
+            VerificationError::InvalidProofShape(
+                "compact L2 requires canonical L1 preprocessed data".to_string(),
+            )
+        })?;
+        let values = <CompactBatchL2Comm as p3_recursion::Recursive<Challenge>>::get_values(
+            &prep.commitment,
+        );
+        if targets.is_empty() || targets.len() != values.len() {
+            return Err(VerificationError::InvalidProofShape(
+                "compact L2 L1 commitment shape mismatch".to_string(),
+            ));
+        }
+        // Hash all cap limbs before pinning: storing every limb as a constant
+        // crosses a Const-table height boundary and exceeds the existing proof
+        // byte ceiling. This fixed-width Tip5 fold uses the same base-field
+        // sponge semantics as the statement fold, with no new wire allowance.
+        let values: Vec<Val> = values
+            .iter()
+            .map(|value| value.as_basis_coefficients_slice()[0])
+            .collect();
+        let expected_digest = statement_public_digest(&values);
+        let mut digest_targets = [None; WIDTH];
+        for (block_idx, chunk) in targets.chunks(RATE).enumerate() {
+            let mut inputs = [None; WIDTH];
+            for i in 0..RATE {
+                inputs[i] = Some(chunk.get(i).copied().unwrap_or(p3_circuit::ExprId::ZERO));
+            }
+            digest_targets = circuit_builder
+                .add_tip5_perm_for_challenger_base(
+                    Tip5Config::GOLDILOCKS_W16,
+                    block_idx == 0,
+                    inputs,
+                )?
+                .map(Some);
+        }
+        for (target, value) in digest_targets[..DIGEST_ELEMS].iter().zip(expected_digest) {
+            let expected = circuit_builder.define_const(Challenge::from(value));
+            circuit_builder.connect(target.expect("L1 commitment digest"), expected);
+        }
+    }
+
+    let mut verification_circuit = circuit_builder.build()?;
+    if rules == ProofRules::Hardened {
+        crate::hardened_tip5::bind_state(&mut verification_circuit)?;
+    }
     let l2_table_packing = compact_batch_l2_table_packing(l2_statement_public_binding_lanes);
     let npo_prep: Vec<Box<dyn NpoPreprocessor<Val>>> =
         vec![Box::new(Tip5Preprocessor), Box::new(RecomposePreprocessor::new(true))];
-    let mut air_builders =
-        tip5_air_builders::<p3_circuit_prover::config::GoldilocksBlake3Config, 2>();
+    let mut air_builders = crate::hardened_tip5::air_builders::<
+        p3_circuit_prover::config::GoldilocksBlake3Config,
+    >(rules);
     air_builders.extend(recompose_air_builders::<
         p3_circuit_prover::config::GoldilocksBlake3Config,
         2,
@@ -2141,7 +2279,7 @@ fn build_compact_batch_l2_over_l1_prep(
     ));
     let mut prover =
         BatchStarkProver::new(compact_batch_l2_stark_config()).with_table_packing(l2_table_packing);
-    prover.register_tip5_table::<2>(Tip5Config::GOLDILOCKS_W16);
+    crate::hardened_tip5::register(&mut prover, rules);
     prover.register_recompose_table::<2>(true);
 
     Ok(CompactBatchL2Prep {
@@ -2203,7 +2341,8 @@ pub fn is_compact_batch_prover_cache_mismatch(error: &VerificationError) -> bool
     let VerificationError::InvalidProofShape(message) = error else {
         return false;
     };
-    message.contains("compact batch L1 prep table-packing mismatch")
+    message.contains("compact batch prover cache proof rules mismatch")
+        || message.contains("compact batch L1 prep table-packing mismatch")
         || message.contains(
             "compact batch L1 prep was built for a different verifier circuit/setup shape",
         )
@@ -2348,15 +2487,26 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
 ) -> Result<CompactBatchCertificateRun, VerificationError> {
     use std::time::Instant;
 
+    if prover_cache.is_some_and(|cache| cache.rules != verified.rules) {
+        return Err(VerificationError::InvalidProofShape(
+            "compact batch prover cache proof rules mismatch".to_string(),
+        ));
+    }
     let cfg = crate::composite_proof::build_config(zk_params, profile);
     let t = Instant::now();
-    let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), sx_bound);
+    let air = CompositeFullAirWithLookupsPinned::try_new_with_rules(
+        verified.program.clone(),
+        sx_bound,
+        verified.rules,
+    )
+    .expect("validated program");
     let rebuilt_l0_common;
     let l0_common = if let Some(common) = verified.common_data.as_ref() {
         common
     } else {
-        rebuilt_l0_common =
-            crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
+        rebuilt_l0_common = crate::composite_proof::logup_common_for_with_rules(
+            &cfg, &verified.program, sx_bound, verified.rules,
+        );
         &rebuilt_l0_common.common
     };
     let built = build_composite_l1_verifier_circuit(
@@ -2390,7 +2540,9 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
         ensure_compact_batch_l2_prep_matches_l1(&cached.l2_prep, &l1_outer_proof)?;
         &cached.l2_prep
     } else {
-        owned_l2_prep = Some(build_compact_batch_l2_over_l1_prep(&l1_outer_proof)?);
+        owned_l2_prep = Some(build_compact_batch_l2_over_l1_prep(
+            &l1_outer_proof, verified.rules,
+        )?);
         owned_l2_prep
             .as_ref()
             .expect("owned L2 prep was just initialized")
@@ -2433,6 +2585,7 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
     let compact_cert =
         AiPowCompactBatchRecursiveCertificate::new(verifier_key_digest, l2_compact.into_body());
     let verifier_context = AiPowCompactBatchVerifierContext {
+        rules: verified.rules,
         verifier_key_digest,
         metadata: l2_metadata,
         circuit_prover_data: std::sync::Arc::clone(&l2_prep.circuit_prover_data),
@@ -2446,7 +2599,8 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
     })?;
     let verify_cert = decode_compact_batch_recursive_certificate(&verify_bytes).map_err(|e| {
         VerificationError::InvalidProofShape(format!(
-            "compact batch recursive certificate decoding failed: {e:?}"
+            "compact batch recursive certificate decoding failed ({} bytes): {e:?}",
+            verify_bytes.len()
         ))
     })?;
     let t = Instant::now();
@@ -2472,6 +2626,7 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
         verifier_context,
         l1_outer_proof,
         prover_cache: owned_l2_prep.map(|l2_prep| AiPowCompactBatchProverCache {
+            rules: verified.rules,
             l1_prep: owned_l1_prep,
             l2_prep,
         }),
@@ -2525,7 +2680,7 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
     let expected_l2_packing = compact_batch_l2_table_packing(context.metadata.public_binding_lanes);
     let mut verifier = p3_circuit_prover::BatchStarkProver::new(compact_batch_l2_stark_config())
         .with_table_packing(expected_l2_packing);
-    verifier.register_tip5_table::<2>(Tip5Config::GOLDILOCKS_W16);
+    crate::hardened_tip5::register(&mut verifier, context.rules);
     verifier.register_recompose_table::<2>(true);
     verifier
         .verify_goldilocks_blake3_path_pruned_preprocessed_compact_body_with_context(
@@ -3362,6 +3517,10 @@ mod tests {
             .expect("encode compact batch recursive certificate");
         let decoded = decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode compact batch recursive certificate");
+        assert!(
+            decoded.has_canonical_pow_witnesses(),
+            "honest prover must satisfy the new admission rule"
+        );
         // The canonical L0 program commitment the node folds into the
         // statement digest (here == the prover's, honest program).
         let commit = canonical_l0_program_commitment_vals(&zk, &profile, &verified.program);

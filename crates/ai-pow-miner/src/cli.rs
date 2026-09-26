@@ -60,18 +60,18 @@ pub struct CommonArgs {
     /// Pearl Gateway miner RPC endpoint. Requires Gateway `getMiningInfo` jobs
     /// with `cert_version = 3`; submissions carry the same version. Accepts
     /// `unix:/path/to.sock`, `/path/to.sock`, `tcp:host:port`, `tcp://host:port`,
-    /// or `host:port`. Ignored in --canonical mode.
+    /// or `host:port`. Ignored in --reference mode.
     #[arg(long, value_name = "ENDPOINT", default_value = DEFAULT_PEARL_GATEWAY_ENDPOINT)]
     pub pearl_gateway: String,
 
-    /// Gateway-free mode: prove a CANONICAL AI-PoW block bound to each
+    /// Gateway-free reference mode: prove a REFERENCE AI-PoW block bound to each
     /// %mine-ai candidate. CUDA mode selects the dense production backend;
     /// CPU mode retains the small diagnostic profile.
-    #[arg(long)]
-    pub canonical: bool,
+    #[arg(long, alias = "canonical")]
+    pub reference: bool,
 
     /// Pearl-compatible dense production benchmark shape (`m=512,k=1024,n=512,r=64,tile=8`).
-    #[arg(long, conflicts_with = "canonical")]
+    #[arg(long, conflicts_with = "reference")]
     pub dense_production: bool,
 
     /// Dedicated CPU ticket-search workers. Defaults to physical core count.
@@ -296,6 +296,53 @@ mod tests {
 
     fn parse(arguments: &[&str]) -> CommonArgs {
         TestArgs::parse_from(arguments).common
+    }
+
+    #[test]
+    fn cli_reference_compatibility_schema_is_valid() {
+        let mut command = TestArgs::command();
+        command.build();
+        let dense = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "dense_production")
+            .expect("dense-production argument");
+        let conflicts = command.get_arg_conflicts_with(dense);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].get_id(), "reference");
+        command.debug_assert();
+    }
+
+    #[test]
+    fn cli_reference_compatibility_accepts_both_spellings() {
+        assert!(!parse(&["ai-pow-mine"]).reference);
+        for flag in ["--reference", "--canonical"] {
+            let args = parse(&["ai-pow-mine", flag]);
+            assert!(args.reference, "{flag} must select reference mode");
+            assert!(!args.dense_production);
+        }
+    }
+
+    #[test]
+    fn cli_reference_compatibility_rejects_dense_mode_in_either_order() {
+        for flag in ["--reference", "--canonical"] {
+            for flags in [[flag, "--dense-production"], ["--dense-production", flag]] {
+                let error = TestArgs::try_parse_from(["ai-pow-mine", flags[0], flags[1]])
+                    .expect_err("reference and dense-production modes must conflict");
+                assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            }
+        }
+    }
+
+    #[test]
+    fn cli_reference_compatibility_keeps_alias_hidden_in_help() {
+        let help = TestArgs::command().render_long_help().to_string();
+        assert!(help.contains("--reference"));
+        assert!(!help.contains("--canonical"));
+        for flag in ["--reference", "--canonical"] {
+            let error = TestArgs::try_parse_from(["ai-pow-mine", flag, "--help"])
+                .expect_err("help must exit parsing before miner startup");
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        }
     }
 
     #[test]

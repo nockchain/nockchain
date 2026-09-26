@@ -26,7 +26,8 @@
 //!
 //! ```text
 //! samply record -- target/release/bench_dumb_validation \
-//!     --state-jam /path/to/state.jam --start 1 --end 2000
+//!     --state-jam /path/to/state.jam --start 1 --end 2000 \
+//!     --verifier-data-dir /path/to/verifier-cache
 //! ```
 //!
 //! Blocks `1..start` are replayed as warmup to position the target; the
@@ -57,7 +58,7 @@ use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D, SIG, T};
 use nockvm_macros::tas;
 use noun_serde::NounDecode;
 use tempfile::Builder;
-use tracing::{info, warn};
+use tracing::info;
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
 type Chaff = chaff::Chaff;
@@ -101,6 +102,12 @@ struct Args {
     /// Log a progress line every N heights.
     #[arg(long, default_value_t = 100)]
     progress_every: u64,
+    /// Enforce a fresh genesis replay with mainnet constants and no skipped blocks.
+    #[arg(long)]
+    mainnet_release_replay: bool,
+    /// Cache directory for both historical and hardened AI verifier setups.
+    #[arg(long)]
+    verifier_data_dir: PathBuf,
 }
 
 /// A block ready to be replayed: the `heard-block` fact plus the `heard-tx`
@@ -127,7 +134,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Err("--end must be >= --start".into());
     }
 
+    if args.mainnet_release_replay && (args.start != 1 || args.target_state_jam.is_some()) {
+        return Err(
+            "release replay requires --start 1 and a fresh target (no --target-state-jam)".into(),
+        );
+    }
     boot::init_default_tracing(&base_cli(NockStackSize::Huge));
+    let buckets = ai_pow_jets::setup::production_verifier_setup_buckets();
+    ai_pow_jets::setup::install_or_build_verifier_setup(&args.verifier_data_dir, &buckets)?;
 
     // A fresh target must replay the whole prefix (1..start) as warmup to
     // position itself at start-1, so it needs genesis + every block 1..=end.
@@ -143,7 +157,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "bench: booting source node from state jam {} (loads the full chain state)",
             args.state_jam.display()
         );
-        let mut source = boot_source(&args).await?;
+        let source_scratch = Builder::new().prefix("bench-dumb-source").tempdir()?;
+        let mut source = boot_source(&args, source_scratch.path().to_path_buf()).await?;
         info!(
             "bench: source boot complete; extracting blocks {}..={}",
             extract_from, args.end
@@ -154,6 +169,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             (None, None)
         } else {
             let constants = peek_constants(&mut source).await?;
+            if args.mainnet_release_replay && constants != BlockchainConstants::new() {
+                return Err(
+                    "release replay source does not have the compiled mainnet constants".into(),
+                );
+            }
             let genesis = extract_block(&mut source, 0)
                 .await?
                 .ok_or("source node has no genesis block (height 0); cannot initialize target")?;
@@ -165,11 +185,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             match extract_block(&mut source, height).await? {
                 Some(block) => blocks.push(block),
                 None => {
-                    warn!(
-                        "bench: source has no block at height {}; stopping extraction here",
-                        height
-                    );
-                    break;
+                    return Err(format!(
+                        "source has no block at required height {height}; replay is incomplete"
+                    )
+                    .into());
                 }
             }
             if args.progress_every > 0 && height.is_multiple_of(args.progress_every) {
@@ -194,7 +213,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match (from_jam, constants, genesis) {
         (false, Some(constants), Some(genesis)) => {
-            // set-constants (source's exact constants, optionally pow-off),
+            // set-constants (PoW remains enabled),
             // genesis seal, btc-data, born -- the same init a fresh mainnet
             // node performs.
             setup::poke(
@@ -217,7 +236,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     genesis.block_fact,
                 )
                 .await?;
-            if peek_page(&mut target, 0).await?.is_none() {
+            let accepted_genesis = match peek_page(&mut target, 0).await? {
+                Some(mut page) => page_block_id(&mut page)? == genesis.block_id,
+                None => false,
+            };
+            if !accepted_genesis {
                 return Err(
                     "target did not accept the genesis block; init sequence is wrong".into(),
                 );
@@ -231,13 +254,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Booted from a checkpoint: confirm it contains the parent of the
             // first measured block, otherwise the replay can't position itself.
             if peek_page(&mut target, args.start - 1).await?.is_none() {
-                warn!(
-                    "bench: imported state has no block at height {} (the parent of the first \
-                     replayed block {}); blocks will fail to validate. The checkpoint passed to \
-                     --target-state-jam should be at height start-1.",
-                    args.start - 1,
-                    args.start
-                );
+                return Err("imported target state is missing the required parent".into());
             }
         }
     }
@@ -248,7 +265,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut measured_blocks = 0u64;
     let mut measured_txs = 0u64;
     let mut skipped_present = 0u64;
-    let mut rejected = 0u64;
+    let mut validated = 0u64;
+    let mut final_block_id = String::new();
 
     for block in blocks {
         let height = block.height;
@@ -272,21 +290,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .poke(Libp2pWire::Gossip(PeerId::random()).to_wire(), tx_fact)
                 .await?;
         }
-        let result = target
+        target
             .poke(
                 Libp2pWire::Gossip(PeerId::random()).to_wire(),
                 block.block_fact,
             )
-            .await;
+            .await
+            .map_err(|e| format!("block {height} poke failed: {e}"))?;
         let elapsed = start.elapsed();
-
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                rejected += 1;
-                warn!("bench: poke for block at height {} errored: {}", height, e);
-            }
-        }
 
         // Confirm the target actually accepted (validated) the block.
         let accepted = match peek_page(&mut target, height).await? {
@@ -294,13 +305,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None => false,
         };
         if !accepted {
-            rejected += 1;
-            warn!(
-                "bench: block at height {} (block_id={}) did NOT validate into the target",
-                height, block.block_id
-            );
+            return Err(format!("block {height} ({}) did not validate", block.block_id).into());
         }
 
+        validated += 1;
+        final_block_id = block.block_id;
         if measured {
             measured_wall += elapsed;
             measured_blocks += 1;
@@ -311,11 +320,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         if args.progress_every > 0 && height.is_multiple_of(args.progress_every) {
             info!(
-                "bench: replayed height={} (measured_blocks={} measured_ms={:.1} rejected={})",
+                "bench: replayed height={} (measured_blocks={} measured_ms={:.1} validated={})",
                 height,
                 measured_blocks,
                 ms(measured_wall),
-                rejected
+                validated
             );
         }
     }
@@ -342,14 +351,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ms(measured_wall) / measured_blocks as f64
         );
     }
-    info!("blocks that did NOT validate: {}", rejected);
-    if rejected != 0 {
-        warn!(
-            "bench: {} block(s) failed to validate -- profile numbers may not reflect full \
-             validation. Check constants/genesis-seal match the source chain.",
-            rejected
-        );
+    if validated + skipped_present != args.end - extract_from + 1 {
+        return Err("replay did not cover the entire requested range".into());
     }
+    if args.mainnet_release_replay && (validated != args.end || skipped_present != 0) {
+        return Err("release replay skipped required validation".into());
+    }
+    info!(validated, skipped_present, final_height = args.end, %final_block_id,
+        genesis_replay = !from_jam, "replay validation succeeded");
 
     if let Some(export_path) = args.export_state_jam.as_deref() {
         export_target(&target, export_path).await?;
@@ -379,16 +388,12 @@ fn base_cli(stack_size: NockStackSize) -> boot::Cli {
     }
 }
 
-async fn boot_source(args: &Args) -> Result<NockApp<Chaff>, Box<dyn Error>> {
-    let scratch = Builder::new().prefix("bench-dumb-source").tempdir()?;
+async fn boot_source(args: &Args, data_dir: PathBuf) -> Result<NockApp<Chaff>, Box<dyn Error>> {
     let cli = boot::Cli {
         state_jam: Some(args.state_jam.to_string_lossy().into_owned()),
-        data_dir: Some(scratch.path().to_path_buf()),
+        data_dir: Some(data_dir),
         ..base_cli(args.source_stack_size)
     };
-    // Keep the tempdir alive for the duration of the boot by leaking it; the OS
-    // reclaims it on exit. (Source is read-only and short-lived.)
-    std::mem::forget(scratch);
     // Post-activation state ranges exercise the ai-pow verifier jet; without
     // its hot state the bench crashes on the fail-closed `!!` stub.
     let mut hot = produce_prover_hot_state();
@@ -477,11 +482,10 @@ async fn extract_block(
             if let Some(raw_tx) = peek_raw_transaction(app, &tx_id).await? {
                 tx_facts.push(make_fact_from_payload("heard-tx", &raw_tx));
             } else {
-                warn!(
-                    "bench: block {} (height {}) references tx {} but source has no raw tx; \
-                     block may fail to validate",
-                    block_id, height, tx_id
-                );
+                return Err(format!(
+                    "source block {block_id} at height {height} is missing raw transaction {tx_id}"
+                )
+                .into());
             }
         }
     }

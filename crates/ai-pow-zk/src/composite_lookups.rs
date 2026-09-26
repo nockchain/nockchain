@@ -23,7 +23,7 @@
 //! | `irange8` | `range_table` (IRANGE8) | `matmul` (A_NOISED_UNPACK / B_NOISED_UNPACK) | i8 range check |
 //! | `i8u8` | `i8u8` chip's 256-row table | (none directly — used cross-bus to bridge i8 ↔ u8) | sign-conversion table |
 //! | `noised_packed` | `input` chip (NOISED_PACKED) | `matmul` (A_NOISED via A_ID; B_NOISED via B_ID), `blake3` (UINT8_DATA when IS_MSG_MAT) | per-row matrix bytes |
-//! | `cv_routing` | `blake3` chip's CV_OUT cells | `blake3` chip's CV_IN cells (when IS_CV_IN) | inter-hash chaining value routing |
+//! | `cv_routing` | `blake3` chip's CV_OUT cells | `blake3` chip's CV_IN cells and computed-child words in parent messages | chaining and parent-to-child commitment routing |
 //! | `stark_row_idx` | `stark_row` chip | (any bus that indexes by row position) | monotonic row identifier |
 //!
 //! Pearl's `pearl_lookups.rs` configures the LogUp argument with
@@ -68,8 +68,8 @@
 //!
 //! **`cv_routing`.** Pearl threads BLAKE3 chaining values across
 //! hash instructions; one hash's CV_OUT becomes the next hash's
-//! CV_IN. The lookup binds these cells across non-adjacent rows.
-//! Without it, an adversary could substitute arbitrary CVs.
+//! CV_IN or a parent compression's message half. The lookup preserves
+//! this relationship across non-adjacent rows.
 //!
 //! **`stark_row_idx`.** Pearl's `STARK_ROW_IDX` column is a
 //! universal row identifier consumed by `cv_routing` (and any
@@ -106,10 +106,18 @@ pub const BUS_I8U8: &str = "i8u8";
 /// glue between matmul and BLAKE3 sides.
 pub const BUS_NOISED_PACKED: &str = "noised_packed";
 
-/// `cv_routing` bus — BLAKE3 chaining value routing. Ties one
-/// hash's CV_OUT to the consuming hash's CV_IN across non-adjacent
-/// rows.
+/// `cv_routing` bus — BLAKE3 chaining value routing. Ties one hash's
+/// CV_OUT to a consuming hash's CV_IN or parent-message half across
+/// non-adjacent rows.
 pub const BUS_CV_ROUTING: &str = "cv_routing";
+
+/// Positions in the round-1 permuted message that recover original parent
+/// words 0..8 (the left child CV) in word order.
+pub const PARENT_LEFT_MSG_POS: [usize; 8] = [5, 8, 0, 2, 6, 11, 1, 4];
+
+/// Positions in the round-6 permuted message that recover original parent
+/// words 8..16 (the right child CV) in word order.
+pub const PARENT_RIGHT_MSG_POS: [usize; 8] = [6, 5, 9, 0, 11, 15, 8, 1];
 
 /// `stark_row_idx` bus — universal row identifier. Used by buses
 /// that need row-level addressing.
@@ -217,6 +225,27 @@ mod tests {
     fn cv_out_freq_pure_function() {
         assert_eq!(cv_out_freq(0), 0);
         assert_eq!(cv_out_freq(42), 42);
+    }
+
+    #[test]
+    fn parent_cv_positions_recover_each_original_message_half() {
+        use crate::chips::blake3::compress::blake3_permute_msg;
+
+        let original: [u32; 16] = core::array::from_fn(|i| i as u32);
+        let mut permuted = original;
+        blake3_permute_msg(&mut permuted);
+        assert_eq!(
+            PARENT_LEFT_MSG_POS.map(|position| permuted[position]),
+            original[..8]
+        );
+
+        for _ in 1..6 {
+            blake3_permute_msg(&mut permuted);
+        }
+        assert_eq!(
+            PARENT_RIGHT_MSG_POS.map(|position| permuted[position]),
+            original[8..]
+        );
     }
 
     #[test]

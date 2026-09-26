@@ -175,7 +175,8 @@
           =(0 remaining-fee)
       ==
     ~|('Insufficient funds to pay fee and gift' !!)
-  [spends.final-state wd.final-state metadata.final-state]
+  =/  =spends:v1:transact  (pin-deposit-sources spends.final-state)
+  [spends (sign-spends spends wd.final-state) metadata.final-state]
 ::
 ++  process-spends-0
   |=  $:  notes=(list nnote:v0:transact)
@@ -219,7 +220,6 @@
     fee.state      new-fee
     orders.state   pending-orders
     metadata.state  (update-metadata-0 note metadata.state output-map)
-    wd.state       (sign-spend name.note [%0 spend] wd.state)
   ==
 ::
 ++  create-spends-1
@@ -259,7 +259,8 @@
           =(0 remaining-fee)
       ==
     ~|('Insufficient funds to pay fee and gift' !!)
-  [spends.final-state wd.final-state metadata.final-state]
+  =/  =spends:v1:transact  (pin-deposit-sources spends.final-state)
+  [spends (sign-spends spends wd.final-state) metadata.final-state]
 ::
 ++  process-spends-1
   |=  $:  notes=(list nnote-1:v1:transact)
@@ -349,8 +350,72 @@
     fee.state      new-fee
     orders.state   pending-orders
     metadata.state  (update-metadata-1 name.note metadata.state output-map input-lock)
-    wd.state       (sign-spend name.note [%1 spend] wd.state)
   ==
+::
+::  +pin-deposit-sources: bind each bridge deposit's seeds to its output
+::
+::    Bind each deposit seed's output-source to the assembled output before
+::    +sign-spends, since output-source is part of the signed seed.
+::
+++  pin-deposit-sources
+  |=  sps=spends:v1:transact
+  ^-  spends:v1:transact
+  =/  all-seeds=(list seed:v1:transact)
+    %-  zing
+    %+  turn  ~(val z-by:zo sps)
+    |=  sp=spend:v1:transact
+    ?-  -.sp
+      %0  ~(tap z-in:zo seeds.+.sp)
+      %1  ~(tap z-in:zo seeds.+.sp)
+    ==
+  =/  deposit-roots=(list hash:transact)
+    %~  tap  z-in:zo
+    %-  z-silt:zo
+    %+  murn  all-seeds
+    |=  sed=seed:v1:transact
+    ?.  (~(has z-by:zo note-data.sed) %bridge)  ~
+    `lock-root.sed
+  ?~  deposit-roots  sps
+  =/  sources=(z-map:zo hash:transact source:transact)
+    %-  ~(gas z-by:zo *(z-map:zo hash:transact source:transact))
+    %+  turn  deposit-roots
+    |=  root=hash:transact
+    =/  merged=(list seed:v1:transact)
+      (skim all-seeds |=(sed=seed:v1:transact =(root lock-root.sed)))
+    =/  entries=(list (unit *))
+      %+  turn  merged
+      |=(sed=seed:v1:transact (~(get z-by:zo note-data.sed) %bridge))
+    ?>  ?=(^ entries)
+    ?.  (levy t.entries |=(e=(unit *) =(e i.entries)))
+      ~|  'Every payment to a bridge deposit address in a transaction must belong to the one deposit. The bridge credits a deposit only with seeds carrying its %bridge entry, so any other payment there would stay in the bridge wallet.'
+      !!
+    :-  root
+    :_  %.n
+    %-  hash:seeds:v1:transact
+    %-  ~(gas z-in:zo *seeds:v1:transact)
+    (turn merged |=(sed=seed:v1:transact sed(output-source ~)))
+  =/  pin
+    |=  =seeds:v1:transact
+    ^-  seeds:v1:transact
+    %-  ~(gas z-in:zo *seeds:v1:transact)
+    %+  turn  ~(tap z-in:zo seeds)
+    |=  sed=seed:v1:transact
+    sed(output-source (~(get z-by:zo sources) lock-root.sed))
+  %-  ~(run z-by:zo sps)
+  |=  sp=spend:v1:transact
+  ^-  spend:v1:transact
+  ?-  -.sp
+    %0  [%0 +.sp(seeds (pin seeds.+.sp))]
+    %1  [%1 +.sp(seeds (pin seeds.+.sp))]
+  ==
+::
+++  sign-spends
+  |=  [sps=spends:v1:transact wd=witness-data:wt]
+  ^-  witness-data:wt
+  %+  roll  ~(tap z-by:zo sps)
+  |=  [[name=nname:transact sp=spend:v1:transact] acc=_wd]
+  (sign-spend name sp acc)
+::
 ++  sign-spend
   |=  [name=nname:transact =spend:v1:transact wd=witness-data:wt]
   ^-  witness-data:wt

@@ -392,10 +392,9 @@
   ::  - %ai-pow: 2^256/(target+1) MAC-equivalents, converted at the
   ::    height-selected cross-puzzle exchange rate.
   ::
-  ::  Heaviness therefore scales inversely with target for both puzzles. The
-  ::  Logos exchange rate is retained below +zk-pow-v5-phase so historical
-  ::  accumulated work remains valid; version %5 switches to Tip5 hash-grinding
-  ::  pricing at the activation height.
+  ::  Heaviness therefore scales inversely with target for both puzzles.
+  ::  Each historical exchange rate is retained below its activation height,
+  ::  so later repricing never changes previously accumulated work.
   ++  block-work-at
     |=  [height=page-number puzzle=?(%dumb-zkpow %ai-pow) target-bn=bignum:bn]
     ^-  bignum:bn
@@ -430,16 +429,50 @@
   ++  zk-pow-v5-mac-equivalents-per-zk-hash
     ^~  1.028.807
   ::
+  ::  At the ASERT reset, retain 400 trillion MAC/s but use 28 million ZK
+  ::  hashes/s per GPU. Round 400,000,000,000,000 / 28,000,000 to nearest.
+  ++  asert-reset-mac-equivalents-per-zk-hash
+    ^~  14.285.714
+  ::
   ++  mac-equivalents-per-zk-work-unit-at
     |=  height=page-number
     ^-  @
     ?:  (lth height zk-pow-v5-phase)
       mac-equivalents-per-zk-attempt
-    zk-pow-v5-mac-equivalents-per-zk-hash
+    ?:  (lth height harden-phase)
+      zk-pow-v5-mac-equivalents-per-zk-hash
+    asert-reset-mac-equivalents-per-zk-hash
   ::
   ++  zk-pow-v5-phase
     ^-  page-number
     147.500
+  ::
+  ::  Shared release boundary for ASERT/work repricing, AI-PoW hardening,
+  ::  Pearl admission limits, and mainnet bridge deposit crediting.
+  ++  harden-phase
+    ^-  page-number
+    154.500
+  ::
+  ++  puzzle-asert-reset-at
+    |=  height=page-number
+    ^-  ?
+    ?|  =(height zk-pow-v5-phase)
+        =(height harden-phase)
+    ==
+  ::
+  ++  ai-pow-hardening-required
+    |=  height=page-number
+    ^-  ?
+    (gte height harden-phase)
+  ::
+  ::  Explicit verifier version selected from this block's height. Keep the
+  ::  boundary in Hoon; the certificate cannot choose its admission rules.
+  ++  ai-pow-proof-rules
+    |=  height=page-number
+    ^-  ?(%legacy %hardened)
+    ?:((ai-pow-hardening-required height) %hardened %legacy)
+  ::
+  ++  ai-pow-canonical-witnesses-required  ai-pow-hardening-required
   ::
   ::  Integer ideals target 70.028% AI / 29.972% ZK and a 149.86s combined
   ::  cadence: AI rate 1/214, ZK rate 1/500.
@@ -466,6 +499,17 @@
   ++  zk-pow-v5-zk-anchor-target
     ^-  @
     (div max-target-atom (mul zk-pow-v5-reference-zk-hashes-per-second zk-pow-v5-zk-ideal-block-time))
+  ::
+  ::  Reset both lanes without changing the reference fleets or AI capacity.
+  ++  asert-reset-reference-zk-hashes-per-gpu-second  ^~  28.000.000
+  ::
+  ++  asert-reset-reference-zk-hashes-per-second
+    ^-  @
+    (mul zk-pow-v5-reference-zk-gpu-count asert-reset-reference-zk-hashes-per-gpu-second)
+  ::
+  ++  asert-reset-zk-anchor-target
+    ^-  @
+    (div max-target-atom (mul asert-reset-reference-zk-hashes-per-second zk-pow-v5-zk-ideal-block-time))
   ::
   ::  +dual-puzzle-phase: the height at which the dual-puzzle regime begins, and
   ::  therefore the first height at which heaviness is priced per puzzle.

@@ -1,9 +1,15 @@
 /=  helpers  /tests/dumb/helpers
 /=  txe  /common/tx-engine
 /=  zoon  /common/zoon
+/=  *  /apps/dumbnet/lib/types
 /=  *  /common/test
 |%
+++  bc-pending-pow-on
+  %*  .  bc-pending-provable:helpers
+    check-pow-flag  &
+  ==
 ++  h  ~(. helpers bc-pending-provable:helpers)
+++  h-on  ~(. helpers bc-pending-pow-on)
 ++  t  ~(. txe bc-pending-provable:helpers)
 +$  heavy-tx  [=tx-id:t =raw-tx:t]
 +$  heavy-txs
@@ -746,7 +752,57 @@
           ~(heaviest-block k-by:h booted-chain)
           ~(consensus-invariants k-by:h booted-chain)
       ==
+
+:::
+:::  Loading preserves accepted chain state and retained transactions.
+++  test-load-discards-pending-preserves-chain-and-transactions
+  =+  [nockchain genesis]=init-nockchain:h-on
+  =^  pages  nockchain
+    (add-n-pages-integration:h-on genesis 2 nockchain)
+  =/  raw1  (make-raw-tx-from-coinbase:v0:h-on p:default-keys-2:h-on (snag 0 pages))
+  =/  raw2  (make-raw-tx-from-coinbase:v0:h-on p:default-keys-3:h-on (snag 1 pages))
+  =^  effs=(list effect:h-on)  nockchain
+    (~(heard-tx k-by:h-on nockchain) raw1)
+  =/  before=consensus-state  ~(con k-by:h-on nockchain)
+  =/  block-3  (prove-page:h-on (make-page-with-txs:v0:h-on (snag 1 pages) ~[id.raw1 id.raw2]))
+  =^  effs=(list effect:h-on)  nockchain
+    (~(heard-block k-by:h-on nockchain) block-3)
+  ?>  (~(has-pending-block k-by:h-on nockchain) ~(digest get:page:t block-3))
+  ?>  (~(check-bnb k-by:h-on nockchain) id.raw1 ~(digest get:page:t block-3))
+  ::  Exercise the real %12 load. Both stored and missing tx dependencies are
+  ::  released; the accepted chain, balances, raw tx and its claims survive.
+  =/  loaded  (~(boot-with k-by:h-on nockchain) ~(con k-by:h-on nockchain))
+  ?>  =(before loaded)
+  ?>  =(loaded (~(boot-with k-by:h-on nockchain) loaded))
+  =.  nockchain  (~(with-con k-by:h-on nockchain) loaded)
+  ::  A late tx cannot promote a discarded header. The honest block can still
+  ::  be accepted when it is received again through fresh admission.
+  =^  effs=(list effect:h-on)  nockchain
+    (~(heard-tx k-by:h-on nockchain) raw2)
+  ?>  =((need heaviest-block.before) ~(heaviest-block k-by:h-on nockchain))
+  =^  effs=(list effect:h-on)  nockchain
+    (~(heard-block k-by:h-on nockchain) block-3)
+  %+  expect-eq
+    !>(~(digest get:page:t block-3))
+    !>(~(heaviest-block k-by:h-on nockchain))
 ::
+++  test-pending-promotion-recheck-accepts-proved-block
+  =+  [nockchain genesis]=init-nockchain:h-on
+  =^  pages  nockchain
+    (add-n-pages-integration:h-on genesis 2 nockchain)
+  ::  the page references a tx the node has not heard: it parks in pending
+  =/  raw1  (make-raw-tx-from-coinbase:v0:h-on p:default-keys-2:h-on (snag 0 pages))
+  =/  block-3  (prove-page:h-on (make-page-with-txs:v0:h-on (snag 1 pages) ~[id.raw1]))
+  =^  effs=(list effect:h-on)  nockchain
+    (~(heard-block k-by:h-on nockchain) block-3)
+  ?>  (~(has-pending-block k-by:h-on nockchain) ~(digest get:page:t block-3))
+  ::  the missing tx arrives: promotion re-verifies the real proof and admits
+  =^  effs=(list effect:h-on)  nockchain
+    (~(heard-tx k-by:h-on nockchain) raw1)
+  ?>  =(~(digest get:page:t block-3) ~(heaviest-block k-by:h-on nockchain))
+  ?>  ?!((~(has-pending-block k-by:h-on nockchain) ~(digest get:page:t block-3)))
+  ~
+:::
 :::  Returned orphan txs get a fresh retention lease. The original heard-at can
 :::  predate the mined block far enough for the same +garbage-collect event to
 :::  evict the tx before it is re-mined. +release-orphan-claims refreshes

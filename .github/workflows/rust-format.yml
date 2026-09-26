@@ -7,6 +7,7 @@ on:
 
 jobs:
   formatting:
+    if: github.repository == 'nockchain/nockchain'
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:

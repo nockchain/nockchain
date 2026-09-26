@@ -139,9 +139,9 @@ impl SearchBackend for CudaSearchBackend {
         Ok(None)
     }
 
-    fn search_canonical(
+    fn search_reference(
         &self,
-        template: Arc<ai_pow_miner::canonical::PreparedCanonicalMoeTemplate>,
+        template: Arc<ai_pow_miner::reference::PreparedReferenceMoeTemplate>,
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError> {
         let _dispatch = self.dispatch.lock().map_err(|_| {

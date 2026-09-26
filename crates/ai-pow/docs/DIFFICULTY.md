@@ -1,7 +1,7 @@
 # AI-PoW difficulty: representations and invariants
 
 Normative. Every producer and consumer of an `%ai-pow` acceptance decision —
-the consensus verifier, the recursive-certificate jet, the canonical CPU miner,
+the consensus verifier, the recursive-certificate jet, the reference CPU miner,
 the Pearl-gateway miner, the ASERT constants, and the fork-choice work formula —
 must agree with what is written here.
 
@@ -31,7 +31,7 @@ scaling it depends on, `effective_jackpot_threshold`.
 
 A producer that compares `jackpot ≤ T` instead is not merely conservative: it
 discards every win in `(T, Θ]`, so it spends `F` times more work per block than
-consensus asks for. At the canonical shape `F = 2^16`; at the envelope maximum
+consensus asks for. At the reference shape `F = 2^16`; at the envelope maximum
 `F = 2^24`. A difficulty parameter tuned against such a producer's measured
 block rate lands `F` times too easy.
 
@@ -132,8 +132,8 @@ ZK proof version `%5`, active at height 147,500, moves the nonce lottery from
 complete-proof attempts to Tip5 hash grinding. Public Neptune Cash/OXZD data
 reports **388.8 Mguess/s** on an RTX 5090 for its post-hardfork Tip5 guesser:
 [Neptune Cash FAQ, Mining](https://useneptune.org/faq/#mining). Pearl's reference
-RTX 5090 rate is 400 TMAC/s. The version-%5 exchange rate is their ratio, rounded
-to the nearest integer:
+RTX 5090 rate is 400 TMAC/s per device. For heights 147,500–154,499, the
+version-%5 exchange rate is their ratio, rounded to the nearest integer:
 
 ```
 400,000,000,000,000 MAC/s / 388,800,000 hashes/s
@@ -142,10 +142,20 @@ to the nearest integer:
 zk-pow-v5-mac-equivalents-per-zk-hash = 1,028,807
 ```
 
-Both values are frozen consensus constants. They need not predict every miner;
-they must remain stable and approximate the relative throughput of the two
-puzzles on comparable hardware. A later throughput change requires another
-height-gated protocol revision, never a retroactive replacement.
+At height 154,500, the ZK reference changes to 28 MH/s per GPU while the Pearl
+per-device reference remains 400 TMAC/s:
+
+```
+400,000,000,000,000 MAC/s / 28,000,000 hashes/s
+  = 14,285,714.285... MAC/hash
+
+height >= 154,500: 14,285,714 MAC/hash
+```
+
+These height-selected rates are frozen consensus constants. They need not
+predict every miner; they must remain stable and approximate the relative
+throughput of the two puzzles on comparable hardware. Later throughput changes
+require another height-gated protocol revision, never a retroactive replacement.
 
 **Logos anchor cross-check.** The ZK anchor
 (`floor(375 · 2^291 / 214)`) prices 306,374,333 proof attempts per block; the AI
@@ -153,8 +163,8 @@ anchor (`2^192`) prices `2^64` MAC-equivalents per block. At their 214 s ZK and
 500 s AI ideals, both lanes produce about 1.43 × 10⁶
 proof-attempt-equivalents of heaviness per second.
 
-**Version-%5 anchor cross-check.** The two ASERT lanes start from independent
-reference-network capacities:
+**Original version-%5 anchor cross-check (147,500–154,499).** The two ASERT
+lanes start from independent reference-network capacities:
 
 ```
 ZK throughput = 2,000 RTX 5090s × 388,800,000 hashes/s
@@ -174,6 +184,35 @@ therefore make the AI rate about 12.5 times the ZK rate. This affects
 fork-choice weight, not the independently scheduled block shares: the 500 s ZK
 / 214 s AI ideals still target 29.972% ZK / 70.028% AI and a 149.86 s combined
 cadence.
+
+**Height-154,500 reset cross-check.** Both ASERT lanes re-anchor to the dynamic
+median-time-past of predecessor 154,499. Branch-local per-puzzle counts and
+last-puzzle heads reset once at that boundary, then advance normally for each
+lane. The ZK network is recalibrated to 2,000 GPUs at 28 MH/s each; the AI
+network remains an independently scaled 10 ExaMAC/s aggregate, not the
+400 TMAC/s per-device rate used for conversion:
+
+```
+ZK throughput = 2,000 GPUs × 28,000,000 hashes/s
+              = 56,000,000,000 hashes/s
+AI throughput = 10,000,000,000,000,000,000 MAC/s
+
+ZK target = floor((p^5 - 1) / (56,000,000,000 × 500))
+          = 76285251194081925074391779755128050196075552898662294001171823290014872052402351429
+AI target = floor(2^256 / (10,000,000,000,000,000,000 × 214))
+          = 54108452914633736179238778041442947594985974142822693476
+```
+
+The new anchor work rates are 55,999,999,999 ZK and 700,000,014,000 AI
+Tip5-hash-equivalents/s after integer flooring, still about 12.5 times as much
+AI normalized work as ZK. The AI target stays the same; its normalized credit
+changes because the conversion factor changes. The 500 s ZK / 214 s AI ideals,
+43,200 s half-life, target ceilings, and proof versions remain unchanged.
+Historical blocks retain their own height-selected rates and ASERT rules.
+Deploy before height 154,500; accepting the old regime past the boundary is not
+automatically undone by upgrading. See the
+[subsequent reset specification](../../../changelog/protocol/017-anthropos.md#subsequent-reset-at-height-154500)
+for operational requirements.
 
 **Why not unnormalized `1/target`.** ASERT pins each puzzle's target to that
 puzzle's own capacity, so a raw `1/target` heaviness would make per-block
@@ -195,8 +234,8 @@ branch wins fork choice by raw block count. Reproduced end-to-end against the
 live kernel; see `2026-07-29_TIME_BANKED_FORK_EXPLOIT.md`. Difficulty must be
 priced into heaviness, not only enforced at admission.
 
-**What exchange-rate drift does.** The constant freezes the 2026-07 hardware
-ratio; reality drifts as provers and inference hardware improve.
+**What exchange-rate drift does.** Each height-selected constant freezes its
+reference hardware ratio; reality drifts as provers and inference hardware improve.
 
 - *Within one puzzle, drift is harmless.* Same-puzzle heaviness comparisons
   share the constant, so it cancels: weight is proportional to expected work
@@ -226,8 +265,9 @@ height and the puzzle can compute it.
 
 ### I5 — the anchor targets a block interval and prices launch weight
 
-`anchor-target-atom.ai-asert = 2^192`. Under I4 the anchor prices both the AI
-puzzle's launch block interval and its launch fork-choice weight:
+At the original Logos launch, `anchor-target-atom.ai-asert = 2^192`. Under I4
+that anchor prices both the AI puzzle's launch block interval and its launch
+fork-choice weight; later anchors are listed above:
 `2^256 / anchor` is both the expected MAC-equivalents per block and the
 anchor block's heaviness, convertible to attempt-equivalents at the I4 rate.
 
@@ -255,13 +295,13 @@ rejects.
 
 | Invariant | Test |
 |---|---|
-| I1 | `ai-pow-miner`: `canonical_grind_threshold_matches_the_consensus_verifier` |
+| I1 | `ai-pow-miner`: `reference_grind_threshold_matches_the_consensus_verifier` |
 | I2 | `ai-pow`: `difficulty::tests::expected_work_is_shape_invariant` |
 | I3 | `nockchain`: `ai_pow_valid_block_is_admitted` (real block admitted through the kernel); `ai-pow`: `difficulty::tests::max_consensus_target_never_overflows`, `..._is_the_tight_bound`; `ai-pow-miner`: `canonical_grind_threshold_covers_the_whole_consensus_target_domain`; Hoon: `test-max-ai-target-atom-keeps-every-shape-representable`, `test-max-ai-target-atom-is-the-tight-bound`; `nockchain`: `validate_rejects_ai_asert_bex_above_the_minable_domain` |
 | I4 | Hoon: `test-puzzle-pricing-starts-at-the-asert-phase-not-admission`, `test-post-activation-work-is-puzzle-priced`, `test-post-activation-weight-tracks-target`, `test-single-block-cannot-outweigh-a-run`, `test-dual-puzzle-mixed-accumulated-work`, `test-zk-work-continuous-at-activation`, `test-anchor-work-is-exchange-rate-priced`, `test-mainnet-v5-anchor-calibration`, `test-pre-ai-heaviness-uses-zk-normalizer`, `test-time-banked-fork-loses-by-work` |
 | I5 | Hoon: `test-ai-anchor-sets-the-launch-block-interval`, `test-mainnet-ai-anchor-is-inside-the-minable-domain`, `test-mainnet-v5-dual-puzzle-schedule`; `nockchain-types`: `ai_anchor_sets_the_launch_block_interval` |
 
-## Worked example — the canonical shape
+## Worked example — the reference shape
 
 `m=64, k=1024, n=64, r=64, tile=8`, so `h = w = 8` and
 `dot_product_length = 1024`:
@@ -277,7 +317,8 @@ At an anchor `T = 2^227`:
 A  = 2^256 / Θ    = 2^13  = 8,192 attempts per block
 W  = 2^256 / T    = 2^29           MAC-equivalents per block
 W  = 2^29 / 25.75e9 ≈ 20.8        Logos proof-attempt-equivalents
-W  = 2^29 / 1.028807e6 ≈ 521.8    version-%5 Tip5-hash-equivalents
+W  = 2^29 / 1.028807e6 ≈ 521.8    Tip5-hash-equivalents at heights 147,500–154,499
+W  = 2^29 / 14.285714e6           Tip5-hash-equivalents at heights >= 154,500
 ```
 
 Reading `A` as `2^256 / T = 2^29` — the shape factor omitted — overstates the

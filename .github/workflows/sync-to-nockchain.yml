@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository != 'nockchain/nockchain'
+    if: github.repository == 'nockchain/nockchain-staging' && (github.repository != 'nockchain/nockchain')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

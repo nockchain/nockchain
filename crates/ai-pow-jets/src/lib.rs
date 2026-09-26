@@ -6,9 +6,9 @@
 //! verify is Rust-only, so — per the chosen architecture — the Hoon arm
 //! `++ai-pow-verify` is a stub and this jet is the real implementation.
 //!
-//! **Transparency:** the jet's sample is the *structured* `ai-pow-artifact` noun
-//! (`[nonce certificate]`, the same shape Hoon builds) plus the block commitment
-//! and target as atoms; the result is a loobean. Only the opaque `nonce` (the
+//! **Transparency:** the jet's sample carries a kernel-selected rule tag, the
+//! structured `[%ai-pow nonce certificate]` artifact, the structured block
+//! commitment, and a target atom; the result is a loobean. Only the opaque `nonce` (the
 //! Pearl statement bytes) and the recursive certificate body are byte-atoms —
 //! everything Hoon reasons about stays inspectable.
 //!
@@ -39,8 +39,11 @@ compile_error!(
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+use ai_pow_miner::certificate_noun::decode_ai_pow_pearl_merge_artifact_noun;
 use ai_pow_miner::certificate_noun::{
-    decode_ai_pow_pearl_merge_artifact_noun, verify_ai_pow_block_artifact, AiPowBlockVerifyOutcome,
+    ai_pow_compact_recursive_certificate_from_node,
+    decode_ai_pow_pearl_merge_artifact_noun_with_rules, AiPowBlockVerifyOutcome,
     CertificateNounLimits, PearlMergeAiPowArtifactShape,
 };
 
@@ -51,11 +54,13 @@ use ai_pow_miner::certificate_noun::{
 #[global_allocator]
 static TEST_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+use ai_pow_zk::proof_rules::ProofRules;
 use ai_pow_zk::recursion::AiPowCompactBatchVerifierContext;
 use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::noun::{Noun, NounSpace, D};
+use nockvm_macros::tas;
 use once_cell::sync::OnceCell;
 
 pub mod setup;
@@ -81,16 +86,27 @@ pub struct AiPowVerifierSetup {
     Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
 )]
 pub struct VerifierSetupShapeKey {
+    pub rules: ProofRules,
     pub trace_height: usize,
     pub sx_bound: bool,
 }
 
 impl VerifierSetupShapeKey {
     pub const fn new(trace_height: usize, sx_bound: bool) -> Self {
+        Self::with_rules(trace_height, sx_bound, ProofRules::Hardened)
+    }
+
+    pub const fn with_rules(trace_height: usize, sx_bound: bool, rules: ProofRules) -> Self {
         Self {
+            rules,
             trace_height,
             sx_bound,
         }
+    }
+
+    pub const fn for_rules(mut self, rules: ProofRules) -> Self {
+        self.rules = rules;
+        self
     }
 
     pub fn from_zk_params(zk_params: &ai_pow_zk::ZkParams, trace_height: usize) -> Option<Self> {
@@ -107,15 +123,19 @@ impl VerifierSetupShapeKey {
 
 impl AiPowVerifierSetup {
     pub const fn shape_key(&self) -> VerifierSetupShapeKey {
-        VerifierSetupShapeKey::new(self.trace_height, self.sx_bound)
+        VerifierSetupShapeKey::with_rules(
+            self.trace_height,
+            self.sx_bound,
+            self.context.proof_rules(),
+        )
     }
 }
 
 /// A per-bucket verifier context living ON DISK: the path of its serialized context
-/// file plus its committed verifier-key digest. Only this small metadata is resident;
-/// the heavy (~0.9–2.7 GB) context is read from disk and deserialized on demand (see
-/// [`ai_pow_verifier_setup_for`]) — a fast page-in (~0.6 s worst case), NEVER a
-/// circuit rebuild. Built once at boot (see the disk-paged residency doc).
+/// file plus its committed verifier-key digest. The context contains verifier
+/// metadata and commitments, with prover trees and raw columns removed. It is
+/// deserialized on demand (see [`ai_pow_verifier_setup_for`]), never rebuilt
+/// during block verification.
 pub struct DiskBucket {
     shape_key: VerifierSetupShapeKey,
     /// The canonical 40-byte verifier-key digest this context must match (the
@@ -376,6 +396,7 @@ pub fn ai_pow_verifier_setup_initialized() -> bool {
 // discarded at the call site.
 #[allow(clippy::result_unit_err)]
 pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(), ()> {
+    setup::prepare_verifier_resources().map_err(|_| ())?;
     let keys: Vec<VerifierSetupShapeKey> =
         setups.iter().map(AiPowVerifierSetup::shape_key).collect();
     if !setup_table_keys_valid(&keys) {
@@ -409,6 +430,7 @@ pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(),
 // `Err(())` marker: callers add boot context via `.map_err(|()| ..)`.
 #[allow(clippy::result_unit_err)]
 pub fn init_ai_pow_verifier_setup_disk(buckets: Vec<DiskBucket>, cap: usize) -> Result<(), ()> {
+    setup::prepare_verifier_resources().map_err(|_| ())?;
     let keys: Vec<VerifierSetupShapeKey> = buckets.iter().map(|b| b.shape_key).collect();
     if !setup_table_keys_valid(&keys) {
         return Err(());
@@ -493,16 +515,27 @@ pub(crate) fn commit_from_noun(stack: &mut nockvm::mem::NockStack, noun: Noun) -
 /// block commitment + target and an explicit setup. Factored out so it is
 /// unit-testable without the boot cache. Returns `Ok(true)` iff the block verifies,
 /// `Ok(false)` if it is well-formed but invalid.
+#[cfg(test)]
 pub(crate) fn ai_pow_verify_core(
     artifact: &PearlMergeAiPowArtifactShape,
     commit: [u8; 32],
     target: [u8; 32],
     setup: &AiPowVerifierSetup,
 ) -> Result<bool, JetErr> {
+    ai_pow_verify_core_with_rules(artifact, commit, target, setup, ProofRules::Hardened)
+}
+
+fn ai_pow_verify_core_with_rules(
+    artifact: &PearlMergeAiPowArtifactShape,
+    commit: [u8; 32],
+    target: [u8; 32],
+    setup: &AiPowVerifierSetup,
+    rules: ProofRules,
+) -> Result<bool, JetErr> {
     let limits = CertificateNounLimits::default();
-    match verify_ai_pow_block_artifact(
+    match ai_pow_miner::certificate_noun::verify_ai_pow_block_artifact_with_rules(
         artifact, limits, &commit, &target, AI_POW_VERIFY_MAX_PATTERN_LEN, &setup.context,
-        &setup.digest_bytes,
+        &setup.digest_bytes, rules,
     ) {
         Ok(AiPowBlockVerifyOutcome::Dense(_)) | Ok(AiPowBlockVerifyOutcome::Moe(_)) => Ok(true),
         Err(_) => Ok(false),
@@ -510,7 +543,9 @@ pub(crate) fn ai_pow_verify_core(
 }
 
 /// The AI-PoW verify jet. Sample:
-/// `[artifact=ai-pow-artifact commit=block-commitment:page:t target=@]`
+/// `[rules=?(%legacy %hardened) artifact=ai-pow-artifact commit=block-commitment:page:t target=@]`
+/// Hoon derives `rules` from the block height. An unknown rule is a kernel/jet
+/// interface error and halts with `%fail`; it must not become a block rejection.
 /// — `commit` is the STRUCTURED commitment noun (canonicalized here via
 /// `commit_from_noun`), `target` the `merge:bignum` LE atom the Hoon arm passes.
 /// Result: loobean.
@@ -526,11 +561,12 @@ pub(crate) fn ai_pow_verify_core(
 /// `BAIL_FAIL`, so a broken node halts rather than wrongly rejecting valid blocks).
 pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let space = context.stack.noun_space();
-    // sample = [artifact commit target]  ⇒  head=2, commit=6, target=7
+    // sample = [rules artifact commit target], selected by the kernel.
     let sample = slot(subject, 6, &space)?;
-    let artifact_noun = slot(sample, 2, &space)?;
-    let commit_noun = slot(sample, 6, &space)?;
-    let target_noun = slot(sample, 7, &space)?;
+    let rules = proof_rules_from_noun(slot(sample, 2, &space)?)?;
+    let artifact_noun = slot(sample, 6, &space)?;
+    let commit_noun = slot(sample, 14, &space)?;
+    let target_noun = slot(sample, 15, &space)?;
 
     // Decode + target-parse + cap-check the ATTACKER-CONTROLLED artifact under
     // catch_unwind. A decode/shape failure, a bad target, an over-cap height, OR a
@@ -538,12 +574,25 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     // None of this mutates `context.stack`, so catching a panic here is safe.
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let limits = CertificateNounLimits::default();
-        let artifact =
-            decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, &space, limits).ok()?;
+        let artifact = decode_ai_pow_pearl_merge_artifact_noun_with_rules(
+            artifact_noun, &space, limits, rules,
+        )
+        .ok()?;
+        // Dense and MoE artifacts share this compact certificate envelope.
+        // Reject noncanonical values before paging in a verifier setup. Never
+        // normalize here: Hoon already hashes the original artifact bytes.
+        if rules == ProofRules::Hardened
+            && !ai_pow_compact_recursive_certificate_from_node(&artifact.certificate.certificate)
+                .ok()?
+                .has_canonical_pow_witnesses()
+        {
+            return None;
+        }
         let target = target_atom_to_32_saturating(target_noun, &space)?;
-        let setup_key = VerifierSetupShapeKey::from_zk_params(
+        let mut setup_key = VerifierSetupShapeKey::from_zk_params(
             &artifact.certificate.zk_params, artifact.certificate.trace_height,
         )?;
+        setup_key.rules = rules;
         Some((artifact, target, setup_key))
     }));
     let (artifact, target, setup_key) = match decoded {
@@ -571,7 +620,7 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     // the recursion verifier on a crafted cert is a deterministic reject → NO, never a
     // node crash. `ai_pow_verify_core` touches only owned/borrowed data (no stack).
     let verified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ai_pow_verify_core(&artifact, commit, target, &setup)
+        ai_pow_verify_core_with_rules(&artifact, commit, target, &setup, rules)
     }));
     match verified {
         Ok(Ok(true)) => Ok(YES),
@@ -579,10 +628,18 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     }
 }
 
+fn proof_rules_from_noun(noun: Noun) -> Result<ProofRules, JetErr> {
+    match noun.as_direct().map_err(|_| BAIL_FAIL)?.data() {
+        tas!(b"legacy") => Ok(ProofRules::Legacy),
+        tas!(b"hardened") => Ok(ProofRules::Hardened),
+        _ => Err(BAIL_FAIL),
+    }
+}
+
 /// Hot-state entry set for the AI-PoW verify jet. Appended to the nockchain kernel
 /// hot state alongside `zkvm-jetpack`'s prover jets.
 ///
-/// The Hoon `++ai-pow-verify` (`~/ %ai-pow-verify`) lives in the shared
+/// The Hoon `++ai-pow-verify` (`~/ %ai-pow-verify-v2`) lives in the shared
 /// `/common/pow` lib under a `~% %pow-lib ..ut ~` root (it cannot be a kernel
 /// door arm — the `fort` mold fixes %dumb-inner to load/peek/poke — nor a
 /// `|^`-nested arm, which fails cold registration). `..ut` resolves to the
@@ -590,12 +647,14 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
 /// `%zeke`-anchored jets, e.g. cheetah `ser-a-pt`, which sit at
 /// `[one two tri qua pen zeke ..]`). So `%pow-lib` sits at
 /// `[one two tri qua pen pow-lib]` and the jetted arm at
-/// `[one two tri qua pen pow-lib ai-pow-verify]`. Axis `1` is the `~/`-gate
+/// `[one two tri qua pen pow-lib ai-pow-verify-v2]`. Axis `1` is the `~/`-gate
 /// convention (matches every base58 / ec-point `|=` jet). Runtime-validated by
 /// the roswell `test-ai-pow-verify-jet-fires` unit test.
 pub fn produce_ai_pow_hot_state() -> Vec<nockvm::jets::hot::HotEntry> {
     use either::Either::Left;
     use nockvm::jets::hot::K_138;
+    // The v2 identity is intentionally distinct from both former three-field
+    // bindings. A mismatched kernel/binary reaches the Hoon fail-safe stub.
     vec![(
         &[
             K_138,
@@ -605,7 +664,7 @@ pub fn produce_ai_pow_hot_state() -> Vec<nockvm::jets::hot::HotEntry> {
             Left(b"qua"),
             Left(b"pen"),
             Left(b"pow-lib"),
-            Left(b"ai-pow-verify"),
+            Left(b"ai-pow-verify-v2"),
         ],
         1,
         ai_pow_verify_jet,
@@ -615,6 +674,40 @@ pub fn produce_ai_pow_hot_state() -> Vec<nockvm::jets::hot::HotEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verifier_rule_tags_reject_unknown_versions() {
+        assert_eq!(
+            proof_rules_from_noun(D(tas!(b"legacy"))).unwrap(),
+            ProofRules::Legacy
+        );
+        assert_eq!(
+            proof_rules_from_noun(D(tas!(b"hardened"))).unwrap(),
+            ProofRules::Hardened
+        );
+        let mut stack = nockvm::mem::NockStack::new(8 << 20, 0);
+        let cell = nockvm::noun::T(&mut stack, &[D(0), D(0)]);
+        for unknown in [D(0), D(1), D(tas!(b"future")), cell] {
+            assert!(matches!(
+                proof_rules_from_noun(unknown),
+                Err(JetErr::Fail(nockvm::interpreter::Error::NonDeterministic(
+                    nockvm::interpreter::Mote::Fail,
+                    _
+                )))
+            ));
+        }
+    }
+
+    #[test]
+    fn verifier_registers_only_the_versioned_single_jet() {
+        let hot = produce_ai_pow_hot_state();
+        assert_eq!(hot.len(), 1);
+        assert_eq!(
+            hot[0].0.last(),
+            Some(&either::Either::Left(&b"ai-pow-verify-v2"[..]))
+        );
+        assert_eq!(hot[0].1, 1);
+    }
 
     /// The bounded LRU underlying lazy residency: MRU touch, cap eviction of the
     /// least-recently-used entry, and dedup insert. Uses cheap `u64` values so the
@@ -759,8 +852,8 @@ mod tests {
         assert!(!buckets.is_empty(), "must return at least one bucket");
         assert_eq!(
             crate::setup::AI_POW_VERIFIER_CACHE_CAP_DEFAULT,
-            buckets.len(),
-            "the production default must retain all 14 attacker-selectable shape keys",
+            2 * buckets.len(),
+            "the production default must retain both versions of every shape",
         );
         let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
         let mut keys: Vec<VerifierSetupShapeKey> = Vec::new();
@@ -782,7 +875,7 @@ mod tests {
                     (b.params.num_stripes() as usize) <= ai_pow::params::STRIPE_MAX,
                 )
             } else {
-                let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
+                let th = crate::setup::reference_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
                     .expect("cheap trace height");
                 (
                     th,
@@ -861,7 +954,7 @@ mod tests {
                             (bucket.params.num_stripes() as usize) <= ai_pow::params::STRIPE_MAX,
                         )
                     } else {
-                        let h = crate::setup::canonical_moe_trace_height(
+                        let h = crate::setup::reference_moe_trace_height(
                             &bucket.params, bucket.hw, bucket.e, bucket.top_k,
                         )
                         .expect("production setup bucket trace height");
@@ -886,15 +979,15 @@ mod tests {
 mod jet_tests {
     use ai_pow::difficulty::{attempt_wins, shape_work_factor_for, AI_POW_MAX_CONSENSUS_TARGET};
     use ai_pow::params::MatmulParams;
-    use ai_pow_miner::canonical::evaluate_canonical_moe_jackpot;
     use ai_pow_miner::certificate_noun::build_ai_pow_pearl_merge_moe_artifact_noun_from_node;
+    use ai_pow_miner::reference::evaluate_reference_moe_jackpot;
     use nockapp::noun::slab::NounSlab;
     use nockvm::noun::NounAllocator;
 
     use super::*;
     use crate::setup::{
-        build_verifier_setup_seed, prove_canonical_moe_block, CanonicalBlock,
-        CANONICAL_SETUP_COMMIT,
+        build_verifier_setup_seed, prove_reference_moe_block, ReferenceBlock,
+        REFERENCE_SETUP_COMMIT,
     };
 
     /// Cue a jammed artifact into a fresh slab and return `(slab, root)`.
@@ -919,7 +1012,7 @@ mod jet_tests {
     /// The target is scaled by the shape work factor, so `[0xff; 32]` overflows
     /// and is deliberately unminable. A fixed commitment search makes the
     /// acceptance KAT exercise a real winning ticket.
-    fn target_hitting_canonical_moe_block() -> (CanonicalBlock, [u8; 32]) {
+    fn target_hitting_reference_moe_block() -> (ReferenceBlock, [u8; 32]) {
         let params = MatmulParams {
             m: 64,
             k: 1024,
@@ -936,7 +1029,7 @@ mod jet_tests {
             .find_map(|attempt| {
                 let mut commit = [0u8; 32];
                 commit[..8].copy_from_slice(&attempt.to_le_bytes());
-                let jackpot = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 0)
+                let jackpot = evaluate_reference_moe_jackpot(&params, 8, 2, 1, commit, 0)
                     .expect("evaluate canonical MoE ticket");
                 attempt_wins(&jackpot, &target, work_factor)
                     .expect("max consensus target is minable")
@@ -944,7 +1037,7 @@ mod jet_tests {
             })
             .expect("canonical commitment search must find a target-winning ticket");
         (
-            prove_canonical_moe_block(&params, 8, 2, 1, commit)
+            prove_reference_moe_block(&params, 8, 2, 1, commit)
                 .expect("prove target-winning canonical MoE block"),
             target,
         )
@@ -1053,7 +1146,7 @@ mod jet_tests {
     #[test]
     #[ignore = "real MoE compact proof (~25s); opt-in"]
     fn ai_pow_verify_jet_core_accepts_real_block_and_rejects_tampering() {
-        let (block, target) = target_hitting_canonical_moe_block();
+        let (block, target) = target_hitting_reference_moe_block();
 
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
             &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
@@ -1088,6 +1181,12 @@ mod jet_tests {
                 .expect("decode artifact noun");
 
         assert!(
+            ai_pow_compact_recursive_certificate_from_node(&artifact.certificate.certificate)
+                .expect("decode honest MoE compact certificate")
+                .has_canonical_pow_witnesses(),
+            "honest MoE prover must satisfy post-activation admission",
+        );
+        assert!(
             matches!(
                 ai_pow_verify_core(&artifact, commit, target, &setup),
                 Ok(true)
@@ -1119,17 +1218,16 @@ mod jet_tests {
         );
     }
 
-    /// SLIM-CONTEXT SOUNDNESS KAT (real proof, ~25s): dropping the prove-only raw
-    /// preprocessed columns from a boot verifier setup (via `into_verifier_only` on
-    /// the rebuild path) leaves verification BIT-IDENTICAL. Prove one real block, then
+    /// Dropping raw columns and the PCS prover tree from a boot verifier setup
+    /// leaves verification unchanged. Prove one real block, then
     /// verify a real artifact and a wrong-commit artifact against BOTH the full proved
-    /// context (retains the raw columns) and the slimmed rebuilt context (raw columns
-    /// dropped), asserting identical accept/reject outcomes and an identical
+    /// context (retains prover data) and the slimmed rebuilt context after a disk
+    /// serialization round trip, asserting identical outcomes and an identical
     /// verifier-key digest. Pins that the RSS trim does not change consensus results.
     #[test]
     #[ignore = "real MoE compact proof (~25s); opt-in"]
     fn slimmed_verifier_only_context_verifies_identically() {
-        let (block, target) = target_hitting_canonical_moe_block();
+        let (block, target) = target_hitting_reference_moe_block();
         let commit = block.commit;
 
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
@@ -1156,8 +1254,7 @@ mod jet_tests {
             context: block.run.verifier_context,
             digest_bytes: full_digest.clone(),
         };
-        // SLIM context: rebuilt from the seed — `into_verifier_only` drops the raw
-        // columns on this (verify-only) rebuild path.
+        // SLIM context: the verify-only rebuild drops raw columns and the PCS tree.
         let slim_setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed)
             .expect("rebuild slimmed setup from seed");
 
@@ -1168,13 +1265,10 @@ mod jet_tests {
         );
         assert_eq!(
             slim_setup.digest_bytes, full_digest,
-            "verifier-key digest must be UNCHANGED by dropping the raw columns",
+            "verifier-key digest must be unchanged by dropping prover data",
         );
 
-        // Confirm the slimming ACTUALLY happened (the rebuild's `Arc::try_unwrap`
-        // succeeded and dropped the raw columns): the slimmed context serializes
-        // strictly smaller than the full proved one. Deterministic (no RSS noise) and
-        // reports the exact prove-only-column bytes dropped for this bucket.
+        // Measure serialized size independently of allocator retention/RSS noise.
         let full_ser =
             bincode::serde::encode_to_vec(&full_setup.context, bincode::config::standard())
                 .expect("serialize full context")
@@ -1185,15 +1279,20 @@ mod jet_tests {
                 .len();
         eprintln!(
             "context serialized: full {full_ser} B, slim {slim_ser} B (dropped {} B of \
-             prove-only columns at 2^{})",
+             prover data at 2^{})",
             full_ser.saturating_sub(slim_ser),
             (slim_setup.trace_height as u64).trailing_zeros(),
         );
         assert!(
-            slim_ser < full_ser,
-            "the slimmed verify-only context must drop the prove-only columns (got full={full_ser} \
-             slim={slim_ser})",
+            slim_ser < 64 * 1024 && slim_ser * 1000 < full_ser,
+            "verifier metadata must be small after removing the tree (full={full_ser}, slim={slim_ser})",
         );
+        let encoded = bincode::serde::encode_to_vec(&slim_setup, bincode::config::standard())
+            .expect("serialize compact setup");
+        let (slim_setup, used): (AiPowVerifierSetup, usize) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                .expect("deserialize compact setup");
+        assert_eq!(used, encoded.len());
 
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
@@ -1247,7 +1346,7 @@ mod jet_tests {
             !crate::ai_pow_verifier_setup_initialized(),
             "run in a fresh process (installs the process-global setup)",
         );
-        let (block, target) = target_hitting_canonical_moe_block();
+        let (block, target) = target_hitting_reference_moe_block();
         let commit = block.commit;
         let setup_key = VerifierSetupShapeKey::from_zk_params(
             &block.certificate.zk_params, block.certificate.trace_height,
@@ -1337,7 +1436,7 @@ mod jet_tests {
             difficulty_bits: 0,
         };
         let block =
-            prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT).expect("prove");
+            prove_reference_moe_block(&params, 8, 2, 1, REFERENCE_SETUP_COMMIT).expect("prove");
         let setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed).expect("build");
         let setup_key = setup.shape_key();
         let digest = setup.digest_bytes.clone();
@@ -1374,7 +1473,9 @@ mod jet_tests {
             eprintln!("skip: verifier setup already initialized in this process");
             return;
         }
-        let cache_dir = std::env::temp_dir().join("aipow-rss-cache");
+        let cache_dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
         let cache_path = crate::setup::verifier_setup_seed_cache_path(&cache_dir);
         if !cache_path.exists() {
             eprintln!(
@@ -1385,28 +1486,12 @@ mod jet_tests {
         }
         let seeds =
             crate::setup::load_verifier_setup_seeds(&cache_path).expect("load stable setup seeds");
-        let mut setup = match seeds.into_iter().find_map(|seed| {
-            let rebuilt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::setup::rebuild_verifier_setup_from_seed(seed)
-            }));
-            match rebuilt {
-                Ok(Ok(setup)) => Some(setup),
-                Ok(Err(e)) => {
-                    eprintln!("skip seed: cached verifier setup is not rebuildable here: {e}");
-                    None
-                }
-                Err(_) => {
-                    eprintln!("skip seed: cached verifier setup rebuild panicked");
-                    None
-                }
-            }
-        }) {
-            Some(setup) => setup,
-            None => {
-                eprintln!("skip: no cached verifier setup seed rebuilt successfully");
-                return;
-            }
-        };
+        let seed = seeds
+            .into_iter()
+            .min_by_key(|seed| seed.trace_height())
+            .expect("stable setup cache contains a seed");
+        let mut setup =
+            crate::setup::rebuild_verifier_setup_from_seed(seed).expect("rebuild cached setup");
         let setup_key = setup.shape_key();
         let committed_digest = setup.digest_bytes.clone();
         setup.digest_bytes[0] ^= 0xff;
@@ -1414,6 +1499,10 @@ mod jet_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ctx_path =
             crate::setup::verifier_context_file_path(tmp.path(), setup_key, &committed_digest);
+        // The path helper names the production namespace; unlike the installer,
+        // it does not create the ai-pow subdirectory in this isolated fixture.
+        std::fs::create_dir_all(ctx_path.parent().expect("context cache directory"))
+            .expect("create context cache directory");
         let bytes = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
             .expect("serialize divergent setup");
         std::fs::write(&ctx_path, &bytes).unwrap();
@@ -1430,11 +1519,10 @@ mod jet_tests {
         );
     }
 
-    /// PRODUCTION BOOT + RSS KAT (~1–2 min + large disk; needs the stable seed cache):
-    /// run the real `install_or_build_verifier_setup` — build all production contexts
-    /// to disk at boot, inject disk-paged — then page through every key with `cap=2`
-    /// (a) each pages in + resolves, and (b) standing RSS stays bounded to ~2 contexts,
-    /// NOT the multi-GB all-resident table. Sets the process-global setup; run alone.
+    /// Run the production installer using existing seeds, building or reusing
+    /// compact context files, then resolve every versioned key with cap=2. Run in
+    /// a fresh process. Reports process RSS, including allocator-retained rebuild
+    /// memory; serialized context size is measured by the full-table gate.
     #[test]
     #[ignore = "builds all production contexts to disk + measures paged RSS; run alone"]
     fn install_or_build_disk_paged_boot_and_rss() {
@@ -1454,10 +1542,10 @@ mod jet_tests {
                 .unwrap_or(0)
                 / 1024
         }
-        // Use the stable dir (has the seed cache) DIRECTLY so the built context files
-        // persist across runs: the first run builds every context file, and later runs
-        // find the files and reuse them.
-        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        // The first run builds v3 contexts from v2 seeds; later runs reuse them.
+        let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
         let src_cache = crate::setup::verifier_setup_seed_cache_path(&dir);
         if !src_cache.exists() {
             eprintln!("skip: no stable seed cache at {}", src_cache.display());
@@ -1467,10 +1555,19 @@ mod jet_tests {
         let seeds = crate::setup::load_verifier_setup_seeds(&src_cache).expect("load seeds");
         let reuse = seeds.iter().all(|s| {
             let key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
-                .expect("valid seed key");
+                .expect("valid seed key")
+                .for_rules(s.rules);
             crate::setup::verifier_context_file_path(&dir, key, &s.verifier_key_digest_bytes)
                 .exists()
         });
+        let keys: Vec<_> = seeds
+            .iter()
+            .map(|s| {
+                VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
+                    .expect("valid seed key")
+                    .for_rules(s.rules)
+            })
+            .collect();
         let expected_cap = 2usize;
         drop(seeds);
         std::env::set_var(
@@ -1483,20 +1580,20 @@ mod jet_tests {
         let n = crate::setup::install_or_build_verifier_setup(&dir, &[])
             .expect("install_or_build (disk-paged)");
         let buckets = crate::setup::production_verifier_setup_buckets();
-        assert_eq!(n, buckets.len(), "all production buckets installed");
+        assert_eq!(n, 2 * buckets.len(), "both rule versions installed");
+        assert_eq!(n, keys.len());
         let after_boot = rss_mb();
         eprintln!(
             "boot mode: {}; after boot (contexts on disk, none paged in): RSS {after_boot} MB (base {base})",
-            if reuse { "REUSE (files existed)" } else { "BUILD (first run)" },
+            if reuse {
+                "REUSE (files existed)"
+            } else {
+                "BUILD (first run)"
+            },
         );
 
         // Page every key in, with cap=2 — RSS must stay ~2 contexts, not the full table.
-        for b in buckets {
-            let h = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
-                .expect("cheap trace height");
-            let sx_bound =
-                (b.params.k / b.params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX;
-            let key = VerifierSetupShapeKey::new(h, sx_bound);
+        for key in keys {
             let setup = expect_found(crate::ai_pow_verifier_setup_for(key));
             assert_eq!(setup.shape_key(), key);
         }
@@ -1534,7 +1631,9 @@ mod jet_tests {
                 .unwrap_or(0)
                 / 1024
         }
-        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
         let cache = crate::setup::verifier_setup_seed_cache_path(&dir);
         if !cache.exists() {
             eprintln!("skip: no stable seed cache");
@@ -1544,7 +1643,8 @@ mod jet_tests {
         seeds.sort_by_key(|s| s.trace_height());
         let big = seeds.pop().expect("a seed");
         let big_key = VerifierSetupShapeKey::from_zk_params(&big.zk_params, big.trace_height())
-            .expect("valid seed key");
+            .expect("valid seed key")
+            .for_rules(big.rules);
         let ctx_path =
             crate::setup::verifier_context_file_path(&dir, big_key, &big.verifier_key_digest_bytes);
         if !ctx_path.exists() {
@@ -1584,24 +1684,30 @@ mod jet_tests {
     }
 
     /// LAZY BOOT DIGEST CHECK (fast, no proving; needs the generated seed cache): the
-    /// real production seed cache's cached per-bucket digests hash to the committed v0
+    /// real production seed cache's cached per-bucket digests hash to the committed v1
     /// constant via the seed-only path — i.e. the lazy boot check ACCEPTS a valid
-    /// cache without rebuilding.
-    /// mirroring the rebuilt-table digest check. Skips if the cache is absent.
+    /// versioned cache without rebuilding, mirroring the rebuilt-table digest check.
+    /// Skips if the cache is absent.
     #[test]
     #[ignore = "needs the generated seed cache (a prior run); validates the lazy boot digest check"]
     fn stable_cache_seeds_pass_lazy_boot_digest_check() {
-        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
         let path = crate::setup::verifier_setup_seed_cache_path(&dir);
         if !path.exists() {
             eprintln!("skip: no stable seed cache at {}", path.display());
             return;
         }
         let seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
-        assert_eq!(seeds.len(), 13, "full production shape-key cache");
+        assert_eq!(
+            setup_seed_keys(&seeds),
+            production_setup_seed_keys(),
+            "full production versioned shape-key cache",
+        );
         crate::table_digest::verify_verifier_setup_seed_table_digest(&seeds)
-            .expect("stable-cache seeds must hash to the committed v0 digest (no rebuild)");
-        eprintln!("stable cache seeds pass the lazy boot digest check ✓");
+            .expect("stable-cache seeds must hash to the committed v1 digest (no rebuild)");
+        eprintln!("stable cache seeds pass the lazy boot digest check");
     }
 
     /// KAT (real proving, ~25s): the ACCEPTANCE path with the block commitment
@@ -1649,7 +1755,7 @@ mod jet_tests {
                     ],
                 );
                 let commit = commit_from_noun(&mut stack, commit_noun);
-                let jackpot = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 0)
+                let jackpot = evaluate_reference_moe_jackpot(&params, 8, 2, 1, commit, 0)
                     .expect("evaluate noun-derived canonical ticket");
                 attempt_wins(&jackpot, &target, work_factor)
                     .expect("max consensus target is minable")
@@ -1658,7 +1764,7 @@ mod jet_tests {
             .expect("noun-derived commitment search must find a target-winning ticket");
 
         // Prove a real cert bound to that noun-derived commit (the miner's job).
-        let block = prove_canonical_moe_block(&params, 8, 2, 1, commit)
+        let block = prove_reference_moe_block(&params, 8, 2, 1, commit)
             .expect("prove canonical MoE block for the noun-derived commit");
         assert_eq!(
             block.commit, commit,
@@ -1731,7 +1837,7 @@ mod jet_tests {
     fn moe_verifier_setup_seed_roundtrip_rebuilds_working_setup() {
         use crate::setup::rebuild_verifier_setup_from_seed;
 
-        let (block, target) = target_hitting_canonical_moe_block();
+        let (block, target) = target_hitting_reference_moe_block();
         let commit = block.commit;
 
         // Serialize the SMALL seed; assert it is small (vs the ~866 MB context).
@@ -1839,13 +1945,22 @@ mod jet_tests {
     /// is what a fresh node does on first boot when it has no cache. Does NOT touch
     /// the global setup OnceCell (so it can't perturb the cheap boot-installer tests).
     #[test]
-    #[ignore = "real MoE compact proof + generate/cache/load (~40s); opt-in"]
+    #[ignore = "real compact proofs + generate/cache/load (~40s); opt-in"]
     fn boot_generate_and_cache_one_bucket_roundtrips() {
         let buckets = crate::setup::production_verifier_setup_buckets();
         let shape = *buckets.first().expect("at least one production bucket");
-        let expected_h =
-            crate::setup::canonical_moe_trace_height(&shape.params, shape.hw, shape.e, shape.top_k)
-                .expect("cheap predicted height");
+        let expected_h = if shape.dense {
+            let schedule = ai_pow_zk::canonical::StripIndexSchedule {
+                a_indices: (0..shape.params.tile).collect(),
+                b_indices: (0..shape.params.tile).collect(),
+            };
+            ai_pow::zk_bridge::expected_layer0_rows_for_strip_schedule(&shape.params, &schedule)
+                .expect("dense bucket trace height")
+                .required_trace_len()
+        } else {
+            crate::setup::reference_moe_trace_height(&shape.params, shape.hw, shape.e, shape.top_k)
+                .expect("cheap predicted height")
+        };
 
         let tmp = std::env::temp_dir().join(format!("ai-pow-genboot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1872,7 +1987,7 @@ mod jet_tests {
         // Load + rebuild (no proving) — the fast subsequent-boot path.
         let table = crate::setup::load_verifier_setup_table(&path).expect("load + rebuild table");
         let _ = std::fs::remove_dir_all(&tmp);
-        assert_eq!(table.len(), 1, "one-bucket table");
+        assert_eq!(table.len(), 2, "both rule versions of one shape");
         assert_eq!(
             table[0].trace_height, expected_h,
             "generated+rebuilt bucket lands at the matrix-free predicted height",
@@ -1882,14 +1997,19 @@ mod jet_tests {
     /// KAT (two real proofs, ~80s): canonical setup generation has a deterministic
     /// serialized seed, not merely a deterministic verifier-key digest.
     #[test]
-    #[ignore = "two real MoE compact proofs (~80s); opt-in"]
+    #[ignore = "two real compact proofs (~80s); opt-in"]
     fn verifier_setup_seed_bytes_are_deterministic() {
         let buckets = crate::setup::production_verifier_setup_buckets();
         let shape = *buckets.first().expect("at least one production bucket");
-        let first = build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
-            .expect("first canonical seed");
-        let second = build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
-            .expect("second canonical seed");
+        let build_seed = || {
+            if shape.dense {
+                crate::setup::build_verifier_setup_seed_dense(&shape.params)
+            } else {
+                build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
+            }
+        };
+        let first = build_seed().expect("first canonical seed");
+        let second = build_seed().expect("second canonical seed");
 
         let first_bytes = bincode::serde::encode_to_vec(&first, bincode::config::standard())
             .expect("serialize first canonical seed");
@@ -1911,7 +2031,7 @@ mod jet_tests {
                     .unwrap()
                     .required_trace_len()
             } else {
-                crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k).unwrap()
+                crate::setup::reference_moe_trace_height(&b.params, b.hw, b.e, b.top_k).unwrap()
             };
             eprintln!(
                 "2^{}: m={} k={} n={} r={} tile={} | dense={} hw={} e={} top_k={} ns={}",
@@ -1940,125 +2060,135 @@ mod jet_tests {
     #[test]
     #[ignore = "generates the full production shape-key table 2^13..2^19; opt-in — closes C4"]
     fn boot_generate_full_production_table() {
-        use std::collections::{BTreeMap, BTreeSet};
-        let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
-        let buckets = crate::setup::production_verifier_setup_buckets();
-        assert_eq!(buckets.len(), 14, "expected 14 production shape keys");
-
-        let mut seeds = Vec::new();
-        let mut total_bytes = 0usize;
+        use crate::setup::*;
+        use crate::table_digest::*;
+        let buckets = production_verifier_setup_buckets();
+        assert_eq!(buckets.len(), 14);
+        let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("ai-pow-fulltable-{}", std::process::id()))
+            });
+        let path = verifier_setup_seed_cache_path(&dir);
+        // Optional retained checkpoints make the expensive release gate resumable.
+        let mut seeds = if path.exists() {
+            load_verifier_setup_seeds(&path).expect("read generation checkpoint")
+        } else {
+            Vec::new()
+        };
         for (i, shape) in buckets.iter().enumerate() {
-            let seed = if shape.dense {
-                crate::setup::build_verifier_setup_seed_dense(&shape.params)
-            } else {
-                crate::setup::build_verifier_setup_seed(
-                    &shape.params, shape.hw, shape.e, shape.top_k,
-                )
+            for rules in [ProofRules::Legacy, ProofRules::Hardened] {
+                let index = i * 2 + usize::from(rules == ProofRules::Hardened);
+                if index < seeds.len() {
+                    continue;
+                }
+                let seed = if shape.dense {
+                    build_verifier_setup_seed_dense_with_rules(&shape.params, rules)
+                } else {
+                    build_verifier_setup_seed_with_rules(
+                        &shape.params, shape.hw, shape.e, shape.top_k, rules,
+                    )
+                }
+                .unwrap_or_else(|e| panic!("bucket {i} {rules:?}: {e}"));
+                eprintln!(
+                    "generated bucket {i} {rules:?}: 2^{} key={:?}",
+                    seed.trace_height().trailing_zeros(),
+                    seed.verifier_key_digest_bytes
+                );
+                seeds.push(seed);
+                save_verifier_setup_seeds(&path, &seeds).expect("save generation checkpoint");
             }
-            .unwrap_or_else(|e| panic!("bucket {i} generation failed: {e}"));
-            let sz = bincode::serde::encode_to_vec(&seed, bincode::config::standard())
-                .expect("serialize seed")
-                .len();
-            total_bytes += sz;
-            eprintln!(
-                "bucket {i}: trace_height=2^{} seed={} bytes (cum {:.1} MiB)",
-                seed.trace_height().trailing_zeros(),
-                sz,
-                total_bytes as f64 / (1024.0 * 1024.0),
-            );
-            seeds.push(seed);
         }
-        eprintln!(
-            "FULL TABLE: {} buckets, total seed cache = {:.1} MiB",
-            seeds.len(),
-            total_bytes as f64 / (1024.0 * 1024.0),
-        );
-
-        let mut by_height: BTreeMap<u32, BTreeSet<bool>> = BTreeMap::new();
-        for s in &seeds {
-            let key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
-                .expect("valid seed key");
-            by_height
-                .entry(s.trace_height().trailing_zeros())
-                .or_default()
-                .insert(key.sx_bound);
-        }
-        let both_sx_classes: BTreeSet<bool> = [false, true].into_iter().collect();
-        for db in 13u32..=cap_db {
-            assert_eq!(
-                by_height.get(&db),
-                Some(&both_sx_classes),
-                "2^{db} must cover both sx-bound classes"
-            );
-        }
-
-        // Round-trip the whole set through a data-dir cache file + rebuild.
-        let tmp = std::env::temp_dir().join(format!("ai-pow-fulltable-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        let path = crate::setup::verifier_setup_seed_cache_path(&tmp);
-        crate::setup::save_verifier_setup_seeds(&path, &seeds).expect("save table");
-        let cache_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        eprintln!(
-            "cache file on disk = {:.1} MiB",
-            cache_bytes as f64 / (1024.0 * 1024.0)
-        );
-        let table = crate::setup::load_verifier_setup_table(&path).expect("load+rebuild table");
-        let _ = std::fs::remove_dir_all(&tmp);
-        assert_eq!(table.len(), 14, "rebuilt table has 14 shape keys");
-        let table_keys: BTreeSet<VerifierSetupShapeKey> =
-            table.iter().map(|s| s.shape_key()).collect();
-        let seed_keys: BTreeSet<VerifierSetupShapeKey> = seeds
-            .iter()
-            .map(|s| {
-                VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
-                    .expect("valid seed key")
-            })
-            .collect();
+        let seeds = load_verifier_setup_seeds(&path).expect("round-trip complete seed table");
+        assert_eq!(seeds.len(), 28);
         assert_eq!(
-            table_keys, seed_keys,
-            "rebuilt table covers the same shape keys"
+            legacy_verifier_setup_seed_table_digest(&seeds),
+            AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST,
+            "all historical verifier keys must retain their original consensus digest"
         );
-
-        // CONSENSUS FINGERPRINT (v0): compute the table digest over the rebuilt table
-        // — the exact generate -> cache -> load path a fresh node runs at boot. Print
-        // it so the constant can be pinned; once pinned, re-running this test (which
-        // re-generates from scratch) also RE-VALIDATES run-to-run determinism, since
-        // an independent generation must reproduce the pinned digest.
-        let table_digest =
-            crate::table_digest::verifier_setup_table_digest(&table).expect("v0 table digest");
-        eprintln!(
-            "V0 VERIFIER-SETUP TABLE DIGEST = {}",
-            crate::table_digest::hex32(&table_digest),
-        );
-        eprintln!(
-            "  pin: AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST = [{}];",
-            table_digest
-                .iter()
-                .map(|b| format!("0x{b:02x}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        if crate::table_digest::v0_digest_is_pinned() {
-            assert_eq!(
-                table_digest,
-                crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST,
-                "independently-generated table digest must match the pinned v0 consensus constant \
-                 (determinism / consensus-parameter check)",
+        let digest = verifier_setup_seed_table_digest(&seeds).expect("versioned table fingerprint");
+        eprintln!("V1 VERIFIER-SETUP TABLE DIGEST = {}", hex32(&digest));
+        eprintln!("pin: {:?}", digest);
+        // Rebuild sequentially to limit temporary prover working memory.
+        let mut keys = std::collections::BTreeSet::new();
+        let mut context_bytes = 0usize;
+        for seed in seeds {
+            let expected = seed.verifier_key_digest_bytes.clone();
+            let setup = rebuild_verifier_setup_from_seed(seed).expect("rebuild versioned seed");
+            let rebuilt = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+                &setup
+                    .context
+                    .validate_setup_binding()
+                    .expect("rebuilt setup binding"),
             );
+            assert_eq!(expected, rebuilt);
+            assert!(keys.insert(setup.shape_key()), "duplicate versioned shape");
+            let encoded = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
+                .expect("serialize rebuilt setup");
+            assert!(
+                encoded.len() < 64 * 1024,
+                "prover tree must not be retained"
+            );
+            context_bytes += encoded.len();
+            let (decoded, used): (AiPowVerifierSetup, usize) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                    .expect("deserialize rebuilt setup");
+            assert_eq!(used, encoded.len());
+            assert_eq!(decoded.shape_key(), setup.shape_key());
+            assert_eq!(
+                decoded.context.validate_setup_binding().unwrap(),
+                setup.context.validate_setup_binding().unwrap(),
+            );
+            eprintln!("rebuilt {:?}", setup.shape_key());
         }
+        eprintln!("ALL 28 VERIFIER CONTEXTS: {context_bytes} serialized bytes");
+        for rules in [ProofRules::Legacy, ProofRules::Hardened] {
+            for log2 in 13..=19 {
+                for sx in [false, true] {
+                    assert!(keys.contains(&VerifierSetupShapeKey::with_rules(
+                        1 << log2,
+                        sx,
+                        rules
+                    )));
+                }
+            }
+        }
+        assert_eq!(
+            digest, AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST,
+            "pin the measured v1 table before release"
+        );
     }
 
     fn production_setup_seed_keys() -> std::collections::BTreeSet<VerifierSetupShapeKey> {
         crate::setup::production_verifier_setup_buckets()
             .iter()
-            .map(|bucket| {
-                let trace_height = crate::setup::canonical_moe_trace_height(
-                    &bucket.params, bucket.hw, bucket.e, bucket.top_k,
-                )
-                .expect("production setup bucket has a trace height");
-                let sx_bound = (bucket.params.k / bucket.params.noise_rank) as usize
-                    <= ai_pow::params::STRIPE_MAX;
-                VerifierSetupShapeKey::new(trace_height, sx_bound)
+            .flat_map(|bucket| {
+                let (trace_height, sx_bound) = if bucket.dense {
+                    let schedule = ai_pow_zk::canonical::StripIndexSchedule {
+                        a_indices: (0..bucket.params.tile).collect(),
+                        b_indices: (0..bucket.params.tile).collect(),
+                    };
+                    let budget = ai_pow::zk_bridge::expected_layer0_rows_for_strip_schedule(
+                        &bucket.params, &schedule,
+                    )
+                    .expect("dense bucket trace height");
+                    (
+                        budget.required_trace_len(),
+                        (bucket.params.num_stripes() as usize) <= ai_pow::params::STRIPE_MAX,
+                    )
+                } else {
+                    let height = crate::setup::reference_moe_trace_height(
+                        &bucket.params, bucket.hw, bucket.e, bucket.top_k,
+                    )
+                    .expect("production setup bucket trace height");
+                    (
+                        height,
+                        (bucket.params.k / bucket.params.noise_rank) as usize
+                            <= ai_pow::params::STRIPE_MAX,
+                    )
+                };
+                [ProofRules::Legacy, ProofRules::Hardened]
+                    .map(|rules| VerifierSetupShapeKey::with_rules(trace_height, sx_bound, rules))
             })
             .collect()
     }
@@ -2071,6 +2201,7 @@ mod jet_tests {
             .map(|seed| {
                 VerifierSetupShapeKey::from_zk_params(&seed.zk_params, seed.trace_height())
                     .expect("cached setup seed has a valid shape key")
+                    .for_rules(seed.rules)
             })
             .collect()
     }
@@ -2153,7 +2284,9 @@ mod jet_tests {
                 .unwrap_or(0)
                 / 1024
         }
-        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
         let path = crate::setup::verifier_setup_seed_cache_path(&dir);
         let seeds = load_stable_production_setup_seeds(&path);
         let cache_mb =
@@ -2189,20 +2322,20 @@ mod jet_tests {
             total.saturating_sub(base),
         );
         // CONSENSUS INVARIANCE: dropping the prove-only raw columns must NOT change the
-        // committed v0 table digest (the digest is over the verifier-key, not the
+        // committed v1 table digest (the digest is over the verifier-key, not the
         // columns). Re-verify against the pinned constant on the slimmed table.
         let table_keys: std::collections::BTreeSet<_> =
             table.iter().map(|setup| setup.shape_key()).collect();
-        if table_keys == production_setup_seed_keys() && crate::table_digest::v0_digest_is_pinned()
+        if table_keys == production_setup_seed_keys() && crate::table_digest::v1_digest_is_pinned()
         {
             let digest =
                 crate::table_digest::verifier_setup_table_digest(&table).expect("table digest");
             assert_eq!(
                 digest,
-                crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST,
-                "slimmed (verifier-only) table digest must equal the pinned v0 constant",
+                crate::table_digest::AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST,
+                "slimmed (verifier-only) table digest must equal the pinned v1 constant",
             );
-            eprintln!("v0 table digest UNCHANGED by slimming ✓");
+            eprintln!("v1 table digest UNCHANGED by slimming ✓");
         }
         std::hint::black_box(&table);
     }
@@ -2216,7 +2349,9 @@ mod jet_tests {
     #[ignore = "rebuilds the largest bucket, then times serialize/read/deserialize; opt-in"]
     fn measure_context_page_in_latency() {
         use std::time::Instant;
-        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
         let path = crate::setup::verifier_setup_seed_cache_path(&dir);
         let mut seeds = load_stable_production_setup_seeds(&path);
         seeds.sort_by_key(|s| s.trace_height());

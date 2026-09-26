@@ -1,6 +1,6 @@
 ::  tests/dumb/mod/unit/ai-pow-jet.hoon
 ::
-::    Validates the AI-PoW consensus verify jet (`~/ %ai-pow-verify` in
+::    Validates the AI-PoW consensus verify jet (`~/ %ai-pow-verify-v2` in
 ::    /common/pow, implemented by crate `ai-pow-jets`, Branch b: Hoon body is a
 ::    fail-safe `!!`, the Rust jet is the real impl).
 ::
@@ -115,9 +115,45 @@
 ::  the jet executes; a mis-chained hint would run the stub `!!` and crash.
 ++  test-ai-pow-verify-jet-fires
   ^-  tang
-  =/  result=?  (ai-pow-verify:mine [%ai-pow 0 0] 0 0)
+  =/  result=?  (ai-pow-verify:mine %legacy [%ai-pow 0 0] 0 0)
   (expect-eq !>(%.n) !>(result))
 ::
+++  test-ai-pow-verify-hardened-jet-fires
+  ^-  tang
+  =/  result=?  (ai-pow-verify:mine %hardened [%ai-pow 0 0] 0 0)
+  (expect-eq !>(%.n) !>(result))
+::
+++  test-ai-pow-verifier-rules-follow-block-height
+  ^-  tang
+  ;:  weld
+    (expect-eq !>(%legacy) !>((ai-pow-proof-rules:page:t 153.500)))
+    (expect-eq !>(%legacy) !>((ai-pow-proof-rules:page:t 154.499)))
+    (expect-eq !>(%hardened) !>((ai-pow-proof-rules:page:t 154.500)))
+    (expect-eq !>(%hardened) !>((ai-pow-proof-rules:page:t 154.501)))
+    (expect-eq !>(%legacy) !>((ai-pow-proof-rules:page:t 154.499)))
+  ==
+::
+++  test-ai-pow-canonical-witnesses-activation
+  ^-  tang
+  ;:  weld
+    (expect-eq !>(%.n) !>((ai-pow-canonical-witnesses-required:page:t 153.500)))
+    (expect-eq !>(%.n) !>((ai-pow-canonical-witnesses-required:page:t 154.499)))
+    (expect-eq !>(%.y) !>((ai-pow-canonical-witnesses-required:page:t 154.500)))
+    (expect-eq !>(%.y) !>((ai-pow-canonical-witnesses-required:page:t 154.501)))
+  ==
+::
+++  test-ai-pow-hardening-activation
+  ^-  tang
+  ;:  weld
+    (expect-eq !>(154.500) !>(harden-phase:page:t))
+    (expect-eq !>(%.n) !>((ai-pow-hardening-required:page:t 153.500)))
+    (expect-eq !>(%.n) !>((ai-pow-hardening-required:page:t 154.499)))
+    (expect-eq !>(%.y) !>((ai-pow-hardening-required:page:t 154.500)))
+    (expect-eq !>(%.y) !>((ai-pow-hardening-required:page:t 154.501)))
+    (expect-eq !>(%.n) !>((ai-pow-hardening-required:page:t 154.499)))
+  ==
+
+:::
 ::  Integration: a height-1 v1 page carrying a malformed `%ai-pow` artifact
 ::  travels the live consensus path. Its discriminator is valid with
 ::  ai-pow-activation-height=0, but the envelope fails the structural gate

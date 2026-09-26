@@ -13,7 +13,7 @@ use ai_pow::tile_hash::hash_le_target;
 use anyhow::{bail, Result};
 use rayon::prelude::*;
 
-use crate::canonical::PreparedCanonicalMoeTemplate;
+use crate::reference::PreparedReferenceMoeTemplate;
 use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
 
 const NO_WINNER: u32 = u32::MAX;
@@ -83,7 +83,7 @@ unsafe extern "C" {
 pub struct GpuSearchBackend {
     device_ordinal: usize,
     batch_attempts: u64,
-    dispatch: Mutex<CanonicalDispatch>,
+    dispatch: Mutex<ReferenceDispatch>,
 }
 
 /// One ordered CUDA search spread across independent devices.
@@ -94,8 +94,8 @@ pub struct MultiGpuSearchBackend {
 }
 
 #[derive(Default)]
-struct CanonicalDispatch {
-    template: Option<Arc<PreparedCanonicalMoeTemplate>>,
+struct ReferenceDispatch {
+    template: Option<Arc<PreparedReferenceMoeTemplate>>,
     session: Option<CudaSession>,
 }
 
@@ -142,7 +142,7 @@ impl CudaSession {
     }
 
     fn canonical(
-        template: &PreparedCanonicalMoeTemplate,
+        template: &PreparedReferenceMoeTemplate,
         max_attempts: u32,
         device_ordinal: usize,
     ) -> Result<Self, SearchBackendError> {
@@ -211,7 +211,7 @@ impl CudaSession {
             .collect())
     }
 
-    fn search_canonical(
+    fn search_reference(
         &self,
         start: u32,
         attempts: u32,
@@ -238,8 +238,8 @@ impl CudaSession {
     }
 
     #[cfg(test)]
-    fn debug_canonical(&self, extranonce: u32) -> Result<CanonicalDebug, SearchBackendError> {
-        let mut debug = CanonicalDebug::default();
+    fn debug_reference(&self, extranonce: u32) -> Result<ReferenceDebug, SearchBackendError> {
+        let mut debug = ReferenceDebug::default();
         // SAFETY: every output buffer has the fixed ABI length.
         let status = unsafe {
             ai_pow_cuda_v3_session_debug(
@@ -307,7 +307,7 @@ impl GpuSearchBackend {
         Ok(Self {
             device_ordinal,
             batch_attempts,
-            dispatch: Mutex::new(CanonicalDispatch::default()),
+            dispatch: Mutex::new(ReferenceDispatch::default()),
         })
     }
 
@@ -447,9 +447,9 @@ impl SearchBackend for GpuSearchBackend {
         Ok(None)
     }
 
-    fn search_canonical(
+    fn search_reference(
         &self,
-        template: Arc<PreparedCanonicalMoeTemplate>,
+        template: Arc<PreparedReferenceMoeTemplate>,
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError> {
         let start = u32::try_from(batch.start)
@@ -480,7 +480,7 @@ impl SearchBackend for GpuSearchBackend {
             .session
             .as_ref()
             .expect("canonical session is initialized")
-            .search_canonical(start, attempts, &batch.threshold)?
+            .search_reference(start, attempts, &batch.threshold)?
         {
             Some(winner) => winner,
             None => return Ok(None),
@@ -533,9 +533,9 @@ impl SearchBackend for MultiGpuSearchBackend {
             .try_reduce(|| None, |left, right| Ok(lower_winner(left, right)))
     }
 
-    fn search_canonical(
+    fn search_reference(
         &self,
-        template: Arc<PreparedCanonicalMoeTemplate>,
+        template: Arc<PreparedReferenceMoeTemplate>,
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError> {
         let active = active_device_count(batch, self.backends.len());
@@ -543,7 +543,7 @@ impl SearchBackend for MultiGpuSearchBackend {
             .par_iter()
             .enumerate()
             .map(|(index, backend)| {
-                backend.search_canonical(
+                backend.search_reference(
                     Arc::clone(&template),
                     partition_for_device(batch, active, index),
                 )
@@ -558,7 +558,7 @@ impl SearchBackend for MultiGpuSearchBackend {
 
 #[cfg(test)]
 #[derive(Debug)]
-struct CanonicalDebug {
+struct ReferenceDebug {
     kappa: [u8; 32],
     h_a: [u8; 32],
     h_b: [u8; 32],
@@ -571,7 +571,7 @@ struct CanonicalDebug {
 }
 
 #[cfg(test)]
-impl Default for CanonicalDebug {
+impl Default for ReferenceDebug {
     fn default() -> Self {
         Self {
             kappa: [0; 32],
@@ -593,7 +593,7 @@ mod tests {
 
     use super::*;
 
-    fn canonical_params() -> MatmulParams {
+    fn reference_params() -> MatmulParams {
         MatmulParams {
             m: 64,
             k: 1024,
@@ -661,20 +661,20 @@ mod tests {
         assert_eq!(lowest.jackpot_hash, [1; 32]);
     }
     #[test]
-    fn multi_gpu_canonical_search_returns_global_lowest_winner() {
+    fn multi_gpu_reference_search_returns_global_lowest_winner() {
         let device_count =
             GpuSearchBackend::available_device_count().expect("visible CUDA devices");
         if device_count < 2 {
             return;
         }
         let template = Arc::new(
-            PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x4d; 32])
+            PreparedReferenceMoeTemplate::new(&reference_params(), 8, 2, 1, [0x4d; 32])
                 .expect("canonical template"),
         );
         let backend = MultiGpuSearchBackend::all_visible(4).expect("multi-GPU backend");
         let batch_len = u64::try_from(device_count.min(8)).expect("device count") * 2;
         let winner = backend
-            .search_canonical(
+            .search_reference(
                 Arc::clone(&template),
                 SearchBatch::new(41, batch_len, [u8::MAX; 32]).expect("maximum target batch"),
             )
@@ -686,7 +686,7 @@ mod tests {
             template.evaluate(41, &mut template.scratch()).jackpot_hash
         );
         assert!(backend
-            .search_canonical(
+            .search_reference(
                 template,
                 SearchBatch::new(57, batch_len, [0; 32]).expect("zero target batch"),
             )
@@ -696,12 +696,12 @@ mod tests {
 
     #[test]
     fn canonical_v3_device_pipeline_matches_scalar() {
-        let template = PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x42; 32])
+        let template = PreparedReferenceMoeTemplate::new(&reference_params(), 8, 2, 1, [0x42; 32])
             .expect("canonical template");
         let session = CudaSession::canonical(&template, 4, 0).expect("CUDA V3 session");
         for extranonce in [0, 1, 7, u32::MAX - 1, u32::MAX] {
             let debug = session
-                .debug_canonical(extranonce)
+                .debug_reference(extranonce)
                 .expect("CUDA V3 evaluation");
             let mut scratch = template.scratch();
             let scalar = template.evaluate(extranonce, &mut scratch);
@@ -719,13 +719,13 @@ mod tests {
     }
 
     #[test]
-    fn canonical_search_obeys_targets_and_session_lifetime() {
+    fn reference_search_obeys_targets_and_session_lifetime() {
         let first = Arc::new(
-            PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x24; 32])
+            PreparedReferenceMoeTemplate::new(&reference_params(), 8, 2, 1, [0x24; 32])
                 .expect("first canonical template"),
         );
         let second = Arc::new(
-            PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x25; 32])
+            PreparedReferenceMoeTemplate::new(&reference_params(), 8, 2, 1, [0x25; 32])
                 .expect("second canonical template"),
         );
         let backend = GpuSearchBackend::new(0, 4).expect("GPU backend");
@@ -733,7 +733,7 @@ mod tests {
             [(Arc::clone(&first), 41), (Arc::clone(&first), 45), (Arc::clone(&second), 49)]
         {
             let winner = backend
-                .search_canonical(
+                .search_reference(
                     Arc::clone(&template),
                     SearchBatch::new(start, 4, [u8::MAX; 32]).expect("maximum target batch"),
                 )
@@ -749,7 +749,7 @@ mod tests {
         }
 
         assert!(backend
-            .search_canonical(
+            .search_reference(
                 second,
                 SearchBatch::new(53, 4, [0; 32]).expect("zero target batch"),
             )
@@ -760,13 +760,13 @@ mod tests {
     #[test]
     #[ignore = "real compact recursive proof generation is opt-in"]
     fn gpu_winner_builds_and_verifies_production_certificate() {
-        use crate::canonical::prove_canonical_moe_block_at_with_verifier_context;
         use crate::certificate_noun::{
             build_ai_pow_pearl_merge_moe_artifact_noun_from_node, verify_ai_pow_block_artifact_jam,
             AiPowBlockVerifyOutcome, AiProofNode, CertificateNounLimits,
         };
+        use crate::reference::prove_reference_moe_block_at_with_verifier_context;
 
-        let params = canonical_params();
+        let params = reference_params();
         let commit = [0x42; 32];
         let consensus_target = ai_pow::difficulty::AI_POW_MAX_CONSENSUS_TARGET;
         let work_factor =
@@ -775,12 +775,12 @@ mod tests {
             ai_pow::difficulty::effective_jackpot_threshold(&consensus_target, work_factor)
                 .expect("effective jackpot threshold");
         let template = Arc::new(
-            PreparedCanonicalMoeTemplate::new(&params, 8, 2, 1, commit)
+            PreparedReferenceMoeTemplate::new(&params, 8, 2, 1, commit)
                 .expect("canonical template"),
         );
         let backend = GpuSearchBackend::new(0, 1024).expect("GPU backend");
         let winner = backend
-            .search_canonical(
+            .search_reference(
                 Arc::clone(&template),
                 SearchBatch::new(0, 1024, threshold).expect("production-target batch"),
             )
@@ -794,7 +794,7 @@ mod tests {
                 .jackpot_hash
         );
 
-        let (block, verifier_context) = prove_canonical_moe_block_at_with_verifier_context(
+        let (block, verifier_context) = prove_reference_moe_block_at_with_verifier_context(
             &params, 8, 2, 1, commit, extranonce,
         )
         .expect("compact recursive proof");

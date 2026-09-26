@@ -14,7 +14,7 @@ use anyhow::{bail, Result};
 use rayon::prelude::*;
 
 #[cfg(feature = "node")]
-use crate::canonical::{PreparedCanonicalDenseSearch, PreparedCanonicalMoeTemplate};
+use crate::reference::{PreparedReferenceDenseSearch, PreparedReferenceMoeTemplate};
 #[cfg(feature = "node")]
 use crate::search::PeakSearchOutcome;
 use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
@@ -399,7 +399,7 @@ pub struct MultiGpuPeakSearchBackend {
 struct PeakDispatch {
     template: Option<Arc<PreparedPearlPatternJob>>,
     session: Option<PeakCudaSession>,
-    peak_template: Option<Arc<PreparedCanonicalDenseSearch>>,
+    peak_template: Option<Arc<PreparedReferenceDenseSearch>>,
     peak_session: Option<PeakCudaSession>,
     peak_preparation: Option<PeakPreparation>,
 }
@@ -461,7 +461,7 @@ impl PeakSearchBackend {
 
     #[cfg(feature = "node")]
     fn validate_peak_template(
-        template: &PreparedCanonicalDenseSearch,
+        template: &PreparedReferenceDenseSearch,
     ) -> Result<(), SearchBackendError> {
         let params = template.params();
         if params.k as usize != PEAK_K
@@ -623,7 +623,7 @@ impl SearchBackend for PeakSearchBackend {
     #[cfg(feature = "node")]
     fn search_peak(
         &self,
-        template: Arc<PreparedCanonicalDenseSearch>,
+        template: Arc<PreparedReferenceDenseSearch>,
         batch: SearchBatch,
     ) -> Result<PeakSearchOutcome, SearchBackendError> {
         let mut dispatch = self
@@ -684,9 +684,9 @@ impl SearchBackend for PeakSearchBackend {
     }
 
     #[cfg(feature = "node")]
-    fn search_canonical(
+    fn search_reference(
         &self,
-        _: Arc<PreparedCanonicalMoeTemplate>,
+        _: Arc<PreparedReferenceMoeTemplate>,
         _: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError> {
         Err(unavailable(
@@ -724,7 +724,7 @@ impl SearchBackend for MultiGpuPeakSearchBackend {
     #[cfg(feature = "node")]
     fn search_peak(
         &self,
-        template: Arc<PreparedCanonicalDenseSearch>,
+        template: Arc<PreparedReferenceDenseSearch>,
         batch: SearchBatch,
     ) -> Result<PeakSearchOutcome, SearchBackendError> {
         let active = self
@@ -759,9 +759,9 @@ impl SearchBackend for MultiGpuPeakSearchBackend {
     }
 
     #[cfg(feature = "node")]
-    fn search_canonical(
+    fn search_reference(
         &self,
-        _: Arc<PreparedCanonicalMoeTemplate>,
+        _: Arc<PreparedReferenceMoeTemplate>,
         _: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError> {
         Err(unavailable(
@@ -877,7 +877,7 @@ mod tests {
             difficulty_bits: 0,
         };
         let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
-        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+        let template = crate::reference::PreparedReferenceDenseTemplate::new(
             &params,
             [0x5a; 32],
             Arc::new(a),
@@ -986,7 +986,7 @@ mod tests {
         let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
         let a = Arc::new(a);
         let b = Arc::new(b);
-        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+        let template = crate::reference::PreparedReferenceDenseTemplate::new(
             &params,
             [0x5a; 32],
             Arc::clone(&a),

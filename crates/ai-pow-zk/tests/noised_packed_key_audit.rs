@@ -1,19 +1,4 @@
-//! Adversarial-audit regression — `noised_packed` side-disjoint keys.
-//!
-//! `b_id_base` must cover every A-side positioned key. The lane origin is
-//! the matrix row at the first selected BLAKE3 chunk, not the chunk index.
-//! These units differ when `k != 1024`.
-//!
-//! A base derived only from the tile height does not cover sparse schedules.
-//! A base derived by subtracting the chunk index from the matrix row does not
-//! cover non-origin schedules when one row spans multiple chunks. Either error
-//! can overlap the A and B key spaces. The LogUp fingerprint then permits a
-//! committed B value to substitute for an A value at a colliding key.
-//!
-//! The full covering-range span keeps every A key below `b_id_base` and every
-//! B key at or above it. Contiguous origin tiles keep the original IDs. These
-//! tests pin side disjointness, matrix-row origin arithmetic, and the packed-ID
-//! budget.
+//! Regression coverage for positioned matrix keys and their bounds.
 
 use ai_pow_zk::canonical::{covering_id_lane_base, covering_id_span};
 use ai_pow_zk::composite_trace::{
@@ -52,45 +37,42 @@ fn assert_side_disjoint(a_lanes: &[u32], b_lanes: &[u32], k: usize, b_id_base: u
 #[test]
 fn noised_packed_scattered_keys_are_side_disjoint() {
     let k = 1024usize;
-    // The non-contiguous audit pattern (h_tile = 8): under the legacy base,
-    // A-row-8's keys collided exactly with B-col-0's.
+    // Non-contiguous coverage pattern with lanes beyond the tile height.
     let a_indices = [0u32, 1, 8, 9, 64, 65, 72, 73];
     let b_indices = [0u32, 1, 2, 3, 4, 5, 6, 7];
     let a_lanes: Vec<u32> = a_indices.map(|i| i - a_indices[0]).to_vec();
     let b_lanes: Vec<u32> = b_indices.map(|i| i - b_indices[0]).to_vec();
     let (a_id_base, b_id_base) = noised_id_bases(
-        *a_lanes.iter().max().unwrap() as usize,
-        *b_lanes.iter().max().unwrap() as usize,
+        *a_lanes.iter().max().expect("A lanes are nonempty") as usize,
+        *b_lanes.iter().max().expect("B lanes are nonempty") as usize,
         k,
     );
     assert_eq!(a_id_base, NOISED_CHUNK_ID_BASE);
     assert_side_disjoint(&a_lanes, &b_lanes, k, b_id_base);
 
-    // The documented collision pair is now separated: A-row-8's key sits
-    // below the B range, B-col-0's key inside it.
+    // Boundary keys remain on their respective sides of the namespace base.
     let key_a8 = noised_chunk_id(a_id_base, k, &single_src(8, 0));
     let key_b0 = noised_chunk_id(b_id_base, k, &single_src(0, 0));
     assert_ne!(
         key_a8, key_b0,
-        "the collision pair must not share a noised_packed chunk_id"
+        "A and B boundary keys must use distinct noised_packed IDs"
     );
     assert!(key_a8 < b_id_base && key_b0 >= b_id_base);
 
-    // Pin the historical collision itself so the exploit class stays explicit:
-    // under the LEGACY tile-height base the two keys were EQUAL.
-    let legacy_b_id_base = NOISED_CHUNK_ID_BASE + ((a_indices.len() * k) / 8) as u64;
+    // A tile-height-only span is insufficient for this non-contiguous layout.
+    let tile_height_base = NOISED_CHUNK_ID_BASE + ((a_indices.len() * k) / 8) as u64;
     assert_eq!(
         key_a8,
-        noised_chunk_id(legacy_b_id_base, k, &single_src(0, 0)),
-        "tile-height derivation collides A-row-8 with B-col-0 (the historical exploit)"
+        noised_chunk_id(tile_height_base, k, &single_src(0, 0)),
+        "non-contiguous schedules require the full covering-range span"
     );
 }
 
 #[test]
 fn noised_packed_contiguous_tile_matches_legacy_derivation() {
-    // Contiguous tiles have span == tile height, so the span-derived base is
-    // byte-identical to the legacy formula — the native path is unchanged.
-    for &(h_tile, w_tile, k) in &[(8usize, 8usize, 1024usize), (16, 16, 4096), (8, 8, 64)] {
+    // A chunk-aligned contiguous tile has no producer tail, so the fixed base
+    // is byte-identical to the legacy formula.
+    for &(h_tile, w_tile, k) in &[(8usize, 8usize, 1024usize), (16, 16, 4096), (8, 8, 1152)] {
         let (a_id_base, b_id_base) = noised_id_bases(h_tile - 1, w_tile - 1, k);
         let legacy = NOISED_CHUNK_ID_BASE + ((h_tile * k) / 8) as u64;
         assert_eq!(a_id_base, NOISED_CHUNK_ID_BASE);
@@ -106,9 +88,8 @@ fn noised_packed_contiguous_tile_matches_legacy_derivation() {
 
 #[test]
 fn noised_packed_sub_chunk_k_nonorigin_disjoint() {
-    // k < 1024 non-origin tile: the chunk base is 0, so lanes are ABSOLUTE
-    // row indices — every lane >= h_tile, the same collision class as the
-    // scattered case (the legacy base could not cover them).
+    // For a k < 1024 non-origin tile, the chunk base is 0 and lanes are
+    // absolute row indices. The namespace span must cover those indices.
     let k = 64usize;
     let lanes: Vec<u32> = (8u32..16).collect(); // tile rows 8..16
     let (a_id_base, b_id_base) = noised_id_bases(15, 15, k);
@@ -133,10 +114,22 @@ fn noised_packed_id_budget_guard() {
         "span overflowing the 26-bit pack_ab_id budget must be rejected"
     );
     // Chunk 128 begins at matrix row 64 when k=2048.
-    assert_eq!(covering_id_lane_base("A", 128, 2048).unwrap(), 64);
-    assert_eq!(covering_id_span("A", &[64, 65], 128, 2048).unwrap(), 2);
-    assert_eq!(covering_id_span("A", &[64, 65], 64, 1024).unwrap(), 2);
-    assert_eq!(covering_id_span("A", &[0, 1, 8], 0, 64).unwrap(), 9);
+    assert_eq!(
+        covering_id_lane_base("A", 128, 2048).expect("aligned lane base"),
+        64
+    );
+    assert_eq!(
+        covering_id_span("A", &[64, 65], 128, 2048).expect("aligned wide span"),
+        2
+    );
+    assert_eq!(
+        covering_id_span("A", &[64, 65], 64, 1024).expect("aligned span"),
+        2
+    );
+    assert_eq!(
+        covering_id_span("A", &[0, 1, 8], 0, 64).expect("origin span"),
+        9
+    );
     // A selected chunk that starts inside a matrix row cannot use lane IDs.
     assert!(covering_id_span("A", &[1, 2], 1, 1536).is_err());
 }

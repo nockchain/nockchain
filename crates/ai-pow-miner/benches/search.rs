@@ -18,9 +18,9 @@ use ai_pow::pearl_compat::{
     PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
 };
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow_miner::canonical::PreparedCanonicalMoeTemplate;
 #[cfg(feature = "gpu")]
 use ai_pow_miner::gpu::{GpuSearchBackend, MultiGpuSearchBackend};
+use ai_pow_miner::reference::PreparedReferenceMoeTemplate;
 use ai_pow_miner::search::{CpuSearchBackend, SearchBackend, SearchBatch};
 use ai_pow_miner::DENSE_PRODUCTION_PARAMS;
 
@@ -77,7 +77,7 @@ fn measure(operation: impl FnOnce()) -> Measurement {
     }
 }
 
-fn canonical_params() -> MatmulParams {
+fn reference_params() -> MatmulParams {
     MatmulParams {
         m: 64,
         k: 1024,
@@ -137,104 +137,104 @@ fn print_measurement(
 }
 
 fn main() {
-    let canonical_attempts = std::env::var("AI_POW_SEARCH_BENCH_CANONICAL_ATTEMPTS")
+    let reference_attempts = std::env::var("AI_POW_SEARCH_BENCH_REFERENCE_ATTEMPTS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|&attempts| attempts > 0)
         .unwrap_or(256);
     let workers = CpuSearchBackend::default_worker_count();
     let backend = CpuSearchBackend::new(workers).expect("dedicated CPU search backend");
-    let canonical = canonical_params();
-    let canonical_template = Arc::new(
-        PreparedCanonicalMoeTemplate::new(&canonical, 8, 2, 1, [0x5a; 32])
-            .expect("canonical template"),
+    let reference = reference_params();
+    let reference_template = Arc::new(
+        PreparedReferenceMoeTemplate::new(&reference, 8, 2, 1, [0x5a; 32])
+            .expect("reference template"),
     );
-    let canonical_shape_work_factor = canonical_template
+    let reference_shape_work_factor = reference_template
         .config()
         .shape_work_factor()
-        .expect("canonical shape work factor");
+        .expect("reference shape work factor");
     backend
-        .search_canonical(
-            Arc::clone(&canonical_template),
-            SearchBatch::new(0, 1, [0; 32]).expect("canonical warmup batch"),
+        .search_reference(
+            Arc::clone(&reference_template),
+            SearchBatch::new(0, 1, [0; 32]).expect("reference warmup batch"),
         )
-        .expect("canonical dedicated warmup");
-    let mut canonical_prepare_scratch = canonical_template.scratch();
-    let canonical_prepare_measurement = measure(|| {
-        for extranonce in 0..canonical_attempts {
+        .expect("reference dedicated warmup");
+    let mut reference_prepare_scratch = reference_template.scratch();
+    let reference_prepare_measurement = measure(|| {
+        for extranonce in 0..reference_attempts {
             std::hint::black_box(
-                canonical_template.prepare_attempt(extranonce, &mut canonical_prepare_scratch),
+                reference_template.prepare_attempt(extranonce, &mut reference_prepare_scratch),
             );
         }
     });
     print_measurement(
-        "canonical_prepare_scalar",
-        u64::from(canonical_attempts),
-        canonical_shape_work_factor,
+        "reference_prepare_scalar",
+        u64::from(reference_attempts),
+        reference_shape_work_factor,
         1,
-        canonical_prepare_measurement,
+        reference_prepare_measurement,
     );
-    let mut canonical_scratch = canonical_template.scratch();
-    let canonical_measurement = measure(|| {
-        for extranonce in 0..canonical_attempts {
+    let mut reference_scratch = reference_template.scratch();
+    let reference_measurement = measure(|| {
+        for extranonce in 0..reference_attempts {
             std::hint::black_box(
-                canonical_template
-                    .evaluate(extranonce, &mut canonical_scratch)
+                reference_template
+                    .evaluate(extranonce, &mut reference_scratch)
                     .jackpot_hash,
             );
         }
     });
     print_measurement(
-        "canonical_prepared_scalar",
-        u64::from(canonical_attempts),
-        canonical_shape_work_factor,
+        "reference_prepared_scalar",
+        u64::from(reference_attempts),
+        reference_shape_work_factor,
         1,
-        canonical_measurement,
+        reference_measurement,
     );
-    let canonical_parallel_measurement = measure(|| {
+    let reference_parallel_measurement = measure(|| {
         std::hint::black_box(
             backend
-                .search_canonical(
-                    Arc::clone(&canonical_template),
-                    SearchBatch::new(0, u64::from(canonical_attempts), [0; 32])
-                        .expect("canonical batch"),
+                .search_reference(
+                    Arc::clone(&reference_template),
+                    SearchBatch::new(0, u64::from(reference_attempts), [0; 32])
+                        .expect("reference batch"),
                 )
-                .expect("canonical dedicated search"),
+                .expect("reference dedicated search"),
         );
     });
     print_measurement(
-        "canonical_prepared_dedicated",
-        u64::from(canonical_attempts),
-        canonical_shape_work_factor,
+        "reference_prepared_dedicated",
+        u64::from(reference_attempts),
+        reference_shape_work_factor,
         workers,
-        canonical_parallel_measurement,
+        reference_parallel_measurement,
     );
 
     #[cfg(feature = "gpu")]
     {
         let gpu_backend =
-            GpuSearchBackend::new(0, u64::from(canonical_attempts)).expect("CUDA search backend");
+            GpuSearchBackend::new(0, u64::from(reference_attempts)).expect("CUDA search backend");
         gpu_backend
-            .search_canonical(
-                Arc::clone(&canonical_template),
+            .search_reference(
+                Arc::clone(&reference_template),
                 SearchBatch::new(0, 1, [0; 32]).expect("CUDA warmup batch"),
             )
             .expect("CUDA warmup");
         let canonical_gpu_measurement = measure(|| {
             std::hint::black_box(
                 gpu_backend
-                    .search_canonical(
-                        Arc::clone(&canonical_template),
-                        SearchBatch::new(0, u64::from(canonical_attempts), [0; 32])
-                            .expect("CUDA canonical batch"),
+                    .search_reference(
+                        Arc::clone(&reference_template),
+                        SearchBatch::new(0, u64::from(reference_attempts), [0; 32])
+                            .expect("CUDA reference batch"),
                     )
-                    .expect("CUDA canonical search"),
+                    .expect("CUDA reference search"),
             );
         });
         print_measurement(
             "canonical_prepared_cuda",
-            u64::from(canonical_attempts),
-            canonical_shape_work_factor,
+            u64::from(reference_attempts),
+            reference_shape_work_factor,
             1,
             canonical_gpu_measurement,
         );
@@ -243,12 +243,12 @@ fn main() {
             .expect("visible CUDA devices")
             .min(8);
         if device_count > 1 {
-            let attempts_per_device = u64::from(canonical_attempts).div_ceil(device_count as u64);
+            let attempts_per_device = u64::from(reference_attempts).div_ceil(device_count as u64);
             let multi_gpu_backend = MultiGpuSearchBackend::all_visible(attempts_per_device)
                 .expect("multi-GPU search backend");
             multi_gpu_backend
-                .search_canonical(
-                    Arc::clone(&canonical_template),
+                .search_reference(
+                    Arc::clone(&reference_template),
                     SearchBatch::new(0, device_count as u64, [0; 32])
                         .expect("multi-GPU warmup batch"),
                 )
@@ -256,18 +256,18 @@ fn main() {
             let canonical_multi_gpu_measurement = measure(|| {
                 std::hint::black_box(
                     multi_gpu_backend
-                        .search_canonical(
-                            Arc::clone(&canonical_template),
-                            SearchBatch::new(0, u64::from(canonical_attempts), [0; 32])
-                                .expect("multi-GPU canonical batch"),
+                        .search_reference(
+                            Arc::clone(&reference_template),
+                            SearchBatch::new(0, u64::from(reference_attempts), [0; 32])
+                                .expect("multi-GPU reference batch"),
                         )
-                        .expect("multi-GPU canonical search"),
+                        .expect("multi-GPU reference search"),
                 );
             });
             print_measurement(
                 "canonical_prepared_multi_cuda",
-                u64::from(canonical_attempts),
-                canonical_shape_work_factor,
+                u64::from(reference_attempts),
+                reference_shape_work_factor,
                 device_count,
                 canonical_multi_gpu_measurement,
             );

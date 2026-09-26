@@ -127,12 +127,12 @@ pub mod wire;
 #[cfg(feature = "node")]
 pub mod certificate_noun;
 
-/// Gateway-free canonical AI-PoW block proving for a self-contained CPU miner
-/// (see [`run::run_canonical`]). Copies the jets-free canonical prover so the
+/// Gateway-free reference AI-PoW block proving for a self-contained CPU miner
+/// (see [`run::run_reference`]). Copies the jets-free reference prover so the
 /// standalone miner can prove a valid `%ai-pow` block bound to the node's block
 /// commitment without an external Pearl Gateway.
 #[cfg(feature = "node")]
-pub mod canonical;
+pub mod reference;
 
 /// Out-of-process node-connecting run loop ([`run::run`]) - the production
 /// entry point used by the `ai-pow-mine` binary. Behind the `node` feature
@@ -144,7 +144,7 @@ pub mod run;
 /// the same work arguments and choose their search implementation explicitly.
 #[cfg(feature = "node")]
 pub mod cli;
-/// CUDA search implementations. `--gpu --canonical` selects the production
+/// CUDA search implementations. `--gpu --reference` selects the production
 /// dense route. Gateway mode retains the generic CUDA backend.
 #[cfg(all(feature = "node", feature = "gpu"))]
 pub mod gpu;

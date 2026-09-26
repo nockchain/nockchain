@@ -7,16 +7,16 @@
 //! `[%command %pow %ai-pow nonce cert]` on the `AiPowMinerWire::Mined` wire
 //! (`SOURCE = "ai-pow-miner"`, `VERSION = 1`).
 //!
-//! The production CUDA route is `--gpu --canonical`. It searches the fixed
+//! The production CUDA route is `--gpu --reference`. It searches the fixed
 //! dense Pearl V3 profile across all visible GPUs unless `--cuda-devices`
 //! selects a subset. Scalar Rust recomputes every reported winner before the
 //! host builds the existing compact recursive certificate.
 //!
-//!   ai-pow-mine --gpu --canonical \
+//!   ai-pow-mine --gpu --reference \
 //!       --mining-pkh 9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV
 //!
-//! `--canonical` without `--gpu` retains the gateway-free CPU MoE route. Without
-//! `--canonical`, the miner uses the Pearl Gateway route configured by
+//! `--reference` without `--gpu` retains the gateway-free CPU MoE route. Without
+//! `--reference`, the miner uses the Pearl Gateway route configured by
 //! `--pearl-gateway`.
 //! Rewards use v1 pubkey-hash configs from `--mining-pkh` or
 //! `--mining-pkh-adv`.
@@ -32,7 +32,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use ai_pow_miner::cli::{init_tracing, CommonArgs};
-use ai_pow_miner::run::{run_canonical_with_backend, run_with_backend, MinerError};
+use ai_pow_miner::run::{run_reference_with_backend, run_with_backend, MinerError};
 use ai_pow_miner::search::{CpuSearchBackend, MeteredSearchBackend, SearchBackend};
 use clap::{Args as ClapArgs, Parser};
 use tokio_util::sync::CancellationToken;
@@ -131,7 +131,7 @@ fn run_peak_if_selected(
     args: &Args,
     rt: &tokio::runtime::Runtime,
 ) -> Result<Option<Result<(), MinerError>>, String> {
-    if !(args.common.canonical && args.accelerator.gpu) {
+    if !(args.common.reference && args.accelerator.gpu) {
         return Ok(None);
     }
     let pkh_configs = args
@@ -187,7 +187,7 @@ fn main() -> ExitCode {
 
     let result = if let Some(result) = peak_result {
         result
-    } else if args.common.canonical {
+    } else if args.common.reference {
         let backend = match search_backend(&args) {
             Ok(backend) => backend,
             Err(error) => {
@@ -204,7 +204,7 @@ fn main() -> ExitCode {
         };
         let node_addr = args.common.node_addr.clone();
         rt.block_on(async move {
-            info!(node = %node_addr, "ai-pow-mine: starting canonical miner");
+            info!(node = %node_addr, "ai-pow-mine: starting reference miner");
             let shutdown = CancellationToken::new();
             let shutdown_clone = shutdown.clone();
             tokio::spawn(async move {
@@ -213,7 +213,7 @@ fn main() -> ExitCode {
                     shutdown_clone.cancel();
                 }
             });
-            run_canonical_with_backend(node_addr, pkh_configs, shutdown, backend).await
+            run_reference_with_backend(node_addr, pkh_configs, shutdown, backend).await
         })
     } else {
         let cfg = match args.common.build_miner_config() {

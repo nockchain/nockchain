@@ -3,7 +3,7 @@
 //! The compact verifier `context` + `verifier_key_digest` are deterministic from
 //! the puzzle SHAPE (params / trace-height) and **proof-independent** (validated in
 //! `ai-pow-miner::moe_compact_verifier_setup_is_proof_independent`). So a consensus
-//! node builds them ONCE at boot by proving a single canonical block, then injects
+//! node builds them ONCE at boot by proving a single setup-representative block, then injects
 //! the result via [`crate::init_ai_pow_verifier_setup`] and reuses it to verify
 //! every same-shape `%ai-pow` block. The per-block opened schedule is bound
 //! separately by the program-commitment fold — not by the setup — so one
@@ -21,17 +21,17 @@ use ai_pow::pearl_compat::{
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
 use ai_pow::zk_bridge::{
-    prove_pearl_merge_compact_recursive_certificate_with_seed,
-    prove_pearl_moe_compact_recursive_certificate_with_seed, AiPowCompactRecursiveCertificateRun,
-    PearlMoeCompactProveRun,
+    prove_pearl_merge_compact_recursive_certificate_with_seed_with_rules,
+    AiPowCompactRecursiveCertificateRun, PearlMoeCompactProveRun,
 };
 use ai_pow_miner::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
 };
+use ai_pow_zk::proof_rules::ProofRules;
 use ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed;
 
 use crate::{AiPowVerifierSetup, VerifierSetupShapeKey};
-/// Error building the canonical verifier setup.
+/// Error building the verifier setup.
 #[derive(Debug)]
 pub struct SetupError(pub String);
 
@@ -41,6 +41,19 @@ impl std::fmt::Display for SetupError {
     }
 }
 impl std::error::Error for SetupError {}
+
+/// Start the verifier's worker pool before any block is admitted. A local
+/// thread-start failure must abort startup, not become an invalid-PoW verdict.
+/// An already configured global pool is reused. Failed initialization is sticky
+/// for this process; operators must fix the resource limit and restart.
+pub fn prepare_verifier_resources() -> Result<(), SetupError> {
+    static READY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    READY.get_or_init(|| {
+        std::panic::catch_unwind(|| {
+            rayon::broadcast(|_| ());
+        }).map_err(|_| "could not initialize verifier Rayon workers; check local thread/memory limits and restart".to_owned())
+    }).clone().map_err(SetupError)
+}
 
 fn err<E: std::fmt::Debug>(what: &str) -> impl FnOnce(E) -> SetupError + '_ {
     move |e| SetupError(format!("{what}: {e:?}"))
@@ -57,7 +70,9 @@ fn shape_key_for_zk_params(
 fn shape_key_for_seed(
     seed: &AiPowCompactVerifierSetupSeed,
 ) -> Result<VerifierSetupShapeKey, SetupError> {
-    shape_key_for_zk_params(&seed.zk_params, seed.trace_height())
+    let mut key = shape_key_for_zk_params(&seed.zk_params, seed.trace_height())?;
+    key.rules = seed.rules;
+    Ok(key)
 }
 
 fn shape_key_for_params(
@@ -75,13 +90,13 @@ fn shape_key_for_params(
         (num_stripes as usize) <= ai_pow::params::STRIPE_MAX,
     ))
 }
-/// An arbitrary fixed commitment for the canonical setup block. The setup is
+/// An arbitrary fixed commitment for the setup-representative block. The setup is
 /// proof-independent, so the specific block does not matter.
-pub const CANONICAL_SETUP_COMMIT: [u8; 32] = [0x42u8; 32];
+pub const REFERENCE_SETUP_COMMIT: [u8; 32] = [0x42u8; 32];
 
-/// The canonical (setup) block: its prove run plus the pieces needed to assemble
+/// The reference (setup-representative) block: its prove run plus the pieces needed to assemble
 /// its artifact noun (used by tests to exercise the jet against this exact block).
-pub struct CanonicalBlock {
+pub struct ReferenceBlock {
     pub run: PearlMoeCompactProveRun,
     pub statement: PearlMergePublicStatementShape,
     pub aux_inclusion: PearlAuxInclusionProof,
@@ -137,8 +152,8 @@ fn setup_aux_inclusion(
         // Shared with the miner rather than copied: this header feeds `sigma`
         // and therefore the whole work transcript, and a base target the accept
         // path cannot scale by the tile shape factor makes the block
-        // unverifiable. See `ai_pow_miner::canonical::CANONICAL_NBITS`.
-        nbits: ai_pow_miner::canonical::CANONICAL_NBITS,
+        // unverifiable. See `ai_pow_miner::reference::REFERENCE_NBITS`.
+        nbits: ai_pow_miner::reference::REFERENCE_NBITS,
     };
     (
         header,
@@ -149,13 +164,13 @@ fn setup_aux_inclusion(
     )
 }
 
-/// The canonical MoE-block inputs derived from a `(params, hw, e, top_k)` shape —
+/// The reference MoE-block inputs derived from a `(params, hw, e, top_k)` shape —
 /// the synthesized matrices, work commitments, routing, opened tile indices, and
-/// the block-statement scaffolding. Shared by [`prove_canonical_moe_block`] (which
-/// then proves + assembles) and [`canonical_moe_trace_height`] (which only needs
+/// the block-statement scaffolding. Shared by [`prove_reference_moe_block`] (which
+/// then proves + assembles) and [`reference_moe_trace_height`] (which only needs
 /// the prove-inputs to predict the trace height), so the two can never disagree
 /// about which bucket a shape lands in.
-struct CanonicalMoeInputs {
+struct ReferenceMoeInputs {
     a: Vec<i8>,
     b: Vec<i8>,
     commitments: ai_pow::pearl_compat::PearlWorkCommitments,
@@ -171,12 +186,12 @@ struct CanonicalMoeInputs {
     aux_inclusion: PearlAuxInclusionProof,
 }
 
-/// The matrix-FREE part of the canonical MoE inputs: the mining config, routing,
+/// The matrix-FREE part of the reference MoE inputs: the mining config, routing,
 /// and opened tile indices — everything the trace height depends on. Kept separate
-/// from the (large) synthesized matrices so [`canonical_moe_trace_height`] can sweep
-/// candidate shapes cheaply, while [`canonical_moe_inputs`] adds the matrices +
+/// from the (large) synthesized matrices so [`reference_moe_trace_height`] can sweep
+/// candidate shapes cheaply, while [`reference_moe_inputs`] adds the matrices +
 /// commitments for the actual prove. Both derive the schedule identically.
-struct CanonicalMoeSchedule {
+struct ReferenceMoeSchedule {
     config: PearlMiningConfig,
     routing: ai_pow::pearl_moe_routing::RoutingData,
     inner: Vec<u32>,
@@ -185,12 +200,12 @@ struct CanonicalMoeSchedule {
     m: usize,
 }
 
-fn canonical_moe_schedule(
+fn reference_moe_schedule(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
-) -> Result<CanonicalMoeSchedule, SetupError> {
+) -> Result<ReferenceMoeSchedule, SetupError> {
     let m = params.m as usize;
     let n = params.n as usize;
     if e == 0 || !n.is_multiple_of(e) {
@@ -215,7 +230,7 @@ fn canonical_moe_schedule(
         .cols_pattern
         .indices_with_offset_bounded(0, 4096)
         .map_err(err("local_b"))?;
-    Ok(CanonicalMoeSchedule {
+    Ok(ReferenceMoeSchedule {
         config,
         routing,
         inner,
@@ -225,21 +240,21 @@ fn canonical_moe_schedule(
     })
 }
 
-fn canonical_moe_inputs(
+fn reference_moe_inputs(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
-) -> Result<CanonicalMoeInputs, SetupError> {
-    let CanonicalMoeSchedule {
+) -> Result<ReferenceMoeInputs, SetupError> {
+    let ReferenceMoeSchedule {
         config,
         routing,
         inner,
         local_b,
         n_e,
         m,
-    } = canonical_moe_schedule(params, hw, e, top_k)?;
+    } = reference_moe_schedule(params, hw, e, top_k)?;
 
     let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
     let aux = setup_aux(nock_commit);
@@ -258,7 +273,7 @@ fn canonical_moe_inputs(
         &routing.routing_offsets_le_bytes(),
     );
 
-    Ok(CanonicalMoeInputs {
+    Ok(ReferenceMoeInputs {
         a,
         b,
         commitments,
@@ -275,33 +290,44 @@ fn canonical_moe_inputs(
     })
 }
 
-/// The Layer-0 trace height a canonical MoE block at `(params, hw, e, top_k)` would
+/// The Layer-0 trace height a reference MoE block at `(params, hw, e, top_k)` would
 /// have — WITHOUT proving AND without synthesizing the (large) matrices. Lets
 /// [`production_verifier_setup_buckets`] cheaply select one shape per trace-height
 /// bucket. Equal to the height the full prove yields.
-pub fn canonical_moe_trace_height(
+pub fn reference_moe_trace_height(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
 ) -> Result<usize, SetupError> {
-    let s = canonical_moe_schedule(params, hw, e, top_k)?;
+    let s = reference_moe_schedule(params, hw, e, top_k)?;
     ai_pow::zk_bridge::pearl_moe_canonical_trace_height(
         params, &s.routing, 0, &s.inner, &s.local_b, s.n_e,
     )
-    .map_err(err("moe canonical trace height"))
+    .map_err(err("moe reference trace height"))
 }
 
-/// Prove a single canonical MoE block at the given shape. `hw` is the opened-tile
+/// Prove a single reference MoE block at the given shape. `hw` is the opened-tile
 /// side (`h = w = hw`); `e`/`top_k` the MoE config. Panics-free (returns errors).
-pub fn prove_canonical_moe_block(
+pub fn prove_reference_moe_block(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
-) -> Result<CanonicalBlock, SetupError> {
-    let CanonicalMoeInputs {
+) -> Result<ReferenceBlock, SetupError> {
+    prove_reference_moe_block_with_rules(params, hw, e, top_k, nock_commit, ProofRules::Hardened)
+}
+
+pub fn prove_reference_moe_block_with_rules(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+    rules: ProofRules,
+) -> Result<ReferenceBlock, SetupError> {
+    let ReferenceMoeInputs {
         a,
         b,
         commitments,
@@ -315,13 +341,14 @@ pub fn prove_canonical_moe_block(
         aux,
         aux_commitment,
         aux_inclusion,
-    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit)?;
+    } = reference_moe_inputs(params, hw, e, top_k, nock_commit)?;
 
-    let (run, seed) = prove_pearl_moe_compact_recursive_certificate_with_seed(
-        params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
-        &inner, &local_b, n_e,
-    )
-    .map_err(err("prove"))?;
+    let (run, seed) =
+        ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate_with_seed_with_rules(
+            params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
+            &inner, &local_b, n_e, rules,
+        )
+        .map_err(err("prove"))?;
 
     let public = PearlPublicProofParams {
         block_header: header,
@@ -343,6 +370,12 @@ pub fn prove_canonical_moe_block(
     let cert_bytes =
         ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&run.compact_cert)
             .map_err(err("encode cert"))?;
+    #[cfg(test)]
+    eprintln!(
+        "reference MoE {rules:?} trace_height={} certificate_bytes={}",
+        run.trace_height,
+        cert_bytes.len()
+    );
     let certificate = AiPowCertificateShape {
         version: 1,
         zk_params: run.zk_params,
@@ -362,7 +395,7 @@ pub fn prove_canonical_moe_block(
         routing_data: routing.routing_data.clone(),
     };
 
-    Ok(CanonicalBlock {
+    Ok(ReferenceBlock {
         run,
         statement,
         aux_inclusion,
@@ -373,7 +406,7 @@ pub fn prove_canonical_moe_block(
     })
 }
 
-/// Build the boot verifier setup by proving one canonical block at the production
+/// Build the boot verifier setup by proving one reference block at the production
 /// shape. Call once at node boot, then [`crate::init_ai_pow_verifier_setup`].
 pub fn build_verifier_setup(
     params: &MatmulParams,
@@ -381,7 +414,18 @@ pub fn build_verifier_setup(
     e: usize,
     top_k: usize,
 ) -> Result<AiPowVerifierSetup, SetupError> {
-    let block = prove_canonical_moe_block(params, hw, e, top_k, CANONICAL_SETUP_COMMIT)?;
+    build_verifier_setup_with_rules(params, hw, e, top_k, ProofRules::Hardened)
+}
+
+pub fn build_verifier_setup_with_rules(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    rules: ProofRules,
+) -> Result<AiPowVerifierSetup, SetupError> {
+    let block =
+        prove_reference_moe_block_with_rules(params, hw, e, top_k, REFERENCE_SETUP_COMMIT, rules)?;
     let trace_height = block.run.trace_height;
     let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
         &block.run.verifier_key_digest(),
@@ -397,40 +441,59 @@ pub fn build_verifier_setup(
 }
 
 /// Build ONLY the small, cacheable rebuild seed for the boot verifier setup, by
-/// proving one canonical MoE block at the given shape. The offline/boot table
-/// builder calls this per trace-height bucket and serializes the seeds; the large
-/// (~866 MB) verifier context that proving also produces is dropped here and
-/// rebuilt at boot from the seed (see [`rebuild_verifier_setup_from_seed`]). This
-/// is the size-practical form: a seed is KB-MB, so a full bucket table caches in
-/// tens of MB rather than gigabytes.
+/// proving one reference MoE block at the given shape. The offline/boot table
+/// builder serializes these inputs for canonical setup derivation. Proving's
+/// large shared context is dropped here; the boot rebuild derives the commitment
+/// and returns only compact verifier data (see [`rebuild_verifier_setup_from_seed`]).
 pub fn build_verifier_setup_seed(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
 ) -> Result<AiPowCompactVerifierSetupSeed, SetupError> {
-    Ok(prove_canonical_moe_block(params, hw, e, top_k, CANONICAL_SETUP_COMMIT)?.seed)
+    build_verifier_setup_seed_with_rules(params, hw, e, top_k, ProofRules::Hardened)
+}
+
+pub fn build_verifier_setup_seed_with_rules(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    rules: ProofRules,
+) -> Result<AiPowCompactVerifierSetupSeed, SetupError> {
+    Ok(
+        prove_reference_moe_block_with_rules(params, hw, e, top_k, REFERENCE_SETUP_COMMIT, rules)?
+            .seed,
+    )
 }
 /// Build ONLY the small, cacheable rebuild seed for a DENSE boot verifier setup, by
-/// proving one canonical dense block at the given shape. The dense counterpart of
+/// proving one reference dense block at the given shape. The dense counterpart of
 /// [`build_verifier_setup_seed`]. Used for the `(2^13, false)` bucket that no MoE
 /// shape reaches — the MoE routing scatters opened A rows, inflating the Layer-0
 /// trace height above the dense budget for the same `(params, tile)`.
 pub fn build_verifier_setup_seed_dense(
     params: &MatmulParams,
 ) -> Result<AiPowCompactVerifierSetupSeed, SetupError> {
-    Ok(prove_canonical_dense_block(params, CANONICAL_SETUP_COMMIT)?.seed)
+    build_verifier_setup_seed_dense_with_rules(params, ProofRules::Hardened)
+}
+
+pub fn build_verifier_setup_seed_dense_with_rules(
+    params: &MatmulParams,
+    rules: ProofRules,
+) -> Result<AiPowCompactVerifierSetupSeed, SetupError> {
+    Ok(prove_reference_dense_block(params, REFERENCE_SETUP_COMMIT, rules)?.seed)
 }
 
 /// Prove a single canonical DENSE block at the given shape. Builds a
 /// Pearl-compatible dense ticket attempt (synth matrices, aux, header), grinds
 /// the aux height until the jackpot clears the max consensus target, then
 /// proves the compact recursive certificate with seed capture. The dense
-/// counterpart of [`prove_canonical_moe_block`].
-fn prove_canonical_dense_block(
+/// counterpart of [`prove_reference_moe_block`].
+fn prove_reference_dense_block(
     params: &MatmulParams,
     nock_commit: [u8; 32],
-) -> Result<CanonicalDenseBlock, SetupError> {
+    rules: ProofRules,
+) -> Result<ReferenceDenseBlock, SetupError> {
     let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
     let config = PearlMiningConfig {
         common_dim: params.k,
@@ -478,16 +541,27 @@ fn prove_canonical_dense_block(
         )
     })?;
 
-    let (run, seed) = prove_pearl_merge_compact_recursive_certificate_with_seed(
-        &attempt, params, &a, &b, max_pattern_len,
+    let (run, seed) = prove_pearl_merge_compact_recursive_certificate_with_seed_with_rules(
+        &attempt, params, &a, &b, max_pattern_len, rules,
     )
     .map_err(err("prove dense compact certificate with seed"))?;
 
-    Ok(CanonicalDenseBlock { run, seed })
+    #[cfg(test)]
+    {
+        let bytes =
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(run.certificate())
+                .map_err(err("encode dense certificate"))?;
+        eprintln!(
+            "reference dense {rules:?} trace_height={} certificate_bytes={}",
+            seed.trace_height(),
+            bytes.len()
+        );
+    }
+    Ok(ReferenceDenseBlock { run, seed })
 }
 /// The canonical dense setup block: its prove run plus the boot-setup seed.
 #[allow(dead_code)]
-struct CanonicalDenseBlock {
+struct ReferenceDenseBlock {
     run: AiPowCompactRecursiveCertificateRun,
     seed: AiPowCompactVerifierSetupSeed,
 }
@@ -506,6 +580,16 @@ pub fn rebuild_verifier_setup_from_seed(
     let context = seed
         .rebuild_context()
         .map_err(err("rebuild verifier context from seed"))?;
+    let rebuilt_digest = context
+        .validate_setup_binding()
+        .map_err(err("rebuilt verifier setup binding"))?;
+    if digest_bytes
+        != ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(&rebuilt_digest)
+    {
+        return Err(SetupError(
+            "rebuilt verifier setup differs from its seed digest".to_string(),
+        ));
+    }
     Ok(AiPowVerifierSetup {
         trace_height: shape_key.trace_height,
         sx_bound: shape_key.sx_bound,
@@ -518,7 +602,7 @@ pub fn rebuild_verifier_setup_from_seed(
 /// after decoding; this version protects the cache's non-consensus bincode framing.
 const VERIFIER_SETUP_SEED_CACHE_MAGIC: &[u8; 8] = b"NCVPSEED";
 /// Bump this when the seed-table bincode encoding or configuration changes.
-const VERIFIER_SETUP_SEED_CACHE_FORMAT_VERSION: u32 = 1;
+const VERIFIER_SETUP_SEED_CACHE_FORMAT_VERSION: u32 = 2;
 const VERIFIER_SETUP_SEED_CACHE_HEADER_LEN: usize = VERIFIER_SETUP_SEED_CACHE_MAGIC.len()
     + std::mem::size_of::<u32>()
     + std::mem::size_of::<u64>()
@@ -596,8 +680,8 @@ fn write_seed_cache_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(
 }
 
 /// Serialize a seed table to `path` with a versioned, checksummed envelope. The
-/// cached artifact is small — the seeds (KB-MB/bucket), NOT the rebuilt ~866 MB
-/// contexts.
+/// seeds contain inputs for deriving canonical verifier commitments. Rebuilt
+/// verifier contexts discard all large prover-only data.
 pub fn save_verifier_setup_seeds(
     path: &std::path::Path,
     seeds: &[AiPowCompactVerifierSetupSeed],
@@ -715,7 +799,7 @@ pub const AI_POW_VERIFIER_CACHE_CAP_ENV: &str = "AI_POW_VERIFIER_CACHE_CAP";
 /// Default resident-context LRU cap. The production default retains every supported
 /// setup shape, so remote inputs cannot create an evict/reload loop on the consensus
 /// thread unless an operator deliberately lowers the cap.
-pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 14;
+pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 28;
 
 /// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped to
 /// `>= 1`), else the DoS-safe all-shape default.
@@ -727,7 +811,7 @@ pub fn verifier_cache_cap() -> usize {
         .unwrap_or(AI_POW_VERIFIER_CACHE_CAP_DEFAULT)
 }
 
-/// Load the cached SEEDS and validate them against the committed **v0** consensus
+/// Load the cached SEEDS and validate them against the committed **v1** consensus
 /// digest WITHOUT rebuilding (lazy boot). The cache envelope rejects corruption and
 /// serialization mismatches before bincode decoding; the consensus digest then
 /// rejects a decoded table with divergent verifier keys.
@@ -745,18 +829,18 @@ fn load_and_validate_seeds(
 /// The verifier-setup table is a CONSENSUS PARAMETER — every node must verify
 /// `%ai-pow` blocks against byte-identical verifier keys. This installer pins that:
 /// the SEEDS it ends up with (loaded or freshly generated) must hash to the committed
-/// [`crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST`], or the node refuses
+/// [`crate::table_digest::AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST`], or the node refuses
 /// to run. It builds every bucket's context to disk AT THE OUTSET (first boot;
 /// reused after) and injects them disk-paged (see
 /// [`crate::init_ai_pow_verifier_setup_disk`]), so a verify never rebuilds — at most
-/// a ~0.6 s page-in from disk — and standing RSS is a bounded working set.
+/// a read of the compact context file — and residency is bounded by the cache cap.
 ///
 /// - **Cache present and valid:** load seeds + validate digest + build/reuse contexts.
 /// - **Cache present but corrupt / format-incompatible / digest-mismatched:** retain
 ///   it until a complete replacement is atomically written, rather than deleting
 ///   the only diagnostic artifact before regeneration.
 /// - **Cache absent:** GENERATE it (one real compact proof per `buckets` entry — a
-///   one-time ~15-minute boot delay), cache it, then load + validate + inject.
+///   one-time generation of both rule versions), cache it, then load + validate + inject.
 ///
 /// Returns the number of buckets installed. **Any failure is `Err` and is FATAL** —
 /// the caller must shut the node down. A digest mismatch on a FRESHLY-GENERATED cache
@@ -765,6 +849,7 @@ pub fn install_or_build_verifier_setup(
     data_dir: &std::path::Path,
     buckets: &[VerifierSetupBucketShape],
 ) -> Result<usize, SetupError> {
+    prepare_verifier_resources()?;
     if crate::ai_pow_verifier_setup_initialized() {
         return Ok(0);
     }
@@ -796,7 +881,7 @@ pub fn install_or_build_verifier_setup(
             }
             tracing::info!(
                 "Generating the AI-PoW verifier-setup table ({} buckets). This is a one-time \
-                 step and takes about 15 minutes; the result is cached, so subsequent boots are \
+                 step for both rule versions; the result is cached, so subsequent boots are \
                  fast.",
                 buckets.len(),
             );
@@ -813,9 +898,8 @@ pub fn install_or_build_verifier_setup(
     }
 
     // Build (or reuse) every bucket's on-disk context AT THE OUTSET: first boot builds
-    // all of them (a one-time cost); subsequent boots find the files and skip straight
-    // to disk-paged residency. Because all contexts exist before any block is verified,
-    // a verify NEVER triggers a ~12 s rebuild — at most a ~0.6 s page-in from disk.
+    // all of them (a one-time cost); subsequent boots reuse the compact files.
+    // No block verification triggers a circuit rebuild.
     let disk_buckets = build_or_reuse_disk_contexts(data_dir, seeds)?;
     let n = disk_buckets.len();
     let cap = verifier_cache_cap();
@@ -835,6 +919,8 @@ pub fn install_or_build_verifier_setup(
 /// The on-disk file for one bucket's serialized verifier context. The shape key and
 /// committed verifier-key digest are baked into the filename so a seed/table change
 /// yields a new filename and a stale file is never mistaken for the current one.
+/// The v3 filename replaces contexts that retained large PCS prover trees. Seed
+/// format v2 is unchanged: existing seeds rebuild the small files automatically.
 pub fn verifier_context_file_path(
     data_dir: &std::path::Path,
     shape_key: VerifierSetupShapeKey,
@@ -847,9 +933,10 @@ pub fn verifier_context_file_path(
         .take(8)
         .map(|b| format!("{b:02x}"))
         .collect();
-    data_dir
-        .join("ai-pow")
-        .join(format!("ctx-2p{log2}-{sx}-{tag}.bin"))
+    data_dir.join("ai-pow").join(format!(
+        "ctx-v3-{:?}-2p{log2}-{sx}-{tag}.bin",
+        shape_key.rules
+    ))
 }
 
 /// The sidecar file holding the BLAKE3 checksum of a context file's bytes.
@@ -930,8 +1017,8 @@ fn build_or_reuse_disk_contexts(
         } else {
             if built == 0 {
                 tracing::info!(
-                    "Building the AI-PoW verifier contexts to disk ({total} buckets, one-time; \
-                     ~1–2 minutes). They are paged in from disk afterwards, never rebuilt.",
+                    "Building compact AI-PoW verifier contexts to disk ({total} buckets, \
+                     one-time). Later starts reuse these files without rebuilding.",
                 );
             }
             let setup = rebuild_verifier_setup_from_seed(seed)?;
@@ -1013,6 +1100,7 @@ pub fn install_verifier_setup_disk_from_setups(
 /// stalls a tool/test harness) and never shuts down on a missing cache — it only
 /// errors on a corrupt cache or rebuild failure. Idempotent.
 pub fn install_verifier_setup_from_cache(data_dir: &std::path::Path) -> Result<usize, SetupError> {
+    prepare_verifier_resources()?;
     if crate::ai_pow_verifier_setup_initialized() {
         return Ok(0);
     }
@@ -1073,13 +1161,16 @@ pub fn build_and_cache_verifier_setup_seeds(
     path: &std::path::Path,
     buckets: &[VerifierSetupBucketShape],
 ) -> Result<(), SetupError> {
-    let mut keys: Vec<VerifierSetupShapeKey> = Vec::with_capacity(buckets.len());
-    let mut seeds: Vec<AiPowCompactVerifierSetupSeed> = Vec::with_capacity(buckets.len());
-    for b in buckets {
+    let mut keys: Vec<VerifierSetupShapeKey> = Vec::with_capacity(2 * buckets.len());
+    let mut seeds: Vec<AiPowCompactVerifierSetupSeed> = Vec::with_capacity(2 * buckets.len());
+    for (b, rules) in buckets
+        .iter()
+        .flat_map(|b| [ProofRules::Legacy, ProofRules::Hardened].map(|rules| (b, rules)))
+    {
         let seed = if b.dense {
-            build_verifier_setup_seed_dense(&b.params)?
+            build_verifier_setup_seed_dense_with_rules(&b.params, rules)?
         } else {
-            build_verifier_setup_seed(&b.params, b.hw, b.e, b.top_k)?
+            build_verifier_setup_seed_with_rules(&b.params, b.hw, b.e, b.top_k, rules)?
         };
         let key = shape_key_for_seed(&seed)?;
         if keys.contains(&key) {
@@ -1126,7 +1217,7 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
                 if params.validate_prod_envelope().is_err() {
                     continue;
                 }
-                if let Ok(th) = canonical_moe_trace_height(&params, hw, E, TOP_K) {
+                if let Ok(th) = reference_moe_trace_height(&params, hw, E, TOP_K) {
                     if th > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
                         continue;
                     }
@@ -1192,6 +1283,14 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
 #[cfg(test)]
 mod atomic_write_tests {
     use super::write_file_atomically_with_commit;
+
+    #[test]
+    fn verifier_resources_are_ready_before_admission_and_reusable() {
+        super::prepare_verifier_resources().expect("initialize worker pool");
+        super::prepare_verifier_resources().expect("reuse worker pool");
+        let workers = rayon::broadcast(|ctx| ctx.index());
+        assert_eq!(workers.len(), rayon::current_num_threads());
+    }
 
     #[test]
     fn failed_atomic_commit_preserves_existing_file() {

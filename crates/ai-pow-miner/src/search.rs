@@ -18,9 +18,9 @@ use ai_pow::tile_hash::hash_le_target;
 use thiserror::Error;
 
 #[cfg(all(feature = "node", feature = "gpu"))]
-use crate::canonical::PreparedCanonicalDenseSearch;
+use crate::reference::PreparedReferenceDenseSearch;
 #[cfg(feature = "node")]
-use crate::canonical::{PreparedCanonicalMoeScratch, PreparedCanonicalMoeTemplate};
+use crate::reference::{PreparedReferenceMoeScratch, PreparedReferenceMoeTemplate};
 
 /// Maximum logical attempts submitted to a backend at once.
 ///
@@ -225,16 +225,16 @@ pub trait SearchBackend: Send + Sync {
     ) -> Result<Option<SearchWinner>, SearchBackendError>;
 
     #[cfg(feature = "node")]
-    fn search_canonical(
+    fn search_reference(
         &self,
-        template: Arc<PreparedCanonicalMoeTemplate>,
+        template: Arc<PreparedReferenceMoeTemplate>,
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError>;
 
     #[cfg(all(feature = "node", feature = "gpu"))]
     fn search_peak(
         &self,
-        _template: Arc<PreparedCanonicalDenseSearch>,
+        _template: Arc<PreparedReferenceDenseSearch>,
         _batch: SearchBatch,
     ) -> Result<PeakSearchOutcome, SearchBackendError> {
         Err(SearchBackendError::BackendUnavailable(
@@ -306,13 +306,13 @@ impl SearchBackend for MeteredSearchBackend {
     }
 
     #[cfg(feature = "node")]
-    fn search_canonical(
+    fn search_reference(
         &self,
-        template: Arc<PreparedCanonicalMoeTemplate>,
+        template: Arc<PreparedReferenceMoeTemplate>,
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError> {
         let shape_work_factor = template.config().shape_work_factor()?;
-        let result = self.inner.search_canonical(template, batch);
+        let result = self.inner.search_reference(template, batch);
         if result.is_ok() {
             self.record(batch.len, shape_work_factor);
         }
@@ -322,7 +322,7 @@ impl SearchBackend for MeteredSearchBackend {
     #[cfg(all(feature = "node", feature = "gpu"))]
     fn search_peak(
         &self,
-        template: Arc<PreparedCanonicalDenseSearch>,
+        template: Arc<PreparedReferenceDenseSearch>,
         batch: SearchBatch,
     ) -> Result<PeakSearchOutcome, SearchBackendError> {
         let shape_work_factor = template.config().shape_work_factor()?;
@@ -462,8 +462,8 @@ enum WorkerCommand {
         next: Arc<AtomicU64>,
     },
     #[cfg(feature = "node")]
-    Canonical {
-        template: Arc<PreparedCanonicalMoeTemplate>,
+    Reference {
+        template: Arc<PreparedReferenceMoeTemplate>,
         batch: SearchBatch,
         next: Arc<AtomicU64>,
     },
@@ -578,9 +578,9 @@ impl SearchBackend for CpuSearchBackend {
     }
 
     #[cfg(feature = "node")]
-    fn search_canonical(
+    fn search_reference(
         &self,
-        template: Arc<PreparedCanonicalMoeTemplate>,
+        template: Arc<PreparedReferenceMoeTemplate>,
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError> {
         Self::validate_batch(batch)?;
@@ -592,7 +592,7 @@ impl SearchBackend for CpuSearchBackend {
         for worker in &self.workers {
             worker
                 .command
-                .send(WorkerCommand::Canonical {
+                .send(WorkerCommand::Reference {
                     template: Arc::clone(&template),
                     batch,
                     next: Arc::clone(&self.next),
@@ -609,7 +609,7 @@ fn worker_loop(
 ) {
     let mut dense_scratch = None;
     #[cfg(feature = "node")]
-    let mut canonical_scratch = None;
+    let mut reference_scratch = None;
     while let Ok(command) = receiver.recv() {
         match command {
             WorkerCommand::Dense {
@@ -622,13 +622,13 @@ fn worker_loop(
                 let _ = result.send(outcome);
             }
             #[cfg(feature = "node")]
-            WorkerCommand::Canonical {
+            WorkerCommand::Reference {
                 template,
                 batch,
                 next,
             } => {
                 let outcome =
-                    search_canonical_with_scratch(&template, batch, &next, &mut canonical_scratch);
+                    search_reference_with_scratch(&template, batch, &next, &mut reference_scratch);
                 let _ = result.send(outcome);
             }
             WorkerCommand::Shutdown => break,
@@ -681,11 +681,11 @@ fn search_dense_with_scratch(
 }
 
 #[cfg(feature = "node")]
-fn search_canonical_with_scratch(
-    template: &PreparedCanonicalMoeTemplate,
+fn search_reference_with_scratch(
+    template: &PreparedReferenceMoeTemplate,
     batch: SearchBatch,
     next: &AtomicU64,
-    scratch: &mut Option<PreparedCanonicalMoeScratch>,
+    scratch: &mut Option<PreparedReferenceMoeScratch>,
 ) -> Result<Option<SearchWinner>, SearchBackendError> {
     if scratch
         .as_ref()

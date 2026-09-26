@@ -413,11 +413,10 @@ pub struct NockchainCli {
     pub bind_private_grpc_port: u16,
     #[arg(
         long = "ai-pow-verifier-cache-cap",
-        help = "Max resident AI-PoW verifier contexts (LRU). The production default \
-                retains all 14 supported shape keys across seven trace heights, preventing \
-                attacker-controlled evict/reload thrash at the measured setup-table RSS. \
-                Lowering the cap reduces RSS by allowing verifier contexts to page in and \
-                out, but reintroduces synchronous page-in churn under adversarial traffic. \
+        help = "Max resident AI-PoW verifier contexts (LRU). The default retains all \
+                28 versioned setups across seven trace heights. Contexts are compact; \
+                lowering the cap causes repeated disk loads for different proof shapes \
+                and versions. \
                 Overrides AI_POW_VERIFIER_CACHE_CAP."
     )]
     pub ai_pow_verifier_cache_cap: Option<usize>,

@@ -253,6 +253,192 @@
     (expect-eq !>(9.719.996.073.121) !>((div ai-work 214)))
   ==
 ::
+::  The second reset prices 2,000 ZK GPUs at 28 MH/s each without changing AI
+::  capacity, lane cadence, or half-life. The preceding %5 schedule is historical.
+++  test-mainnet-asert-reset-schedule
+  ^-  tang
+  =/  mainnet  *blockchain-constants:txe
+  =/  mt  ~(. txe mainnet)
+  =/  dc  ~(. dcon *consensus-state *derived-state mainnet)
+  %-  zing
+  %+  turn  ~[153.500 154.000 154.001 154.499 154.500 154.501]
+  |=  height=@
+  =/  zk  (need (active-asert-anchor:dc %zk height))
+  =/  ai  (need (active-asert-anchor:dc %ai height))
+  =/  phase=@  ?:((lth height 154.500) 147.500 154.500)
+  =/  zk-work=@  (mul ?:((lth height 154.500) 777.600.000.000 56.000.000.000) 500)
+  ;:  weld
+    (expect-eq !>(=(height 154.500)) !>((puzzle-asert-reset-at:page:mt height)))
+    (expect-eq !>([phase phase]) !>([activation-height.zk activation-height.ai]))
+    (expect-eq !>((div max-target-atom:mt zk-work)) !>(target.zk))
+    (expect-eq !>((div (bex 256) (mul 10.000.000.000.000.000.000 214))) !>(target.ai))
+    (expect-eq !>([500 214]) !>([ideal-block-time.zk ideal-block-time.ai]))
+    (expect-eq !>([43.200 43.200]) !>([half-life.zk half-life.ai]))
+    (expect-eq !>([max-target-atom:mt max-ai-target-atom:mt]) !>([maximum-target.zk maximum-target.ai]))
+  ==
+::
+::  Existing counters and heads must not leak into either first-child target.
+::  Exercise both a retained anchor cache and an upgrade parked at 154,499
+::  with only the predecessor's ordinary MTP available.
+++  test-mainnet-asert-reset-first-child-targets
+  ^-  tang
+  =/  mainnet  *blockchain-constants:txe
+  =/  mt  ~(. txe mainnet)
+  =/  hm  ~(. helpers mainnet)
+  =/  parent=page:t  default-genesis-page:hm
+  =.  parent
+    ?^  -.parent
+      parent(height 154.499, digest *block-id:t)
+    parent(height 154.499, digest *block-id:t)
+  =/  parent-id=block-id:t  ~(digest get:page:mt parent)
+  =/  old-head=block-id:t  ~(digest get:page:mt default-genesis-page:hm)
+  =/  timestamps=(h-map block-id:t @)
+    (~(put h-by *(h-map block-id:t @)) parent-id 123.456)
+  =/  prior=derived-state  *derived-state
+  =.  puzzle-asert-states.prior
+    (~(put h-by puzzle-asert-states.prior) parent-id [91 73 `old-head `old-head])
+  %-  zing
+  %+  turn  `(list ?)`~[%.y %.n]
+  |=  cached=?
+  =/  con=consensus-state  *consensus-state
+  =.  blocks.con
+    (~(put h-by blocks.con) parent-id (to-local-page:page:mt parent))
+  =.  min-timestamps.con  (~(put h-by timestamps) old-head 12.345)
+  =.  asert-anchor-min-timestamps.con
+    ?.  cached  asert-anchor-min-timestamps.con
+    (~(put by (~(put by asert-anchor-min-timestamps.con) %zk timestamps)) %ai timestamps)
+  =/  dc  ~(. dcon con prior mainnet)
+  ;:  weld
+    %+  expect-eq
+      !>((div max-target-atom:mt (mul 56.000.000.000 500)))
+    !>((merge:bignum (compute-target-zk-asert:dc 154.500 parent-id)))
+    %+  expect-eq
+      !>((div (bex 256) (mul 10.000.000.000.000.000.000 214)))
+    !>((merge:bignum (compute-target-ai-asert:dc 154.500 parent-id)))
+  ==
+::
+::  Interleave two forks in the same consensus/derived maps. Each has its own
+::  154,499 MTP and nonzero old lineage. Integer half-life drifts make exact
+::  target multiples observable without duplicating ASERT's implementation.
+::  Each fork starts on a different puzzle, then alternates through 154,502.
+++  test-mainnet-asert-reset-mixed-forks-reset-once
+  ^-  tang
+  =/  mainnet  *blockchain-constants:txe
+  =/  mt  ~(. txe mainnet)
+  =/  hm  ~(. helpers mainnet)
+  =/  make-parent
+    |=  stamp=@
+    ^-  page:t
+    =/  pag=page:t  default-genesis-page:hm
+    =.  pag
+      ?^  -.pag
+        pag(height 154.499, timestamp stamp)
+      pag(height 154.499, timestamp stamp)
+    ?^  -.pag
+      pag(digest (compute-digest:page:mt pag))
+    pag(digest (compute-digest:page:mt pag))
+  =/  parent-a=page:t  (make-parent 100.000)
+  =/  parent-b=page:t  (make-parent 200.000)
+  =/  old-head=block-id:t  ~(digest get:page:mt default-genesis-page:hm)
+  =/  seed
+    %+  roll  `(list page:t)`~[parent-a parent-b]
+    |=  [pag=page:t state=[con=consensus-state der=derived-state]]
+    =/  bid=block-id:t  ~(digest get:page:mt pag)
+    =.  blocks.con.state
+      (~(put h-by blocks.con.state) bid (to-local-page:page:mt pag))
+    =.  min-timestamps.con.state
+      (~(put h-by min-timestamps.con.state) bid ~(timestamp get:page:mt pag))
+    =.  min-timestamps.con.state
+      (~(put h-by min-timestamps.con.state) old-head 12.345)
+    =.  puzzle-asert-states.der.state
+      (~(put h-by puzzle-asert-states.der.state) bid [91 73 `old-head `old-head])
+    state
+  =/  extend
+    |=  [con=consensus-state der=derived-state parent=page:t ai=? stamp=@]
+    ^-  [con=consensus-state der=derived-state tip=page:t]
+    =/  pag=page:t  (make-empty-page:hm parent)
+    =.  pag
+      ?^  -.pag
+        pag(timestamp stamp)
+      pag(timestamp stamp, pow ?:(ai `(sample-ai-pow-artifact:hm 4) pow.pag))
+    =.  pag
+      ?^  -.pag
+        pag(digest (compute-digest:page:mt pag))
+      pag(digest (compute-digest:page:mt pag))
+    =/  bid=block-id:t  ~(digest get:page:mt pag)
+    =.  blocks.con
+      (~(put h-by blocks.con) bid (to-local-page:page:mt pag))
+    =.  min-timestamps.con
+      (~(put h-by min-timestamps.con) bid stamp)
+    =.  con  (~(update-asert-anchor-min-timestamps dcon con der mainnet) %zk pag)
+    =.  con  (~(update-asert-anchor-min-timestamps dcon con der mainnet) %ai pag)
+    =.  der  (~(update-puzzle-asert-state dder der mainnet) con pag)
+    [con der pag]
+  ::  First accepted blocks have one and two half-lives of drift, respectively.
+  =/  a1  (extend con.seed der.seed parent-a %.n 143.700)
+  =/  b1  (extend con.a1 der.a1 parent-b %.y 286.614)
+  =/  targets
+    |=  [con=consensus-state der=derived-state tip=page:t]
+    ^-  [@ @]
+    =/  dc  ~(. dcon con der mainnet)
+    =/  height=@  +(~(height get:page:mt tip))
+    =/  bid=block-id:t  ~(digest get:page:mt tip)
+    [(merge:bignum (compute-target-zk-asert:dc height bid)) (merge:bignum (compute-target-ai-asert:dc height bid))]
+  =/  after-first-a  (targets con.b1 der.b1 tip.a1)
+  =/  after-first-b  (targets con.b1 der.b1 tip.b1)
+  ::  The other lane starts without inheriting the first lane's count or head.
+  =/  a2  (extend con.b1 der.b1 tip.a1 %.y 186.614)
+  =/  b2  (extend con.a2 der.a2 tip.b1 %.n 330.100)
+  =/  after-second-a  (targets con.b2 der.b2 tip.a2)
+  =/  after-second-b  (targets con.b2 der.b2 tip.b2)
+  ::  Returning to a lane must retain its earlier block, not reset at each height.
+  =/  a3  (extend con.b2 der.b2 tip.a2 %.n 230.600)
+  =/  b3  (extend con.a3 der.a3 tip.b2 %.y 373.228)
+  =/  zk=@  (div max-target-atom:mt (mul 56.000.000.000 500))
+  =/  ai=@  (div (bex 256) (mul 10.000.000.000.000.000.000 214))
+  ;:  weld
+    (expect-eq !>([(mul 2 zk) ai]) !>(after-first-a))
+    (expect-eq !>([zk (mul 4 ai)]) !>(after-first-b))
+    (expect-eq !>([(mul 2 zk) (mul 4 ai)]) !>(after-second-a))
+    (expect-eq !>([(mul 8 zk) (mul 4 ai)]) !>(after-second-b))
+    (expect-eq !>([(mul 8 zk) (mul 4 ai)]) !>((targets con.b3 der.b3 tip.a3)))
+    (expect-eq !>([(mul 8 zk) (mul 16 ai)]) !>((targets con.b3 der.b3 tip.b3)))
+  ==
+::
+::  Reprice AI work only at the new height. Realistic old/new ZK anchors keep
+::  their own target-priced work at every height; historical Logos and %5 AI
+::  blocks must not be retrospectively repriced.
+++  test-mainnet-asert-reset-height-priced-work
+  ^-  tang
+  =/  mt  ~(. txe *blockchain-constants:txe)
+  =/  ai-target=@  (div (bex 256) (mul 10.000.000.000.000.000.000 214))
+  =/  old-zk-target=@  (div max-target-atom:mt (mul 777.600.000.000 500))
+  =/  new-zk-target=@  (div max-target-atom:mt (mul 56.000.000.000 500))
+  %-  zing
+  %+  turn
+    :~  [147.499 25.750.000.000]
+        [147.500 1.028.807]
+        [153.500 1.028.807]
+        [154.000 1.028.807]
+        [154.001 1.028.807]
+        [154.499 1.028.807]
+        [154.500 14.285.714]
+        [154.501 14.285.714]
+    ==
+  |=  [height=@ rate=@]
+  ;:  weld
+    (expect-eq !>(rate) !>((mac-equivalents-per-zk-work-unit-at:page:mt height)))
+    %+  expect-eq
+      !>((div (bex 256) (mul rate +(ai-target))))
+    !>((merge:bignum (block-work-at:page:mt height %ai-pow (chunk:bignum ai-target))))
+    %+  expect-eq
+      !>((div max-target-atom:mt +(old-zk-target)))
+    !>((merge:bignum (block-work-at:page:mt height %dumb-zkpow (chunk:bignum old-zk-target))))
+    %+  expect-eq
+      !>((div max-target-atom:mt +(new-zk-target)))
+    !>((merge:bignum (block-work-at:page:mt height %dumb-zkpow (chunk:bignum new-zk-target))))
+  ==
+::
 :::  ZK weight is continuous across the activation boundary: a post-activation
 :::  ZK block contributes exactly what the pre-activation formula gives on the
 :::  same target. KAT: at the mainnet post-activation anchor the expected work
@@ -485,6 +671,7 @@
     !>((merge:bignum (ai-pow-work:page:pt ~(height get:page:pt ai-page) ~(target get:page:pt ai-page))))
   ==
 
+:::
 ::  RETARGETING — AI difficulty tracks the AI subchain, not global height.
 ::  Two chains share the same AI subchain (one AI block on genesis); chain B
 ::  interleaves a ZK block. The next AI block's ASERT target must be IDENTICAL

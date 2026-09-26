@@ -3,12 +3,11 @@
 //!
 //! The kernel-side Hoon emits effects shaped `[%mine-zk version commit
 //! target pow-len]` (always) and `[%mine-ai version commit target
-//! pow-len]` (post-AI-activation). `commit` is the kernel's
+//! pow-len candidate-height]` (post-AI-activation). `commit` is the kernel's
 //! `block-commitment:page`, not a raw block header. Each miner subscribes via
 //! WatchEffects with its own head filter (`b"mine-zk"` / `b"mine-ai"`).
-//! This decoder is shape-symmetric: same field layout for both heads,
-//! so the same struct holds either kind of candidate while preserving the
-//! effect kind for puzzle-specific boundary checks.
+//! The shared fields retain their layout; only AI candidates carry a height.
+//! The effect kind is preserved for puzzle-specific boundary checks.
 
 use nockapp::noun::slab::NounSlab;
 use nockchain_math::noun_ext::NounMathExtHandle;
@@ -31,6 +30,9 @@ pub struct MiningCandidate {
     pub target: NounSlab,
     /// `pow-len` parameter (proof length in bytes).
     pub pow_len: u64,
+    /// AI candidate height emitted by the node. Old AI jobs lack this field;
+    /// miners that select height-activated proof rules must reject those jobs.
+    pub candidate_height: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,18 +47,23 @@ pub enum CandidateDecodeError {
     NotACell,
     #[error("effect head is not %mine-zk or %mine-ai")]
     NotMine,
-    #[error("effect tail does not match the 4-tuple [version commit target pow-len]")]
+    #[error(
+        "effect tail does not match [version commit target pow-len] with an optional AI height"
+    )]
     BadTuple,
     #[error("pow-len is not a u64 atom")]
     BadPowLen,
+    #[error("candidate height is not a u64 atom")]
+    BadHeight,
 }
 
 impl MiningCandidate {
     /// Decode a `[%mine-zk version commit target pow-len]` or
-    /// `[%mine-ai version commit target pow-len]` effect noun (read
+    /// `[%mine-ai version commit target pow-len candidate-height]` effect noun (read
     /// from a `WatchEffects` stream) into a `MiningCandidate`. The
     /// caller's head_filter on the subscription decides which head it
-    /// receives; this decoder accepts either.
+    /// receives; this decoder accepts either. Old AI effects decode with no
+    /// candidate height so the miner can report an explicit upgrade error.
     ///
     /// Returns `Ok(None)` for an effect whose head is neither
     /// `%mine-zk` nor `%mine-ai`.
@@ -78,11 +85,25 @@ impl MiningCandidate {
         } else {
             return Ok(None);
         };
-        let [version_h, commit_h, target_h, pow_len_h] = effect_cell
+        let [version_h, commit_h, target_h, pow_tail] = effect_cell
             .tail()
             .uncell::<4>()
             .map_err(|_| CandidateDecodeError::BadTuple)?;
 
+        let (pow_len_h, candidate_height) =
+            if kind == MiningCandidateKind::Ai && pow_tail.as_cell().is_ok() {
+                let [pow_len_h, height_h] = pow_tail
+                    .uncell::<2>()
+                    .map_err(|_| CandidateDecodeError::BadTuple)?;
+                let height = height_h
+                    .as_atom()
+                    .map_err(|_| CandidateDecodeError::BadHeight)?
+                    .as_u64()
+                    .map_err(|_| CandidateDecodeError::BadHeight)?;
+                (pow_len_h, Some(height))
+            } else {
+                (pow_tail, None)
+            };
         let pow_len = pow_len_h
             .as_atom()
             .map_err(|_| CandidateDecodeError::BadPowLen)?
@@ -95,6 +116,7 @@ impl MiningCandidate {
             block_header: noun_into_owned_slab(commit_h.noun(), &space),
             target: noun_into_owned_slab(target_h.noun(), &space),
             pow_len,
+            candidate_height,
         }))
     }
 }
@@ -175,6 +197,37 @@ mod tests {
             .expect("head is %mine-ai");
         assert_eq!(candidate.kind, MiningCandidateKind::Ai);
         assert_eq!(candidate.pow_len, 64);
+        assert_eq!(candidate.candidate_height, None);
+    }
+
+    #[test]
+    fn ai_candidates_carry_the_candidate_height_across_cutover_and_reorg() {
+        for height in [153_500, 154_499, 154_500, 154_501, 154_499] {
+            let mut slab = NounSlab::new();
+            let root = T(
+                &mut slab,
+                &[D(tas!(b"mine-ai")), D(4), D(0x22), D(0x33), D(64), D(height)],
+            );
+            slab.set_root(root);
+            let candidate = MiningCandidate::from_effect_slab(slab).unwrap().unwrap();
+            assert_eq!(candidate.candidate_height, Some(height));
+            assert_eq!(candidate.pow_len, 64);
+        }
+    }
+
+    #[test]
+    fn ai_candidate_rejects_non_atom_height() {
+        let mut slab = NounSlab::new();
+        let height = T(&mut slab, &[D(1), D(2)]);
+        let root = T(
+            &mut slab,
+            &[D(tas!(b"mine-ai")), D(4), D(0), D(0), D(64), height],
+        );
+        slab.set_root(root);
+        assert!(matches!(
+            MiningCandidate::from_effect_slab(slab),
+            Err(CandidateDecodeError::BadHeight)
+        ));
     }
 
     #[test]

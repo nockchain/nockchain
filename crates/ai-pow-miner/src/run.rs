@@ -48,16 +48,17 @@ use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::PearlWorkCommitments;
 use ai_pow::pearl_compat::{
     pearl_nbits_to_target_le, validate_pearl_merge_config_for_recursive_prover,
-    verify_pearl_aux_inclusion, PearlAuxInclusionProof, PearlCompatError,
-    PearlIncompleteBlockHeader, PearlMergeCheckedTicketAttempt, PearlMergeTicketAttempt,
-    PearlMiningConfig, PearlNockchainAux, PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES,
-    PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH, PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
+    PearlAuxInclusionProof, PearlCompatError, PearlIncompleteBlockHeader,
+    PearlMergeCheckedTicketAttempt, PearlMergeTicketAttempt, PearlMiningConfig, PearlNockchainAux,
+    PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES, PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH,
+    PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
 };
 use ai_pow::tile_hash::hash_le_target;
 use ai_pow::zk_bridge::{
-    prove_pearl_merge_compact_recursive_certificate_checked, AiPowCompactRecursiveCertificateRun,
-    AiPowRecursiveCertificateRun, ZkPublicCommitments,
+    prove_pearl_merge_compact_recursive_certificate_checked_with_rules,
+    AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun, ZkPublicCommitments,
 };
+use ai_pow_zk::proof_rules::ProofRules;
 use ai_pow_zk::{CompositePublicInputs, ZkParams};
 use futures::StreamExt;
 use nockapp::nockapp::wire::Wire;
@@ -76,19 +77,11 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::canonical::{
-    evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at_for_miner, CanonicalBlock,
-    CanonicalProveError, PreparedCanonicalMoeTemplate,
-};
-#[cfg(feature = "gpu")]
-use crate::canonical::{
-    CanonicalDenseBlock, PreparedCanonicalDenseSearch, PreparedCanonicalDenseTemplate,
-};
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_public_inputs_node,
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_recursive_run,
-    build_ai_pow_pearl_merge_moe_artifact_noun_from_node,
+    build_ai_pow_pearl_merge_moe_artifact_noun_from_node_with_rules,
     decode_ai_pow_pearl_merge_artifact_metadata_slab, AiProofNode, CertificateNounError,
     CertificateNounLimits,
 };
@@ -98,6 +91,14 @@ use crate::pearl_mining::{
     self, PearlMergeMineOptions, PearlMergeMinedTicket, PearlMergeMiningError, PearlMergeMiningJob,
 };
 use crate::pearl_plain_proof::PearlPlainProof;
+use crate::reference::{
+    evaluate_reference_moe_jackpot, prove_reference_moe_block_at_with_rules,
+    PreparedReferenceMoeTemplate, ReferenceBlock, ReferenceProveError,
+};
+#[cfg(feature = "gpu")]
+use crate::reference::{
+    PreparedReferenceDenseSearch, PreparedReferenceDenseTemplate, ReferenceDenseBlock,
+};
 #[cfg(feature = "gpu")]
 use crate::search::MeteredSearchBackend;
 #[cfg(feature = "gpu")]
@@ -143,6 +144,7 @@ impl AiPowSubmitTimings {
 
 type AiPowPearlMergeCertificateBuilder = dyn Fn(
         &PearlMergeCheckedTicketAttempt,
+        ProofRules,
     ) -> Result<PearlMergeCertificateProof, AiPowCertificateBuildError>
     + Send
     + Sync
@@ -200,7 +202,7 @@ pub struct PearlMergeSubmissionConfig {
 }
 
 impl PearlMergeSubmissionConfig {
-    /// Build the canonical production Pearl-compatible Nockchain submission
+    /// Build the reference production Pearl-compatible Nockchain submission
     /// config. The certificate builder is fixed to the selected compact
     /// recursive prover, so external callers cannot accidentally install a
     /// plain-proof or synthetic certificate path.
@@ -214,21 +216,20 @@ impl PearlMergeSubmissionConfig {
         a: Arc<Vec<i8>>,
         b: Arc<Vec<i8>>,
     ) -> Self {
-        let certificate_builder = Arc::new(move |attempt: &PearlMergeCheckedTicketAttempt| {
-            let run = prove_pearl_merge_compact_recursive_certificate_checked(
-                attempt,
-                &params,
-                a.as_slice(),
-                b.as_slice(),
-            )
-            .map_err(|e| {
-                AiPowCertificateBuildError(format!(
-                    "refusing to build Pearl-compatible recursive certificate before successful Nockchain target check: {e}"
-                ))
-            })?;
-            let proof = PearlMergeCertificateProof::from_compact_recursive_run(&run)?;
-            Ok(proof)
-        });
+        let certificate_builder = Arc::new(
+            move |attempt: &PearlMergeCheckedTicketAttempt, rules: ProofRules| {
+                let run = prove_pearl_merge_compact_recursive_certificate_checked_with_rules(
+                    attempt, &params, a.as_slice(), b.as_slice(), rules,
+                )
+                .map_err(|e| {
+                    AiPowCertificateBuildError(format!(
+                        "refusing to build Pearl-compatible recursive certificate before successful Nockchain target check: {e}"
+                    ))
+                })?;
+                let proof = PearlMergeCertificateProof::from_compact_recursive_run(&run)?;
+                Ok(proof)
+            },
+        );
 
         Self {
             gateway,
@@ -243,8 +244,9 @@ impl PearlMergeSubmissionConfig {
     pub(crate) fn build_certificate_for_attempt(
         &self,
         attempt: &PearlMergeCheckedTicketAttempt,
+        rules: ProofRules,
     ) -> Result<PearlMergeCertificateProof, AiPowCertificateBuildError> {
-        (self.certificate_builder)(attempt)
+        (self.certificate_builder)(attempt, rules)
     }
 }
 
@@ -745,6 +747,7 @@ pub async fn run_with_backend(
                                 }
                             };
                             let pearl_job = PearlMergeCandidateJob {
+                                rules: mined.rules,
                                 header: mined.ticket.attempt.public_params.block_header,
                                 gateway_mining_job: mined.gateway_mining_job.clone(),
                                 aux_inclusion: mined.aux_inclusion.clone(),
@@ -863,11 +866,11 @@ pub async fn run_with_backend(
     Ok(())
 }
 
-/// Canonical block shape for the gateway-free CPU miner. Matches the
+/// Reference block shape for the gateway-free CPU miner. Matches the
 /// `ai_pow_accept_e2e` integration test and a member of the node's production
 /// verifier-setup bucket set (heights 2^13..2^19), so a node's boot-installed
-/// setup verifies it. See [`run_canonical`].
-const CANONICAL_MATMUL_PARAMS: MatmulParams = MatmulParams {
+/// setup verifies it. See [`run_reference`].
+const REFERENCE_MATMUL_PARAMS: MatmulParams = MatmulParams {
     m: 64,
     k: 1024,
     n: 64,
@@ -876,22 +879,22 @@ const CANONICAL_MATMUL_PARAMS: MatmulParams = MatmulParams {
     spot_checks: 1,
     difficulty_bits: 0,
 };
-const CANONICAL_HW: u32 = 8;
-const CANONICAL_E: usize = 2;
-const CANONICAL_TOP_K: usize = 1;
+const REFERENCE_HW: u32 = 8;
+const REFERENCE_E: usize = 2;
+const REFERENCE_TOP_K: usize = 1;
 
-/// Build the `[%command %pow [%ai-pow nonce cert]]` poke from a proved canonical
+/// Build the `[%command %pow [%ai-pow nonce cert]]` poke from a proved reference
 /// (MoE / `AIM1`) block, mirroring `ai_pow_accept_e2e::artifact_for_block` +
 /// `pow_poke_from_artifact`. The artifact is wrapped directly (no dense-`AIP1`
 /// metadata self-check — that would reject the MoE nonce magic).
-fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> {
-    let artifact = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+fn build_reference_poke(block: &ReferenceBlock) -> Result<NounSlab, MinerError> {
+    let artifact = build_ai_pow_pearl_merge_moe_artifact_noun_from_node_with_rules(
         &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
         block.certificate.found_idx, block.certificate.trace_height,
         &block.certificate.commitments, &block.certificate.public_inputs,
-        &block.certificate.certificate,
+        &block.certificate.certificate, block.rules,
     )
-    .map_err(|e| MinerError::CertificateBuild(format!("canonical moe artifact: {e}")))?;
+    .map_err(|e| MinerError::CertificateBuild(format!("reference moe artifact: {e}")))?;
     let artifact_space = artifact.noun_space();
     let mut slab = NounSlab::new();
     let art = slab.copy_into(unsafe { *artifact.root() }, &artifact_space);
@@ -901,7 +904,7 @@ fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> 
 }
 
 #[cfg(feature = "gpu")]
-fn build_peak_poke(block: &CanonicalDenseBlock) -> Result<NounSlab, MinerError> {
+fn build_peak_poke(block: &ReferenceDenseBlock) -> Result<NounSlab, MinerError> {
     let artifact = build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
         block.attempt.attempt(),
         &block.aux_inclusion,
@@ -920,15 +923,15 @@ fn build_peak_poke(block: &CanonicalDenseBlock) -> Result<NounSlab, MinerError> 
 }
 
 enum GatewayFreeBlock {
-    Canonical(CanonicalBlock),
+    Reference(ReferenceBlock),
     #[cfg(feature = "gpu")]
-    Peak(CanonicalDenseBlock),
+    Peak(ReferenceDenseBlock),
 }
 
 impl GatewayFreeBlock {
     fn commit(&self) -> [u8; 32] {
         match self {
-            Self::Canonical(block) => block.commit,
+            Self::Reference(block) => block.commit,
             #[cfg(feature = "gpu")]
             Self::Peak(block) => block.commit,
         }
@@ -936,7 +939,7 @@ impl GatewayFreeBlock {
 
     fn trace_height(&self) -> usize {
         match self {
-            Self::Canonical(block) => block.certificate.trace_height,
+            Self::Reference(block) => block.certificate.trace_height,
             #[cfg(feature = "gpu")]
             Self::Peak(block) => block.run.trace_height(),
         }
@@ -944,7 +947,7 @@ impl GatewayFreeBlock {
 
     fn build_poke(&self) -> Result<NounSlab, MinerError> {
         match self {
-            Self::Canonical(block) => build_canonical_poke(block),
+            Self::Reference(block) => build_reference_poke(block),
             #[cfg(feature = "gpu")]
             Self::Peak(block) => build_peak_poke(block),
         }
@@ -953,7 +956,7 @@ impl GatewayFreeBlock {
 
 #[derive(Clone)]
 enum GatewayFreeProfile {
-    Canonical,
+    Reference,
     #[cfg(feature = "gpu")]
     Peak {
         a: Arc<Vec<i8>>,
@@ -964,7 +967,7 @@ enum GatewayFreeProfile {
 impl GatewayFreeProfile {
     fn name(&self) -> &'static str {
         match self {
-            Self::Canonical => "canonical-moe",
+            Self::Reference => "reference-moe",
             #[cfg(feature = "gpu")]
             Self::Peak { .. } => "peak-dense",
         }
@@ -972,7 +975,7 @@ impl GatewayFreeProfile {
 
     fn worker_errors_are_fatal(&self) -> bool {
         match self {
-            Self::Canonical => false,
+            Self::Reference => false,
             #[cfg(feature = "gpu")]
             Self::Peak { .. } => true,
         }
@@ -984,13 +987,16 @@ impl GatewayFreeProfile {
         target: DifficultyTarget,
         cancel: Arc<AtomicBool>,
         backend: &dyn SearchBackend,
+        rules: ProofRules,
     ) -> GrindResult {
         match self {
-            Self::Canonical => grind_canonical_block_with_backend(commit, target, cancel, backend),
+            Self::Reference => grind_reference_block_with_backend_with_rules(
+                commit, target, cancel, backend, rules,
+            ),
             #[cfg(feature = "gpu")]
-            Self::Peak { a, b } => {
-                grind_peak_block_with_backend(commit, target, cancel, backend, a, b)
-            }
+            Self::Peak { a, b } => grind_peak_block_with_backend_with_rules(
+                commit, target, cancel, backend, a, b, rules,
+            ),
         }
     }
 }
@@ -998,9 +1004,9 @@ impl GatewayFreeProfile {
 /// A grind worker returns `Ok(Some(block))` when a ticket cleared the target and
 /// its certificate was proved, `Ok(None)` when the grind was cancelled or
 /// exhausted, and `Err` on search, revalidation, or proof failure.
-type GrindResult = Result<Option<GatewayFreeBlock>, CanonicalProveError>;
+type GrindResult = Result<Option<GatewayFreeBlock>, ReferenceProveError>;
 
-enum CanonicalOutcome {
+enum ReferenceOutcome {
     None,
     Joined(Result<GrindResult, tokio::task::JoinError>),
 }
@@ -1012,14 +1018,14 @@ enum CanonicalOutcome {
 /// grind per candidate, so a candidate storm accumulates concurrent proves
 /// until memory is exhausted. The handle is only consumed (`worker.take()` by
 /// the caller's match arms) when this branch actually wins.
-async fn await_canonical_worker(worker: &mut Option<JoinHandle<GrindResult>>) -> CanonicalOutcome {
+async fn await_reference_worker(worker: &mut Option<JoinHandle<GrindResult>>) -> ReferenceOutcome {
     match worker.as_mut() {
-        Some(h) => CanonicalOutcome::Joined(h.await),
-        None => CanonicalOutcome::None,
+        Some(h) => ReferenceOutcome::Joined(h.await),
+        None => ReferenceOutcome::None,
     }
 }
 
-async fn cancel_and_await_canonical_worker(
+async fn cancel_and_await_reference_worker(
     worker: &mut Option<JoinHandle<GrindResult>>,
     cancel: &AtomicBool,
 ) -> Result<(), MinerError> {
@@ -1032,35 +1038,35 @@ async fn cancel_and_await_canonical_worker(
     Ok(())
 }
 
-/// MAC-equivalents one canonical grind attempt costs — the shape work factor
+/// MAC-equivalents one reference grind attempt costs — the shape work factor
 /// `F` consensus prices this miner's attempts at. The node's `target` prices
 /// ONE MAC-equivalent, so the jackpot clears when
-/// `jackpot <= target * CANONICAL_SHAPE_WORK_FACTOR`; comparing against the
+/// `jackpot <= target * REFERENCE_SHAPE_WORK_FACTOR`; comparing against the
 /// bare target instead would silently discard every win in `(target, Theta]`
 /// and cost this miner `F` times more work per block than consensus asks for.
 /// See `ai_pow::difficulty`.
-pub fn canonical_shape_work_factor() -> Result<u128, CanonicalProveError> {
-    crate::canonical::canonical_mining_config(
-        &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K,
+pub fn reference_shape_work_factor() -> Result<u128, ReferenceProveError> {
+    crate::reference::reference_mining_config(
+        &REFERENCE_MATMUL_PARAMS, REFERENCE_HW, REFERENCE_E, REFERENCE_TOP_K,
     )
     .shape_work_factor()
-    .map_err(|e| CanonicalProveError(format!("canonical shape work factor: {e}")))
+    .map_err(|e| ReferenceProveError(format!("reference shape work factor: {e}")))
 }
 
 /// The effective jackpot threshold this miner accepts against: `target · F` for
-/// the canonical tile shape.
+/// the reference tile shape.
 ///
 /// Depends only on `(target, shape)`, never on the extranonce, so the grind
-/// resolves it once. A target the canonical shape cannot scale is a node /
+/// resolves it once. A target the reference shape cannot scale is a node /
 /// consensus misconfiguration, not a grind failure — surface it rather than
 /// silently spinning the whole extranonce space.
-pub fn canonical_grind_threshold(
+pub fn reference_grind_threshold(
     target: &DifficultyTarget,
-) -> Result<[u8; 32], CanonicalProveError> {
-    let factor = canonical_shape_work_factor()?;
+) -> Result<[u8; 32], ReferenceProveError> {
+    let factor = reference_shape_work_factor()?;
     ai_pow::difficulty::effective_jackpot_threshold(target, factor).map_err(|e| {
-        CanonicalProveError(format!(
-            "candidate target {} is outside the representable AI-PoW domain for the canonical \
+        ReferenceProveError(format!(
+            "candidate target {} is outside the representable AI-PoW domain for the reference \
              shape (factor {factor}): {e:?}",
             hex::encode(target)
         ))
@@ -1068,35 +1074,52 @@ pub fn canonical_grind_threshold(
 }
 
 #[cfg(test)]
-fn grind_canonical_block(
+fn grind_reference_block(
     commit: [u8; 32],
     target: DifficultyTarget,
     cancel: Arc<AtomicBool>,
 ) -> GrindResult {
     let backend = CpuSearchBackend::default();
-    grind_canonical_block_with_backend(commit, target, cancel, &backend)
+    grind_reference_block_with_backend(commit, target, cancel, &backend)
 }
 
-// Proof-of-work grind for the gateway-free canonical miner. Batches consecutive
+// Proof-of-work grind for the gateway-free reference miner. Batches consecutive
 // extranonces through a prepared template and returns only after a scalar-oracle
 // recheck has matched the backend winner. Cancellation is observed before and
 // after every bounded batch. Runs on a blocking thread.
-fn grind_canonical_block_with_backend(
+#[cfg(test)]
+fn grind_reference_block_with_backend(
     commit: [u8; 32],
     target: DifficultyTarget,
     cancel: Arc<AtomicBool>,
     backend: &dyn SearchBackend,
 ) -> GrindResult {
-    let threshold = canonical_grind_threshold(&target)?;
+    grind_reference_block_with_backend_with_rules(
+        commit,
+        target,
+        cancel,
+        backend,
+        ProofRules::Hardened,
+    )
+}
+
+fn grind_reference_block_with_backend_with_rules(
+    commit: [u8; 32],
+    target: DifficultyTarget,
+    cancel: Arc<AtomicBool>,
+    backend: &dyn SearchBackend,
+    rules: ProofRules,
+) -> GrindResult {
+    let threshold = reference_grind_threshold(&target)?;
     if cancel.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    let template = Arc::new(PreparedCanonicalMoeTemplate::new(
-        &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
+    let template = Arc::new(PreparedReferenceMoeTemplate::new(
+        &REFERENCE_MATMUL_PARAMS, REFERENCE_HW, REFERENCE_E, REFERENCE_TOP_K, commit,
     )?);
     let mut scheduler =
         OrderedBatchScheduler::new(0, u64::from(u32::MAX) + 1, None, backend.batch_attempts())
-            .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
+            .map_err(|error| ReferenceProveError(format!("search scheduler: {error}")))?;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -1106,75 +1129,76 @@ fn grind_canonical_block_with_backend(
             Ok(batch) => batch,
             Err(SearchScheduleEnd::AttemptSpaceExhausted) => break,
             Err(SearchScheduleEnd::BudgetExhausted { .. }) => {
-                return Err(CanonicalProveError(
-                    "canonical grind has no configured attempt budget".to_string(),
+                return Err(ReferenceProveError(
+                    "reference grind has no configured attempt budget".to_string(),
                 ));
             }
         };
         let winner = backend
-            .search_canonical(Arc::clone(&template), batch)
-            .map_err(|error| CanonicalProveError(format!("search backend: {error}")))?;
+            .search_reference(Arc::clone(&template), batch)
+            .map_err(|error| ReferenceProveError(format!("search backend: {error}")))?;
         if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
         let Some(winner) = winner else {
             scheduler
                 .record_miss(batch)
-                .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
+                .map_err(|error| ReferenceProveError(format!("search scheduler: {error}")))?;
             continue;
         };
         scheduler
             .record_winner(batch, winner)
-            .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
+            .map_err(|error| ReferenceProveError(format!("search scheduler: {error}")))?;
         let extranonce = u32::try_from(winner.ordinal).map_err(|_| {
-            CanonicalProveError("backend returned out-of-range extranonce".to_string())
+            ReferenceProveError("backend returned out-of-range extranonce".to_string())
         })?;
-        let jackpot = evaluate_canonical_moe_jackpot(
-            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
+        let jackpot = evaluate_reference_moe_jackpot(
+            &REFERENCE_MATMUL_PARAMS, REFERENCE_HW, REFERENCE_E, REFERENCE_TOP_K, commit,
             extranonce,
         )?;
         if jackpot != winner.jackpot_hash {
-            return Err(CanonicalProveError(
-                "search backend jackpot disagrees with canonical scalar oracle".to_string(),
+            return Err(ReferenceProveError(
+                "search backend jackpot disagrees with reference scalar oracle".to_string(),
             ));
         }
         if !hash_le_target(&jackpot, &threshold) {
-            return Err(CanonicalProveError(
-                "search backend reported a canonical jackpot above its threshold".to_string(),
+            return Err(ReferenceProveError(
+                "search backend reported a reference jackpot above its threshold".to_string(),
             ));
         }
         info!(
             extranonce,
             commit = %hex::encode(commit),
-            "canonical AI-PoW jackpot hit; proving certificate (~25-30s)"
+            "reference AI-PoW jackpot hit; proving certificate (~25-30s)"
         );
-        let proved = prove_canonical_moe_block_at_for_miner(
-            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
-            extranonce,
+        let proved = prove_reference_moe_block_at_with_rules(
+            &REFERENCE_MATMUL_PARAMS, REFERENCE_HW, REFERENCE_E, REFERENCE_TOP_K, commit,
+            extranonce, rules,
         )?;
-        return Ok(Some(GatewayFreeBlock::Canonical(proved)));
+        return Ok(Some(GatewayFreeBlock::Reference(proved)));
     }
     warn!(
         commit = %hex::encode(commit),
-        "canonical AI-PoW grind exhausted the u32 extranonce space with no jackpot; \
-         the target is too hard for the canonical shape (raise --fakenet-ai-asert-anchor-target-bex)"
+        "reference AI-PoW grind exhausted the u32 extranonce space with no jackpot; \
+         the target is too hard for the reference shape (raise --fakenet-ai-asert-anchor-target-bex)"
     );
     Ok(None)
 }
 
 #[cfg(feature = "gpu")]
-fn grind_peak_block_with_backend(
+fn grind_peak_block_with_backend_with_rules(
     commit: [u8; 32],
     target: DifficultyTarget,
     cancel: Arc<AtomicBool>,
     backend: &dyn SearchBackend,
     a: &Arc<Vec<i8>>,
     b: &Arc<Vec<i8>>,
+    rules: ProofRules,
 ) -> GrindResult {
     if cancel.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    let template = PreparedCanonicalDenseTemplate::new(
+    let template = PreparedReferenceDenseTemplate::new(
         &PEAK_PRODUCTION_PARAMS,
         commit,
         Arc::clone(a),
@@ -1189,10 +1213,10 @@ fn grind_peak_block_with_backend(
         let factor = prepared
             .config()
             .shape_work_factor()
-            .map_err(|e| CanonicalProveError(format!("peak shape work factor: {e}")))?;
+            .map_err(|e| ReferenceProveError(format!("peak shape work factor: {e}")))?;
         let threshold =
             ai_pow::difficulty::effective_jackpot_threshold(&target, factor).map_err(|e| {
-                CanonicalProveError(format!(
+                ReferenceProveError(format!(
                     "candidate target {} is outside the representable AI-PoW domain for the peak \
                      shape (factor {factor}): {e:?}",
                     hex::encode(target)
@@ -1200,10 +1224,10 @@ fn grind_peak_block_with_backend(
             })?;
         let total_tickets = prepared.total_tickets();
         let batch = SearchBatch::new(0, total_tickets, threshold)
-            .map_err(|e| CanonicalProveError(format!("peak search batch: {e}")))?;
+            .map_err(|e| ReferenceProveError(format!("peak search batch: {e}")))?;
         let outcome = backend
             .search_peak(Arc::clone(&prepared), batch)
-            .map_err(|e| CanonicalProveError(format!("peak search backend: {e}")))?;
+            .map_err(|e| ReferenceProveError(format!("peak search backend: {e}")))?;
         if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -1218,7 +1242,7 @@ fn grind_peak_block_with_backend(
             commit = %hex::encode(commit),
             "peak dense AI-PoW jackpot hit; proving recursive certificate"
         );
-        let block = template.prove(attempt)?;
+        let block = template.prove_with_rules(attempt, rules)?;
         return Ok(Some(GatewayFreeBlock::Peak(block)));
     }
 
@@ -1231,31 +1255,31 @@ fn grind_peak_block_with_backend(
 
 #[cfg(feature = "gpu")]
 fn revalidate_peak_winner(
-    template: &PreparedCanonicalDenseTemplate,
-    prepared: &PreparedCanonicalDenseSearch,
+    template: &PreparedReferenceDenseTemplate,
+    prepared: &PreparedReferenceDenseSearch,
     winner: crate::search::SearchWinner,
     device_commitments: &PearlWorkCommitments,
     target: &DifficultyTarget,
-) -> Result<PearlMergeCheckedTicketAttempt, CanonicalProveError> {
+) -> Result<PearlMergeCheckedTicketAttempt, ReferenceProveError> {
     let attempt = template.checked_search_winner(prepared, winner.ordinal, target)?;
     if attempt.commitments != *device_commitments {
-        return Err(CanonicalProveError(
+        return Err(ReferenceProveError(
             "peak backend transcript disagrees with scalar winner recheck".to_string(),
         ));
     }
     if attempt.ticket.jackpot_hash != winner.jackpot_hash {
-        return Err(CanonicalProveError(
+        return Err(ReferenceProveError(
             "peak backend jackpot disagrees with scalar winner recheck".to_string(),
         ));
     }
     Ok(attempt)
 }
 
-/// Gateway-free canonical CPU miner. It binds each MoE search to the current
+/// Gateway-free reference CPU miner. It binds each MoE search to the current
 /// `%mine-ai` block commitment, applies the consensus shape-work adjustment, and
 /// builds the recursive certificate only after a scalar-validated hit. A new
 /// candidate cancels and drains the old search before its replacement starts.
-pub async fn run_canonical(
+pub async fn run_reference(
     node_addr: String,
     mining_pkh_configs: Vec<MiningPkhConfig>,
     shutdown: CancellationToken,
@@ -1268,13 +1292,13 @@ pub async fn run_canonical(
         mining_pkh_configs,
         shutdown,
         backend,
-        GatewayFreeProfile::Canonical,
+        GatewayFreeProfile::Reference,
     )
     .await
 }
 
-/// Gateway-free canonical miner with an owned ticket-search backend.
-pub async fn run_canonical_with_backend(
+/// Gateway-free reference miner with an owned ticket-search backend.
+pub async fn run_reference_with_backend(
     node_addr: String,
     mining_pkh_configs: Vec<MiningPkhConfig>,
     shutdown: CancellationToken,
@@ -1285,7 +1309,7 @@ pub async fn run_canonical_with_backend(
         mining_pkh_configs,
         shutdown,
         backend,
-        GatewayFreeProfile::Canonical,
+        GatewayFreeProfile::Reference,
     )
     .await
 }
@@ -1392,7 +1416,7 @@ async fn run_gateway_free_with_backend(
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
-                    cancel_and_await_canonical_worker(&mut worker, &grind_cancel).await?;
+                    cancel_and_await_reference_worker(&mut worker, &grind_cancel).await?;
                     return Ok(());
                 }
                 maybe_c = candidates.next() => {
@@ -1419,7 +1443,7 @@ async fn run_gateway_free_with_backend(
                             profile = profile_name,
                             "new candidate replaces active gateway-free search"
                         );
-                        cancel_and_await_canonical_worker(&mut worker, &grind_cancel).await?;
+                        cancel_and_await_reference_worker(&mut worker, &grind_cancel).await?;
                     }
                     let inputs = match derive_nockchain_candidate_inputs(&candidate) {
                         Ok(x) => x,
@@ -1442,21 +1466,21 @@ async fn run_gateway_free_with_backend(
                     let backend = backend.clone();
                     let profile = profile.clone();
                     worker = Some(tokio::task::spawn_blocking(move || {
-                        profile.grind(commit, target, cancel, &*backend)
+                        profile.grind(commit, target, cancel, &*backend, inputs.rules)
                     }));
                 }
-                joined = await_canonical_worker(&mut worker) => {
+                joined = await_reference_worker(&mut worker) => {
                     // A Joined outcome means the grind task resolved; consume the
                     // handle so the next poll does not re-await the completed task
                     // and replay the outcome.
-                    if matches!(joined, CanonicalOutcome::Joined(_)) {
+                    if matches!(joined, ReferenceOutcome::Joined(_)) {
                         worker = None;
                     }
                     match joined {
-                        CanonicalOutcome::None => {
+                        ReferenceOutcome::None => {
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         }
-                        CanonicalOutcome::Joined(Ok(Ok(Some(block)))) => {
+                        ReferenceOutcome::Joined(Ok(Ok(Some(block)))) => {
                             info!(
                                 profile = profile_name,
                                 commit = %hex::encode(block.commit()),
@@ -1506,18 +1530,18 @@ async fn run_gateway_free_with_backend(
                                 Err(e) => warn!(error = %e, "build gateway-free poke failed"),
                             }
                         }
-                        CanonicalOutcome::Joined(Ok(Ok(None))) => {
+                        ReferenceOutcome::Joined(Ok(Ok(None))) => {
                             // Grind cancelled (shutdown) or exhausted the nonce space.
                         }
-                        CanonicalOutcome::Joined(Ok(Err(e)))
+                        ReferenceOutcome::Joined(Ok(Err(e)))
                             if profile.worker_errors_are_fatal() =>
                         {
                             return Err(MinerError::ProductionWorker(e.to_string()));
                         }
-                        CanonicalOutcome::Joined(Ok(Err(e))) => {
+                        ReferenceOutcome::Joined(Ok(Err(e))) => {
                             warn!(error = %e, profile = profile_name, "gateway-free AI-PoW grind/prove failed");
                         }
-                        CanonicalOutcome::Joined(Err(e)) => {
+                        ReferenceOutcome::Joined(Err(e)) => {
                             return Err(MinerError::WorkerJoin(format!("{e}")));
                         }
                     }
@@ -1525,7 +1549,7 @@ async fn run_gateway_free_with_backend(
             }
         };
 
-        cancel_and_await_canonical_worker(&mut worker, &grind_cancel).await?;
+        cancel_and_await_reference_worker(&mut worker, &grind_cancel).await?;
         let _ = client
             .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
             .await;
@@ -1689,6 +1713,7 @@ fn expect_ai_pow_candidate_version(candidate: &MiningCandidate) -> Result<(), St
 }
 
 struct PearlMergeCandidateJob {
+    rules: ProofRules,
     header: PearlIncompleteBlockHeader,
     gateway_mining_job: PearlGatewayResolvedMiningJob,
     aux_inclusion: PearlAuxInclusionProof,
@@ -1697,6 +1722,7 @@ struct PearlMergeCandidateJob {
 }
 
 struct PearlMergeMinedSubmission {
+    rules: ProofRules,
     ticket: PearlMergeMinedTicket,
     gateway_mining_job: PearlGatewayResolvedMiningJob,
     aux_inclusion: PearlAuxInclusionProof,
@@ -1736,6 +1762,7 @@ struct PearlGatewayResolvedMiningJob {
 
 #[derive(Clone, Copy)]
 struct NockchainCandidateInputs {
+    rules: ProofRules,
     target: DifficultyTarget,
     nock_block_commitment: [u8; 32],
     pow_len: u64,
@@ -1745,8 +1772,12 @@ fn derive_nockchain_candidate_inputs(
     candidate: &MiningCandidate,
 ) -> Result<NockchainCandidateInputs, String> {
     expect_ai_pow_candidate_version(candidate)?;
+    let height = candidate.candidate_height.ok_or_else(|| {
+        "AI-PoW candidate is missing its height; upgrade the node before mining".to_string()
+    })?;
     let (target, nock_block_commitment) = derive_job_inputs(candidate)?;
     Ok(NockchainCandidateInputs {
+        rules: ProofRules::at_height(height),
         target,
         nock_block_commitment,
         pow_len: candidate.pow_len,
@@ -1776,9 +1807,22 @@ fn derive_pearl_merge_job_inputs_from_nockchain(
         let job = fetch_pearl_gateway_mining_job(&pearl.gateway, Some(&aux_commitment))
             .map_err(|e| format!("resolve Pearl work header: {e}"))?;
         let (header, aux_inclusion) = match job.aux_inclusion.clone() {
-            Some(aux_inclusion) => {
-                verify_pearl_aux_inclusion(&job.header, &aux_commitment, &aux_inclusion)
-                    .map_err(|e| format!("verify Pearl Gateway aux inclusion: {e}"))?;
+            Some(mut aux_inclusion) => {
+                // Keep the Gateway's complete Pearl job intact; only the
+                // Nockchain evidence copy uses the canonical txid preimage.
+                if candidate.rules == ProofRules::Hardened {
+                    aux_inclusion.coinbase_tx = ai_pow::pearl_compat::canonical_pearl_aux_coinbase(
+                        &aux_inclusion.coinbase_tx,
+                    )
+                    .map_err(|e| format!("canonicalize Pearl auxiliary evidence: {e}"))?;
+                }
+                ai_pow::pearl_compat::verify_pearl_aux_inclusion_with_limits(
+                    &job.header,
+                    &aux_commitment,
+                    &aux_inclusion,
+                    candidate.rules.into(),
+                )
+                .map_err(|e| format!("verify Pearl Gateway aux inclusion: {e}"))?;
                 (job.header, aux_inclusion)
             }
             None => {
@@ -1790,6 +1834,7 @@ fn derive_pearl_merge_job_inputs_from_nockchain(
         (header, job, aux_inclusion)
     };
     Ok(PearlMergeCandidateJob {
+        rules: candidate.rules,
         header,
         gateway_mining_job,
         aux_inclusion,
@@ -2329,6 +2374,7 @@ fn spawn_pearl_merge_attempt(
             Err(e) => return (generation, Err(e)),
         };
         let mined = PearlMergeMinedSubmission {
+            rules: job_inputs.rules,
             ticket,
             gateway_mining_job: job_inputs.gateway_mining_job,
             aux_inclusion: job_inputs.aux_inclusion,
@@ -2357,7 +2403,7 @@ fn spawn_pearl_merge_attempt(
         }
 
         let proof_start = Instant::now();
-        let proof = match pearl.build_certificate_for_attempt(&mined.ticket.attempt) {
+        let proof = match pearl.build_certificate_for_attempt(&mined.ticket.attempt, mined.rules) {
             Ok(proof) => proof,
             Err(e) => {
                 return (
@@ -2624,7 +2670,6 @@ mod tests {
     use tokio::sync::{broadcast, mpsc, Mutex as TMutex};
 
     use super::*;
-    use crate::canonical::prove_canonical_moe_block_at;
     use crate::certificate_noun::{
         build_ai_pow_pearl_merge_artifact_noun_from_node, decode_ai_pow_pearl_merge_artifact_noun,
         pearl_merge_recursive_certificate_parts_from_ticket,
@@ -2633,14 +2678,15 @@ mod tests {
     use crate::pearl_mining::{
         self, PearlMergeMineOptions, PearlMergeMiningError, PearlMergeMiningJob,
     };
+    use crate::reference::prove_reference_moe_block_at;
     use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
     use crate::wire::AiPowMinerWire;
 
-    struct CorruptCanonicalBackend {
+    struct CorruptReferenceBackend {
         jackpot_hash: [u8; 32],
     }
 
-    impl SearchBackend for CorruptCanonicalBackend {
+    impl SearchBackend for CorruptReferenceBackend {
         fn search_dense(
             &self,
             _: Arc<ai_pow::pearl_compat::PreparedPearlPatternJob>,
@@ -2649,9 +2695,9 @@ mod tests {
             Ok(None)
         }
 
-        fn search_canonical(
+        fn search_reference(
             &self,
-            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            _: Arc<crate::reference::PreparedReferenceMoeTemplate>,
             batch: SearchBatch,
         ) -> Result<Option<SearchWinner>, SearchBackendError> {
             Ok(Some(SearchWinner {
@@ -2662,48 +2708,48 @@ mod tests {
     }
 
     /// Measure the two cost components of AI-PoW mining on THIS machine, using the
-    /// exact canonical shape the run loop mines (`CANONICAL_MATMUL_PARAMS`,
+    /// exact reference shape the run loop mines (`REFERENCE_MATMUL_PARAMS`,
     /// hw/e/top-k). AI block time = (expected grind attempts x t_attempt) + t_prove,
-    /// where expected attempts ~= 2^256 / (target · F) and `F` is the canonical
+    /// where expected attempts ~= 2^256 / (target · F) and `F` is the reference
     /// shape work factor. Using 2^256/target here instead overstates the attempt
     /// count by `F` (2^16 for this shape), so any difficulty tuned against it
     /// lands `F` times too easy. These numbers are what the fakenet AI difficulty
     /// is tuned to (via the AI ASERT anchor target) so the AI and ZK puzzles take
     /// comparable wall-clock per block. Ignored (slow); run:
-    ///   cargo test --release -p ai-pow-miner --features node canonical_mining_costs -- --ignored --nocapture
-    /// **The canonical miner and the consensus verifier must accept exactly the
+    ///   cargo test --release -p ai-pow-miner --features node reference_mining_costs -- --ignored --nocapture
+    /// **The reference miner and the consensus verifier must accept exactly the
     /// same jackpots.**
     ///
     /// The miner's grind threshold is derived from the mining config it puts in
     /// the statement; the verifier's is derived from the config it re-parses out
-    /// of that statement. This pins them equal for the real canonical statement,
+    /// of that statement. This pins them equal for the real reference statement,
     /// so a miner that reverts to comparing the jackpot against the bare
     /// consensus target — which costs `F` times more work per block than
     /// consensus asks for, and mis-tunes every difficulty derived from the
     /// miner's measured rate — fails here instead of in production.
     #[test]
-    fn canonical_grind_threshold_matches_the_consensus_verifier() {
+    fn reference_grind_threshold_matches_the_consensus_verifier() {
         let commit = [0x5au8; 32];
-        let public = crate::canonical::canonical_public_params(
-            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit, 0,
+        let public = crate::reference::reference_public_params(
+            &REFERENCE_MATMUL_PARAMS, REFERENCE_HW, REFERENCE_E, REFERENCE_TOP_K, commit, 0,
         )
-        .expect("canonical public params");
+        .expect("reference public params");
 
-        let miner_factor = canonical_shape_work_factor().expect("miner factor");
+        let miner_factor = reference_shape_work_factor().expect("miner factor");
         let verifier_factor = public
             .difficulty_adjustment_factor()
             .expect("verifier factor");
         assert_eq!(
             miner_factor, verifier_factor,
-            "canonical miner and consensus verifier disagree on the shape work factor"
+            "reference miner and consensus verifier disagree on the shape work factor"
         );
-        // The canonical shape is h=w=8, k=1024, r=64 => F = 64 * 1024 = 2^16.
+        // The reference shape is h=w=8, k=1024, r=64 => F = 64 * 1024 = 2^16.
         assert_eq!(miner_factor, 1 << 16);
 
         for target_byte_index in [20usize, 24, 28] {
             let mut target = [0u8; 32];
             target[target_byte_index] = 0x01;
-            let miner = canonical_grind_threshold(&target).expect("miner threshold");
+            let miner = reference_grind_threshold(&target).expect("miner threshold");
             let verifier = public
                 .nockchain_adjusted_target(&target)
                 .expect("verifier threshold");
@@ -2723,35 +2769,35 @@ mod tests {
     }
 
     /// A target consensus may legitimately emit must always be scalable by the
-    /// canonical shape. If this fails the canonical miner cannot mine at that
+    /// reference shape. If this fails the reference miner cannot mine at that
     /// difficulty at all — and since the AI ASERT only advances on accepted AI
     /// blocks, the puzzle would not recover.
     #[test]
-    fn canonical_grind_threshold_covers_the_whole_consensus_target_domain() {
+    fn reference_grind_threshold_covers_the_whole_consensus_target_domain() {
         let max = ai_pow::difficulty::AI_POW_MAX_CONSENSUS_TARGET;
-        canonical_grind_threshold(&max)
-            .expect("the canonical miner must be able to grind at the maximum consensus AI target");
+        reference_grind_threshold(&max)
+            .expect("the reference miner must be able to grind at the maximum consensus AI target");
     }
 
     #[test]
     #[ignore]
-    fn canonical_mining_costs() {
+    fn reference_mining_costs() {
         let commit = [0x5au8; 32];
-        let factor = canonical_shape_work_factor().expect("canonical shape work factor");
+        let factor = reference_shape_work_factor().expect("reference shape work factor");
         println!(
-            "canonical shape work factor F = {factor} (2^{})",
+            "reference shape work factor F = {factor} (2^{})",
             factor.ilog2()
         );
 
-        // (a) Per-attempt grind cost: evaluate_canonical_moe_jackpot (matmul +
+        // (a) Per-attempt grind cost: evaluate_reference_moe_jackpot (matmul +
         // jackpot, no cert). This is the tunable proof-of-work unit.
         let warm =
-            evaluate_canonical_moe_jackpot(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, commit, 0).unwrap();
+            evaluate_reference_moe_jackpot(&REFERENCE_MATMUL_PARAMS, 8, 2, 1, commit, 0).unwrap();
         assert_ne!(warm, [0u8; 32]);
         let attempts = 200u32;
         let t = std::time::Instant::now();
         for xn in 0..attempts {
-            let _ = evaluate_canonical_moe_jackpot(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, commit, xn)
+            let _ = evaluate_reference_moe_jackpot(&REFERENCE_MATMUL_PARAMS, 8, 2, 1, commit, xn)
                 .expect("grind attempt");
         }
         let per_attempt = t.elapsed().as_secs_f64() / attempts as f64;
@@ -2763,14 +2809,14 @@ mod tests {
 
         // (b) One-time certificate cost (paid once per block, on the winning nonce).
         let t = std::time::Instant::now();
-        let block = prove_canonical_moe_block_at(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, commit, 0)
+        let block = prove_reference_moe_block_at(&REFERENCE_MATMUL_PARAMS, 8, 2, 1, commit, 0)
             .expect("prove");
         let prove_seconds = t.elapsed().as_secs_f64();
         let AiProofNode::Bytes(cert_bytes) = &block.certificate.certificate else {
             panic!("production compact certificate must use the canonical byte node");
         };
         println!(
-            "canonical MoE prove: {prove_seconds:.3}s compact_cert_bytes={} trace_height={}  \
+            "reference MoE prove: {prove_seconds:.3}s compact_cert_bytes={} trace_height={}  \
              <-- t_prove",
             cert_bytes.len(),
             block.certificate.trace_height
@@ -2778,28 +2824,28 @@ mod tests {
     }
 
     #[test]
-    fn canonical_grind_exits_when_cancelled() {
+    fn reference_grind_exits_when_cancelled() {
         let cancel = Arc::new(AtomicBool::new(true));
         assert!(
-            grind_canonical_block([0u8; 32], crate::easy_nock_target(), cancel)
+            grind_reference_block([0u8; 32], crate::easy_nock_target(), cancel)
                 .expect("cancelled grind should exit cleanly")
                 .is_none()
         );
     }
 
     #[test]
-    fn canonical_backend_winner_must_match_scalar_oracle_before_proving() {
+    fn reference_backend_winner_must_match_scalar_oracle_before_proving() {
         let commit = [0x5au8; 32];
-        let mut corrupt = evaluate_canonical_moe_jackpot(
-            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit, 0,
+        let mut corrupt = evaluate_reference_moe_jackpot(
+            &REFERENCE_MATMUL_PARAMS, REFERENCE_HW, REFERENCE_E, REFERENCE_TOP_K, commit, 0,
         )
-        .expect("scalar canonical jackpot");
+        .expect("scalar reference jackpot");
         corrupt[0] ^= 1;
-        let backend = CorruptCanonicalBackend {
+        let backend = CorruptReferenceBackend {
             jackpot_hash: corrupt,
         };
 
-        let error = match grind_canonical_block_with_backend(
+        let error = match grind_reference_block_with_backend(
             commit,
             crate::easy_nock_target(),
             Arc::new(AtomicBool::new(false)),
@@ -2810,7 +2856,7 @@ mod tests {
         };
         assert!(error
             .to_string()
-            .contains("disagrees with canonical scalar oracle"));
+            .contains("disagrees with reference scalar oracle"));
     }
 
     #[cfg(feature = "gpu")]
@@ -2827,7 +2873,7 @@ mod tests {
         };
         let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
         let template =
-            PreparedCanonicalDenseTemplate::new(&params, [0x5a; 32], Arc::new(a), Arc::new(b))
+            PreparedReferenceDenseTemplate::new(&params, [0x5a; 32], Arc::new(a), Arc::new(b))
                 .expect("dense template");
         let prepared = template.prepare_search(0).expect("search transcript");
         let scalar_prepared = template.prepare(0).expect("scalar preparation");
@@ -2857,7 +2903,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn canonical_reconnect_cleanup_awaits_in_flight_worker() {
+    async fn reference_reconnect_cleanup_awaits_in_flight_worker() {
         let cancel = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicU64::new(0));
         let cancel_for_worker = cancel.clone();
@@ -2877,7 +2923,7 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
-        cancel_and_await_canonical_worker(&mut worker, &cancel)
+        cancel_and_await_reference_worker(&mut worker, &cancel)
             .await
             .expect("cleanup should join worker");
 
@@ -2999,7 +3045,10 @@ mod tests {
             }
             let target = T(&mut slab, &[D(tas!(b"bn")), target_list]);
             let plen = D(pow_len);
-            let effect = T(&mut slab, &[head, version, commit, target, plen]);
+            let effect = T(
+                &mut slab,
+                &[head, version, commit, target, plen, D(154_500)],
+            );
             slab.set_root(effect);
             self.effect_tx.send(slab).expect("publish %mine-ai effect");
         }
@@ -3163,25 +3212,27 @@ mod tests {
                 max_attempts: Some(1),
                 ..PearlMergeMineOptions::default()
             },
-            certificate_builder: Arc::new(|attempt: &PearlMergeCheckedTicketAttempt| {
-                let params = pearl_test_params();
-                let (a, b) = synth_matrices(b"pearl-node-run-submit", &params);
-                let parts = pearl_merge_recursive_certificate_parts_from_ticket(
-                    attempt.attempt(),
-                    &a,
-                    &b,
-                    16,
-                )
-                .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
-                Ok(PearlMergeCertificateProof {
-                    zk_params: parts.zk_params,
-                    found_idx: parts.found_idx,
-                    commitments: parts.commitments,
-                    public_inputs: parts.public_inputs,
-                    trace_height: parts.trace_height,
-                    certificate: AiProofNode::Unit,
-                })
-            }),
+            certificate_builder: Arc::new(
+                |attempt: &PearlMergeCheckedTicketAttempt, _rules: ProofRules| {
+                    let params = pearl_test_params();
+                    let (a, b) = synth_matrices(b"pearl-node-run-submit", &params);
+                    let parts = pearl_merge_recursive_certificate_parts_from_ticket(
+                        attempt.attempt(),
+                        &a,
+                        &b,
+                        16,
+                    )
+                    .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
+                    Ok(PearlMergeCertificateProof {
+                        zk_params: parts.zk_params,
+                        found_idx: parts.found_idx,
+                        commitments: parts.commitments,
+                        public_inputs: parts.public_inputs,
+                        trace_height: parts.trace_height,
+                        certificate: AiProofNode::Unit,
+                    })
+                },
+            ),
         }
     }
 
@@ -3439,7 +3490,7 @@ mod tests {
     }
 
     #[test]
-    fn pearl_gateway_aux_inclusion_decoder_rejects_merkle_branch() {
+    fn pearl_gateway_aux_inclusion_decoder_rejects_over_limit_merkle_branch() {
         let encoded_coinbase = {
             use base64::Engine as _;
             base64::engine::general_purpose::STANDARD.encode([0u8; 1])
@@ -3450,17 +3501,39 @@ mod tests {
         };
         let err = decode_pearl_gateway_aux_inclusion(PearlGatewayAuxInclusion {
             coinbase_tx: encoded_coinbase,
-            merkle_branch: vec![encoded_digest],
+            merkle_branch: vec![encoded_digest; PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH + 1],
         })
-        .expect_err("production Gateway aux inclusion must reject merkle branches");
+        .expect_err("Gateway aux inclusion must reject over-limit merkle branches");
 
         assert!(matches!(
             err,
             PearlGatewayError::AuxInclusionMerkleBranchTooDeep {
-                actual: 1,
+                actual,
                 limit: PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH
-            }
+            } if actual == PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH + 1
         ));
+    }
+
+    #[test]
+    fn pearl_gateway_aux_inclusion_decoder_rejects_invalid_sibling_digest_lengths() {
+        use base64::Engine as _;
+
+        let coinbase_tx = pearl_test_coinbase_tx(&[0x42; 32]);
+        for digest_len in [0, 31, 33] {
+            let err = decode_pearl_gateway_aux_inclusion(PearlGatewayAuxInclusion {
+                coinbase_tx: base64::engine::general_purpose::STANDARD.encode(&coinbase_tx),
+                merkle_branch: vec![
+                    base64::engine::general_purpose::STANDARD.encode([0x11; 32]),
+                    base64::engine::general_purpose::STANDARD.encode(vec![0x22; digest_len]),
+                ],
+            })
+            .expect_err("Gateway aux inclusion must reject malformed sibling digests");
+
+            assert!(matches!(
+                err,
+                PearlGatewayError::AuxInclusionDigestLen(actual) if actual == digest_len
+            ));
+        }
     }
 
     #[test]
@@ -3545,6 +3618,7 @@ mod tests {
         )
         .expect("evaluate Pearl-compatible attempt");
         let mined = PearlMergeMinedSubmission {
+            rules: ProofRules::Hardened,
             ticket: PearlMergeMinedTicket {
                 attempt,
                 pearl_target_hit: true,
@@ -3789,6 +3863,7 @@ mod tests {
         let block_header = synth_block_commitment_slab(commitment_seed);
         MiningCandidate {
             kind: MiningCandidateKind::Ai,
+            candidate_height: Some(154_500),
             version,
             block_header,
             target,
@@ -3800,6 +3875,26 @@ mod tests {
         candidate_for_target_and_commitment(target, 0xCAFE)
     }
 
+    #[test]
+    fn candidate_height_selects_rules_and_missing_height_fails_closed() {
+        let mut candidate = candidate_for_target(bignum_target_slab(&[1]));
+        for (height, expected) in [
+            (153_500, ProofRules::Legacy), // Former activation remains historical.
+            (154_499, ProofRules::Legacy),
+            (154_500, ProofRules::Hardened),
+            (154_501, ProofRules::Hardened),
+            (154_499, ProofRules::Legacy),
+        ] {
+            candidate.candidate_height = Some(height);
+            assert_eq!(
+                derive_nockchain_candidate_inputs(&candidate).unwrap().rules,
+                expected
+            );
+        }
+        candidate.candidate_height = None;
+        assert!(derive_nockchain_candidate_inputs(&candidate).is_err());
+    }
+
     fn candidate_with_version(
         version: NounSlab,
         target: NounSlab,
@@ -3807,6 +3902,7 @@ mod tests {
     ) -> MiningCandidate {
         MiningCandidate {
             kind: MiningCandidateKind::Ai,
+            candidate_height: Some(154_500),
             version,
             block_header: synth_block_commitment_slab(commitment_seed),
             target,
@@ -3895,14 +3991,57 @@ mod tests {
     }
 
     #[test]
-    fn derive_pearl_merge_job_inputs_uses_gateway_returned_aux_inclusion() {
+    fn derive_pearl_merge_job_inputs_gates_transaction_branches_at_cutover() {
+        use ai_pow::pearl_compat::pearl_bitcoin_double_sha256_raw;
+        use base64::Engine as _;
+
         let candidate =
             candidate_for_target_and_commitment(bignum_target_slab(&[u64::from(u32::MAX)]), 0xD0A1);
         let mut aux = pearl_test_aux();
         aux.nock_block_commitment = expected_aux_commitment_bridge(&candidate);
         let aux_commitment = aux.commitment().expect("aux commitment");
         let coinbase_tx = pearl_test_coinbase_tx(&aux_commitment);
-        let mut merkle_root = ai_pow::pearl_compat::pearl_bitcoin_double_sha256_raw(&coinbase_tx);
+        // The Gateway retains the actual witness-bearing transaction. Only the
+        // Nockchain inclusion evidence is normalized to its txid serialization.
+        let mut witness_coinbase = coinbase_tx[..4].to_vec();
+        witness_coinbase.extend_from_slice(&[0, 1]);
+        witness_coinbase.extend_from_slice(&coinbase_tx[4..coinbase_tx.len() - 4]);
+        witness_coinbase.extend_from_slice(&[1, 32]);
+        witness_coinbase.extend_from_slice(&[0x42; 32]);
+        witness_coinbase.extend_from_slice(&coinbase_tx[coinbase_tx.len() - 4..]);
+        let transaction_txids = [0x11u8, 0x22, 0x33].map(|previous_txid_byte| {
+            let mut tx = Vec::new();
+            tx.extend_from_slice(&1u32.to_le_bytes());
+            tx.push(1);
+            tx.extend_from_slice(&[previous_txid_byte; 32]);
+            tx.extend_from_slice(&0u32.to_le_bytes());
+            tx.push(0);
+            tx.extend_from_slice(&u32::MAX.to_le_bytes());
+            tx.push(1);
+            tx.extend_from_slice(&1u64.to_le_bytes());
+            tx.push(1);
+            tx.push(0x51);
+            tx.extend_from_slice(&0u32.to_le_bytes());
+            pearl_bitcoin_double_sha256_raw(&tx)
+        });
+        let merkle_parent = |left: [u8; 32], right: [u8; 32]| {
+            let mut pair = [0u8; 64];
+            pair[..32].copy_from_slice(&left);
+            pair[32..].copy_from_slice(&right);
+            pearl_bitcoin_double_sha256_raw(&pair)
+        };
+        // Four transaction leaves: the coinbase and three ordinary transactions.
+        let left_parent = merkle_parent(
+            pearl_bitcoin_double_sha256_raw(&coinbase_tx),
+            transaction_txids[0],
+        );
+        let right_parent = merkle_parent(transaction_txids[1], transaction_txids[2]);
+        let merkle_branch = [transaction_txids[0], right_parent];
+        let encoded_branch = serde_json::to_string(
+            &merkle_branch.map(|digest| base64::engine::general_purpose::STANDARD.encode(digest)),
+        )
+        .expect("encode Gateway merkle branch");
+        let mut merkle_root = merkle_parent(left_parent, right_parent);
         merkle_root.reverse();
         let mut gateway_header = pearl_test_header();
         gateway_header.merkle_root = merkle_root;
@@ -3914,7 +4053,7 @@ mod tests {
         };
         let encoded_coinbase = {
             use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD.encode(&coinbase_tx)
+            base64::engine::general_purpose::STANDARD.encode(&witness_coinbase)
         };
         let expected_coinbase_aux_flags = {
             let mut flags =
@@ -3928,43 +4067,76 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind gateway fixture");
         let port = listener.local_addr().expect("gateway fixture addr").port();
         let gateway = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept gateway client");
-            let mut request_line = String::new();
-            {
-                let mut reader =
-                    std::io::BufReader::new(stream.try_clone().expect("clone gateway stream"));
-                std::io::BufRead::read_line(&mut reader, &mut request_line)
-                    .expect("read gateway request");
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().expect("accept gateway client");
+                let mut request_line = String::new();
+                {
+                    let mut reader =
+                        std::io::BufReader::new(stream.try_clone().expect("clone gateway stream"));
+                    std::io::BufRead::read_line(&mut reader, &mut request_line)
+                        .expect("read gateway request");
+                }
+                let request: serde_json::Value =
+                    serde_json::from_str(&request_line).expect("parse gateway request");
+                assert_eq!(request["method"], "getMiningInfo");
+                assert_eq!(
+                    request["params"]["coinbase_aux_flags"],
+                    expected_coinbase_aux_flags
+                );
+                assert_eq!(request["params"]["return_aux_inclusion"], true);
+                let response = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"incomplete_header_bytes\":\"{}\",\"target\":{},\"cert_version\":3,\"aux_inclusion\":{{\"coinbase_tx\":\"{}\",\"merkle_branch\":{}}}}}}}\n",
+                encoded_header, gateway_target, encoded_coinbase, encoded_branch
+            );
+                std::io::Write::write_all(&mut stream, response.as_bytes())
+                    .expect("write gateway response");
             }
-            let request: serde_json::Value =
-                serde_json::from_str(&request_line).expect("parse gateway request");
-            assert_eq!(request["method"], "getMiningInfo");
-            assert_eq!(
-                request["params"]["coinbase_aux_flags"],
-                expected_coinbase_aux_flags
-            );
-            assert_eq!(request["params"]["return_aux_inclusion"], true);
-            let response = format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"incomplete_header_bytes\":\"{}\",\"target\":{},\"cert_version\":3,\"aux_inclusion\":{{\"coinbase_tx\":\"{}\",\"merkle_branch\":[]}}}}}}\n",
-                encoded_header, gateway_target, encoded_coinbase
-            );
-            std::io::Write::write_all(&mut stream, response.as_bytes())
-                .expect("write gateway response");
         });
 
         let mut cfg = test_cfg("http://127.0.0.1:1".to_string());
         cfg.puzzle.pearl_merge.gateway =
             pearl_tcp_gateway(port, Duration::from_secs(2), Duration::from_secs(1));
 
-        let job = derive_pearl_merge_job_inputs(&cfg, &candidate)
-            .expect("derive Gateway aux-bearing Pearl job");
+        let mut last_job = None;
+        for height in [153_500, 154_499, 154_500, 154_501, 154_499] {
+            let mut inputs = derive_nockchain_candidate_inputs(&candidate).unwrap();
+            inputs.rules = ProofRules::at_height(height);
+            let result = derive_pearl_merge_job_inputs_from_nockchain(&cfg, &inputs);
+            if height < 154_500 {
+                assert!(matches!(result, Err(ref error) if error.contains("merkle branch")));
+            } else {
+                last_job = Some(result.expect("transaction-bearing job after activation"));
+            }
+        }
+        let job = last_job.unwrap();
         gateway.join().expect("gateway fixture exited");
 
         assert_eq!(job.header, gateway_header);
-        assert_eq!(job.gateway_mining_job.header, gateway_header);
-        verify_pearl_aux_inclusion(&job.header, &aux_commitment, &job.aux_inclusion)
-            .expect("Gateway-returned aux inclusion should verify");
         assert_eq!(job.aux_inclusion.coinbase_tx, coinbase_tx);
+        assert_eq!(
+            job.gateway_mining_job
+                .aux_inclusion
+                .as_ref()
+                .unwrap()
+                .coinbase_tx,
+            witness_coinbase
+        );
+        verify_pearl_aux_inclusion(&job.header, &aux_commitment, &job.aux_inclusion)
+            .expect("Gateway-returned transaction-bearing aux inclusion should verify");
+
+        let mut reordered = job.aux_inclusion.clone();
+        reordered.merkle_branch.reverse();
+        assert!(
+            verify_pearl_aux_inclusion(&job.header, &aux_commitment, &reordered).is_err(),
+            "Gateway siblings must retain leaf-to-root order"
+        );
+        let mut stale_aux_commitment = aux_commitment;
+        stale_aux_commitment[0] ^= 1;
+        assert!(
+            verify_pearl_aux_inclusion(&job.header, &stale_aux_commitment, &job.aux_inclusion)
+                .is_err(),
+            "transaction-bearing inclusion must still bind the requested aux commitment"
+        );
     }
 
     #[test]
@@ -4598,7 +4770,7 @@ mod tests {
     }
 
     #[test]
-    fn pearl_ticket_loop_output_builds_canonical_ai_pow_poke() {
+    fn pearl_ticket_loop_output_builds_reference_ai_pow_poke() {
         let params = pearl_test_params();
         let (a, b) = synth_matrices(b"pearl-run-loop-to-poke", &params);
         let config = pearl_test_config();
@@ -4827,21 +4999,27 @@ mod tests {
         let mut cfg = test_cfg(node.url());
         cfg.puzzle.pearl_merge.gateway = gateway.config.clone();
         let pearl_cfg = &mut cfg.puzzle.pearl_merge;
-        pearl_cfg.certificate_builder = Arc::new(|attempt: &PearlMergeCheckedTicketAttempt| {
-            let params = pearl_test_params();
-            let (a, b) = synth_matrices(b"pearl-node-run-submit", &params);
-            let parts =
-                pearl_merge_recursive_certificate_parts_from_ticket(attempt.attempt(), &a, &b, 16)
-                    .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
-            Ok(PearlMergeCertificateProof {
-                zk_params: parts.zk_params,
-                found_idx: parts.found_idx + 1,
-                commitments: parts.commitments,
-                public_inputs: parts.public_inputs,
-                trace_height: parts.trace_height,
-                certificate: AiProofNode::Unit,
-            })
-        });
+        pearl_cfg.certificate_builder = Arc::new(
+            |attempt: &PearlMergeCheckedTicketAttempt, _rules: ProofRules| {
+                let params = pearl_test_params();
+                let (a, b) = synth_matrices(b"pearl-node-run-submit", &params);
+                let parts = pearl_merge_recursive_certificate_parts_from_ticket(
+                    attempt.attempt(),
+                    &a,
+                    &b,
+                    16,
+                )
+                .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
+                Ok(PearlMergeCertificateProof {
+                    zk_params: parts.zk_params,
+                    found_idx: parts.found_idx + 1,
+                    commitments: parts.commitments,
+                    public_inputs: parts.public_inputs,
+                    trace_height: parts.trace_height,
+                    certificate: AiProofNode::Unit,
+                })
+            },
+        );
 
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();
@@ -4889,13 +5067,14 @@ mod tests {
             max_attempts: Some(1),
             ..PearlMergeMineOptions::default()
         };
-        pearl_cfg.certificate_builder =
-            Arc::new(move |_attempt: &PearlMergeCheckedTicketAttempt| {
+        pearl_cfg.certificate_builder = Arc::new(
+            move |_attempt: &PearlMergeCheckedTicketAttempt, _rules: ProofRules| {
                 builder_calls_for_cfg.fetch_add(1, Ordering::SeqCst);
                 Err(AiPowCertificateBuildError(
                     "certificate builder must not be called on a target miss".to_string(),
                 ))
-            });
+            },
+        );
 
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();

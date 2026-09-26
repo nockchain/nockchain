@@ -109,13 +109,13 @@ Historical Logos blocks retain their original rate:
 height < 147,500: 25,750,000,000 MAC / complete-proof attempt
 ```
 
-For version `%5`, the reference RTX 5090 rates are 400 TMAC/s for Pearl and
-388.8 Mguess/s for post-hardfork Tip5 grinding. The latter is public
-Neptune Cash/OXZD miner data: <https://useneptune.org/faq/#mining>.
+For heights 147,500–154,499, the version `%5` reference RTX 5090 rates are
+400 TMAC/s for Pearl and 388.8 Mguess/s for post-hardfork Tip5 grinding. The
+latter is public Neptune Cash/OXZD miner data: <https://useneptune.org/faq/#mining>.
 
 ```text
 400,000,000,000,000 / 388,800,000 = 1,028,806.584...
-height >= 147,500: 1,028,807 MAC / Tip5 hash
+147,500 <= height < 154,500: 1,028,807 MAC / Tip5 hash
 ```
 
 The quotient is rounded to the nearest integer. The height gate is mandatory:
@@ -141,7 +141,8 @@ ZK = (1/500) / (1/214 + 1/500) = 29.972%
 combined interval = 1 / (1/214 + 1/500) = 149.86 seconds
 ```
 
-The version `%5` ASERT lanes use independent reference-network capacities:
+The original version `%5` ASERT anchors at height 147,500 use independent
+reference-network capacities:
 
 ```text
 ZK-PoW: 2,000 RTX 5090s * 388,800,000 Tip5 hashes/s
@@ -162,13 +163,69 @@ AI = floor(2^256 / (10,000,000,000,000,000,000 * 214))
 After integer flooring, the anchors contribute 777,599,999,999 ZK and
 9,719,996,073,121 AI normalized work units per second. These independent
 capacity assumptions intentionally make the AI rate about 12.5 times the ZK
-rate. The cross-puzzle conversion remains 1,028,807 MAC per Tip5 hash.
+rate. The cross-puzzle conversion is 1,028,807 MAC per Tip5 hash through height
+154,499; the subsequent reset below preserves this historical calibration.
 
 ### Unchanged rules
 
 Anthropos does not change AI-PoW `%4`, the STARK AIR, transaction or note
 encoding, emissions, the 80/20 miner/protocol-fund split, or any block below
 height 147,500.
+
+### Subsequent reset at height 154,500
+
+At height 154,500, both ZK and AI ASERT levels reset again, using the dynamic
+median-time-past of predecessor block 154,499 rather than a fixed timestamp.
+Both branch-local per-puzzle counts and last-puzzle heads reset once at the
+boundary; subsequent blocks advance their own lane normally. Competing branches
+derive their anchor from their own predecessor, not another branch's history.
+The original height-147,500 specification and all earlier chainwork remain
+unchanged.
+
+The revised per-device reference is **28 MH/s for ZK** and **400 TMAC/s for
+Pearl AI**. The height-selected exchange rate is rounded to the nearest integer:
+
+```text
+400,000,000,000,000 MAC/s / 28,000,000 hashes/s
+  = 14,285,714.285... MAC/hash
+height >= 154,500: 14,285,714 MAC / Tip5 hash
+```
+
+Per-device conversion is distinct from aggregate capacity. The ZK anchor
+assumes **2,000 GPUs**, while the AI anchor retains its independently scaled
+**10 ExaMAC/s aggregate network**; 400 TMAC/s is not the AI network capacity:
+
+```text
+ZK throughput = 2,000 GPUs * 28,000,000 hashes/s
+              = 56,000,000,000 hashes/s
+AI throughput = 10 ExaMAC/s
+              = 10,000,000,000,000,000,000 MAC/s
+
+ZK target = floor((p^5 - 1) / (56,000,000,000 * 500))
+          = 76285251194081925074391779755128050196075552898662294001171823290014872052402351429
+AI target = floor(2^256 / (10,000,000,000,000,000,000 * 214))
+          = 54108452914633736179238778041442947594985974142822693476
+```
+
+After integer flooring, these anchors contribute 55,999,999,999 ZK and
+700,000,014,000 AI normalized work units per second. The AI target is unchanged,
+but its normalized work changes with the exchange rate. The independent
+capacities still make the AI normalized rate about 12.5 times the ZK rate.
+
+The 500 s ZK / 214 s AI ideals, 43,200 s ASERT half-life, target ceilings,
+approximately 150 s combined cadence, and ZK `%5` and AI `%4` proof versions
+remain unchanged. The coordinated AI-PoW verification update is specified in
+[Logos compatibility](016-logos.md#backward-compatibility). Blocks through
+height 154,499 retain their historical
+targets, exchange rates, and accumulated work; this reset does not reprice
+history.
+
+Nodes and both miner types must deploy the reset-capable software **before
+height 154,500**. A node parked at predecessor 154,499 can use that block's MTP
+directly. This is not an automatic rewind or repair of blocks already accepted
+under the old rules; upgrading after crossing the boundary requires coordinated
+recovery rather than assuming the upgrade rewrites chain state. Do not roll back
+to a pre-reset binary after accepting the new regime.
 
 ## Activation
 

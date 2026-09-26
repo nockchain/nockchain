@@ -33,7 +33,7 @@
     [~ old-state]
   ?^  stop=(validate-nockchain-page-sequence block.nockchain-block)
     [[%0 %stop u.stop stop-info]~ old-state]
-  =/  [latest-block=nock-block process-block=process-result]
+  =/  [latest-block=nock-block process-block=process-result hung=(list [tx-id:t @ud])]
     (process-nockchain-block block.nockchain-block txs.nockchain-block)
   ?-    -.process-block
       %|
@@ -63,12 +63,17 @@
     ::
     =^  eth-sig-requests  state
       (nockchain-propose-deposits latest-block)
+    ::  Commit the processed block before stopping for unresolved deposits.
+    =/  hung-stop=(list effect)
+      ?~  hung  ~
+      ~[[%0 %stop (hung-deposit-message hung) (get-stop-info state)]]
+    =?  stop.state  ?=(^ hung)  `(get-stop-info state)
     ?~  eth-sig-requests
-      [~ state]
+      [hung-stop state]
     =/  deposit-effects=(list effect)
       ~[[%0 %commit-nock-deposits eth-sig-requests]]
     ~&  eth-sig-requests+eth-sig-requests
-    [deposit-effects state]
+    [(weld deposit-effects hung-stop) state]
   ==
 ::  Mainnet nonce 14 settled a 100,000,000-nick deposit from block 46,849
 ::  before the minimum became 100,000 NOCK. Preserve that canonical block
@@ -97,6 +102,44 @@
     ==
   block(deposits (~(put z-by deposits.block) name legacy))
 ::
+::  +deposit-seed-credit-height: mainnet uses the shared release boundary;
+::  other networks apply seed crediting from genesis. Preserve earlier replay.
+++  deposit-seed-credit-height
+  ^-  @
+  ?.  =(46.810 nockchain-start-height.constants.state)
+    0
+  harden-phase:page:t
+::
+::  +parent-hash-binding-height: first Nock height at which consensus binds
+::  every seed's parent-hash to its own spend's input note, so seeds with the
+::  same parent-hash were signed together.  %0 spends always bind; %1 spends
+::  bind from ai-pow-activation-height (+validate-with-context:spends).
+::  Mainnet binds from 126,000, before +deposit-seed-credit-height; other
+::  networks use the constants their node reported, or the defaults.
+++  parent-hash-binding-height
+  ^-  @
+  =/  bc=blockchain-constants:t
+    ?:  =(46.810 nockchain-start-height.constants.state)
+      *blockchain-constants:t
+    (fall nockchain-constants.state *blockchain-constants:t)
+  ai-pow-activation-height.bc
+::
+::  +hung-deposit-message: stop reason for deposit outputs that several
+::  qualifying %bridge entries kept from minting
+++  hung-deposit-message
+  |=  hung=(list [tx-id:t @ud])
+  ^-  @t
+  %-  crip
+  ;:  weld
+    "deposit outputs with several qualifying %bridge entries minted nothing;"
+    " their nocks remain in the bridge nockchain wallet. resolve the"
+    " depositor funds, then restart the bridge. nock tx (entries):"
+    ^-  tape
+    %-  zing
+    %+  turn  hung
+    |=  [id=tx-id:t competing=@ud]
+    ;:(weld " " (trip (to-b58:hash:t id)) " (" (scow %ud competing) ")")
+  ==
 ::
 ++  repair-stale-base-hold
   |=  ~
@@ -206,12 +249,12 @@
 ++  process-nockchain-block
   ~%  %process-nockchain-block  ..process-nockchain-block  ~
   |=  [block=page:t txs=(z-map tx-id:t tx:t)]
-  ^-  [nock-block process-result]
+  ^-  [nock-block process-result hung=(list [tx-id:t @ud])]
   |^
   ?:  ?=(^ -.block)
     ::  we should not be processing blocks that were mined prior to the bridge cutover.
     ~|  %v0-block-received  !!
-  =+  [deposits withdrawal-settlements]=process-nock-txs
+  =+  [deposits withdrawal-settlements hung]=process-nock-txs
   =/  nock-blk=nock-block
     :*  %nock
         %0
@@ -246,16 +289,16 @@
   =/  deferred-result=process-result
     (nockchain-process-deferred-deposit-settlements nock-blk)
   ?-  -.deferred-result
-      %|  [nock-blk deferred-result]
+      %|  [nock-blk deferred-result hung]
       %&
     =.  state  p.deferred-result
-    [nock-blk (nockchain-process-withdrawal-settlements nock-blk)]
+    [nock-blk (nockchain-process-withdrawal-settlements nock-blk) hung]
   ==
   ::
   ++  process-nock-txs
-    ^-  [deposits=(z-map nname deposit) withdrawal-settlements=(z-map nname withdrawal-settlement)]
+    ^-  [deposits=(z-map nname deposit) withdrawal-settlements=(z-map nname withdrawal-settlement) hung=(list [tx-id:t @ud])]
     =/  tx-list  ~(tap z-by txs)
-    =|  ret=[deposits=(z-map nname deposit) withdrawal-settlements=(z-map nname withdrawal-settlement)]
+    =|  ret=[deposits=(z-map nname deposit) withdrawal-settlements=(z-map nname withdrawal-settlement) hung=(list [tx-id:t @ud])]
     |-
     ?~  tx-list  ret
     =*  tx-id  p.i.tx-list
@@ -264,9 +307,11 @@
       ::  produce a deposit
       ::
       ~&  bridge-deposit-detected+tx-id
-      =/  maybe-intent=(unit deposit-intent)
+      =/  [maybe-intent=(unit deposit-intent) competing=@ud]
         (extract-deposit-intent tx)
       ~&  maybe-intent+maybe-intent
+      =?  hung.ret  (gth competing 0)
+        [[tx-id competing] hung.ret]
       ?~  maybe-intent
         $(tx-list t.tx-list)
       =.  deposits.ret
@@ -315,12 +360,14 @@
   ::  deposit transaction. searches outputs for %bridge field
   ::  containing [%0 %base evm-address-based], converts the based address
   ::  to raw evm format, and calculates total amount from spends.
-  ::  returns ~ if the tx output doesn't go to the proper address or
-  ::  the note-data doesn't have a %bridge entry.
+  ::  returns no deposit if the tx output doesn't go to the proper address
+  ::  or the note-data doesn't have a %bridge entry.  also produces the
+  ::  number of qualifying %bridge entries when several kept the output from
+  ::  minting, and 0 otherwise.
   ::
   ++  extract-deposit-intent
     |=  =tx:t
-    ^-  (unit deposit-intent)
+    ^-  [(unit deposit-intent) @ud]
     ?>  ?=(%1 -.tx)
     =/  bridge-output=(unit output:v1:t)
       =/  outputs-list=(list output:v1:t)
@@ -342,33 +389,101 @@
       $(outputs-list t.outputs-list)
     ?~  bridge-output
       ~>  %slog.[0 'bridge data output note first name does not match bridge-lock-root first name']
-      ~
+      [~ 0]
     ?>  ?=(@ -.note.u.bridge-output)  :: assert v1 output
-    =/  =note-data:t  note-data.note.u.bridge-output
-    ::  we already checked that the %bridge entry exists in the note data
-    =/  bridge-data  (~(got z-by note-data) %bridge)
-    ::  NOTE: the whole bridge will crash if someone puts a faulty bridge
-    ::  note-data together without mole virtualizing the recipient processing.
-    ::  validate bridge data format: [%0 %base evm-address-based]
-    =/  recipient=(unit evm-address)
-      %-  mole
-      |.
-      =+  deposit-data=;;(bridge-deposit-data bridge-data)
-      ::  convert from based representation to raw EVM address
-      (based-to-evm-address addr.deposit-data)
+    =/  height=@  ~(height get:page:t block)
+    ::  Select deposit crediting by height, preserving historical replay.
+    =/  credited=(each [bridge-data=* total=coins:t] @ud)
+      ?.  (lth height deposit-seed-credit-height)
+        %+  credit-entries  seeds.u.bridge-output
+        (gte height parent-hash-binding-height)
+      ::  we already checked that the %bridge entry exists in the note data
+      :+  %&
+        (~(got z-by note-data.note.u.bridge-output) %bridge)
+      assets.note.u.bridge-output
+    ?:  ?=(%| -.credited)
+      ?:  =(0 p.credited)
+        ~>  %slog.[0 'No %bridge entry in the deposit output qualifies on its own. Deposited nocks will remain in bridge nockchain wallet.']
+        [~ 0]
+      ~>  %slog.[0 'Several %bridge entries in the deposit output qualify on their own. None is minted; the bridge stops after this block.']
+      [~ p.credited]
+    =/  bridge-data  bridge-data.p.credited
+    =/  recipient=(unit evm-address)  (parse-recipient bridge-data)
     ?~  recipient
       ~>  %slog.[0 'Encountered malformed evm recipient address. Deposited nocks will remain in bridge nockchain wallet.']
-      ~
+      [~ 0]
     ~&  recipient+recipient
-    =/  deposit-total  assets.note.u.bridge-output
+    =/  deposit-total  total.p.credited
     ::
     =/  deposit-fee=@  (calculate:bridge-fee deposit-total nicks-fee-per-nock.constants.state)
     =/  amount-to-mint=@
       (sub deposit-total deposit-fee)
     ::  amount that we are minting as a result of this deposit should be positive
     ?:  (gth amount-to-mint 0)
-      `[name.note.u.bridge-output recipient amount-to-mint deposit-fee]
-    ~
+      [`[name.note.u.bridge-output recipient amount-to-mint deposit-fee] 0]
+    [~ 0]
+  ::
+  ::    +parse-recipient: the EVM address in a %bridge entry, if well formed
+  ::
+  ::  Parse [%0 %base evm-address-based] within +mole.
+  ++  parse-recipient
+    |=  bridge-data=*
+    ^-  (unit evm-address)
+    %-  mole
+    |.
+    =+  deposit-data=;;(bridge-deposit-data bridge-data)
+    ::  convert from based representation to raw EVM address
+    (based-to-evm-address addr.deposit-data)
+  ::
+  ::    +credit-entries: credit each %bridge entry with its own seeds, and
+  ::    find the one that qualifies
+  ::
+  ::  Credit tagged seeds to their entry. When parent hashes are bound,
+  ::  also credit untagged seeds from a spend carrying exactly one entry.
+  ::  An entry qualifies when it meets the minimum and has a valid recipient.
+  ::  Mint exactly one qualifying entry. Multiple qualifying entries stop
+  ::  processing after the block is committed; zero entries do not stop it.
+  ++  credit-entries
+    |=  [=seeds:v1:t bound=?]
+    ^-  (each [bridge-data=* total=coins:t] @ud)
+    =/  seed-list=(list seed:v1:t)  ~(tap z-in seeds)
+    =/  tagged=(list [parent=hash:t entry=*])
+      %+  murn  seed-list
+      |=  sed=seed:v1:t
+      ?~  entry=(~(get z-by note-data.sed) %bridge)  ~
+      `[parent-hash.sed u.entry]
+    =/  credit-to
+      |=  sed=seed:v1:t
+      ^-  (unit *)
+      =/  entry=(unit *)  (~(get z-by note-data.sed) %bridge)
+      ?^  entry  entry
+      ?.  bound  ~
+      =/  spend-entries=(list *)
+        %+  roll  tagged
+        |=  [[parent=hash:t e=*] acc=(list *)]
+        ?.  =(parent parent-hash.sed)  acc
+        ?:  (lien acc |=(a=* =(a e)))  acc
+        [e acc]
+      ?.  ?=([* ~] spend-entries)  ~
+      `i.spend-entries
+    =/  totals=(list [bridge-data=* total=coins:t])
+      %+  roll  seed-list
+      |=  [sed=seed:v1:t acc=(list [bridge-data=* total=coins:t])]
+      =/  entry=(unit *)  (credit-to sed)
+      ?~  entry  acc
+      ?.  (lien acc |=([e=* *] =(e u.entry)))
+        [[u.entry gift.sed] acc]
+      %+  turn  acc
+      |=  [e=* total=coins:t]
+      [e ?:(=(e u.entry) (add total gift.sed) total)]
+    =/  qualifying=(list [bridge-data=* total=coins:t])
+      %+  skim  totals
+      |=  [bridge-data=* total=coins:t]
+      ?&  (gte total (mul minimum-event-nocks.constants.state nicks-per-nock:t))
+          ?=(^ (parse-recipient bridge-data))
+      ==
+    ?:  ?=([* ~] qualifying)  [%& i.qualifying]
+    [%| (lent qualifying)]
   --
 ::
 ++  unsettled-deposits-by-counterpart

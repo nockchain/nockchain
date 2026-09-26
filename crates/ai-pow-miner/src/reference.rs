@@ -1,8 +1,8 @@
-//! Gateway-free canonical AI-PoW block proving for the standalone miner.
+//! Gateway-free reference AI-PoW block proving for the standalone miner.
 //!
 //! The production `--pearl-gateway` path fetches Pearl work from an external
 //! gateway and proves a recursive certificate merging that Pearl proof. For a
-//! self-contained fakenet run (no gateway), the miner instead proves a CANONICAL
+//! self-contained fakenet run (no gateway), the miner instead proves a REFERENCE
 //! MoE block directly on the CPU, bound to the node's block commitment. This is
 //! the exact block the boot-time verifier-setup builder and the
 //! `ai_pow_accept_e2e` integration test prove — the setup is height-keyed and
@@ -33,11 +33,8 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow::zk_bridge::{
-    prove_pearl_merge_compact_recursive_certificate_checked,
-    prove_pearl_moe_compact_recursive_certificate, AiPowCompactRecursiveCertificateRun,
-    PearlMoeCompactProveRun,
-};
+use ai_pow::zk_bridge::{AiPowCompactRecursiveCertificateRun, PearlMoeCompactProveRun};
+use ai_pow_zk::proof_rules::ProofRules;
 
 use crate::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
@@ -45,22 +42,23 @@ use crate::certificate_noun::{
 
 /// Error proving a canonical AI-PoW block.
 #[derive(Debug)]
-pub struct CanonicalProveError(pub String);
+pub struct ReferenceProveError(pub String);
 
-impl std::fmt::Display for CanonicalProveError {
+impl std::fmt::Display for ReferenceProveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "canonical ai-pow prove: {}", self.0)
     }
 }
-impl std::error::Error for CanonicalProveError {}
+impl std::error::Error for ReferenceProveError {}
 
-fn err<E: std::fmt::Debug>(what: &str) -> impl FnOnce(E) -> CanonicalProveError + '_ {
-    move |e| CanonicalProveError(format!("{what}: {e:?}"))
+fn err<E: std::fmt::Debug>(what: &str) -> impl FnOnce(E) -> ReferenceProveError + '_ {
+    move |e| ReferenceProveError(format!("{what}: {e:?}"))
 }
 
 /// The canonical submission block: the pieces needed to assemble its `%ai-pow`
 /// artifact noun after proving.
-pub struct CanonicalBlock {
+pub struct ReferenceBlock {
+    pub rules: ProofRules,
     pub statement: PearlMergePublicStatementShape,
     pub aux_inclusion: PearlAuxInclusionProof,
     pub moe_art: PearlMergeMoeArtifact,
@@ -70,7 +68,7 @@ pub struct CanonicalBlock {
 }
 
 /// A proved dense canonical block that is ready for `AIP1` artifact encoding.
-pub struct CanonicalDenseBlock {
+pub struct ReferenceDenseBlock {
     pub attempt: PearlMergeCheckedTicketAttempt,
     pub aux_inclusion: PearlAuxInclusionProof,
     pub a: Arc<Vec<i8>>,
@@ -97,7 +95,7 @@ fn setup_aux(commit: [u8; 32]) -> PearlNockchainAux {
 
 /// Base header timestamp; `extranonce == 0` reproduces the exact block the boot
 /// verifier-setup builder and `ai_pow_accept_e2e` prove (byte-stable).
-const CANONICAL_BASE_TIMESTAMP: u32 = 0x6677_8899;
+const REFERENCE_BASE_TIMESTAMP: u32 = 0x6677_8899;
 
 /// `nbits` for the synthetic Pearl header.
 ///
@@ -115,7 +113,7 @@ const CANONICAL_BASE_TIMESTAMP: u32 = 0x6677_8899;
 ///
 /// Regtest-max `0x207fffff` (~2^255) does NOT scale, and a header carrying it
 /// cannot produce an acceptable block.
-pub const CANONICAL_NBITS: u32 = 0x1d7f_ffff;
+pub const REFERENCE_NBITS: u32 = 0x1d7f_ffff;
 
 /// Build the synthetic Pearl header + aux-inclusion proof for one grind attempt.
 ///
@@ -152,8 +150,8 @@ fn setup_aux_inclusion(
         version: 0x0102_0304,
         prev_block: [0x11; 32],
         merkle_root,
-        timestamp: CANONICAL_BASE_TIMESTAMP.wrapping_add(extranonce),
-        nbits: CANONICAL_NBITS,
+        timestamp: REFERENCE_BASE_TIMESTAMP.wrapping_add(extranonce),
+        nbits: REFERENCE_NBITS,
     };
     (
         header,
@@ -164,7 +162,7 @@ fn setup_aux_inclusion(
     )
 }
 
-struct CanonicalMoeInputs {
+struct ReferenceMoeInputs {
     a: Vec<i8>,
     b: Vec<i8>,
     commitments: ai_pow::pearl_compat::PearlWorkCommitments,
@@ -180,7 +178,7 @@ struct CanonicalMoeInputs {
     aux_inclusion: PearlAuxInclusionProof,
 }
 
-struct CanonicalMoeSchedule {
+struct ReferenceMoeSchedule {
     config: PearlMiningConfig,
     routing: ai_pow::pearl_moe_routing::RoutingData,
     inner: Vec<u32>,
@@ -194,7 +192,7 @@ struct CanonicalMoeSchedule {
 /// An extranonce changes only the header timestamp. All resulting transcript
 /// values—commitments, seeds, noised strips, tile state, and jackpot—are
 /// recomputed for every evaluation.
-pub struct PreparedCanonicalMoeTemplate {
+pub struct PreparedReferenceMoeTemplate {
     params: MatmulParams,
     config: PearlMiningConfig,
     a: Vec<i8>,
@@ -219,7 +217,7 @@ pub struct PreparedCanonicalMoeTemplate {
 ///
 /// Source matrices and auxiliary inclusion remain immutable across
 /// attempt-bound search transcripts.
-pub struct PreparedCanonicalDenseTemplate {
+pub struct PreparedReferenceDenseTemplate {
     params: MatmulParams,
     config: PearlMiningConfig,
     a: Arc<Vec<i8>>,
@@ -230,7 +228,7 @@ pub struct PreparedCanonicalDenseTemplate {
 }
 
 /// Host metadata for one dense search transcript prepared on the GPU.
-pub struct PreparedCanonicalDenseSearch {
+pub struct PreparedReferenceDenseSearch {
     extranonce: u32,
     header: PearlIncompleteBlockHeader,
     config: PearlMiningConfig,
@@ -242,7 +240,7 @@ pub struct PreparedCanonicalDenseSearch {
 }
 
 /// Reusable mutable storage for one canonical template worker.
-pub struct PreparedCanonicalMoeScratch {
+pub struct PreparedReferenceMoeScratch {
     noise: BlockNoise,
     e_row: Vec<i8>,
     f_col: Vec<i8>,
@@ -253,28 +251,28 @@ pub struct PreparedCanonicalMoeScratch {
 
 /// Search-only values for one canonical extranonce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CanonicalMoeSearchResult {
+pub struct ReferenceMoeSearchResult {
     pub commitments: PearlWorkCommitments,
     pub tile_state: TileState,
     pub jackpot_hash: [u8; 32],
 }
 
-impl PreparedCanonicalMoeTemplate {
+impl PreparedReferenceMoeTemplate {
     pub fn new(
         params: &MatmulParams,
         hw: u32,
         e: usize,
         top_k: usize,
         nock_commit: [u8; 32],
-    ) -> Result<Self, CanonicalProveError> {
-        let CanonicalMoeSchedule {
+    ) -> Result<Self, ReferenceProveError> {
+        let ReferenceMoeSchedule {
             config,
             routing,
             inner,
             local_b,
             n_e,
             m,
-        } = canonical_moe_schedule(params, hw, e, top_k)?;
+        } = reference_moe_schedule(params, hw, e, top_k)?;
         let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
         let aux = setup_aux(nock_commit);
         let aux_commitment = aux.commitment().map_err(err("aux commitment"))?;
@@ -355,9 +353,9 @@ impl PreparedCanonicalMoeTemplate {
         )
     }
 
-    pub fn scratch(&self) -> PreparedCanonicalMoeScratch {
+    pub fn scratch(&self) -> PreparedReferenceMoeScratch {
         let k = self.params.k as usize;
-        PreparedCanonicalMoeScratch {
+        PreparedReferenceMoeScratch {
             noise: BlockNoise::for_params(&self.params),
             e_row: vec![0; k],
             f_col: vec![0; k],
@@ -368,7 +366,7 @@ impl PreparedCanonicalMoeTemplate {
     }
 
     /// Whether a worker scratch allocation has this template's matrix shape.
-    pub fn scratch_matches(&self, scratch: &PreparedCanonicalMoeScratch) -> bool {
+    pub fn scratch_matches(&self, scratch: &PreparedReferenceMoeScratch) -> bool {
         let k = self.params.k as usize;
         scratch.noise.m == self.params.m
             && scratch.noise.k == self.params.k
@@ -405,7 +403,7 @@ impl PreparedCanonicalMoeTemplate {
     pub fn prepare_attempt(
         &self,
         extranonce: u32,
-        scratch: &mut PreparedCanonicalMoeScratch,
+        scratch: &mut PreparedReferenceMoeScratch,
     ) -> PearlWorkCommitments {
         let header = self.header_for(extranonce);
         let kappa = pearl_kappa(&header.to_bytes(), &self.mu);
@@ -445,7 +443,7 @@ impl PreparedCanonicalMoeTemplate {
     /// Opened noised strips produced by [`Self::prepare_attempt`].
     pub fn prepared_strips<'a>(
         &self,
-        scratch: &'a PreparedCanonicalMoeScratch,
+        scratch: &'a PreparedReferenceMoeScratch,
     ) -> (&'a [i8], &'a [i8]) {
         (&scratch.a_prime_rows, &scratch.b_prime_cols)
     }
@@ -454,8 +452,8 @@ impl PreparedCanonicalMoeTemplate {
     pub fn evaluate(
         &self,
         extranonce: u32,
-        scratch: &mut PreparedCanonicalMoeScratch,
-    ) -> CanonicalMoeSearchResult {
+        scratch: &mut PreparedReferenceMoeScratch,
+    ) -> ReferenceMoeSearchResult {
         let commitments = self.prepare_attempt(extranonce, scratch);
         let k = self.params.k as usize;
         let tile_state = compute_pattern_tile_state_from_slices(
@@ -468,7 +466,7 @@ impl PreparedCanonicalMoeTemplate {
             k,
             &mut scratch.tile,
         );
-        CanonicalMoeSearchResult {
+        ReferenceMoeSearchResult {
             commitments,
             tile_state,
             jackpot_hash: pearl_jackpot_hash(&tile_state, &commitments.s_a),
@@ -488,31 +486,31 @@ impl PreparedCanonicalMoeTemplate {
     }
 }
 
-impl PreparedCanonicalDenseTemplate {
+impl PreparedReferenceDenseTemplate {
     pub fn new(
         params: &MatmulParams,
         nock_commit: [u8; 32],
         a: Arc<Vec<i8>>,
         b: Arc<Vec<i8>>,
-    ) -> Result<Self, CanonicalProveError> {
+    ) -> Result<Self, ReferenceProveError> {
         params
             .validate_prod_envelope()
             .map_err(err("dense canonical parameter envelope"))?;
         if params.spot_checks != 1 || params.difficulty_bits != 0 {
-            return Err(CanonicalProveError(
+            return Err(ReferenceProveError(
                 "dense canonical proof requires spot_checks=1 and difficulty_bits=0".to_string(),
             ));
         }
         let expected_a = usize::try_from(params.m)
             .ok()
             .and_then(|m| m.checked_mul(params.k as usize))
-            .ok_or_else(|| CanonicalProveError("dense A length overflow".to_string()))?;
+            .ok_or_else(|| ReferenceProveError("dense A length overflow".to_string()))?;
         let expected_b = usize::try_from(params.n)
             .ok()
             .and_then(|n| n.checked_mul(params.k as usize))
-            .ok_or_else(|| CanonicalProveError("dense B length overflow".to_string()))?;
+            .ok_or_else(|| ReferenceProveError("dense B length overflow".to_string()))?;
         if a.len() != expected_a || b.len() != expected_b {
-            return Err(CanonicalProveError(format!(
+            return Err(ReferenceProveError(format!(
                 "dense matrix lengths must be {expected_a} and {expected_b}, got {} and {}",
                 a.len(),
                 b.len()
@@ -521,7 +519,7 @@ impl PreparedCanonicalDenseTemplate {
         let config = PearlMiningConfig {
             common_dim: params.k,
             rank: u16::try_from(params.noise_rank)
-                .map_err(|_| CanonicalProveError("dense rank does not fit u16".to_string()))?,
+                .map_err(|_| ReferenceProveError("dense rank does not fit u16".to_string()))?,
             mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
             rows_pattern: setup_pattern(params.tile),
             cols_pattern: setup_pattern(params.tile),
@@ -560,19 +558,19 @@ impl PreparedCanonicalDenseTemplate {
     pub fn prepare_search(
         &self,
         extranonce: u32,
-    ) -> Result<PreparedCanonicalDenseSearch, CanonicalProveError> {
+    ) -> Result<PreparedReferenceDenseSearch, ReferenceProveError> {
         let header = self.header_for(extranonce);
         let row_tickets = u64::from(self.params.m / self.params.tile);
         let col_tickets = u64::from(self.params.n / self.params.tile);
         if row_tickets == 0 || col_tickets == 0 {
-            return Err(CanonicalProveError(
+            return Err(ReferenceProveError(
                 "dense search requires at least one complete tile".to_string(),
             ));
         }
         row_tickets
             .checked_mul(col_tickets)
-            .ok_or_else(|| CanonicalProveError("dense ticket count overflow".to_string()))?;
-        Ok(PreparedCanonicalDenseSearch {
+            .ok_or_else(|| ReferenceProveError("dense ticket count overflow".to_string()))?;
+        Ok(PreparedReferenceDenseSearch {
             extranonce,
             header,
             config: self.config,
@@ -587,7 +585,7 @@ impl PreparedCanonicalDenseTemplate {
         })
     }
 
-    pub fn prepare(&self, extranonce: u32) -> Result<PreparedPearlPatternJob, CanonicalProveError> {
+    pub fn prepare(&self, extranonce: u32) -> Result<PreparedPearlPatternJob, ReferenceProveError> {
         prepare_pearl_pattern_job(
             &self.header_for(extranonce),
             &self.config,
@@ -604,14 +602,14 @@ impl PreparedCanonicalDenseTemplate {
         prepared: &PreparedPearlPatternJob,
         ordinal: u64,
         nockchain_target: &[u8; 32],
-    ) -> Result<PearlMergeCheckedTicketAttempt, CanonicalProveError> {
+    ) -> Result<PearlMergeCheckedTicketAttempt, ReferenceProveError> {
         if prepared.params() != self.params || prepared.config() != self.config {
-            return Err(CanonicalProveError(
+            return Err(ReferenceProveError(
                 "dense winner belongs to a different prepared template".to_string(),
             ));
         }
         let (t_rows, t_cols) = prepared.offsets_at_ordinal(ordinal).ok_or_else(|| {
-            CanonicalProveError("dense winner ordinal is out of range".to_string())
+            ReferenceProveError("dense winner ordinal is out of range".to_string())
         })?;
         let attempt = evaluate_pearl_merge_checked_ticket_attempt(
             &prepared.header(),
@@ -635,20 +633,20 @@ impl PreparedCanonicalDenseTemplate {
 
     pub fn checked_search_winner(
         &self,
-        prepared: &PreparedCanonicalDenseSearch,
+        prepared: &PreparedReferenceDenseSearch,
         ordinal: u64,
         nockchain_target: &[u8; 32],
-    ) -> Result<PearlMergeCheckedTicketAttempt, CanonicalProveError> {
+    ) -> Result<PearlMergeCheckedTicketAttempt, ReferenceProveError> {
         if prepared.params != self.params
             || prepared.config != self.config
             || prepared.header != self.header_for(prepared.extranonce)
         {
-            return Err(CanonicalProveError(
+            return Err(ReferenceProveError(
                 "dense winner belongs to a different search transcript".to_string(),
             ));
         }
         let (t_rows, t_cols) = prepared.offsets_at_ordinal(ordinal).ok_or_else(|| {
-            CanonicalProveError("dense winner ordinal is out of range".to_string())
+            ReferenceProveError("dense winner ordinal is out of range".to_string())
         })?;
         let attempt = evaluate_pearl_merge_checked_ticket_attempt(
             &prepared.header,
@@ -673,13 +671,22 @@ impl PreparedCanonicalDenseTemplate {
     pub fn prove(
         &self,
         attempt: PearlMergeCheckedTicketAttempt,
-    ) -> Result<CanonicalDenseBlock, CanonicalProveError> {
-        let run = prove_pearl_merge_compact_recursive_certificate_checked(
-            &attempt, &self.params, &self.a, &self.b,
-        )
-        .map_err(err("prove dense canonical winner"))?;
+    ) -> Result<ReferenceDenseBlock, ReferenceProveError> {
+        self.prove_with_rules(attempt, ProofRules::Hardened)
+    }
+
+    pub fn prove_with_rules(
+        &self,
+        attempt: PearlMergeCheckedTicketAttempt,
+        rules: ProofRules,
+    ) -> Result<ReferenceDenseBlock, ReferenceProveError> {
+        let run =
+            ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate_checked_with_rules(
+                &attempt, &self.params, &self.a, &self.b, rules,
+            )
+            .map_err(err("prove dense canonical winner"))?;
         let jackpot_hash = attempt.ticket.jackpot_hash;
-        Ok(CanonicalDenseBlock {
+        Ok(ReferenceDenseBlock {
             attempt,
             aux_inclusion: self.aux_inclusion.clone(),
             a: Arc::clone(&self.a),
@@ -691,7 +698,7 @@ impl PreparedCanonicalDenseTemplate {
     }
 }
 
-impl PreparedCanonicalDenseSearch {
+impl PreparedReferenceDenseSearch {
     pub const fn config(&self) -> PearlMiningConfig {
         self.config
     }
@@ -725,14 +732,14 @@ impl PreparedCanonicalDenseSearch {
     }
 }
 
-/// The Pearl mining config the canonical miner puts in every statement it
+/// The Pearl mining config the reference miner puts in every statement it
 /// builds.
 ///
 /// Public so the grind loop can derive its accept threshold
 /// (`config.shape_work_factor()`) from the SAME object the statement carries
 /// and the verifier re-parses. Deriving it from a parallel copy of
 /// `(h, w, k, r)` is how a miner's predicate silently diverges from consensus.
-pub fn canonical_mining_config(
+pub fn reference_mining_config(
     params: &MatmulParams,
     hw: u32,
     e: usize,
@@ -748,19 +755,19 @@ pub fn canonical_mining_config(
     }
 }
 
-fn canonical_moe_schedule(
+fn reference_moe_schedule(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
-) -> Result<CanonicalMoeSchedule, CanonicalProveError> {
+) -> Result<ReferenceMoeSchedule, ReferenceProveError> {
     let m = params.m as usize;
     let n = params.n as usize;
     if e == 0 || !n.is_multiple_of(e) {
-        return Err(CanonicalProveError(format!("n={n} not divisible by e={e}")));
+        return Err(ReferenceProveError(format!("n={n} not divisible by e={e}")));
     }
     let n_e = n / e;
-    let config = canonical_mining_config(params, hw, e, top_k);
+    let config = reference_mining_config(params, hw, e, top_k);
     let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
     let routing = build_routing_data(&topk, m, top_k, e).map_err(err("routing"))?;
     let inner = config
@@ -771,7 +778,7 @@ fn canonical_moe_schedule(
         .cols_pattern
         .indices_with_offset_bounded(0, 4096)
         .map_err(err("local_b"))?;
-    Ok(CanonicalMoeSchedule {
+    Ok(ReferenceMoeSchedule {
         config,
         routing,
         inner,
@@ -781,22 +788,22 @@ fn canonical_moe_schedule(
     })
 }
 
-fn canonical_moe_inputs(
+fn reference_moe_inputs(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-) -> Result<CanonicalMoeInputs, CanonicalProveError> {
-    let CanonicalMoeSchedule {
+) -> Result<ReferenceMoeInputs, ReferenceProveError> {
+    let ReferenceMoeSchedule {
         config,
         routing,
         inner,
         local_b,
         n_e,
         m,
-    } = canonical_moe_schedule(params, hw, e, top_k)?;
+    } = reference_moe_schedule(params, hw, e, top_k)?;
 
     let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
     let aux = setup_aux(nock_commit);
@@ -815,7 +822,7 @@ fn canonical_moe_inputs(
         &routing.routing_offsets_le_bytes(),
     );
 
-    Ok(CanonicalMoeInputs {
+    Ok(ReferenceMoeInputs {
         a,
         b,
         commitments,
@@ -835,7 +842,7 @@ fn canonical_moe_inputs(
 /// Cheap proof-of-work grind step: compute the full work ticket for one attempt
 /// (`nock_commit`, `extranonce`) — the noised MoE tile matmul + BLAKE3 jackpot, and
 /// NOT the ~25-30s recursive certificate. The returned ticket is byte-identical to
-/// the one the matching [`prove_canonical_moe_block_at`] certifies (both route
+/// the one the matching [`prove_reference_moe_block_at`] certifies (both route
 /// through `compute_pearl_moe_ticket` with the same inputs), so a jackpot found
 /// here is guaranteed to survive the certificate's `jackpot <= target` gate.
 ///
@@ -845,15 +852,15 @@ fn canonical_moe_inputs(
 /// is no separate nonce: changing `extranonce` (the header timestamp inside
 /// `sigma`) changes `kappa` → `s_a`/`s_b` → the noise → the tile matmul → the
 /// jackpot. So a fresh jackpot trial is impossible without a fresh tile inference.
-pub fn evaluate_canonical_moe_ticket(
+pub fn evaluate_reference_moe_ticket(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-) -> Result<ai_pow::pearl_compat::PearlMoeTicket, CanonicalProveError> {
-    let CanonicalMoeInputs {
+) -> Result<ai_pow::pearl_compat::PearlMoeTicket, ReferenceProveError> {
+    let ReferenceMoeInputs {
         a,
         b,
         commitments,
@@ -863,7 +870,7 @@ pub fn evaluate_canonical_moe_ticket(
         n_e,
         m,
         ..
-    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
+    } = reference_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
     // Mirror the prover's ticket call exactly (expert 0, dot_product_len == k).
     compute_pearl_moe_ticket(
         &commitments.kappa, &commitments.h_a, &commitments.h_b, &a, &b, &routing, 0, &inner,
@@ -873,29 +880,29 @@ pub fn evaluate_canonical_moe_ticket(
 }
 
 /// Cheap grind step returning only the jackpot hash (see
-/// [`evaluate_canonical_moe_ticket`]).
-pub fn evaluate_canonical_moe_jackpot(
+/// [`evaluate_reference_moe_ticket`]).
+pub fn evaluate_reference_moe_jackpot(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-) -> Result<[u8; 32], CanonicalProveError> {
-    Ok(evaluate_canonical_moe_ticket(params, hw, e, top_k, nock_commit, extranonce)?.jackpot_hash)
+) -> Result<[u8; 32], ReferenceProveError> {
+    Ok(evaluate_reference_moe_ticket(params, hw, e, top_k, nock_commit, extranonce)?.jackpot_hash)
 }
 
 /// Prove a single canonical MoE block bound to `nock_commit` at `extranonce == 0`.
 /// Byte-stable back-compat wrapper (the boot setup builder / e2e prove this exact
 /// block).
-pub fn prove_canonical_moe_block(
+pub fn prove_reference_moe_block(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
-) -> Result<CanonicalBlock, CanonicalProveError> {
-    prove_canonical_moe_block_at(params, hw, e, top_k, nock_commit, 0)
+) -> Result<ReferenceBlock, ReferenceProveError> {
+    prove_reference_moe_block_at(params, hw, e, top_k, nock_commit, 0)
 }
 
 /// Prove a single canonical MoE block at the given shape, bound to `nock_commit`
@@ -903,41 +910,49 @@ pub fn prove_canonical_moe_block(
 /// selects the header timestamp that made `jackpot <= target`). `hw` is the
 /// opened-tile side; `e`/`top_k` the MoE config. ~25-30s on CPU for the small
 /// shape. Returns errors (panics-free).
-pub fn prove_canonical_moe_block_at(
+pub fn prove_reference_moe_block_at(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-) -> Result<CanonicalBlock, CanonicalProveError> {
-    prove_canonical_moe_block_at_for_miner(params, hw, e, top_k, nock_commit, extranonce)
+) -> Result<ReferenceBlock, ReferenceProveError> {
+    prove_reference_moe_block_at_with_rules(
+        params,
+        hw,
+        e,
+        top_k,
+        nock_commit,
+        extranonce,
+        ProofRules::Hardened,
+    )
 }
 
-/// The `PearlPublicProofParams` the canonical miner will publish for this
+/// The `PearlPublicProofParams` the reference miner will publish for this
 /// attempt, WITHOUT paying the ~25-30s certificate cost.
 ///
 /// `hash_jackpot` is left zero — every other field, and in particular the whole
 /// `mining_config`, is byte-identical to what
-/// [`prove_canonical_moe_block_at`] emits, so this is the statement the
+/// [`prove_reference_moe_block_at`] emits, so this is the statement the
 /// consensus verifier re-parses. Exists so the grind loop's accept threshold
 /// can be checked against the verifier's without proving.
-pub fn canonical_public_params(
+pub fn reference_public_params(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-) -> Result<PearlPublicProofParams, CanonicalProveError> {
-    let CanonicalMoeInputs {
+) -> Result<PearlPublicProofParams, ReferenceProveError> {
+    let ReferenceMoeInputs {
         commitments,
         n_e,
         m,
         config,
         header,
         ..
-    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
+    } = reference_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
     Ok(PearlPublicProofParams {
         block_header: header,
         mining_config: config,
@@ -951,23 +966,23 @@ pub fn canonical_public_params(
     })
 }
 
-/// The authenticated statement and MoE artifact the canonical miner will
+/// The authenticated statement and MoE artifact the reference miner will
 /// publish for this attempt, WITHOUT paying the certificate cost.
 ///
-/// Unlike [`canonical_public_params`] the returned `hash_jackpot` is the real
+/// Unlike [`reference_public_params`] the returned `hash_jackpot` is the real
 /// one for `(nock_commit, extranonce)`, so the pair is a complete MoE work
 /// statement: it passes aux binding and `verify_pearl_moe_compatible_work`
 /// against any target the jackpot clears. Only the recursive certificate is
 /// absent, which is what makes it usable for testing the pre-proof gates.
-pub fn canonical_moe_statement_parts(
+pub fn reference_moe_statement_parts(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-) -> Result<(PearlPublicProofParams, PearlMergeMoeArtifact), CanonicalProveError> {
-    let CanonicalMoeInputs {
+) -> Result<(PearlPublicProofParams, PearlMergeMoeArtifact), ReferenceProveError> {
+    let ReferenceMoeInputs {
         commitments,
         routing,
         n_e,
@@ -975,8 +990,8 @@ pub fn canonical_moe_statement_parts(
         config,
         header,
         ..
-    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
-    let ticket = evaluate_canonical_moe_ticket(params, hw, e, top_k, nock_commit, extranonce)?;
+    } = reference_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
+    let ticket = evaluate_reference_moe_ticket(params, hw, e, top_k, nock_commit, extranonce)?;
     let public = PearlPublicProofParams {
         block_header: header,
         mining_config: config,
@@ -1000,22 +1015,25 @@ pub fn canonical_moe_statement_parts(
     Ok((public, moe_art))
 }
 
+/// Prove with the rules selected by the node's candidate height. Neither the
+/// auxiliary statement's height nor proof metadata selects consensus rules.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prove_canonical_moe_block_at_for_miner(
+pub fn prove_reference_moe_block_at_with_rules(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-) -> Result<CanonicalBlock, CanonicalProveError> {
-    prove_canonical_moe_block_at_inner(params, hw, e, top_k, nock_commit, extranonce)
+    rules: ProofRules,
+) -> Result<ReferenceBlock, ReferenceProveError> {
+    prove_reference_moe_block_at_inner(params, hw, e, top_k, nock_commit, extranonce, rules)
         .map(|(block, _)| block)
 }
 
 #[cfg(all(test, feature = "gpu"))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prove_canonical_moe_block_at_with_verifier_context(
+pub(crate) fn prove_reference_moe_block_at_with_verifier_context(
     params: &MatmulParams,
     hw: u32,
     e: usize,
@@ -1024,30 +1042,39 @@ pub(crate) fn prove_canonical_moe_block_at_with_verifier_context(
     extranonce: u32,
 ) -> Result<
     (
-        CanonicalBlock,
+        ReferenceBlock,
         ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     ),
-    CanonicalProveError,
+    ReferenceProveError,
 > {
-    prove_canonical_moe_block_at_inner(params, hw, e, top_k, nock_commit, extranonce)
+    prove_reference_moe_block_at_inner(
+        params,
+        hw,
+        e,
+        top_k,
+        nock_commit,
+        extranonce,
+        ProofRules::Hardened,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prove_canonical_moe_block_at_inner(
+fn prove_reference_moe_block_at_inner(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
+    rules: ProofRules,
 ) -> Result<
     (
-        CanonicalBlock,
+        ReferenceBlock,
         ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     ),
-    CanonicalProveError,
+    ReferenceProveError,
 > {
-    let CanonicalMoeInputs {
+    let ReferenceMoeInputs {
         a,
         b,
         commitments,
@@ -1061,11 +1088,11 @@ fn prove_canonical_moe_block_at_inner(
         aux,
         aux_commitment,
         aux_inclusion,
-    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
+    } = reference_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
 
-    let run = prove_pearl_moe_compact_recursive_certificate(
+    let run = ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate_with_rules(
         params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
-        &inner, &local_b, n_e,
+        &inner, &local_b, n_e, rules,
     )
     .map_err(err("prove"))?;
 
@@ -1120,7 +1147,8 @@ fn prove_canonical_moe_block_at_inner(
     };
 
     Ok((
-        CanonicalBlock {
+        ReferenceBlock {
+            rules,
             statement,
             aux_inclusion,
             moe_art,
@@ -1138,7 +1166,7 @@ mod tests {
 
     use super::*;
 
-    fn canonical_params() -> MatmulParams {
+    fn reference_params() -> MatmulParams {
         MatmulParams {
             m: 64,
             k: 1024,
@@ -1167,7 +1195,7 @@ mod tests {
         let params = dense_params();
         let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, &params);
         let template =
-            PreparedCanonicalDenseTemplate::new(&params, [0x5a; 32], Arc::new(a), Arc::new(b))
+            PreparedReferenceDenseTemplate::new(&params, [0x5a; 32], Arc::new(a), Arc::new(b))
                 .expect("dense canonical template");
         let first = template.prepare(0).expect("first dense template");
         let second = template.prepare(1).expect("second dense template");
@@ -1196,33 +1224,33 @@ mod tests {
     /// after proving. Also: distinct extranonces are distinct PoW attempts (fresh
     /// jackpots), and `extranonce == 0` is the byte-stable back-compat block.
     /// Ignored (one prove ~25-30s); run with:
-    ///   cargo test --release -p ai-pow-miner canonical_grind_jackpot_matches_prove -- --ignored --nocapture
+    ///   cargo test --release -p ai-pow-miner reference_grind_jackpot_matches_prove -- --ignored --nocapture
     #[test]
     #[ignore]
-    fn canonical_grind_jackpot_matches_prove() {
-        let params = canonical_params();
+    fn reference_grind_jackpot_matches_prove() {
+        let params = reference_params();
         let commit = [0x5au8; 32];
 
         // Grind jackpots vary per extranonce (fresh attempts).
-        let j0 = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 0).expect("eval 0");
-        let j1 = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 1).expect("eval 1");
-        let j2 = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 2).expect("eval 2");
+        let j0 = evaluate_reference_moe_jackpot(&params, 8, 2, 1, commit, 0).expect("eval 0");
+        let j1 = evaluate_reference_moe_jackpot(&params, 8, 2, 1, commit, 1).expect("eval 1");
+        let j2 = evaluate_reference_moe_jackpot(&params, 8, 2, 1, commit, 2).expect("eval 2");
         assert_ne!(j0, j1, "extranonce 0 vs 1 must be distinct attempts");
         assert_ne!(j1, j2, "extranonce 1 vs 2 must be distinct attempts");
         // Deterministic per (commit, extranonce).
-        let j1b = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 1).expect("eval 1b");
+        let j1b = evaluate_reference_moe_jackpot(&params, 8, 2, 1, commit, 1).expect("eval 1b");
         assert_eq!(j1, j1b, "grind eval must be deterministic");
 
         // Grind eval == certified jackpot, for a nonzero extranonce.
-        let block = prove_canonical_moe_block_at(&params, 8, 2, 1, commit, 1).expect("prove 1");
+        let block = prove_reference_moe_block_at(&params, 8, 2, 1, commit, 1).expect("prove 1");
         assert_eq!(
             block.jackpot_hash, j1,
             "certified jackpot must equal the cheap grind jackpot for the same extranonce"
         );
 
-        // extranonce 0 back-compat: same wrapper result as prove_canonical_moe_block.
-        let b0a = prove_canonical_moe_block(&params, 8, 2, 1, commit).expect("prove wrapper");
-        let b0b = prove_canonical_moe_block_at(&params, 8, 2, 1, commit, 0).expect("prove at 0");
+        // extranonce 0 back-compat: same wrapper result as prove_reference_moe_block.
+        let b0a = prove_reference_moe_block(&params, 8, 2, 1, commit).expect("prove wrapper");
+        let b0b = prove_reference_moe_block_at(&params, 8, 2, 1, commit, 0).expect("prove at 0");
         assert_eq!(b0a.jackpot_hash, b0b.jackpot_hash);
         assert_eq!(b0a.jackpot_hash, j0);
 
@@ -1239,15 +1267,15 @@ mod tests {
     /// cheap jackpot trials without redoing inference; that is exactly the
     /// forbidden shortcut. Cheap (no certificate), so not ignored.
     #[test]
-    fn canonical_extranonce_forces_fresh_tile_inference() {
-        let params = canonical_params();
+    fn reference_extranonce_forces_fresh_tile_inference() {
+        let params = reference_params();
         let commit = [0x33u8; 32];
         let n = 24u32;
         let mut seen_tiles = std::collections::HashSet::new();
         let mut seen_sa = std::collections::HashSet::new();
         let mut prev: Option<ai_pow::pearl_compat::PearlMoeTicket> = None;
         for xn in 0..n {
-            let t = evaluate_canonical_moe_ticket(&params, 8, 2, 1, commit, xn).expect("ticket");
+            let t = evaluate_reference_moe_ticket(&params, 8, 2, 1, commit, xn).expect("ticket");
             // Serialize the tile matmul output to compare/collect.
             let tile_bytes = format!("{:?}", t.tile_state);
             assert!(
@@ -1285,11 +1313,11 @@ mod tests {
     /// assert the canonical jackpot equals the s_A-keyed hash and does NOT equal the
     /// nonce-folded-key hash.
     #[test]
-    fn canonical_jackpot_keyed_by_s_a_direct_not_nonce_folded() {
-        let params = canonical_params();
+    fn reference_jackpot_keyed_by_s_a_direct_not_nonce_folded() {
+        let params = reference_params();
         let commit = [0x77u8; 32];
         for xn in [0u32, 1, 5, 100] {
-            let t = evaluate_canonical_moe_ticket(&params, 8, 2, 1, commit, xn).expect("ticket");
+            let t = evaluate_reference_moe_ticket(&params, 8, 2, 1, commit, xn).expect("ticket");
             // Pearl form: BLAKE3(M, key = s_A).
             let pearl_keyed = ai_pow::pearl_compat::pearl_jackpot_hash(&t.tile_state, &t.s_a);
             assert_eq!(
@@ -1311,11 +1339,11 @@ mod tests {
     ///
     /// The transcript is keyed by `kappa = BLAKE3(sigma || mu)` and `sigma`
     /// includes the header `nbits`, so these values move whenever
-    /// `CANONICAL_NBITS` does. See that constant for why it is not regtest-max.
-    fn canonical_moe_route_kat_snapshot() {
-        let params = canonical_params();
+    /// `REFERENCE_NBITS` does. See that constant for why it is not regtest-max.
+    fn reference_moe_route_kat_snapshot() {
+        let params = reference_params();
         let ticket =
-            evaluate_canonical_moe_ticket(&params, 8, 2, 1, [0x42u8; 32], 7).expect("ticket");
+            evaluate_reference_moe_ticket(&params, 8, 2, 1, [0x42u8; 32], 7).expect("ticket");
 
         assert_eq!(
             hex::encode(ticket.s_a),
@@ -1361,10 +1389,10 @@ mod tests {
     /// Pinned against the loosest target consensus can emit, so this holds for
     /// the whole admissible difficulty range rather than one convenient point.
     #[test]
-    fn canonical_statement_survives_the_node_work_precheck() {
-        let params = canonical_params();
+    fn reference_statement_survives_the_node_work_precheck() {
+        let params = reference_params();
         let (mut public, moe_art) =
-            canonical_moe_statement_parts(&params, 8, 2, 1, [0x5a; 32], 0).expect("statement");
+            reference_moe_statement_parts(&params, 8, 2, 1, [0x5a; 32], 0).expect("statement");
 
         // Pearl's own target is not gated here, but it must be REPRESENTABLE:
         // the accept path computes it with `?` before the Nockchain gate.
@@ -1386,14 +1414,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_search_kat_snapshot() {
+    fn reference_search_kat_snapshot() {
         use ai_pow::matmul::{compute_pattern_tile_trace_from_slices, BlockNoise};
 
-        let params = canonical_params();
+        let params = reference_params();
         let commit = [0x42u8; 32];
         let extranonce = 7;
         let inputs =
-            canonical_moe_inputs(&params, 8, 2, 1, commit, extranonce).expect("canonical inputs");
+            reference_moe_inputs(&params, 8, 2, 1, commit, extranonce).expect("canonical inputs");
         let ticket = compute_pearl_moe_ticket(
             &inputs.commitments.kappa, &inputs.commitments.h_a, &inputs.commitments.h_b, &inputs.a,
             &inputs.b, &inputs.routing, 0, &inputs.inner, &inputs.local_b, inputs.n_e,
@@ -1437,7 +1465,7 @@ mod tests {
         let mut target = [0u8; 32];
         target[..28].fill(0xff);
         let public =
-            canonical_public_params(&params, 8, 2, 1, commit, extranonce).expect("public params");
+            reference_public_params(&params, 8, 2, 1, commit, extranonce).expect("public params");
 
         assert_eq!(
             hex::encode(inputs.header.to_bytes()),
@@ -1518,19 +1546,19 @@ mod tests {
     }
 
     #[test]
-    fn prepared_canonical_template_matches_scalar_ticket_oracle() {
-        let params = canonical_params();
+    fn prepared_reference_template_matches_scalar_ticket_oracle() {
+        let params = reference_params();
         let commit = [0x42u8; 32];
         let template =
-            PreparedCanonicalMoeTemplate::new(&params, 8, 2, 1, commit).expect("template");
+            PreparedReferenceMoeTemplate::new(&params, 8, 2, 1, commit).expect("template");
         let mut scratch = template.scratch();
         let a_prime_rows = scratch.a_prime_rows.as_ptr();
         let b_prime_cols = scratch.b_prime_cols.as_ptr();
 
         for extranonce in [0, 1, 7, u32::MAX] {
             let inputs =
-                canonical_moe_inputs(&params, 8, 2, 1, commit, extranonce).expect("inputs");
-            let scalar = evaluate_canonical_moe_ticket(&params, 8, 2, 1, commit, extranonce)
+                reference_moe_inputs(&params, 8, 2, 1, commit, extranonce).expect("inputs");
+            let scalar = evaluate_reference_moe_ticket(&params, 8, 2, 1, commit, extranonce)
                 .expect("scalar");
             let prepared = template.evaluate(extranonce, &mut scratch);
 
@@ -1546,7 +1574,7 @@ mod tests {
         assert_eq!(scratch.b_prime_cols.as_ptr(), b_prime_cols);
         assert_eq!(
             template.header_for(u32::MAX).timestamp,
-            CANONICAL_BASE_TIMESTAMP.wrapping_add(u32::MAX)
+            REFERENCE_BASE_TIMESTAMP.wrapping_add(u32::MAX)
         );
     }
 }
