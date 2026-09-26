@@ -1,5 +1,7 @@
-/// Package registry system using typhoon registry format
-/// Fetches registry from https://github.com/sigilante/typhoon
+/// Package registry system using typhoon registry format.
+/// Fetches the registry from https://github.com/sigilante/typhoon by default;
+/// override with the `--registry` flag or the `NOCKUP_REGISTRY` env var (a URL
+/// or a local file path).
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -199,17 +201,53 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
 /// Cached online registry
 static ONLINE_REGISTRY: Lazy<RwLock<Option<RegistryToml>>> = Lazy::new(|| RwLock::new(None));
 
-const REGISTRY_URL: &str =
+/// Default registry, used when neither `--registry` nor `$NOCKUP_REGISTRY` is set.
+const DEFAULT_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/sigilante/typhoon/master/registry.toml";
 
-/// Fetch and parse the online registry (blocking - use spawn_blocking in async context)
-fn fetch_registry_sync() -> Result<RegistryToml> {
-    let response =
-        reqwest::blocking::get(REGISTRY_URL).context("Failed to fetch registry from GitHub")?;
+/// Optional override for the registry source, set once at startup (e.g. from the
+/// `--registry` CLI flag). `None` means fall back to the env var / default.
+static REGISTRY_SOURCE: RwLock<Option<String>> = RwLock::new(None);
 
-    let content = response
-        .text()
-        .context("Failed to read registry response")?;
+/// Set the registry source: a remote URL (`http`/`https`) or a local file path.
+/// Takes precedence over `$NOCKUP_REGISTRY` and the built-in default. Call this
+/// before any package resolution happens.
+pub fn set_registry_source(source: impl Into<String>) {
+    if let Ok(mut guard) = REGISTRY_SOURCE.write() {
+        *guard = Some(source.into());
+    }
+}
+
+/// Resolve the active registry source.
+/// Precedence: explicit override (CLI) > `$NOCKUP_REGISTRY` > built-in default.
+fn registry_source() -> String {
+    if let Ok(guard) = REGISTRY_SOURCE.read() {
+        if let Some(src) = guard.as_ref() {
+            return src.clone();
+        }
+    }
+    match std::env::var("NOCKUP_REGISTRY") {
+        Ok(src) if !src.is_empty() => src,
+        _ => DEFAULT_REGISTRY_URL.to_string(),
+    }
+}
+
+/// Fetch and parse the registry (blocking - use spawn_blocking in async context).
+/// The source may be a remote URL or a local file path (an optional `file://`
+/// prefix is accepted), so a registry can be served over HTTP or read from disk.
+fn fetch_registry_sync() -> Result<RegistryToml> {
+    let source = registry_source();
+
+    let content = if source.starts_with("http://") || source.starts_with("https://") {
+        reqwest::blocking::get(source.as_str())
+            .with_context(|| format!("Failed to fetch registry from {source}"))?
+            .text()
+            .context("Failed to read registry response")?
+    } else {
+        let path = source.strip_prefix("file://").unwrap_or(&source);
+        std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read registry file '{path}'"))?
+    };
 
     let registry: RegistryToml =
         toml::from_str(&content).context("Failed to parse registry TOML")?;
