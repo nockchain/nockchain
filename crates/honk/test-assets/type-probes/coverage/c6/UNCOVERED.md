@@ -1,9 +1,9 @@
 # c6 coverage ledger: honk pipeline, library entry points, and CLI
 
 Range: `crates/honk/src/pipeline.rs`, `lib.rs`, `errors.rs`, `types.rs` and
-`crates/honk/src/bin/honk.rs`, excluding `#[cfg(test)]` modules. Gaps: 2473
-lines (0 unit-only, 2120 parity-only, 353 both) and 425 branch outcomes (0
-unit-only, 335 parity-only, 90 both). Tags: `U` = not covered by unit tests
+`crates/honk/src/bin/honk.rs`, excluding `#[cfg(test)]` modules. Gaps: 2477
+lines (0 unit-only, 2124 parity-only, 353 both) and 426 branch outcomes (0
+unit-only, 336 parity-only, 90 both). Tags: `U` = not covered by unit tests
 (including `cov_c6.rs`, `bin_tests/cov_c6_bin.rs` and `tests/cov_c6_cli.rs`),
 `P` = not covered by the parity corpus, `UP` = both. Line numbers match the
 current source.
@@ -23,10 +23,10 @@ current source.
   (L2881-2899), `ensure_subject_values` (L2901-2908, B2903T/F),
   `eval_formula_with_subject` (L2910-2928), `eval_standard_formula_to_jam`
   (L2930-3032, all outcomes of B2958-B3025), `jam_standard_gate_value`
-  (L3034-3037), `jam_standard_kernel_trap_native` (L4220-4240, B4231T/F),
-  `slam_gate_with_atom_sample_noun` (L4463-4495, B4484T/F),
-  `slam_gate_with_atom_sample_noun_in_frame` (L4497-4517) and
-  `jam_standard_kernel_product_trap_in_frame` (L4519-4525).
+  (L3034-3037), `jam_standard_kernel_trap_native` (L4274-4294, B4285T/F),
+  `slam_gate_with_atom_sample_noun` (L4517-4549, B4538T/F),
+  `slam_gate_with_atom_sample_noun_in_frame` (L4551-4571) and
+  `jam_standard_kernel_product_trap_in_frame` (L4573-4579).
 - Other dead code: `parse_prelude_hoon` L927-932, B919F (both callers pass
   `docs=true`); `value_trap` L2831 (only called for arbitrary output).
 - Unreachable:
@@ -40,7 +40,7 @@ current source.
     reachable file first (`entry_uses_unpinned_softed_constraints`,
     `check_dependency_tree`), so a resolution error never reaches a compile.
   - `check_dependency_tree` L784, 786, 788 and `directory_mug_with_files`
-    L4606, 4608, 4610: WalkDir yields paths under the walked root.
+    L4660, 4662, 4664: WalkDir yields paths under the walked root.
     `check_dependency_tree` L897, B891F: the walk visits only graph keys.
   - `run` L656, B654F: `parse_args` always yields an entry, a batch manifest
     or a dump directory.
@@ -60,9 +60,9 @@ current source.
     L2079; `slam_wrapper_gate` L2866-2868, B2865T B2866T/F.
   - Cache: `read_cache_object` L2258, `reject_cache_payload` B2263F and
     `flush_build_cache` B2289c2T are only called or queued when a cache
-    exists; `hydrate_pack_root` B3963c2T: the reachability walk stops at
+    exists; `hydrate_pack_root` B4017c2T: the reachability walk stops at
     hydrated nodes.
-  - `noun_eq` L4652, 4662-4663; B4648c2F B4651T B4656F B4656c2F: two
+  - `noun_eq` L4706, 4716-4717; B4702c2F B4705T B4710F B4710c2F: two
     distinct nouns with equal mugs; unreachable in practice.
 - Defensive:
   - `decode_cached_vase` L2196-2197 and `decode_cached_product` L2228,
@@ -71,23 +71,23 @@ current source.
     packs fail pack verification first, and honk never writes an eval value
     or a product without a trap.
   - `current_dir()` failure: `hoon_log_path` L530, B523F; `build_entry_wer`
-    L1072, B1067F; `entry_path_for_hoon` L4924-4925, B4919F B4920F.
+    L1072, B1067F; `entry_path_for_hoon` L4978-4979, B4973F B4974F.
   - `main` L606 (worker thread spawn failure); `dump_exact_wrapper_assets`
     L3158, 3169 and `dump_native_wrapper_assets` L3197 (write errors);
-    `evaluate_honc_isolated` L3432 (evaluation failure after a successful
-    mint); `lexical_absolute_path` L4946 (`Component::Prefix`, Windows only).
+    `evaluate_honc_isolated` L3486 (evaluation failure after a successful
+    mint); `lexical_absolute_path` L5000 (`Component::Prefix`, Windows only).
 - Diagnostics-only:
   - Fields of `info!`/`debug!` events, evaluated only when that level is
     enabled: `TimedHoonPathLog::drop` L446, `report_native_timing_totals`
     L509-512, `run` L658-660, `slam_wrapper_gate` L2861-2862,
-    `compile_entry_with_hoonc` L3525, `eval_formula_noun_in_context`
-    L4302-4303.
+    `compile_entry_with_hoonc` L3579, `eval_formula_noun_in_context`
+    L4356-4357.
   - Type-intern statistics under `HONK_IR_ROUNDTRIP`, which cannot fail or
     be empty for a real type: `build_context_with_shared_prelude` L1255,
     1258, B1249F B1252F; `build_context_with_dynamic_wrapper_prelude` L1366,
     1369-1370, B1358F B1360F B1363F.
-  - Tracing of interpreter failures: `eval_formula_noun_in_context` L4321,
-    B4320T; `trace_interpret_error` L4337, 4339, 4348, B4347F
+  - Tracing of interpreter failures: `eval_formula_noun_in_context` L4375,
+    B4374T; `trace_interpret_error` L4391, 4393, 4402, B4401F
     (non-deterministic and scry errors, and a `mook` failure).
 
 ### Parity-only gaps [P] (unit-covered)
@@ -103,7 +103,7 @@ current source.
   559-561, 567-569, 571-574; B541T B553T B567T/F (`nockasm` and `cache`
   subcommands, `--help`, argument errors); `run` B678F (`--no-dbug`, which
   hoonc does not have); `run` L740, B735F and `compile_entry_with_hoonc`
-  L3545, B3540F (an output path with no directory).
+  L3599, B3594F (an output path with no directory).
 - Batch mode. The `c6_batch_*` genrule pairings are verified by Bazel but
   not replayed for coverage (the replay runs the dynock pairings and single
   entries only): `CompileMode::parse` L122-128, 130;
@@ -115,11 +115,11 @@ current source.
   entry whose dependency tree fails `check_dependency_tree`);
   `compile_batch_with_shared_prelude` L1427-1436, 1441-1448, 1450-1454,
   1456-1458, 1460-1462; B1451T/F; and the manifest directory lists in
-  `directory_mug_with_files` L4613-4615, B4612T B4613T/F,
-  `hoonc_directory_allowed_paths` L4851-4857, 4859-4860, B4854T/F,
-  `hoonc_manifest_relative_path` L4862-4870, 4872-4883, 4887-4892; B4863T/F
-  B4864T/F B4868T/F B4878T/F B4880T/F, and `normal_path_components`
-  L4894-4901.
+  `directory_mug_with_files` L4667-4669, B4666T B4667T/F,
+  `hoonc_directory_allowed_paths` L4905-4911, 4913-4914, B4908T/F,
+  `hoonc_manifest_relative_path` L4916-4924, 4926-4937, 4941-4946; B4917T/F
+  B4918T/F B4922T/F B4932T/F B4934T/F, and `normal_path_components`
+  L4948-4955.
 - Persistent cache. Only the batch genrule passes `--cache-dir`:
   `dependency_merkle_for_path` L2086-2091, 2093-2113, 2115-2124, 2127-2129,
   2131-2132, 2134-2138, 2140-2144; B2088T/F B2091F; `cache_object_key`
@@ -133,13 +133,13 @@ current source.
   2347-2348, 2350-2352, 2354, 2367-2368; B2339T B2346T B2347T/F B2366T;
   `compile_path` L2409-2412, 2417-2418, 2420-2425, 2431, 2433, 2457-2463;
   B2408T B2416T B2417T/F B2421T B2456T; `NativeBuildContext::drop`
-  L3105-3109, B3104T; `hydrate_pack_root` L3942-3954, 3956-3960, 3962-3966,
-  3968-3969; B3948T/F B3953T/F B3956T/F B3956c2T/F B3963T/F B3963c2F;
-  `push_pack_children` L3971, 3973-3990, 3992; `build_pack_node` (every gap
-  in L3999-4073; packs are written in noun mode, so its op arms only guard
-  untrusted packs); `nasm_atom_to_slab` L4075-4082, B4076T/F B4077T/F;
-  `cache_tuple_fields` L4438-4449, 4451-4453, B4439T/F; `atom_u64`
-  L4434-4436 (also used by trace decoding).
+  L3105-3109, B3104T; `hydrate_pack_root` L3996-4008, 4010-4014, 4016-4020,
+  4022-4023; B4002T/F B4007T/F B4010T/F B4010c2T/F B4017T/F B4017c2F;
+  `push_pack_children` L4025, 4027-4044, 4046; `build_pack_node` (every gap
+  in L4053-4127; packs are written in noun mode, so its op arms only guard
+  untrusted packs); `nasm_atom_to_slab` L4129-4136, B4130T/F B4131T/F;
+  `cache_tuple_fields` L4492-4503, 4505-4507, B4493T/F; `atom_u64`
+  L4488-4490 (also used by trace decoding).
 - Wrapper asset dumps: maintenance tooling that regenerates the wrapper and
   cold-state assets; `test-assets/wrapper_asset_parity_test.sh` and
   `c6_cli_wrapper_asset_dumps_agree` compare the dynamic and native
@@ -165,9 +165,9 @@ current source.
   L2774-2784; `slam_wrapper_gate` L2840-2846, 2848-2858, 2865, 2869-2871,
   2874-2879, B2865F; `dump_exact_wrapper_assets` (every P gap in
   L3119-3171); `dump_native_wrapper_assets` L3173-3196, 3199-3200;
-  `jam_noun_in_fresh_slab` L3202-3206; `evaluate_honc_isolated` L3403-3409,
-  3411-3416, 3418-3430, 3433-3436, 3438; `trap_battery` L3628-3634;
-  `jam_slab_noun` L3926-3929; `slam_gate_formula` L4527-4533.
+  `jam_noun_in_fresh_slab` L3202-3206; `evaluate_honc_isolated` L3457-3463,
+  3465-3470, 3472-3484, 3487-3490, 3492; `trap_battery` L3682-3688;
+  `jam_slab_noun` L3980-3983; `slam_gate_formula` L4581-4587.
 - Non-canonical preludes and `--sut-jam`. hoonc has only its own hoon.hoon,
   so a non-canonical prelude has no reference, and `--sut-jam` with the
   canonical subject type gives the default build
@@ -176,29 +176,31 @@ current source.
   `parse_prelude_hoon` L925 (a prelude that fails to parse);
   `build_context_with_shared_prelude` L1178, 1285; B1168F B1183T B1183c2F
   B1187F B1198F B1273T B1278F; `data_vase` L2661-2665, 2667-2668, B2652F;
-  `local_octs_type` L3582-3588; `ty_atom_local` B3910T;
-  `seed_honc_type_with_ut` L3233, B3229F; `peel_transparent` L3252-3253,
-  B3251F (prelude shapes other than hoon-138 parsed with dbug off);
-  `mint_honc_prelude_chunked` L3297, B3296F (a prelude that is not `=<`);
-  `mint_honc_formula_with_ut` L3391-3400, B3387F (the whole-prelude route
-  for a non-`=<` prelude or `NATIVE_HOON_NO_CHUNK`, whose artifact differs
-  from the chunked one, an open bug listed in DIVERGENCES.md);
-  `extract_subject_type_root` L4137, 4143-4145; B4136T B4139F B4141F;
-  `prelude_type_from_subject_type` L4150-4151; `type_cell_parts` L4162,
-  B4161T; `looks_like_type_noun` L4173, 4176, 4185-4193; B4172T B4175F;
-  `type_tag_atom_text` L4204, 4210; B4203T B4206T B4208F B4208c2T/F.
+  `local_octs_type` L3636-3642; `ty_atom_local` B3964T;
+  `seed_honc_type_with_ut` L3233, B3229F; `peel_prelude_wrappers`
+  L3254-3256, 3258, B3253F (a `Dbug`, `Note` or multi-element `=~` wrapper
+  on the prelude's compose chain; native parity parses hoon-138 with dbug
+  off); `chunk_prelude` L3282, B3281F (a prelude that is not `=<`);
+  `restore_spot_hints` L3311 (spots peeled from a dbug-on prelude);
+  `mint_honc_formula_with_ut` L3444-3454, B3441F B3442F (the whole-prelude
+  route for a non-`=<` or noted prelude, or `NATIVE_HOON_NO_CHUNK`, which
+  gives the same artifact as the chunked route);
+  `extract_subject_type_root` L4191, 4197-4199; B4190T B4193F B4195F;
+  `prelude_type_from_subject_type` L4204-4205; `type_cell_parts` L4216,
+  B4215T; `looks_like_type_noun` L4227, 4230, 4239-4247; B4226T B4229F;
+  `type_tag_atom_text` L4258, 4264; B4257T B4260T B4262F B4262c2T/F.
 - Debug environment variables and tracing (diagnostics-only):
   `build_context_with_shared_prelude` L1215, 1225-1229, 1246-1250,
   1252-1253, 1257, 1259; B1214T B1224T B1227T/F B1245T B1247T/F B1249T
   B1252T (`NATIVE_HOON_SKIP_BURP`, `HONK_IR_ROUNDTRIP`, `NATIVE_HOON_TRACE`);
-  `mint_with_sut` L2632-2633, B2631T; `mint_honc_prelude_chunked` L3359,
-  B3358T; `prelude_variant_name` L3261-3276 (names printed in a log line);
-  `eval_formula_noun_in_context` L4282-4285, 4290-4293, 4309-4312; B4281T
-  B4289T B4308T; `trace_interpret_error` L4334-4336, 4338, 4341-4347,
-  4350-4356; B4342T/F B4347T; spot-trace decoding, every gap in L4358-4432
+  `mint_with_sut` L2632-2633, B2631T; `mint_honc_prelude_chunked` L3408,
+  B3407T; `prelude_variant_name` L3318-3333 (names printed in a log line);
+  `eval_formula_noun_in_context` L4336-4339, 4344-4347, 4363-4366; B4335T
+  B4343T B4362T; `trace_interpret_error` L4388-4390, 4392, 4395-4401,
+  4404-4410; B4396T/F B4401T; spot-trace decoding, every gap in L4412-4486
   (`normalize_interpret_trace`, `decode_spot_trace`, `decode_spot_noun`,
   `decode_path_noun`, `decode_pint_noun`, `atom_text`); `trace_native`
-  L4561, B4560T; `trace_timed` L4568, 4570-4577, 4579, B4566F;
+  L4615, B4614T; `trace_timed` L4622, 4624-4631, 4633, B4620F;
   `hoon_log_path` L526, 529, 532; B524F B525T (log paths equal to or
   outside the working directory).
 - Rejections: `check_dependency_tree` L823, B822T: an empty file in the
@@ -206,25 +208,25 @@ current source.
   `compile_batch_with_shared_prelude` L1449: a standard-mode entry that is
   not a gate, built in a batch (the single-entry form is the replayed
   `standard-not-gate` tree; batch builds are not replayed).
-  `eval_formula_noun_in_context` L4319-4320, 4322-4323, B4320F: an
+  `eval_formula_noun_in_context` L4373-4374, 4376-4377, B4374F: an
   evaluation that crashes (no parity probe has a crashing `/dat` node).
-- Defensive checks: `catch_nock_panic` L4539-4554 (a panic inside Nock
-  evaluation); `native_value_override` L3462-3467, B3460F (an unpinned
+- Defensive checks: `catch_nock_panic` L4593-4608 (a panic inside Nock
+  evaluation); `native_value_override` L3516-3521, B3514F (an unpinned
   softed-constraints module that reached native compilation; `run` delegates
-  it to hoonc first); `softed_constraints_pins_match` L3487-3488, B3487T/F
+  it to hoonc first); `softed_constraints_pins_match` L3541-3542, B3541T/F
   (a pinned file that is missing or unreadable).
 - Path fallbacks: `build_entry_wer` B1059T (the binary passes
   `absolute_entry_wer=true` for every entry); `build_entry_wer` L1071, 1073,
-  B1069F, `path_components_for_dbug` L1117 and `entry_path_for_hoon` L4923,
-  4927, B4921F (an entry outside both the dependency root and the working
+  B1069F, `path_components_for_dbug` L1117 and `entry_path_for_hoon` L4977,
+  4981, B4975F (an entry outside both the dependency root and the working
   directory); `build_import_wer` L1097, 1099-1106; B1095F B1103T/F and
-  `entry_path_for_hoon` L4913, B4912T (a root reached through a symlink; the
+  `entry_path_for_hoon` L4967, B4966T (a root reached through a symlink; the
   replay's inputs sit lexically under their roots); `hoon_path_from_relative`
-  L4932, B4931T (an entry equal to the root, which is not buildable);
-  `lexical_absolute_path` L4948-4951 (`.` and `..` components).
-- Mug ties: `dor` (every gap in L4715-4762), `gor_mug` L4769 and `mor_mug`
-  L4782 (distinct keys with equal mugs, or equal mugs of mugs), and
-  `map_put_mug` L4811-4813, B4809F (one path with two contents). A real
+  L4986, B4985T (an entry equal to the root, which is not buildable);
+  `lexical_absolute_path` L5002-5005 (`.` and `..` components).
+- Mug ties: `dor` (every gap in L4769-4816), `gor_mug` L4823 and `mor_mug`
+  L4836 (distinct keys with equal mugs, or equal mugs of mugs), and
+  `map_put_mug` L4865-4867, B4863F (one path with two contents). A real
   directory walk produces neither.
 
 ## pipeline.rs

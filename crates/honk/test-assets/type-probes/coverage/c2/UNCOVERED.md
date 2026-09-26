@@ -1,4 +1,4 @@
-# c2 ledger: uncovered branches in `crates/honk/src/native/ut/mod.rs` 4818-9582
+# c2 ledger: uncovered branches in `crates/honk/src/native/ut/mod.rs` 4818-9579
 
 This range holds `fish` and skin tests, seminouns, lazy resolvers and musk,
 `bran`, `%=`, the hoon/spec/open caches, core minting, literals, `nest`,
@@ -16,7 +16,7 @@ covered there once a reject probe reaches it.
 
 | Gaps | Tag | Reason |
 |---|---|---|
-| L5636 (`lazy_resolver_compile_arm`), L7621 (`mint_core`), L7934, L7981 (lazy-resolver arm-map walkers), L9314 (`burp_type`) | UP | Defensive: the callee fails only on a malformed noun (an axis of 0, a map or type noun that does not decode, a duplicate arm axis). |
+| L5636 (`lazy_resolver_compile_arm`), L7621 (`mint_core`), L7934, L7981 (lazy-resolver arm-map walkers), L9311 (`burp_type`) | UP | Defensive: the callee fails only on a malformed noun (an axis of 0, a map or type noun that does not decode, a duplicate arm axis). |
 
 ## Skins (`?#`, `ar:fish`)
 
@@ -49,7 +49,7 @@ covered there once a reject probe reaches it.
 | L6283 | UP | Dead: an op-11 hint that is not an atom is a cell. |
 | L6317-6322, L6324 `semi_complete_value_id` | P | Test-only (`#[cfg(test)]`). |
 | L6407-6409, L6422, B6420 F, L6457-6459 | P | Defensive: recovery after the eval stack is exhausted during mack or the core copy (resource exhaustion only). |
-| L9332, L9336, L9339, B9331 F, B9335 F, B9338 F (`semi_is_full_complete`) | P | Defensive: malformed seminoun nouns. |
+| L9329, L9333, L9336, B9328 F, B9332 F, B9335 F (`semi_is_full_complete`) | P | Defensive: malformed seminoun nouns. |
 
 ## `bran`
 
@@ -76,17 +76,17 @@ covered there once a reject probe reaches it.
 
 | Gaps | Tag | Reason |
 |---|---|---|
-| B7365 F (`cache_hoon_ast_ptr`); B7386 F, B7403 F (`cache_hoon_ast_for_node`); B7437 F (`spec_example_cached`); B7482 F (`spec_factory_open_cached`); B7521 F (`open_cached`); L8414, B8410 F (`decode_hold_hoon_ast`) | UP | Unreachable: the order queue is non-empty whenever its length exceeds the limit. |
+| B7365 F (`cache_hoon_ast_ptr`); B7386 F, B7403 F (`cache_hoon_ast_for_node`); B7437 F (`spec_example_cached`); B7482 F (`spec_factory_open_cached`); B7521 F (`open_cached`); L8411, B8407 F (`decode_hold_hoon_ast`) | UP | Unreachable: the order queue is non-empty whenever its length exceeds the limit. |
 | L7423, B7422 F (`spec_example_cached`); L7452-7459, B7451 F (`spec_factory_open_cached`); L7497-7498, B7496 F (`open_cached`) | UP | Unreachable: the signature writers never return `None`. |
-| L7429, L7441, B7427 F, B7434 F (`spec_example_cached`); L7466, L7486, B7464 F, B7479 F (`spec_factory_open_cached`); L8395, L8397, B8393 F (`hoon_ast_lookup_cached`) | UP | Performance cache only: needs a signature or mug collision between unequal specs or genes. |
+| L7429, L7441, B7427 F, B7434 F (`spec_example_cached`); L7466, L7486, B7464 F, B7479 F (`spec_factory_open_cached`); L8392, L8394, B8390 F (`hoon_ast_lookup_cached`) | UP | Performance cache only: needs a signature or mug collision between unequal specs or genes. |
 | L7444, B7443 T (`spec_example_cached`); L7489, B7488 T (`spec_factory_open_cached`) | UP | Performance cache only: bucket overflow needs 8 colliding specs. |
-| L7403-7405, B7402 T, B7403 T (`cache_hoon_ast_for_node`); L7482-7484, B7481 T, B7482 T (`spec_factory_open_cached`); L8410-8413, B8409 T, B8410 T (`decode_hold_hoon_ast`) | P | Performance cache only: key eviction past 16,384 entries. |
-| L8416, B8407 F (`decode_hold_hoon_ast`) | UP | Dead: the raw-map hit returns before this check, so the key is never already present. |
-| L7375, B7374 T (`cache_hoon_ast_for_node`); L8377, B8376 T (`hoon_ast_lookup_cached`); L8446, B8442 F (`hoon_noun_for_node`) | P | Parity runs cannot take these: they run only when `exact_hoon_ast_lookup_enabled` is off, and every honk entry point turns it on. |
-| L8403, B8402 T (`decode_hold_hoon_ast` raw hit) | P | Parity runs cannot take it: `hoon_ast_lookup_cached` checks the same map first unless exact lookup is off. |
-| L8444, B8443 T (`hoon_noun_for_node`) | P | Performance cache only: needs `hoon_noun_for_node` on a gene decoded from a hold noun; no parity probe does this. |
-| B8456 F (`hoon_noun_for_node`) | UP | Performance cache only: the arena registers every Hoon node under its root, so this lookup does not miss. |
-| B9322 F (`burp_type`) | UP | Performance cache only: the burp cache stops growing at 65,536 entries. |
+| L7403-7405, B7402 T, B7403 T (`cache_hoon_ast_for_node`); L7482-7484, B7481 T, B7482 T (`spec_factory_open_cached`); L8407-8410, B8406 T, B8407 T (`decode_hold_hoon_ast`) | P | Performance cache only: key eviction past 16,384 entries. |
+| L8413, B8404 F (`decode_hold_hoon_ast`) | UP | Dead: the raw-map hit returns before this check, so the key is never already present. |
+| L7375, B7374 T (`cache_hoon_ast_for_node`); L8374, B8373 T (`hoon_ast_lookup_cached`); L8443, B8439 F (`hoon_noun_for_node`) | P | Parity runs cannot take these: they run only when `exact_hoon_ast_lookup_enabled` is off, and every honk entry point turns it on. |
+| L8400, B8399 T (`decode_hold_hoon_ast` raw hit) | P | Parity runs cannot take it: `hoon_ast_lookup_cached` checks the same map first unless exact lookup is off. |
+| L8441, B8440 T (`hoon_noun_for_node`) | P | Performance cache only: needs `hoon_noun_for_node` on a gene decoded from a hold noun; no parity probe does this. |
+| B8453 F (`hoon_noun_for_node`) | UP | Performance cache only: the arena registers every Hoon node under its root, so this lookup does not miss. |
+| B9319 F (`burp_type`) | UP | Performance cache only: the burp cache stops growing at 65,536 entries. |
 
 ## Cores
 
@@ -104,22 +104,22 @@ covered there once a reject probe reaches it.
 | L8071-8072 (`with_arm_context`) | P | Diagnostics only: rewraps an arm's error message with the arm name. |
 | L8074-8078 (`with_arm_context`) | UP | Diagnostics only: the same rewrapping for the other error kinds. |
 | L8114-8119, L8121-8127 | UP | `debug_assert_eq!` arguments, compiled out in the instrumented builds. |
-| L8219-8222, B8217 F (`mint_opened`); L8273-8276, B8271 F (`play_opened`) | UP | Defensive: "unsupported" fallbacks; every Hoon variant is minted or played directly or changed by `open`. |
+| L8219-8222, B8217 F (`mint_opened`); L8270-8273, B8268 F (`play_opened`) | UP | Defensive: "unsupported" fallbacks; every Hoon variant is minted or played directly or changed by `open`. |
 
 ## Literals
 
 | Gaps | Tag | Reason |
 |---|---|---|
-| L8315, B8314 T (`sand-null`); L8322, B8321 T (`sand-flag`) | P | Unreachable from source: the parser builds `%n` and `%f` sands only with 0 (tic-aura casts). |
-| L8328 | P | Unreachable from source: the parser never builds a `%sand` with a cell value. |
-| L8362-8373, B8369 T/F, B8369 c2 T/F `hint_type_n` | P | Test-only (`#[cfg(test)]`). |
+| L8312, B8311 T (`sand-null`); L8319, B8318 T (`sand-flag`) | P | Unreachable from source: the parser builds `%n` and `%f` sands only with 0 (tic-aura casts). |
+| L8325 | P | Unreachable from source: the parser never builds a `%sand` with a cell value. |
+| L8359-8370, B8366 T/F, B8366 c2 T/F `hint_type_n` | P | Test-only (`#[cfg(test)]`). |
 
 ## Nesting and wrapping
 
 | Gaps | Tag | Reason |
 |---|---|---|
-| L8518-8520 | P | Defensive: fork options requested for a non-fork. |
-| L8537, B8531 F | UP | Dead: an `unreachable!()` after re-matching the same enum. |
-| L8866, L8875 (`nest_core` with a non-core) | P | Defensive: the only caller dispatches on core/core pairs. |
-| L9157-9162, L9164-9169 (`nest_deep_arms`) | P | Defensive: an arm gene that does not decode. |
-| L9198, B9197 c2 T (`wrap-core`) | P | Rejected by both compilers: re-wrapping a non-gold core with `^\|` or `^&` (hoonc fails in `++wrap`). |
+| L8515-8517 | P | Defensive: fork options requested for a non-fork. |
+| L8534, B8528 F | UP | Dead: an `unreachable!()` after re-matching the same enum. |
+| L8863, L8872 (`nest_core` with a non-core) | P | Defensive: the only caller dispatches on core/core pairs. |
+| L9154-9159, L9161-9166 (`nest_deep_arms`) | P | Defensive: an arm gene that does not decode. |
+| L9195, B9194 c2 T (`wrap-core`) | P | Rejected by both compilers: re-wrapping a non-gold core with `^\|` or `^&` (hoonc fails in `++wrap`). |
