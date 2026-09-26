@@ -72,6 +72,25 @@ struct HoldRepoFanHoldIdEntry {
     id: FanLegId,
 }
 
+/// Lazy resolver IDs made for one `LazyCoreKey`, each with the tomes map and
+/// prefix it was made for: the key's `TomesSignature` is a 31-bit mug, so a hit
+/// is confirmed structurally.
+type LazyResolverBucket = Vec<(Noun, Option<String>, LazyResolverId)>;
+
+fn lazy_resolver_id_in(
+    bucket: Option<&LazyResolverBucket>,
+    tomes_map: Noun,
+    prefix: Option<&str>,
+    space: &NounSpace,
+) -> Result<Option<LazyResolverId>> {
+    for (stored_map, stored_prefix, id) in bucket.into_iter().flatten() {
+        if stored_prefix.as_deref() == prefix && noun_eq(*stored_map, tomes_map, space)? {
+            return Ok(Some(*id));
+        }
+    }
+    Ok(None)
+}
+
 const SEMI_TAG_FULL: u64 = 1_819_047_270; // %full
 const SEMI_TAG_HALF: u64 = 1_718_378_856; // %half
 const SEMI_TAG_LAZY: u64 = 2_038_063_468; // %lazy
@@ -290,13 +309,13 @@ pub struct Ut<'a> {
     // (subject type ID, tome signature, poly) to one resolver ID, so structurally
     // equal lazy cores intern to one type and identity-keyed recursion cuts
     // converge. Lives as long as `lazy_resolvers`, for the whole compile.
-    pub lazy_resolver_canonical_ids: HashMap<LazyCoreKey, LazyResolverId>,
+    pub lazy_resolver_canonical_ids: HashMap<LazyCoreKey, LazyResolverBucket>,
     // Resolver IDs for the `%lazy` battery seminoun of mulled cores (hoon-138
     // `++mile`'s `laze`), keyed like `lazy_resolver_canonical_ids` but drawn
     // separately and never registered: a mulled core never resolves arms, but
     // its seminoun must differ from `*seminoun`, full batteries, and `++mine`'s
     // lazy root, while staying equal across mulls of the same core.
-    pub mull_lazy_resolver_ids: HashMap<LazyCoreKey, LazyResolverId>,
+    pub mull_lazy_resolver_ids: HashMap<LazyCoreKey, LazyResolverBucket>,
     // Exact AST recovery from structurally equal hoon nouns. The honk binary
     // enables it for prelude builds; the normal compile path keeps it off.
     pub exact_hoon_ast_lookup_enabled: bool,
@@ -3548,10 +3567,18 @@ impl<'a> Ut<'a> {
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
         ));
         let poly_key = PolyKey::from(poly);
-        Ok(native_core_mint_cache_lookup(
+        let Some(entry) = native_core_mint_cache_lookup(
             &self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key,
-        ))
+        ) else {
+            return Ok(None);
+        };
+        // The signature is a 31-bit mug: trust the hit only for the same arms.
+        if entry.prefix != *prefix || !noun_eq(entry.tomes_map, tomes_map, &self.slab.noun_space())?
+        {
+            return Ok(None);
+        }
+        Ok(Some((entry.core_type, entry.formula)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3571,9 +3598,15 @@ impl<'a> Ut<'a> {
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
         ));
         let poly_key = PolyKey::from(poly);
+        let entry = CoreMintEntry {
+            core_type,
+            formula,
+            tomes_map,
+            prefix: prefix.clone(),
+        };
         native_core_mint_cache_store(
             &mut self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
-            context.memo.arm_epoch_key, context.memo.placeholder_context_key, core_type, formula,
+            context.memo.arm_epoch_key, context.memo.placeholder_context_key, entry,
         );
         Ok(())
     }
@@ -5509,19 +5542,26 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         tomes_sig: TomesSignature,
         poly: Poly,
-    ) -> LazyResolverId {
+        tomes_map: Noun,
+        prefix: Option<&str>,
+    ) -> Result<LazyResolverId> {
         let poly_key = PolyKey::from(poly);
         let key = LazyCoreKey {
             subject: sut.arena_id(),
             tomes: tomes_sig,
             poly: poly_key,
         };
-        if let Some(&id) = self.lazy_resolver_canonical_ids.get(&key) {
-            return id;
+        let space = self.slab.noun_space();
+        let bucket = self.lazy_resolver_canonical_ids.get(&key);
+        if let Some(id) = lazy_resolver_id_in(bucket, tomes_map, prefix, &space)? {
+            return Ok(id);
         }
         let id = self.lazy_resolver_new_id();
-        self.lazy_resolver_canonical_ids.insert(key, id);
-        id
+        self.lazy_resolver_canonical_ids
+            .entry(key)
+            .or_default()
+            .push((tomes_map, prefix.map(str::to_string), id));
+        Ok(id)
     }
 
     /// The resolver ID of hoon-138 `++mile`'s `(laze nym hud dom)`: one per
@@ -5534,18 +5574,26 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         tomes_sig: TomesSignature,
         poly: Poly,
-    ) -> LazyResolverId {
+        tomes_map: Noun,
+        prefix: Option<&str>,
+    ) -> Result<LazyResolverId> {
         let key = LazyCoreKey {
             subject: sut.arena_id(),
             tomes: tomes_sig,
             poly: PolyKey::from(poly),
         };
-        if let Some(&id) = self.mull_lazy_resolver_ids.get(&key) {
-            return id;
+        let space = self.slab.noun_space();
+        let bucket = self.mull_lazy_resolver_ids.get(&key);
+        if let Some(id) = lazy_resolver_id_in(bucket, tomes_map, prefix, &space)? {
+            return Ok(id);
         }
         let id = self.lazy_resolver_new_id();
-        self.mull_lazy_resolver_ids.insert(key, id);
-        id
+        self.mull_lazy_resolver_ids.entry(key).or_default().push((
+            tomes_map,
+            prefix.map(str::to_string),
+            id,
+        ));
+        Ok(id)
     }
 
     fn lazy_resolver_register_context(
@@ -7590,7 +7638,8 @@ impl<'a> Ut<'a> {
         let tomes_sig = TomesSignature(u64::from(
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
         ));
-        let resolver_id = self.lazy_resolver_canonical_id(&sut, tomes_sig, poly);
+        let resolver_id =
+            self.lazy_resolver_canonical_id(&sut, tomes_sig, poly, tomes_map, prefix.as_deref())?;
         let lazy_semi = self.semi_noun_lazy_root(resolver_id);
         let lazy_rest = T(self.slab, &[lazy_semi, tomes_map]);
         // Build the lazy core once, with payload and context both `sut`. Every arm
@@ -10278,11 +10327,17 @@ impl<'a> Ut<'a> {
     }
 
     #[inline]
-    fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>) -> MissKey {
+    fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>, seen: &[(TypeId, TypeId)]) -> MissKey {
+        let mut assumptions: Vec<(TypeId, TypeId)> = seen
+            .iter()
+            .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+            .collect();
+        assumptions.sort_unstable();
         MissKey {
             subject: sut.arena_id(),
             reference: ref_.arena_id(),
             vet: VetMode(self.vet),
+            assumptions,
         }
     }
     /// Memo over (sut, ref, vet) keys. Without it, sibling fork branches
@@ -10300,7 +10355,7 @@ impl<'a> Ut<'a> {
         seen: &mut Vec<(TypeId, TypeId)>,
         memo: &mut FastHashMap<MissKey, bool>,
     ) -> Result<bool> {
-        let key = self.miss_memo_key(&sut, &ref_);
+        let key = self.miss_memo_key(&sut, &ref_, seen);
         if let Some(&cached) = memo.get(&key) {
             return Ok(cached);
         }
@@ -10399,9 +10454,12 @@ impl<'a> Ut<'a> {
                 };
                 let rh = rh.clone();
                 let rt = rt.clone();
-                let head_miss = self.miss_dext(sh, rh, seen, memo)?;
-                let tail_miss = self.miss_dext(st, rt, seen, memo)?;
-                Ok(head_miss || tail_miss)
+                // `?|` short-circuits: the tails are not compared when the heads
+                // miss.
+                if self.miss_dext(sh, rh, seen, memo)? {
+                    return Ok(true);
+                }
+                self.miss_dext(st, rt, seen, memo)
             }
             _ => self.miss_dext(ref_, sut, seen, memo),
         }
@@ -11545,7 +11603,7 @@ impl<'a> Ut<'a> {
         let tomes_sig = TomesSignature(u64::from(
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(nym).0,
         ));
-        let resolver_id = self.mull_lazy_resolver_id(&sut, tomes_sig, hud);
+        let resolver_id = self.mull_lazy_resolver_id(&sut, tomes_sig, hud, tomes_map, nym)?;
         // Construct yet = core(sut, [nym hud gold], sut, laze, dom)
         let garb = garb_native(nym, hud, Vair::Gold);
         let semi_noun = self.semi_noun_lazy_root(resolver_id);
@@ -12924,7 +12982,7 @@ use crate::native::ir::intern::{
     live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
     mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,
     mull_cache_store as native_mull_cache_store, native_of, native_of_mug_candidates,
-    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context,
+    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context, CoreMintEntry,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
 use crate::native::ir::ty::{garb_native, visit_fork_set_members, Garb as NGarb, Type as NTy};

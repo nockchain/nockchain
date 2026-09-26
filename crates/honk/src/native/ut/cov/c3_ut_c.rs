@@ -577,6 +577,26 @@ fn c3_miss_memo_persistence_clears_on_context_change() {
     });
 }
 
+#[test]
+fn c3_miss_memo_keys_on_the_assumption_set() {
+    with_ut(|ut| {
+        // hoon-138's `++miss` answers `&` for a hold pair already in `gil`, so a
+        // verdict reached under assumptions must not be reused without them.
+        let a = atom_ty(ut, "tas", Some(0x61));
+        let b = atom_ty(ut, "tas", Some(0x62));
+        let (x, y) = (native_type_id(&a), native_type_id(&b));
+        let bare = ut.miss_memo_key(&a, &b, &[]);
+        let one = ut.miss_memo_key(&a, &b, &[(y, x)]);
+        assert_ne!(bare, one);
+        // `gil` holds unordered pairs in a set, so order does not matter.
+        assert_eq!(one, ut.miss_memo_key(&a, &b, &[(x, y)]));
+        assert_eq!(
+            ut.miss_memo_key(&a, &b, &[(x, y), (y, y)]),
+            ut.miss_memo_key(&a, &b, &[(y, y), (y, x)])
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // fitz / atom_max / cons_fork (mod.rs ~10707-10870)
 // ---------------------------------------------------------------------------

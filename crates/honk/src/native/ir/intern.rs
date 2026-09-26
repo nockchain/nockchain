@@ -179,7 +179,9 @@ pub struct Context {
 
     // Boundary caches keyed by canonical type IDs.
     nest_cache: HashMap<TypeBinaryKey<TypeId>, bool>,
-    core_mint_cache: HashMap<CoreMintKey, (Rc<Type>, FormulaId)>,
+    /// Entries carry the tomes map and prefix the key's `TomesSignature` was
+    /// hashed from; the lookup's caller checks them before trusting a hit.
+    core_mint_cache: HashMap<CoreMintKey, CoreMintEntry>,
     mint_cache: HashMap<MintKey<TypeId>, (Rc<Type>, FormulaId)>,
     mull_cache: HashMap<MullKey, (Rc<Type>, Rc<Type>)>,
     fuse_cache: HashMap<TypeBinaryKey<TypeId>, Rc<Type>>,
@@ -249,6 +251,16 @@ pub fn native_of_mug_insert(cx: &mut Context, mug: NounMug, rc: Rc<Type>) {
     }
 }
 
+/// A cached `core_mint` result with the tomes map and prefix it was minted
+/// from, which the 31-bit mug in `TomesSignature` alone does not pin down.
+#[derive(Clone)]
+pub struct CoreMintEntry {
+    pub core_type: Rc<Type>,
+    pub formula: FormulaId,
+    pub tomes_map: Noun,
+    pub prefix: Option<String>,
+}
+
 /// Look up a native `core_mint` result by canonical (sut, gol) IDs plus the
 /// arm-map signature, vet, poly, fan, arm epoch, and placeholder signature.
 #[allow(clippy::too_many_arguments)]
@@ -262,7 +274,7 @@ pub fn core_mint_cache_lookup(
     fan: FanContextId,
     arm_epoch: ArmEpoch,
     placeholder: PlaceholderSignature,
-) -> Option<(Rc<Type>, FormulaId)> {
+) -> Option<CoreMintEntry> {
     let key = CoreMintKey {
         subject: canonical_id(sut),
         goal: canonical_id(gol),
@@ -288,8 +300,7 @@ pub fn core_mint_cache_store(
     fan: FanContextId,
     arm_epoch: ArmEpoch,
     placeholder: PlaceholderSignature,
-    core_type: Rc<Type>,
-    formula: FormulaId,
+    entry: CoreMintEntry,
 ) {
     let key = CoreMintKey {
         subject: canonical_id(sut),
@@ -301,7 +312,7 @@ pub fn core_mint_cache_store(
         arm_epoch,
         placeholder,
     };
-    cx.core_mint_cache.insert(key, (core_type, formula));
+    cx.core_mint_cache.insert(key, entry);
 }
 
 /// Look up a native `mint` result by canonical (sut, gol) IDs plus vet, the
