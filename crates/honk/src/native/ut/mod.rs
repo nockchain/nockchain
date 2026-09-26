@@ -8234,10 +8234,7 @@ impl<'a> Ut<'a> {
         let result = self.mint(sut, gol, inner);
         self.dbug_locations.pop();
         let (ty, formula) = result?;
-        let spot_noun = spot_to_noun(self.slab, spot)?;
-        let hint_inner = T(self.slab, &[D(1), spot_noun]);
-        let spot_tag = term_to_noun(self.slab, "spot");
-        let hint = T(self.slab, &[spot_tag, hint_inner]);
+        let hint = spot_hint_clue(self.slab, spot)?;
         let space = self.slab.noun_space();
         let formula = self.formula_arena.hint(hint, formula, &space);
         Ok((ty, formula))
@@ -13971,6 +13968,21 @@ fn skin_to_noun(slab: &mut NounSlab, skin: &Skin) -> Result<Noun> {
             tagged1(slab, "wash", n_noun)
         }
     })
+}
+
+/// `[%spot %1 spot]`, the hint clue `mint` puts on a `%dbug` node's formula.
+fn spot_hint_clue(slab: &mut NounSlab, spot: &Spot) -> Result<Noun> {
+    let spot_noun = spot_to_noun(slab, spot)?;
+    let hint_inner = T(slab, &[D(1), spot_noun]);
+    let spot_tag = term_to_noun(slab, "spot");
+    Ok(T(slab, &[spot_tag, hint_inner]))
+}
+
+/// `[%11 [%spot %1 spot] formula]`: the formula `mint` gives a `%dbug` node
+/// whose inner hoon mints to `formula`.
+pub fn spot_hint_formula(slab: &mut NounSlab, spot: &Spot, formula: Noun) -> Result<Noun> {
+    let hint = spot_hint_clue(slab, spot)?;
+    Ok(T(slab, &[D(11), hint, formula]))
 }
 
 fn spot_to_noun(slab: &mut NounSlab, spot: &Spot) -> Result<Noun> {

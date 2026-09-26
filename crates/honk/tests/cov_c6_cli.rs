@@ -631,10 +631,9 @@ fn c6_cli_non_canonical_preludes_are_minted_natively() {
         "whole.jam",
     );
     assert!(!log.contains("chunked prelude"), "{log}");
-    // The two routes are not byte-identical (the whole-prelude mint burps
-    // only the final type); only the chunked route is parity-checked, via
-    // the hoon-138 self-mint.
-    assert!(!chunked.is_empty() && !whole.is_empty());
+    // The prelude is parsed with dbug on here, so the chunked route must put
+    // back the spot hints it peels off the `=<` and `=>` nodes.
+    assert_eq!(whole, chunked);
 
     // An explicit subject type replaces the minted prelude type.
     let sut_prelude = {

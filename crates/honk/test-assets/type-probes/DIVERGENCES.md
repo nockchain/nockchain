@@ -82,5 +82,3 @@ None.
   reports a panic instead of an error: `!?` with an unsatisfied version
   (`open` `%zpwt`) and a free `%loop` spec in a mold (`spore`), among others.
   hoon-138 crashes on the same inputs.
-- `NATIVE_HOON_NO_CHUNK=1` produces a different prelude artifact than the
-  default chunked mint (debug path only).

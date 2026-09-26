@@ -380,9 +380,43 @@ fn prelude_peeling_and_variant_names() {
         spot.clone(),
         Box::new(Hoon::Note(Note::Know("k".to_string()), boxed())),
     )]);
-    assert_eq!(peel_transparent(&wrapped), &leaf);
+    // Peeling collects `Dbug` spots and stops at a `Note`.
+    let mut spots = Vec::new();
+    assert_eq!(peel_prelude_wrappers(&wrapped, &mut spots), None);
+    let spotted = Hoon::TisSig(vec![Hoon::Dbug(spot.clone(), boxed())]);
+    spots.clear();
+    assert_eq!(peel_prelude_wrappers(&spotted, &mut spots), Some(&leaf));
+    assert_eq!(spots, vec![&spot]);
     let two = Hoon::TisSig(vec![leaf.clone(), leaf.clone()]);
-    assert_eq!(peel_transparent(&two), &two);
+    spots.clear();
+    assert_eq!(peel_prelude_wrappers(&two, &mut spots), Some(&two));
+    assert!(spots.is_empty());
+
+    // A `Note` anywhere on the compose chain sends the prelude down the whole
+    // route; a spotted chain splits into its layers.
+    let noted_chain = Hoon::TisGal(
+        boxed(),
+        Box::new(Hoon::TisGar(
+            boxed(),
+            Box::new(Hoon::Note(Note::Know("k".to_string()), boxed())),
+        )),
+    );
+    assert!(chunk_prelude(&noted_chain).is_none());
+    let spotted_chain = Hoon::Dbug(
+        spot.clone(),
+        Box::new(Hoon::TisGal(
+            boxed(),
+            Box::new(Hoon::TisGar(
+                boxed(),
+                Box::new(Hoon::Dbug(spot.clone(), boxed())),
+            )),
+        )),
+    );
+    let plan = chunk_prelude(&spotted_chain).expect("chunked");
+    assert_eq!(plan.root_spots, vec![&spot]);
+    assert!(plan.stdlib_spots.is_empty());
+    assert_eq!(plan.layers.len(), 2);
+    assert_eq!(plan.tail_spots, vec![vec![&spot]]);
 
     let named = [
         (Hoon::TisGal(boxed(), boxed()), "TisGal(=<)"),
@@ -441,9 +475,7 @@ fn small_preludes_seed_mint_and_evaluate() {
     assert!(formula.is_cell());
 
     // Only a `=<` prelude can be minted in chunks.
-    let mut out: NounSlab = NounSlab::new();
-    let err = mint_honc_prelude_chunked(&mut out, &prelude).expect_err("not =<");
-    assert!(err.to_string().contains("root is not =<"), "{err}");
+    assert!(chunk_prelude(&prelude).is_none());
 
     // The isolated evaluation mints and runs the prelude against `~`.
     let mut formula_slab: NounSlab = NounSlab::new();

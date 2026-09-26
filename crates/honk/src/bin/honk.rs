@@ -15,14 +15,14 @@ use std::{cmp, env, fs, process};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use hatch::ast::hoon::{Hoon, Limb};
+use hatch::ast::hoon::{Hoon, Limb, Spot as HoonSpot};
 use hatch::utils::hoon_to_noun;
 use honk::build_cache::{BuildCache, CacheObjectKind, CacheRead, CacheWrite};
 use honk::nasm_bridge::SlabToNockasm;
 use honk::native::formula::comb;
 use honk::native::hot::native_hot_state;
 use honk::native::noun::term_to_noun;
-use honk::native::ut::{ty_noun, Ut};
+use honk::native::ut::{spot_hint_formula, ty_noun, Ut};
 use honk::pipeline;
 use honk::pipeline::{NativeImportKind, ScopeMode};
 use nockapp::noun::slab::{NockJammer, NounSlab};
@@ -3240,20 +3240,77 @@ fn seed_honc_type_with_ut(
     })
 }
 
-/// Strips the wrappers the parser puts around the prelude (a one-element `=~`,
-/// `Dbug` spots, `Note` hints) to reach the compose node. Peeling drops any
-/// outer `Dbug` location stack, so chunked output matches hoonc only for a
-/// prelude parsed with `dbug=false`, as the native-parity route does (see
-/// `prelude_dbug` in `run`).
-fn peel_transparent(mut hoon: &Hoon) -> &Hoon {
+/// Strips the wrappers the parser puts around a prelude compose node (a
+/// one-element `=~` and `Dbug` spots), collecting each spot outermost first so
+/// the chunked mint can put its hint back. `None` at a `Note`: its hint type
+/// would wrap the product of every later layer, so such a prelude mints whole.
+fn peel_prelude_wrappers<'a>(
+    mut hoon: &'a Hoon,
+    spots: &mut Vec<&'a HoonSpot>,
+) -> Option<&'a Hoon> {
     loop {
         hoon = match hoon {
             Hoon::TisSig(list) if list.len() == 1 => &list[0],
-            Hoon::Dbug(_, inner) => inner.as_ref(),
-            Hoon::Note(_, inner) => inner.as_ref(),
-            other => return other,
+            Hoon::Dbug(spot, inner) => {
+                spots.push(spot);
+                inner.as_ref()
+            }
+            Hoon::Note(_, _) => return None,
+            other => return Some(other),
         };
     }
+}
+
+/// A prelude `=< ride stdlib` split for `mint_honc_prelude_chunked`, where
+/// `stdlib` is the chain `=> p0 => p1 … body`. `layers` holds `p0 … body`;
+/// `root_spots`, `stdlib_spots` and `tail_spots[i]` are the `Dbug` spots peeled
+/// from the root, from `stdlib`, and from the `q` of the `=>` whose `p` is
+/// `layers[i]`.
+struct ChunkedPrelude<'a> {
+    root_spots: Vec<&'a HoonSpot>,
+    ride: &'a Hoon,
+    stdlib_spots: Vec<&'a HoonSpot>,
+    layers: Vec<&'a Hoon>,
+    tail_spots: Vec<Vec<&'a HoonSpot>>,
+}
+
+/// Splits a `=<` prelude into chunks, or `None` if it is not `=<` or a `Note`
+/// wraps its chain.
+fn chunk_prelude(prelude: &Hoon) -> Option<ChunkedPrelude<'_>> {
+    let mut root_spots = Vec::new();
+    let Hoon::TisGal(ride, stdlib) = peel_prelude_wrappers(prelude, &mut root_spots)? else {
+        return None;
+    };
+    let mut stdlib_spots = Vec::new();
+    let mut cur = peel_prelude_wrappers(stdlib, &mut stdlib_spots)?;
+    let mut layers = Vec::new();
+    let mut tail_spots = Vec::new();
+    while let Hoon::TisGar(p, q) = cur {
+        layers.push(p.as_ref());
+        let mut spots = Vec::new();
+        cur = peel_prelude_wrappers(q, &mut spots)?;
+        tail_spots.push(spots);
+    }
+    layers.push(cur);
+    Some(ChunkedPrelude {
+        root_spots,
+        ride,
+        stdlib_spots,
+        layers,
+        tail_spots,
+    })
+}
+
+/// Wraps `formula` in the spot hints of the peeled `Dbug`s, innermost first.
+fn restore_spot_hints(
+    slab: &mut NounSlab<NockJammer>,
+    spots: &[&HoonSpot],
+    mut formula: Noun,
+) -> Result<Noun> {
+    for spot in spots.iter().rev() {
+        formula = spot_hint_formula(slab, spot, formula)?;
+    }
+    Ok(formula)
 }
 
 fn prelude_variant_name(hoon: &Hoon) -> &'static str {
@@ -3285,24 +3342,16 @@ fn prelude_variant_name(hoon: &Hoon) -> &'static str {
 /// Each layer, then `ride`, mints in its own cold-loaded `Ut` and working slab.
 /// The subject type moves between two ping-ponged slabs and formulas collect in
 /// `out_slab`, so peak memory is one layer plus the current subject and the
-/// formulas. Formulas fold with `comb` as in `mint_tsgr_arena`. The unit test
-/// `chunked_tisgar_chain_matches_monolithic_mint` exercises only the library
-/// prototype `mint_tisgar_chain_chunked`, not this function; this function's
-/// output is compared byte-for-byte with hoonc by `just honk-138-parity`.
+/// formulas. Formulas fold with `comb` as in `mint_tsgr_arena`, with the spot
+/// hints of the peeled `Dbug`s restored, so the result matches the whole-prelude
+/// mint. The hoon-138 self-mint compares this function's output byte-for-byte
+/// with hoonc.
 fn mint_honc_prelude_chunked(
     out_slab: &mut NounSlab<NockJammer>,
-    prelude: &Hoon,
+    plan: &ChunkedPrelude<'_>,
 ) -> Result<(Noun, Noun)> {
-    let Hoon::TisGal(ride, stdlib) = peel_transparent(prelude) else {
-        return Err("chunked prelude mint: root is not =<".into());
-    };
-    let mut layers: Vec<&Hoon> = Vec::new();
-    let mut cur: &Hoon = peel_transparent(stdlib);
-    while let Hoon::TisGar(p, q) = cur {
-        layers.push(p.as_ref());
-        cur = peel_transparent(q);
-    }
-    layers.push(cur);
+    let layers = &plan.layers;
+    let ride = plan.ride;
     eprintln!(
         "[honk] chunked prelude: {} layers + ride; layer variants = [{}]",
         layers.len(),
@@ -3326,7 +3375,7 @@ fn mint_honc_prelude_chunked(
     for (i, expr) in layers
         .iter()
         .copied()
-        .chain(std::iter::once(ride.as_ref()))
+        .chain(std::iter::once(ride))
         .enumerate()
     {
         let mut work: NounSlab<NockJammer> = NounSlab::new();
@@ -3360,14 +3409,18 @@ fn mint_honc_prelude_chunked(
         }
     }
 
-    // formulas = [layer0 … body, ride]. `=> stdlib ride` = comb(stdlib, ride);
-    // stdlib chain folds right: comb(l0, comb(l1, … comb(l_{k-1}, body))).
+    // formulas = [p0 … p_{k-1}, body, ride]. `=> stdlib ride` = comb(stdlib,
+    // ride), and the stdlib chain folds right: comb(p0, comb(p1, … body)), with
+    // each `=>`'s peeled `q` spots around its tail.
     let ride_formula = formulas.pop().expect("ride formula");
     let mut stdlib_formula = formulas.pop().expect("stdlib body formula");
-    while let Some(head) = formulas.pop() {
+    for (head, spots) in formulas.into_iter().zip(&plan.tail_spots).rev() {
+        stdlib_formula = restore_spot_hints(out_slab, spots, stdlib_formula)?;
         stdlib_formula = comb(out_slab, head, stdlib_formula)?;
     }
+    let stdlib_formula = restore_spot_hints(out_slab, &plan.stdlib_spots, stdlib_formula)?;
     let formula = comb(out_slab, stdlib_formula, ride_formula)?;
+    let formula = restore_spot_hints(out_slab, &plan.root_spots, formula)?;
     Ok((
         prelude_type_out.expect("chunked prelude ride type"),
         formula,
@@ -3379,15 +3432,16 @@ fn mint_honc_formula_with_ut(
     _context: &mut Context,
     prelude: &Hoon,
 ) -> Result<(Noun, Noun)> {
-    // The canonical prelude is `=< …`; mint it chunked to bound memory.
+    // The canonical prelude is `=< …`; mint it chunked to bound memory. The
+    // chunked and whole routes produce the same artifact.
     eprintln!(
         "[honk] mint_honc_formula path: prelude root = {}",
         prelude_variant_name(prelude)
     );
-    if std::env::var_os("NATIVE_HOON_NO_CHUNK").is_none()
-        && matches!(peel_transparent(prelude), Hoon::TisGal(_, _))
-    {
-        return mint_honc_prelude_chunked(&mut *ut.slab, prelude);
+    if std::env::var_os("NATIVE_HOON_NO_CHUNK").is_none() {
+        if let Some(plan) = chunk_prelude(prelude) {
+            return mint_honc_prelude_chunked(&mut *ut.slab, &plan);
+        }
     }
     let sut = empty_subject_type(&mut *ut.slab);
     let gol = ty_noun(&mut *ut.slab);
