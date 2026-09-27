@@ -30,6 +30,7 @@ import time
 PKH = "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
 BLOCK_SERVICE = "nockchain.public.v2.NockchainBlockService/"
 METRICS_SERVICE = "nockchain.public.v2.NockchainMetricsService/"
+VERIFIER_SETUP_SEED_FILE = "verifier-setup-seeds-v2.bin"
 
 
 def file_hash(path):
@@ -323,7 +324,12 @@ class Rehearsal:
         print(f"Artifacts: {self.work}", flush=True)
         if self.args.setup_cache:
             self.report["active_stage"] = "prepare-verifier-cache"
-            shutil.copytree(self.args.setup_cache, self.nodes["a"]["data"] / "ai-pow")
+            destination = self.nodes["a"]["data"] / "ai-pow"
+            destination.mkdir(parents=True)
+            shutil.copyfile(
+                self.args.setup_cache / VERIFIER_SETUP_SEED_FILE,
+                destination / VERIFIER_SETUP_SEED_FILE,
+            )
         self.start_node("a", fresh=True)
         self.wait("node-a-boot", lambda: self.ready("a"), self.args.boot_timeout)
         # Reuse only proof-independent verifier setup, never consensus state.
@@ -413,7 +419,10 @@ def main():
     parser.add_argument("--miner-bin", required=True, type=Path)
     parser.add_argument("--grpcurl", default=shutil.which("grpcurl"), type=Path)
     parser.add_argument("--work-dir", type=Path, help="new directory; existing paths are refused")
-    parser.add_argument("--setup-cache", type=Path, help="optional ai-pow verifier-only cache directory")
+    parser.add_argument(
+        "--setup-cache", type=Path,
+        help=f"optional directory containing {VERIFIER_SETUP_SEED_FILE}; only this seed file is imported",
+    )
     parser.add_argument("--boot-timeout", type=int, default=3600)
     parser.add_argument("--stage-timeout", type=int, default=180)
     args = parser.parse_args()
@@ -422,6 +431,10 @@ def main():
         if path is None or not path.is_file():
             parser.error(f"{name} must name an existing executable")
         setattr(args, name, path.resolve())
+    if args.setup_cache is not None:
+        if not (args.setup_cache / VERIFIER_SETUP_SEED_FILE).is_file():
+            parser.error(f"setup_cache must contain {VERIFIER_SETUP_SEED_FILE}")
+        args.setup_cache = args.setup_cache.resolve()
     if args.boot_timeout <= 0 or args.stage_timeout <= 0:
         parser.error("timeouts must be positive")
     rehearsal = Rehearsal(args)

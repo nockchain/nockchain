@@ -26,7 +26,11 @@ preservation around real activation boundaries.
 - Enough time and memory for mandatory AI verifier setup on first boot, even
   though this run mines ZK blocks. The default boot timeout is one hour.
   `--setup-cache` accepts an existing proof-independent `ai-pow` cache directory;
-  it is copied into fresh node state and validated by node startup.
+  only `verifier-setup-seeds-v2.bin` is imported into fresh node state. The file
+  must exist before either node starts. Node startup validates the seed table
+  and rebuilds its verifier contexts locally; foreign context files, checksum
+  sidecars, and temporary files are not imported. The completed local cache is
+  then reused by the second node on the same machine and binary.
 
 The older YAML scenarios still expect in-process mining flags. This rehearsal
 uses the current separate-miner interface.
@@ -44,6 +48,30 @@ Use the corresponding paths when setting `CARGO_TARGET_DIR`. Pass
 `--stage-timeout` to change the default three-minute bound per mining/sync
 stage. `--work-dir` must be a new directory; otherwise the script creates a
 temporary directory and prints its location.
+
+An `ai-pow-jets` test executable built from the current branch can check a
+candidate cache without regenerating seeds or rebuilding contexts. An older
+binary may check a stale consensus digest. If needed,
+`cargo test --locked -p ai-pow-jets --lib --no-run` builds it and prints its
+path. For this check,
+`AI_POW_SETUP_GENERATION_DIR` names the **parent** of the `ai-pow` directory;
+`--setup-cache` instead names the `ai-pow` directory itself.
+
+```sh
+seed_root=/path/to/cache-parent
+test -f "$seed_root/ai-pow/verifier-setup-seeds-v2.bin" &&
+AI_POW_SETUP_GENERATION_DIR="$seed_root" \
+  /path/to/ai_pow_jets-test-binary \
+  --exact jet_tests::stable_cache_seeds_pass_lazy_boot_digest_check \
+  --ignored --nocapture
+```
+
+Require one executed test, a passing result, and the explicit message
+`stable cache seeds pass the lazy boot digest check`. An absent cache skips
+the test successfully, and a wrong filter can run zero tests, so exit status
+alone is insufficient. This check validates the cache format, complete
+production shape set, and committed table digest. Normal node startup still
+performs its own validation.
 
 ## Isolation and evidence
 
