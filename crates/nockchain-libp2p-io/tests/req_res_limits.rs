@@ -751,7 +751,8 @@ async fn req_res_gen2_timeout_updates_observability_and_recovers() {
 
     let timeout_secs = 1;
     let requester_config = timeout_gen2_config(timeout_secs);
-    let responder_config = timeout_gen2_config(timeout_secs);
+    // The silent responder must outlast the requester so its timeout cannot close the stream first.
+    let responder_config = timeout_gen2_config(10);
     let transcript = Transcript::default();
     let _guard = TranscriptGuard::new(&transcript, "gen2_timeout_observability");
     transcript.record(
