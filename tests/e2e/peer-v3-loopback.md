@@ -17,7 +17,7 @@ preservation around real activation boundaries.
 
 ## Prerequisites
 
-- Python 3 and `grpcurl`.
+- Python 3, `grpcurl`, and `lsof` (macOS or Linux).
 - `nockchain` and `zk-pow-mine` built from the current branch.
 - Fresh `assets/dumb.jam` and `assets/miner.jam` compiled from the current Hoon
   sources before building those binaries. Do not silently reuse older compiled
@@ -38,7 +38,10 @@ uses the current separate-miner interface.
 After generating both current assets:
 
 ```sh
-cargo build -p nockchain --bin nockchain -p zk-pow-miner --bin zk-pow-mine
+KERNEL_JAM_PATH="$PWD/assets/dumb.jam" \
+  cargo build --locked -p nockchain --bin nockchain
+KERNEL_JAM_PATH="$PWD/assets/miner.jam" \
+  cargo build --locked -p zk-pow-miner --bin zk-pow-mine
 python3 scripts/peer-v3-loopback-rehearsal.py \
   --node-bin target/debug/nockchain \
   --miner-bin target/debug/zk-pow-mine
@@ -48,6 +51,12 @@ Use the corresponding paths when setting `CARGO_TARGET_DIR`. Pass
 `--stage-timeout` to change the default three-minute bound per mining/sync
 stage. `--work-dir` must be a new directory; otherwise the script creates a
 temporary directory and prints its location.
+
+Build the two binaries separately: their kernel crates use the same
+`KERNEL_JAM_PATH` variable for different assets. Explicit paths also avoid a
+shared Cargo target reusing a build-script path from another checkout. Before
+starting either node, the rehearsal verifies that each executable contains
+the complete current kernel asset, then records that check in its report.
 
 An `ai-pow-jets` test executable built from the current branch can check a
 candidate cache without regenerating seeds or rebuilding contexts. An older
@@ -80,7 +89,16 @@ gRPC listeners, and `--no-default-peers`. The receiving node's only configured
 peer is the other loopback node. No production snapshots or node identities
 are used. Discovery can learn only from this isolated peer set; the node has
 no separate switch for disabling Kademlia. Child environments omit inherited
-node/miner/proxy settings and disable telemetry.
+node/miner/proxy settings. `TRACY_DISABLE` prevents the default profiler's TCP
+listener and discovery broadcasts. Application metrics are disabled, and the
+global Gnort registry's first emission is deferred beyond the run's bounded
+stages and cleanup because that registry does not honor the disable setting.
+
+On every wait poll, the script uses `lsof` with both an owned-PID filter and a
+network-socket filter, verifies the returned PID, and checks all reported TCP
+and UDP endpoints. A wildcard or non-loopback endpoint aborts the run and
+triggers cleanup. This is a periodic check, not an operating-system network
+sandbox. The report records the number of successful process socket checks.
 
 All owned child processes are stopped when the script finishes or fails. Logs
 and `report.json` remain in the run directory. The report records each agreed

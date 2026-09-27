@@ -15,7 +15,9 @@ counts do not identify which block arrived through gossip.
 
 import argparse
 import hashlib
+import ipaddress
 import json
+import mmap
 import os
 from pathlib import Path
 import shutil
@@ -41,6 +43,18 @@ def file_hash(path):
     return digest.hexdigest()
 
 
+def check_embedded_kernel(binary, asset):
+    # These binaries embed the complete JAM with include_bytes!. A shared
+    # Cargo target can retain another checkout's build-script asset path.
+    kernel = asset.read_bytes()
+    if not kernel or binary.stat().st_size == 0:
+        raise RuntimeError("kernel asset and executable must be nonempty")
+    with binary.open("rb") as executable:
+        with mmap.mmap(executable.fileno(), 0, access=mmap.ACCESS_READ) as contents:
+            if contents.find(kernel) < 0:
+                raise RuntimeError(f"{binary.name} does not embed the current {asset.name}; rebuild with explicit KERNEL_JAM_PATH")
+
+
 def free_port(kind, assigned):
     for _ in range(100):
         with socket.socket(socket.AF_INET, kind) as listener:
@@ -50,6 +64,61 @@ def free_port(kind, assigned):
             assigned.add(port)
             return port
     raise RuntimeError("could not allocate a distinct loopback port")
+
+
+def check_loopback_sockets(lsof, pid):
+    # lsof combines selectors with OR unless -a is given. Check the emitted PID
+    # as well so an unrelated process can never be attributed to this child.
+    result = subprocess.run(
+        [str(lsof), "-nP", "-a", "-p", str(pid), "-i", "-FpfPn"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return 0  # A booting child may not have opened any sockets yet.
+    if result.returncode != 0 or result.stderr:
+        raise RuntimeError("owned-process socket inspection failed")
+    owner = None
+    protocol = None
+    in_file = False
+    named = False
+    count = 0
+    for field in result.stdout.splitlines():
+        if field.startswith("p"):
+            if owner is not None:
+                raise RuntimeError("socket inspection returned multiple process records")
+            owner = field[1:]
+            if owner != str(pid):
+                raise RuntimeError("socket inspection returned an unexpected PID")
+        elif field.startswith("f"):
+            if owner is None or (in_file and not named):
+                raise RuntimeError("incomplete owned-process socket record")
+            in_file = True
+            protocol = None
+            named = False
+        elif field.startswith("P"):
+            if not in_file or protocol is not None:
+                raise RuntimeError("unrecognized owned-process socket protocol field")
+            protocol = field[1:]
+        elif field.startswith("n"):
+            if owner != str(pid) or protocol not in ("TCP", "UDP") or named:
+                raise RuntimeError("unrecognized owned-process socket record")
+            for endpoint in field[1:].split("->"):
+                host, separator, port = endpoint.rpartition(":")
+                if not separator or not port.isdecimal():
+                    raise RuntimeError("unrecognized owned-process socket endpoint")
+                try:
+                    address = ipaddress.ip_address(host.strip("[]"))
+                except ValueError:
+                    raise RuntimeError("owned process has a wildcard or unknown socket address") from None
+                if not address.is_loopback:
+                    raise RuntimeError("owned process has a non-loopback socket endpoint")
+            named = True
+            count += 1
+        else:
+            raise RuntimeError("unrecognized socket inspection output")
+    if not count or not named:
+        raise RuntimeError("incomplete socket inspection output")
+    return count
 
 
 def source_metadata():
@@ -107,6 +176,12 @@ class Rehearsal:
         self.env.update({
             "NOCKAPP_DISABLE_METRICS": "1",
             "GNORT_DISABLE": "1",
+            "TRACY_DISABLE": "1",
+            # Gnort's global registry does not honor GNORT_DISABLE. Its client
+            # is lazy, so defer its first emission beyond every bounded stage
+            # (three boots and seven network/mining waits), including cleanup.
+            "GNORT_DELAY_MILLIS": str(1000 * (3 * args.boot_timeout + 7 * args.stage_timeout + 600)),
+            "STATSD_HOST": "127.0.0.1",
             "RUST_LOG": "info",
             "RAYON_NUM_THREADS": "2",
             "NOCKCHAIN_LIBP2P_MIN_PEERS": "1",
@@ -122,6 +197,8 @@ class Rehearsal:
                 "default_peers": False,
                 "fresh_consensus_state": True,
                 "inherited_application_environment": False,
+                "socket_guard": "owned PID TCP/UDP loopback endpoints, checked on every wait poll",
+                "socket_guard_checks": 0,
             },
             "stages": [],
             **source_metadata(),
@@ -178,6 +255,8 @@ class Rehearsal:
         for name, process in self.processes.items():
             if process.poll() is not None:
                 raise RuntimeError(f"{name} exited with status {process.returncode}")
+            check_loopback_sockets(self.args.lsof, process.pid)
+            self.report["isolation"]["socket_guard_checks"] += 1
 
     def wait(self, label, predicate, timeout):
         self.report["active_stage"] = label
@@ -322,6 +401,11 @@ class Rehearsal:
 
     def run(self):
         print(f"Artifacts: {self.work}", flush=True)
+        self.report["active_stage"] = "verify-embedded-kernels"
+        assets = Path(__file__).resolve().parent.parent / "assets"
+        check_embedded_kernel(self.args.node_bin, assets / "dumb.jam")
+        check_embedded_kernel(self.args.miner_bin, assets / "miner.jam")
+        self.report["kernel_assets_embedded_verified"] = True
         if self.args.setup_cache:
             self.report["active_stage"] = "prepare-verifier-cache"
             destination = self.nodes["a"]["data"] / "ai-pow"
@@ -418,6 +502,7 @@ def main():
     parser.add_argument("--node-bin", required=True, type=Path)
     parser.add_argument("--miner-bin", required=True, type=Path)
     parser.add_argument("--grpcurl", default=shutil.which("grpcurl"), type=Path)
+    parser.add_argument("--lsof", default=shutil.which("lsof"), type=Path)
     parser.add_argument("--work-dir", type=Path, help="new directory; existing paths are refused")
     parser.add_argument(
         "--setup-cache", type=Path,
@@ -426,7 +511,7 @@ def main():
     parser.add_argument("--boot-timeout", type=int, default=3600)
     parser.add_argument("--stage-timeout", type=int, default=180)
     args = parser.parse_args()
-    for name in ("node_bin", "miner_bin", "grpcurl"):
+    for name in ("node_bin", "miner_bin", "grpcurl", "lsof"):
         path = getattr(args, name)
         if path is None or not path.is_file():
             parser.error(f"{name} must name an existing executable")
