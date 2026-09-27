@@ -138,12 +138,13 @@ jobs:
       # Kernel crates fail if their real JAM asset is missing. The protocol
       # dependency graph needs only kernels-open-dumb. A cache entry is valid
       # only for these exact compiler, bootstrap, dependency and Hoon inputs.
+      # Exclude restored Cargo outputs from this source fingerprint.
       - name: Cache the current consensus kernel
         id: kernel
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: assets/dumb.jam
-          key: peer-v3-kernel-${{ runner.os }}-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '**/Cargo.toml', '**/*.rs', '**/*.c', '**/*.h', '**/*.S', '**/*.s', 'patches/**', '.cargo/**', 'hoon/**', 'crates/hoonc/hoon/**', 'crates/hoonc/bootstrap/*.jam', 'assets/honc-cold-138.jam', 'scripts/*jam*', 'Makefile') }}
+          key: peer-v3-kernel-${{ runner.os }}-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '**/Cargo.toml', '**/*.rs', '**/*.c', '**/*.h', '**/*.S', '**/*.s', 'patches/**', '.cargo/**', 'hoon/**', 'crates/hoonc/hoon/**', 'crates/hoonc/bootstrap/*.jam', 'assets/honc-cold-138.jam', 'scripts/*jam*', 'Makefile', '!target/**', '!**/target/**') }}
 
       - name: Compile the current consensus kernel
         if: steps.kernel.outputs.cache-hit != 'true'
