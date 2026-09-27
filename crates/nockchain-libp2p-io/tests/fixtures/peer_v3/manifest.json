@@ -1,7 +1,10 @@
 {
   "version": 1,
-  "capture_date": "2026-09-25",
-  "reference_revision": "cbd9298f96584b14ab93074ecdf32d0ec212e50e",
+  "capture_dates": [
+    "2026-09-25",
+    "2026-09-26"
+  ],
+  "reference_revision": "73877be29bd1fafeeade1be7b95aebb0f64d8382",
   "specification": "changelog/protocol/018-ecclesia.md",
   "required": {
     "page_versions": [
@@ -31,6 +34,12 @@
     "nonempty_bundle_page_versions": [
       0,
       1
+    ],
+    "consecutive_page_heights": [
+      [
+        154499,
+        154500
+      ]
     ]
   },
   "public_checkpoints": [
@@ -603,6 +612,40 @@
       "file": "page-v1-AaNeN8MmHYLKeKtoL4QLDRPS3mkNSSHH3prVacJeBrNvqnqvkNm2oYn.jam",
       "sha256": "ea65504afba159ca996eee806ebee132670ae777965d9507f0106efded6cb443",
       "size_bytes": 147462
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "6LYLt1haP91TEXJ5vXdnTiPAiv6CbPnSPP8pXxjWAvDu3XsGVrij2Nn",
+      "height": 154499,
+      "pow_version": 5,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-26",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-6LYLt1haP91TEXJ5vXdnTiPAiv6CbPnSPP8pXxjWAvDu3XsGVrij2Nn.jam",
+      "sha256": "26b84388ebee3c430483d2defadd79c778b4a5b93a5b1ea26f6d0ab290493a92",
+      "size_bytes": 117666
+    },
+    {
+      "kind": "page",
+      "consensus_version": 1,
+      "id_base58": "AkXmefAEsnBikXE9yiuXfZvEXf3jGegtUrwaLrGWDoK1wipwmKqZDTX",
+      "height": 154500,
+      "pow_version": 4,
+      "transaction_count": 0,
+      "tx_ids_base58": [],
+      "spend_versions": [],
+      "inputs_or_spends_count": null,
+      "event_num": null,
+      "source_label": "accepted-chain-2026-09-26",
+      "validation": "accepted-chain-page-peek",
+      "file": "page-v1-AkXmefAEsnBikXE9yiuXfZvEXf3jGegtUrwaLrGWDoK1wipwmKqZDTX.jam",
+      "sha256": "9efd39f8fc0dae59b69aef921ba680272ec78931c8fe18245bd19eb93fd45ac4",
+      "size_bytes": 147492
     },
     {
       "kind": "transaction",

@@ -115,6 +115,7 @@ rust_test(
     ] + glob([
         "tests/fixtures/peer_v3/*.jam",
         "tests/fixtures/peer_v3/manifest.json",
+        "tests/fixtures/peer_v3_wire/vectors.json",
     ]),
     deps = [
         "//crates/chaff",
@@ -142,6 +143,7 @@ rust_test_with_miri(
     ] + glob([
         "tests/fixtures/peer_v3/*.jam",
         "tests/fixtures/peer_v3/manifest.json",
+        "tests/fixtures/peer_v3_wire/vectors.json",
     ]),
     deps = [
         "//crates/chaff",

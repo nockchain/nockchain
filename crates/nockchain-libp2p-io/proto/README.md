@@ -60,13 +60,23 @@ and transactions across both consensus versions and all six proof variants.
 Its tests preserve original JAM through the checked types and framed codec,
 verify block inclusion, and exercise reconstructed authenticated gossip.
 
+The [wire corpus](../tests/fixtures/peer_v3_wire/PROVENANCE.md) pins raw protobuf
+examples and independently authored semantic expectations. Both Prost and the
+official Google protobuf runtime must agree on presence, merge behavior, oneof
+selection, repeated fields, and recognized meaning in the presence of unknown
+fields. Rust also checks domain admission, canonical driver nouns, and the
+authentication commitment. The reference runner is
+[`scripts/peer-v3-conformance.py`](../../../scripts/peer-v3-conformance.py).
+
 Code generation writes `nockchain.peer.v3.rs` and `peer_v3_descriptor.bin` into
 the build output directory. These files are not checked in. The descriptor
 tests exercise the production schema and prohibited schema changes.
 
 [`buf.yaml`](../buf.yaml) adds standard naming lint and `FILE` compatibility
-checks. Buf is optional developer tooling; the build-time policy does not
-depend on it. From this crate's directory, run:
+checks. The [peer protocol CI workflow](../../../.github/workflows/peer-protocol-v3.yml)
+runs these checks, the Google reference runner, and the Rust protocol suite with
+a kernel built from the current source. The build-time descriptor policy does
+not depend on Buf. From this crate's directory, run:
 
 ```sh
 buf lint
@@ -76,8 +86,9 @@ buf breaking --against /path/to/reviewed-peer-v3.binpb
 Create the baseline image with `buf build -o /path/to/reviewed-peer-v3.binpb`
 from the reviewed release checkout. A baseline must contain v3; the initial
 v3 addition has no prior v3 schema to compare against. The compatibility check
-is an explicit maintenance step, not something the descriptor policy can infer
-from a single revision.
+uses the PR base or previous revision in CI and reports when that baseline has
+no v3 schema. The descriptor policy alone cannot infer compatibility from a
+single revision.
 
 Never reuse field numbers or enum values. Reserve the names and numbers of
 removed fields and enum values, and review deletions against the compatibility

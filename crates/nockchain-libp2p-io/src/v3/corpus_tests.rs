@@ -58,6 +58,7 @@ struct RequiredCoverage {
     spend_versions: Vec<u32>,
     lock_merkle_proof_kinds: Vec<String>,
     nonempty_bundle_page_versions: Vec<u32>,
+    consecutive_page_heights: Vec<[u64; 2]>,
 }
 
 impl Default for RequiredCoverage {
@@ -69,6 +70,7 @@ impl Default for RequiredCoverage {
             spend_versions: Vec::new(),
             lock_merkle_proof_kinds: Vec::new(),
             nonempty_bundle_page_versions: Vec::new(),
+            consecutive_page_heights: Vec::new(),
         }
     }
 }
@@ -563,6 +565,23 @@ fn captured_history_has_the_declared_version_coverage() {
             .get(&checkpoint.id_base58)
             .expect("public checkpoint page must be represented in the corpus");
         assert_eq!(page.height, checkpoint.height, "public checkpoint height");
+    }
+    for [parent_height, child_height] in &manifest.required.consecutive_page_heights {
+        assert_eq!(parent_height.checked_add(1), Some(*child_height));
+        let at_height = |height| {
+            let mut matches = captured_pages.values().filter(|page| page.height == height);
+            let page = matches
+                .next()
+                .expect("required boundary page must be captured");
+            assert!(
+                matches.next().is_none(),
+                "ambiguous captured height {height}"
+            );
+            page
+        };
+        let parent = at_height(*parent_height);
+        let child = at_height(*child_height);
+        assert_eq!(child.parent, parent.id, "boundary pages must share a chain");
     }
     for capture in manifest
         .captures

@@ -1,12 +1,13 @@
 # Historical peer corpus
 
-These are real consensus nouns captured on 2026-09-25: 31 pages and the 19 raw
-transactions included in those pages. No consensus payload was synthesized.
+These are real consensus nouns captured on 2026-09-25 and 2026-09-26: 33 pages
+and the 19 raw transactions included in those pages. No consensus payload was
+synthesized.
 The test harness constructs v3 transport envelopes around the captured data;
 those envelopes are not recorded network traffic.
 
 The reference definitions are the public repository at
-`cbd9298f96584b14ab93074ecdf32d0ec212e50e`. The transport specification is
+`73877be29bd1fafeeade1be7b95aebb0f64d8382`. The transport specification is
 [Ecclesia](../../../../../changelog/protocol/018-ecclesia.md).
 
 ## Source and verification
@@ -16,7 +17,9 @@ heights and transaction IDs. Event-log facts alone do not establish consensus
 acceptance. Every published page was subsequently fetched using the node's
 read-only `%heavy-n` peek, which selects a page on its accepted heaviest chain.
 Every raw transaction was fetched by `%raw-transaction` using an ID contained
-in one of the captured pages.
+in one of the captured pages. The second capture added the accepted pages at
+154499 and 154500 around the AI proof hardening upgrade; both have empty
+transaction sets. The suite also verifies their parent-child linkage.
 
 The pages at heights 144, 4032, and 16128 match the checkpoint hashes in the
 public `hoon/apps/dumbnet/lib/consensus.hoon`. The manifest pins those hashes,
@@ -50,6 +53,7 @@ python3 crates/nockchain-libp2p-io/examples/capture_peer_corpus.py \
   --height 1 144 4032 6749 6750 11999 12000 16128 19996 20010 20011 \
     37349 37350 38999 39000 41568 41878 53999 54000 65499 65500 \
     119399 119400 125999 126000 147499 147500 148868 148869 148899 153864 \
+    154499 154500 \
   --output /tmp/peer-v3-pages.jsonl
 
 cargo run -p nockchain-libp2p-io --example extract_peer_corpus -- \

@@ -50,6 +50,7 @@ prost-build = { workspace = true }
 prost-types = { workspace = true }
 
 [dev-dependencies]
+base64 = "0.22.1"
 cbor4ii = { workspace = true, features = ["serde1", "use_std"] }
 chaff = { workspace = true }
 hex = { workspace = true }

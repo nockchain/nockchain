@@ -10,6 +10,8 @@ mod corpus_tests;
 mod envelope;
 mod page;
 mod transaction;
+#[cfg(test)]
+mod wire_tests;
 
 mod pb {
     include!(concat!(env!("OUT_DIR"), "/nockchain.peer.v3.rs"));

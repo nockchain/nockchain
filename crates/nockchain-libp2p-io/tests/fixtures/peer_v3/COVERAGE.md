@@ -8,19 +8,22 @@ It is one part of protocol validation, not a claim of complete conformance.
 
 | Requirement | Required | Captured |
 | --- | --- | --- |
-| Page versions | Untagged v0 and tagged v1 | 14 v0, 17 v1 |
+| Page versions | Untagged v0 and tagged v1 | 14 v0, 19 v1 |
 | Raw transaction versions | Untagged v0 and tagged v1 | 13 v0, 6 v1 |
-| ZK proof versions | 0, 1, 2, 3, 5 | 4, 2, 16, 4, 2 pages respectively |
-| AI proof artifact | `%ai-pow`, classified as version 4 | 3 pages |
+| ZK proof versions | 0, 1, 2, 3, 5 | 4, 2, 16, 4, 3 pages respectively |
+| AI proof artifact | `%ai-pow`, classified as version 4 | 4 pages |
 | V1 spend variants | Legacy 0 and witness 1 | 2 legacy-spend transactions, 4 witness-spend transactions |
 | Lock Merkle proof forms | Untagged stub and `%full` | Both forms in captured v1 transactions |
 | Complete nonempty bundles | Page versions 0 and 1 | All transactions for the captured nonempty pages |
+| AI proof hardening boundary | Heights 154499 and 154500 | Real accepted-chain pages with verified parent linkage |
 | Public checkpoints | Heights 144, 4032, 16128 | All three match the public constants |
 
 The manifest's `required` lists are test assertions. Removing the last example
 of any required variant fails the suite. Proof 4 is an AI artifact, not an
 additional ZK proof-stream tag. The block at height 147500 contains an AI
-artifact; ZK proof 5 is covered by heights 148868 and 148869.
+artifact; ZK proof 5 is covered by heights 148868, 148869, and 154499. The
+activation page at 154500 contains an AI artifact. These fixtures check
+representation compatibility; they do not rerun the height-selected proof rules.
 
 ## Assertions
 
@@ -46,8 +49,9 @@ that oracle.
 - The corpus does not rerun consensus proof/signature verification. The v0
   transaction checks use the pinned ID and full source noun; the harness has no
   independent v0 transaction-ID computation.
-- Cross-runtime protobuf vectors, an exhaustive protobuf merge/unknown-field
-  acceptance matrix, and full-node cutover rehearsals remain separate work.
+- Cross-runtime protobuf merge/unknown-field checks are maintained in the
+  adjacent `peer_v3_wire` corpus. Neither corpus replaces full-node consensus
+  and cutover rehearsals.
 - Operational admission and resource limits are outside this corpus's scope.
 
 No intentionally divergent conversion is accepted; see
