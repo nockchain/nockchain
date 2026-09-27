@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rehearse v3 between two isolated, real fakenet nodes and one ZK miner.
 
-Build current dumb/miner Hoon assets and both binaries before running. The
+Build current dumb/miner Hoon assets and all three executables before running. The
 script never builds, contacts an external host, or reuses consensus state.
 All listeners and explicit peers use loopback, bootstrap peers are disabled,
 and child environments omit inherited networking/telemetry configuration.
@@ -192,6 +192,8 @@ class Rehearsal:
             "active_stage": "initialization",
             "node_binary_sha256": file_hash(args.node_bin),
             "miner_binary_sha256": file_hash(args.miner_bin),
+            "head_binary_sha256": file_hash(args.head_bin),
+            "head_source": "private consensus Peek through peer_v3_head",
             "isolation": {
                 "network": "127.0.0.1 only",
                 "default_peers": False,
@@ -288,14 +290,19 @@ class Rehearsal:
         return result
 
     def head(self, name):
-        result = self.rpc(name, BLOCK_SERVICE + "GetBlocks", {
-            "page": {"clientPageItemsLimit": "1"},
-        })["blocks"]
-        height = int(result.get("currentHeight", 0))
-        entries = result.get("blocks", [])
-        if not entries or int(entries[0].get("height", 0)) != height:
-            raise RuntimeError("head not present in explorer cache")
-        return {"height": height, "block_id": entries[0]["blockId"]}
+        result = subprocess.run(
+            [str(self.args.head_bin), str(self.nodes[name]["private"])],
+            capture_output=True, text=True, timeout=12, env=self.env, check=True,
+        )
+        head = json.loads(result.stdout)
+        if (
+            not isinstance(head, dict)
+            or type(head.get("height")) is not int
+            or not 0 <= head["height"] <= (1 << 64) - 1
+            or not isinstance(head.get("block_id"), dict)
+        ):
+            raise RuntimeError("head helper returned an invalid consensus head")
+        return head
 
     def ready(self, name):
         # A fresh fakenet has only genesis; the explorer deliberately does not
@@ -392,7 +399,11 @@ class Rehearsal:
         detail = self.rpc("b", BLOCK_SERVICE + "GetBlockDetails", {
             "height": str(head["height"]),
         })["details"]
-        if detail.get("blockId") != head["block_id"] or not detail.get("hasPow"):
+        if (
+            int(detail.get("height", 0)) != head["height"]
+            or detail.get("blockId") != head["block_id"]
+            or not detail.get("hasPow")
+        ):
             raise RuntimeError("receiving node did not expose the agreed proof-bearing block")
         stage = {"name": name, "head": head, "receiver_peer_stats": self.stats("b", "a")}
         self.report["stages"].append(stage)
@@ -450,6 +461,10 @@ class Rehearsal:
         if self.peer_id("b") != identity_before:
             raise RuntimeError("receiver identity changed across restart")
         self.report["stages"][-1]["identity_preserved"] = True
+        final_heads = {name: self.head(name) for name in ("a", "b")}
+        self.report["final_kernel_heads"] = final_heads
+        if any(head != self.report["stages"][-1]["head"] for head in final_heads.values()):
+            raise RuntimeError("consensus head changed after final agreement")
         self.report["status"] = "passed"
         self.report["active_stage"] = None
 
@@ -501,6 +516,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--node-bin", required=True, type=Path)
     parser.add_argument("--miner-bin", required=True, type=Path)
+    parser.add_argument("--head-bin", required=True, type=Path, help="current peer_v3_head Rust example executable")
     parser.add_argument("--grpcurl", default=shutil.which("grpcurl"), type=Path)
     parser.add_argument("--lsof", default=shutil.which("lsof"), type=Path)
     parser.add_argument("--work-dir", type=Path, help="new directory; existing paths are refused")
@@ -511,7 +527,7 @@ def main():
     parser.add_argument("--boot-timeout", type=int, default=3600)
     parser.add_argument("--stage-timeout", type=int, default=180)
     args = parser.parse_args()
-    for name in ("node_bin", "miner_bin", "grpcurl", "lsof"):
+    for name in ("node_bin", "miner_bin", "head_bin", "grpcurl", "lsof"):
         path = getattr(args, name)
         if path is None or not path.is_file():
             parser.error(f"{name} must name an existing executable")

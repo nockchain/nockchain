@@ -5,6 +5,11 @@ separate `zk-pow-mine` process. It checks initial synchronization, authenticated
 block gossip, and catch-up after restarting the receiving node with its
 existing identity and state. Both nodes must expose the same proof-bearing
 chain head, and the receiving node must report generation 3 peer traffic.
+Head snapshots come directly from the kernel's private Peek through the
+`peer_v3_head` Rust example. It queries `%heaviest-chain`, falling back to
+`%heaviest-block` when needed. The public block-details RPC separately
+checks the agreed height, block ID, and proof presence. After restart catch-up,
+the script captures both kernel heads again and requires the same agreement.
 The gossip check also requires a new `libp2p/gossip` event in its local event
 log. This run submits no transactions, so those events establish receipt of
 block gossip during the connected stage. Head agreement is checked
@@ -18,7 +23,8 @@ preservation around real activation boundaries.
 ## Prerequisites
 
 - Python 3, `grpcurl`, and `lsof` (macOS or Linux).
-- `nockchain` and `zk-pow-mine` built from the current branch.
+- `nockchain`, `zk-pow-mine`, and the `peer_v3_head` example built from the current
+  branch.
 - Fresh `assets/dumb.jam` and `assets/miner.jam` compiled from the current Hoon
   sources before building those binaries. Do not silently reuse older compiled
   kernels. Use a fresh `hoonc --new --data-dir` directory for each asset; the
@@ -42,9 +48,12 @@ KERNEL_JAM_PATH="$PWD/assets/dumb.jam" \
   cargo build --locked -p nockchain --bin nockchain
 KERNEL_JAM_PATH="$PWD/assets/miner.jam" \
   cargo build --locked -p zk-pow-miner --bin zk-pow-mine
+KERNEL_JAM_PATH="$PWD/assets/dumb.jam" \
+  cargo build --locked -p nockchain-e2e --example peer_v3_head
 python3 scripts/peer-v3-loopback-rehearsal.py \
   --node-bin target/debug/nockchain \
-  --miner-bin target/debug/zk-pow-mine
+  --miner-bin target/debug/zk-pow-mine \
+  --head-bin target/debug/examples/peer_v3_head
 ```
 
 Use the corresponding paths when setting `CARGO_TARGET_DIR`. Pass
@@ -102,7 +111,8 @@ sandbox. The report records the number of successful process socket checks.
 
 All owned child processes are stopped when the script finishes or fails. Logs
 and `report.json` remain in the run directory. The report records each agreed
-head, peer traffic, gossip-event count, identity preservation, binary hashes,
+head, final kernel-head snapshots, peer traffic, gossip-event count, identity
+preservation, node/miner/head-helper binary hashes, the head-query source,
 the Git revision, the Hoon source-tree digest and kernel-asset hashes present
 at run time. These hashes document the inputs; rebuild the binaries after
 changing either kernel asset.

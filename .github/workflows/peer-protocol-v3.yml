@@ -174,3 +174,11 @@ jobs:
           cargo --config 'profile.dev.package."*".debug=0' \
             --config 'profile.test.package."*".debug=0' \
             test --locked --no-fail-fast -p nockchain-libp2p-io --example extract_peer_corpus
+
+      - name: Test the loopback consensus-head reader
+        env:
+          KERNEL_JAM_PATH: ${{ github.workspace }}/assets/dumb.jam
+        run: |
+          cargo --config 'profile.dev.package."*".debug=0' \
+            --config 'profile.test.package."*".debug=0' \
+            test --locked -p nockchain-e2e --example peer_v3_head

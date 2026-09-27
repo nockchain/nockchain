@@ -44,3 +44,23 @@ rust_test(
     name = "nockchain-e2e_unit_tests",
     crate = ":nockchain-e2e-lib",
 )
+
+rust_binary(
+    name = "peer_v3_head",
+    srcs = ["examples/peer_v3_head.rs"],
+    aliases = aliases(),
+    edition = "2021",
+    deps = [":nockchain-e2e-lib"] + all_crate_deps(),
+)
+
+rust_test(
+    name = "peer_v3_head_unit_tests",
+    srcs = ["examples/peer_v3_head.rs"],
+    aliases = aliases(),
+    edition = "2021",
+    deps = [
+        ":nockchain-e2e-lib",
+        "//crates/nockchain-math",
+        "//crates/nockchain-types",
+    ] + all_crate_deps(),
+)
