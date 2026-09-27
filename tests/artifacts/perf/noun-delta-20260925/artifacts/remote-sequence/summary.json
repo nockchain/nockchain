@@ -1,0 +1,418 @@
+{
+  "build_seconds": {
+    "n": 20,
+    "min": 0.238399835,
+    "median": 0.24343475050000002,
+    "p95_nearest_rank": 0.249530991,
+    "max": 0.302355069
+  },
+  "encode_seconds": {
+    "n": 20,
+    "min": 0.002461754,
+    "median": 0.0026063095,
+    "p95_nearest_rank": 0.00349109,
+    "max": 0.008377107
+  },
+  "decode_virtual_mount_seconds": {
+    "n": 20,
+    "min": 0.054098507,
+    "median": 0.0543633045,
+    "p95_nearest_rank": 0.054765594,
+    "max": 0.060562331
+  },
+  "total_seconds": {
+    "n": 20,
+    "median": 0.300370911,
+    "p95_nearest_rank": 0.313584412
+  },
+  "stages": {
+    "open": {
+      "details": {
+        "current": {
+          "allocated_words": 3581771960,
+          "event_num": 7433651,
+          "kernel_hash": [
+            4,
+            64,
+            219,
+            91,
+            254,
+            167,
+            202,
+            128,
+            228,
+            36,
+            100,
+            12,
+            109,
+            54,
+            1,
+            58,
+            122,
+            120,
+            116,
+            143,
+            251,
+            5,
+            206,
+            200,
+            93,
+            72,
+            73,
+            197,
+            142,
+            146,
+            21,
+            84
+          ],
+          "root_raw": 14987979563470782625
+        },
+        "epoch": {
+          "allocated_words": 3569566993,
+          "event_num": 7373518,
+          "kernel_hash": [
+            60,
+            57,
+            33,
+            215,
+            178,
+            173,
+            180,
+            141,
+            246,
+            170,
+            17,
+            43,
+            5,
+            92,
+            228,
+            152,
+            187,
+            165,
+            38,
+            245,
+            19,
+            245,
+            201,
+            197,
+            45,
+            31,
+            6,
+            243,
+            195,
+            8,
+            84,
+            112
+          ],
+          "root_raw": 14987979563458557274
+        },
+        "hash_bytes": 16,
+        "middle": {
+          "allocated_words": 3579971660,
+          "event_num": 7392318,
+          "kernel_hash": [
+            60,
+            57,
+            33,
+            215,
+            178,
+            173,
+            180,
+            141,
+            246,
+            170,
+            17,
+            43,
+            5,
+            92,
+            228,
+            152,
+            187,
+            165,
+            38,
+            245,
+            19,
+            245,
+            201,
+            197,
+            45,
+            31,
+            6,
+            243,
+            195,
+            8,
+            84,
+            112
+          ],
+          "root_raw": 14987979563468961501
+        },
+        "parallel_initial_index": true
+      },
+      "seconds": 0.000299008,
+      "stage": "open"
+    },
+    "index_middle": {
+      "details": {
+        "memory": [
+          "VmSize:\t126901308 kB",
+          "VmHWM:\t93024464 kB",
+          "VmRSS:\t93024464 kB"
+        ],
+        "stats": {
+          "atom_bytes": 18654015166,
+          "cells": 413206441,
+          "direct_references": 201681747,
+          "elapsed_secs": 176.724349559,
+          "estimated_index_bytes": 22280147144,
+          "fingerprint_bits": 128,
+          "incremental_index_bytes": 22280147144,
+          "incremental_sidecar_bytes": null,
+          "index_depth": 0,
+          "indirect_atoms": 4135864,
+          "inherited_nodes": 0,
+          "max_stack_frames": 2438,
+          "memo_hits": 207388831,
+          "nodes": 417342305,
+          "reachable_nodes_exact": true,
+          "serialized_index_bytes": 10016215376
+        }
+      },
+      "seconds": 176.724352315,
+      "stage": "index_middle"
+    },
+    "index_epoch": {
+      "details": {
+        "memory": [
+          "VmSize:\t126901308 kB",
+          "VmHWM:\t93241696 kB",
+          "VmRSS:\t93241696 kB"
+        ],
+        "stats": {
+          "atom_bytes": 18575718942,
+          "cells": 412996955,
+          "direct_references": 201594717,
+          "elapsed_secs": 178.350935031,
+          "estimated_index_bytes": 22280147144,
+          "fingerprint_bits": 128,
+          "incremental_index_bytes": 22280147144,
+          "incremental_sidecar_bytes": null,
+          "index_depth": 0,
+          "indirect_atoms": 4120217,
+          "inherited_nodes": 0,
+          "max_stack_frames": 2438,
+          "memo_hits": 207282022,
+          "nodes": 417117172,
+          "reachable_nodes_exact": true,
+          "serialized_index_bytes": 10010812184
+        }
+      },
+      "seconds": 178.350939159,
+      "stage": "index_epoch"
+    },
+    "parallel_initial_index": {
+      "details": {
+        "memory": [
+          "VmSize:\t126901296 kB",
+          "VmHWM:\t93241808 kB",
+          "VmRSS:\t93241808 kB"
+        ]
+      },
+      "seconds": 178.351125573,
+      "stage": "parallel_initial_index"
+    },
+    "lookup_epoch": {
+      "details": {
+        "memory": [
+          "VmSize:\t129129468 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t95469980 kB"
+        ],
+        "stats": {
+          "elapsed_secs": 30.245692463,
+          "estimated_bytes": 2348810320,
+          "incremental_bytes": 2348810320,
+          "prefix_collisions": 0,
+          "unique_hashes": 59187793
+        }
+      },
+      "seconds": 30.245693225,
+      "stage": "lookup_epoch"
+    },
+    "build_epoch_to_middle": {
+      "details": {
+        "memory": [
+          "VmSize:\t129233220 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t95568232 kB"
+        ],
+        "stats": {
+          "atom_bytes": 78242336,
+          "base_references": 121783,
+          "elapsed_secs": 0.219259092,
+          "encoded_bytes": 83184471,
+          "estimated_delta_bytes": 90825248,
+          "memo_hits": 87811,
+          "new_atoms": 8911,
+          "new_cells": 285992
+        }
+      },
+      "seconds": 0.219260144,
+      "stage": "build_epoch_to_middle"
+    },
+    "mount_middle_from_epoch_delta": {
+      "details": {
+        "memory": [
+          "VmSize:\t79849196 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t48980608 kB"
+        ]
+      },
+      "seconds": 0.051096626,
+      "stage": "mount_middle_from_epoch_delta"
+    },
+    "derive_middle_index": {
+      "details": {
+        "memory": [
+          "VmSize:\t79849196 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t48980608 kB"
+        ],
+        "stats": {
+          "atom_bytes": 18653961278,
+          "cells": 413282947,
+          "direct_references": 0,
+          "elapsed_secs": 0.056794234,
+          "estimated_index_bytes": 22287229112,
+          "fingerprint_bits": 128,
+          "incremental_index_bytes": 7081968,
+          "incremental_sidecar_bytes": 4718528,
+          "index_depth": 1,
+          "indirect_atoms": 4129128,
+          "inherited_nodes": 417117172,
+          "max_stack_frames": 0,
+          "memo_hits": 0,
+          "nodes": 417412075,
+          "reachable_nodes_exact": false,
+          "serialized_index_bytes": 10017889856
+        }
+      },
+      "seconds": 0.056795316,
+      "stage": "derive_middle_index"
+    },
+    "derive_middle_lookup": {
+      "details": {
+        "memory": [
+          "VmSize:\t79849196 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t48980608 kB"
+        ],
+        "stats": {
+          "elapsed_secs": 0.02800638,
+          "estimated_bytes": 2357985440,
+          "incremental_bytes": 9175120,
+          "prefix_collisions": 0,
+          "unique_hashes": 59466659
+        }
+      },
+      "seconds": 0.028007081,
+      "stage": "derive_middle_lookup"
+    },
+    "index_current": {
+      "details": {
+        "memory": [
+          "VmSize:\t101345012 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t95658088 kB"
+        ],
+        "stats": {
+          "atom_bytes": 18667140783,
+          "cells": 413242762,
+          "direct_references": 201699230,
+          "elapsed_secs": 210.014096056,
+          "estimated_index_bytes": 22280147144,
+          "fingerprint_bits": 128,
+          "incremental_index_bytes": 22280147144,
+          "incremental_sidecar_bytes": null,
+          "index_depth": 0,
+          "indirect_atoms": 4139170,
+          "inherited_nodes": 0,
+          "max_stack_frames": 2439,
+          "memo_hits": 207404363,
+          "nodes": 417381932,
+          "reachable_nodes_exact": true,
+          "serialized_index_bytes": 10017166424
+        }
+      },
+      "seconds": 210.014098229,
+      "stage": "index_current"
+    },
+    "diff_current_against_reconstructed_middle": {
+      "details": {
+        "memory": [
+          "VmSize:\t101345012 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t95658088 kB"
+        ],
+        "stats": {
+          "atom_bytes": 31658106,
+          "base_references": 105030,
+          "elapsed_secs": 0.236109165,
+          "encoded_bytes": 37687373,
+          "estimated_delta_bytes": 44241018,
+          "memo_hits": 96583,
+          "new_atoms": 3741,
+          "new_cells": 352678
+        }
+      },
+      "seconds": 0.236110268,
+      "stage": "diff_current_against_reconstructed_middle"
+    },
+    "mount_current_from_two_deltas": {
+      "details": {
+        "memory": [
+          "VmSize:\t101352284 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t95670680 kB"
+        ]
+      },
+      "seconds": 0.049312829,
+      "stage": "mount_current_from_two_deltas"
+    },
+    "warm_summary": {
+      "details": {
+        "budget_seconds": 60,
+        "completed": 20,
+        "requested": 20
+      },
+      "seconds": 6.118120811,
+      "stage": "warm_summary"
+    },
+    "full_chain_structural_verification": {
+      "details": {
+        "memory": [
+          "VmSize:\t77640528 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t74755696 kB"
+        ],
+        "result": {
+          "compared_atom_bytes": 18667145447,
+          "compared_pairs": 417390995,
+          "elapsed_secs": 219.756599743
+        }
+      },
+      "seconds": 220.021645031,
+      "stage": "full_chain_structural_verification"
+    },
+    "complete": {
+      "details": {
+        "memory": [
+          "VmSize:\t77640528 kB",
+          "VmHWM:\t96581960 kB",
+          "VmRSS:\t74755696 kB"
+        ]
+      },
+      "seconds": 647.585259616,
+      "stage": "complete"
+    }
+  }
+}

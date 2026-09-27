@@ -1,0 +1,123 @@
+hashcons_progress physical=10000000 canonical=8540907 new_cells=7161791 new_atoms=1379116 elapsed_secs=4.253 estimated_dictionary_bytes=1225785344 raw_memo_bytes=293601280
+hashcons_progress physical=20000000 canonical=10875607 new_cells=9436482 new_atoms=1439125 elapsed_secs=7.819 estimated_dictionary_bytes=1431306240 raw_memo_bytes=587202560
+hashcons_progress physical=30000000 canonical=12020351 new_cells=10563712 new_atoms=1456639 elapsed_secs=11.256 estimated_dictionary_bytes=1431306240 raw_memo_bytes=1174405120
+hashcons_progress physical=40000000 canonical=12837140 new_cells=11365826 new_atoms=1471314 elapsed_secs=14.610 estimated_dictionary_bytes=1431306240 raw_memo_bytes=1174405120
+hashcons_progress physical=50000000 canonical=13514331 new_cells=12033885 new_atoms=1480446 elapsed_secs=17.621 estimated_dictionary_bytes=1431306240 raw_memo_bytes=1174405120
+hashcons_progress physical=60000000 canonical=14105158 new_cells=12616013 new_atoms=1489145 elapsed_secs=21.380 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=70000000 canonical=14663043 new_cells=13168804 new_atoms=1494239 elapsed_secs=24.427 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=80000000 canonical=15131241 new_cells=13630122 new_atoms=1501119 elapsed_secs=27.479 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=90000000 canonical=15488412 new_cells=13981938 new_atoms=1506474 elapsed_secs=30.524 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=100000000 canonical=15967188 new_cells=14455757 new_atoms=1511431 elapsed_secs=33.601 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=110000000 canonical=16366281 new_cells=14848889 new_atoms=1517392 elapsed_secs=37.015 estimated_dictionary_bytes=1842348032 raw_memo_bytes=2348810240
+hashcons_progress physical=120000000 canonical=16724030 new_cells=15203857 new_atoms=1520173 elapsed_secs=41.761 estimated_dictionary_bytes=1842348032 raw_memo_bytes=4697620480
+hashcons_progress physical=130000000 canonical=17119089 new_cells=15595500 new_atoms=1523589 elapsed_secs=45.176 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=140000000 canonical=17479756 new_cells=15950962 new_atoms=1528794 elapsed_secs=48.564 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=150000000 canonical=17902360 new_cells=16370367 new_atoms=1531993 elapsed_secs=51.975 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=160000000 canonical=18318843 new_cells=16782301 new_atoms=1536542 elapsed_secs=55.419 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=170000000 canonical=18750001 new_cells=17209648 new_atoms=1540353 elapsed_secs=58.927 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=180000000 canonical=19208023 new_cells=17663428 new_atoms=1544595 elapsed_secs=62.355 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=190000000 canonical=19653926 new_cells=18103425 new_atoms=1550501 elapsed_secs=65.786 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=200000000 canonical=20131773 new_cells=18575726 new_atoms=1556047 elapsed_secs=69.248 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=210000000 canonical=20571311 new_cells=19010473 new_atoms=1560838 elapsed_secs=72.744 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=220000000 canonical=21015268 new_cells=19449731 new_atoms=1565537 elapsed_secs=76.315 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=230000000 canonical=21516309 new_cells=19945347 new_atoms=1570962 elapsed_secs=79.971 estimated_dictionary_bytes=2781872128 raw_memo_bytes=4697620480
+hashcons_progress physical=240000000 canonical=22068225 new_cells=20491908 new_atoms=1576317 elapsed_secs=86.166 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=250000000 canonical=22583467 new_cells=21001766 new_atoms=1581701 elapsed_secs=89.847 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=260000000 canonical=23156210 new_cells=21568186 new_atoms=1588024 elapsed_secs=93.545 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=270000000 canonical=23726769 new_cells=22132236 new_atoms=1594533 elapsed_secs=97.258 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=280000000 canonical=24403114 new_cells=22800890 new_atoms=1602224 elapsed_secs=101.010 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=290000000 canonical=24966294 new_cells=23356759 new_atoms=1609535 elapsed_secs=104.702 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=300000000 canonical=25672031 new_cells=24053130 new_atoms=1618901 elapsed_secs=108.470 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=310000000 canonical=26320206 new_cells=24692407 new_atoms=1627799 elapsed_secs=112.257 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=320000000 canonical=27062364 new_cells=25423202 new_atoms=1639162 elapsed_secs=116.044 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=330000000 canonical=27914903 new_cells=26261537 new_atoms=1653366 elapsed_secs=119.879 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=340000000 canonical=28616570 new_cells=26950664 new_atoms=1665906 elapsed_secs=123.672 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=350000000 canonical=29542789 new_cells=27858156 new_atoms=1684633 elapsed_secs=127.530 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=360000000 canonical=30813800 new_cells=29104292 new_atoms=1709508 elapsed_secs=131.511 estimated_dictionary_bytes=2781872128 raw_memo_bytes=9395240960
+hashcons_progress physical=370000000 canonical=32119397 new_cells=30388387 new_atoms=1731010 elapsed_secs=136.036 estimated_dictionary_bytes=3603955712 raw_memo_bytes=9395240960
+hashcons_progress physical=380000000 canonical=34003047 new_cells=32237352 new_atoms=1765695 elapsed_secs=140.329 estimated_dictionary_bytes=5483003904 raw_memo_bytes=9395240960
+hashcons_progress physical=390000000 canonical=35984568 new_cells=34165318 new_atoms=1819250 elapsed_secs=144.614 estimated_dictionary_bytes=5483003904 raw_memo_bytes=9395240960
+hashcons_progress physical=400000000 canonical=45371146 new_cells=43027114 new_atoms=2344032 elapsed_secs=150.403 estimated_dictionary_bytes=5563744256 raw_memo_bytes=9395240960
+hashcons_progress physical=410000000 canonical=53832275 new_cells=50982006 new_atoms=2850269 elapsed_secs=158.441 estimated_dictionary_bytes=5563744256 raw_memo_bytes=9395240960
+hashcons_progress physical=10000000 canonical=59209625 new_cells=20070 new_atoms=1762 elapsed_secs=3.367 estimated_dictionary_bytes=5563744400 raw_memo_bytes=293601280
+hashcons_progress physical=20000000 canonical=59209625 new_cells=20070 new_atoms=1762 elapsed_secs=6.684 estimated_dictionary_bytes=5563744400 raw_memo_bytes=587202560
+hashcons_progress physical=30000000 canonical=59209625 new_cells=20070 new_atoms=1762 elapsed_secs=10.217 estimated_dictionary_bytes=5563744400 raw_memo_bytes=1174405120
+hashcons_progress physical=40000000 canonical=59209625 new_cells=20070 new_atoms=1762 elapsed_secs=13.402 estimated_dictionary_bytes=5563744400 raw_memo_bytes=1174405120
+hashcons_progress physical=50000000 canonical=59209625 new_cells=20070 new_atoms=1762 elapsed_secs=16.611 estimated_dictionary_bytes=5563744400 raw_memo_bytes=1174405120
+hashcons_progress physical=60000000 canonical=59216512 new_cells=26875 new_atoms=1844 elapsed_secs=20.570 estimated_dictionary_bytes=5563744400 raw_memo_bytes=2348810240
+hashcons_progress physical=70000000 canonical=59217113 new_cells=27473 new_atoms=1847 elapsed_secs=23.854 estimated_dictionary_bytes=5563744400 raw_memo_bytes=2348810240
+hashcons_progress physical=80000000 canonical=59221706 new_cells=31947 new_atoms=1966 elapsed_secs=27.133 estimated_dictionary_bytes=5563744400 raw_memo_bytes=2348810240
+hashcons_progress physical=90000000 canonical=59221714 new_cells=31955 new_atoms=1966 elapsed_secs=30.460 estimated_dictionary_bytes=5563744400 raw_memo_bytes=2348810240
+hashcons_progress physical=100000000 canonical=59221716 new_cells=31957 new_atoms=1966 elapsed_secs=33.775 estimated_dictionary_bytes=5563744400 raw_memo_bytes=2348810240
+hashcons_progress physical=110000000 canonical=59221718 new_cells=31959 new_atoms=1966 elapsed_secs=37.155 estimated_dictionary_bytes=5563744400 raw_memo_bytes=2348810240
+hashcons_progress physical=120000000 canonical=59226011 new_cells=36188 new_atoms=2030 elapsed_secs=41.907 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=130000000 canonical=59226533 new_cells=36707 new_atoms=2033 elapsed_secs=45.368 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=140000000 canonical=59236790 new_cells=46537 new_atoms=2460 elapsed_secs=48.823 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=150000000 canonical=59238946 new_cells=48691 new_atoms=2462 elapsed_secs=52.269 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=160000000 canonical=59244604 new_cells=54115 new_atoms=2696 elapsed_secs=55.731 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=170000000 canonical=59246334 new_cells=55836 new_atoms=2705 elapsed_secs=59.200 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=180000000 canonical=59247791 new_cells=57287 new_atoms=2711 elapsed_secs=62.681 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=190000000 canonical=59252005 new_cells=61354 new_atoms=2858 elapsed_secs=66.180 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=200000000 canonical=59252972 new_cells=62311 new_atoms=2868 elapsed_secs=69.689 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=210000000 canonical=59254471 new_cells=63797 new_atoms=2881 elapsed_secs=73.224 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=220000000 canonical=59255187 new_cells=64507 new_atoms=2887 elapsed_secs=76.830 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=230000000 canonical=59255656 new_cells=64974 new_atoms=2889 elapsed_secs=80.516 estimated_dictionary_bytes=5563744400 raw_memo_bytes=4697620480
+hashcons_progress physical=240000000 canonical=59257153 new_cells=66455 new_atoms=2905 elapsed_secs=86.701 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=250000000 canonical=59259957 new_cells=69229 new_atoms=2935 elapsed_secs=90.513 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=260000000 canonical=59260483 new_cells=69746 new_atoms=2944 elapsed_secs=94.287 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=270000000 canonical=59262248 new_cells=71495 new_atoms=2960 elapsed_secs=98.034 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=280000000 canonical=59265038 new_cells=74249 new_atoms=2996 elapsed_secs=101.774 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=290000000 canonical=59267185 new_cells=76369 new_atoms=3023 elapsed_secs=105.500 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=300000000 canonical=59269452 new_cells=78589 new_atoms=3070 elapsed_secs=109.259 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=310000000 canonical=59273367 new_cells=82456 new_atoms=3118 elapsed_secs=113.035 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=320000000 canonical=59279065 new_cells=87955 new_atoms=3317 elapsed_secs=116.792 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=330000000 canonical=59281898 new_cells=90727 new_atoms=3378 elapsed_secs=120.554 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=340000000 canonical=59285050 new_cells=93816 new_atoms=3441 elapsed_secs=124.325 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=350000000 canonical=59289541 new_cells=98206 new_atoms=3542 elapsed_secs=128.119 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=360000000 canonical=59295540 new_cells=104065 new_atoms=3682 elapsed_secs=131.936 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=370000000 canonical=59300193 new_cells=108643 new_atoms=3757 elapsed_secs=135.755 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=380000000 canonical=59308715 new_cells=116999 new_atoms=3923 elapsed_secs=139.618 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=390000000 canonical=59318082 new_cells=126176 new_atoms=4113 elapsed_secs=143.487 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=400000000 canonical=59338312 new_cells=145228 new_atoms=5291 elapsed_secs=147.404 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+hashcons_progress physical=410000000 canonical=59373866 new_cells=179173 new_atoms=6900 elapsed_secs=154.438 estimated_dictionary_bytes=5563744400 raw_memo_bytes=9395240960
+verify_progress pairs=10000000 atom_bytes=11875090 elapsed_secs=0.957
+verify_progress pairs=20000000 atom_bytes=13383578 elapsed_secs=2.397
+verify_progress pairs=30000000 atom_bytes=13535498 elapsed_secs=4.118
+verify_progress pairs=40000000 atom_bytes=13659762 elapsed_secs=5.563
+verify_progress pairs=50000000 atom_bytes=13739506 elapsed_secs=7.025
+verify_progress pairs=60000000 atom_bytes=13821698 elapsed_secs=9.179
+verify_progress pairs=70000000 atom_bytes=13868194 elapsed_secs=10.710
+verify_progress pairs=80000000 atom_bytes=13927514 elapsed_secs=12.232
+verify_progress pairs=90000000 atom_bytes=13972802 elapsed_secs=13.750
+verify_progress pairs=100000000 atom_bytes=14018410 elapsed_secs=15.281
+verify_progress pairs=110000000 atom_bytes=14068786 elapsed_secs=16.866
+verify_progress pairs=120000000 atom_bytes=14096178 elapsed_secs=19.779
+verify_progress pairs=130000000 atom_bytes=14126394 elapsed_secs=21.426
+verify_progress pairs=140000000 atom_bytes=14179266 elapsed_secs=23.089
+verify_progress pairs=150000000 atom_bytes=14208130 elapsed_secs=24.785
+verify_progress pairs=160000000 atom_bytes=14250602 elapsed_secs=26.488
+verify_progress pairs=170000000 atom_bytes=14283786 elapsed_secs=28.133
+verify_progress pairs=180000000 atom_bytes=14322618 elapsed_secs=29.786
+verify_progress pairs=190000000 atom_bytes=14374442 elapsed_secs=31.455
+verify_progress pairs=200000000 atom_bytes=14422282 elapsed_secs=33.188
+verify_progress pairs=210000000 atom_bytes=14465490 elapsed_secs=34.882
+verify_progress pairs=220000000 atom_bytes=14508314 elapsed_secs=36.604
+verify_progress pairs=230000000 atom_bytes=14554266 elapsed_secs=38.362
+verify_progress pairs=240000000 atom_bytes=14600978 elapsed_secs=42.788
+verify_progress pairs=250000000 atom_bytes=14647618 elapsed_secs=44.611
+verify_progress pairs=260000000 atom_bytes=14701650 elapsed_secs=46.646
+verify_progress pairs=270000000 atom_bytes=14757634 elapsed_secs=48.358
+verify_progress pairs=280000000 atom_bytes=14823514 elapsed_secs=49.911
+verify_progress pairs=290000000 atom_bytes=14884338 elapsed_secs=51.445
+verify_progress pairs=300000000 atom_bytes=14960306 elapsed_secs=52.994
+verify_progress pairs=310000000 atom_bytes=15034114 elapsed_secs=54.532
+verify_progress pairs=320000000 atom_bytes=15129082 elapsed_secs=56.081
+verify_progress pairs=330000000 atom_bytes=15244602 elapsed_secs=57.620
+verify_progress pairs=340000000 atom_bytes=15345826 elapsed_secs=59.212
+verify_progress pairs=350000000 atom_bytes=15496858 elapsed_secs=60.776
+verify_progress pairs=360000000 atom_bytes=15695354 elapsed_secs=62.355
+verify_progress pairs=370000000 atom_bytes=15868586 elapsed_secs=63.932
+verify_progress pairs=380000000 atom_bytes=16152546 elapsed_secs=65.516
+verify_progress pairs=390000000 atom_bytes=16519810 elapsed_secs=67.116
+verify_progress pairs=400000000 atom_bytes=21906106 elapsed_secs=68.379
+verify_progress pairs=410000000 atom_bytes=11055061378 elapsed_secs=70.379

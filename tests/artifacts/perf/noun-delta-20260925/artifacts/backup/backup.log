@@ -1,0 +1,8 @@
+2026-09-25T16:42:15Z stopping production; source_bytes=636786733056
+2026-09-25T16:42:16Z production stopped; copying complete data directory
+verified 40 independent copied files
+2026-09-25T16:52:07Z restarting unchanged production service
+2026-09-25T16:52:08Z production restarted with sha256:16d6001a791b6f8c7dc28c8e9029ff228d9d324294174bc82bfcc5d139f7e169
+/etc/systemd/system/nockcloud-pool-leader.service: OK
+555280687104	/opt/nockcloud/backups/pma-storage-efficiency-20260925T1635Z/data
+2026-09-25T16:52:08Z stopped-copy-restart sequence complete

@@ -1,0 +1,15 @@
+{
+  "date": "2026-09-25",
+  "repository_branch": "codex/pma-storage-efficiency",
+  "repository_head": "639240265d1298d4aef36b350772faa994173058",
+  "pull_request": "https://github.com/nockchain/nockchain/pull/207",
+  "runtime_source_changes_for_this_experiment": false,
+  "filesystem": {
+    "source": "/dev/mapper/vg0-root",
+    "type": "ext4",
+    "options": "rw,relatime",
+    "capacity_observed": "6.9T",
+    "available_observed": "3.8T"
+  },
+  "co_tenancy_update": "Read-only SQLite fallback verification began 18:08:12 UTC with CPUQuota50%,MemoryMax2G,Nice15,IOSchedulingClassidle; it overlaps later baseline, block control, variant pilots and sequence experiment. Production remains running. No global host settings changed."
+}

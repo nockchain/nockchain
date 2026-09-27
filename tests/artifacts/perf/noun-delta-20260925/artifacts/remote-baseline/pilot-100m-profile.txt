@@ -1,0 +1,25 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:P'
+# Event count (approx.): 84550354151
+#
+# Overhead  Command          Shared Object      Symbol
+# ........  ...............  .................  ........................................................................................................................................
+#
+    36.24%  noun-delta-benc  noun-delta-bench   [.] _blake3_compress_in_place_avx512
+    21.80%  noun-delta-benc  noun-delta-bench   [.] _RINvNtCsi35qDuBo1p6_26nockchain_noun_delta_bench6engine11build_indexNtNtB4_3pma8SnapshotECsgvGqySSJdTt_26nockchain_noun_delta_bench
+    16.68%  noun-delta-benc  noun-delta-bench   [.] _RNvMsa_Csh2Q8kGCyV5z_6blake3NtB5_10ChunkState6update
+     6.97%  noun-delta-benc  noun-delta-bench   [.] _RNvMsd_Csh2Q8kGCyV5z_6blake3NtB5_6Hasher6update
+     5.74%  noun-delta-benc  noun-delta-bench   [.] _RNvMNtCsi35qDuBo1p6_26nockchain_noun_delta_bench3pmaNtB2_8Snapshot10word_range
+     3.18%  noun-delta-benc  noun-delta-bench   [.] _RNvMNtCsi35qDuBo1p6_26nockchain_noun_delta_bench3pmaNtB2_8Snapshot4node
+     1.82%  noun-delta-benc  noun-delta-bench   [.] _RNvMs1_NtCsi35qDuBo1p6_26nockchain_noun_delta_bench6engineNtB5_11MerkleIndex7hash_of
+     1.55%  noun-delta-benc  noun-delta-bench   [.] _RNvNtCsi35qDuBo1p6_26nockchain_noun_delta_bench6engine9hash_cell
+     1.02%  noun-delta-benc  noun-delta-bench   [.] _RNvNtCsi35qDuBo1p6_26nockchain_noun_delta_bench6engine9hash_atom
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
