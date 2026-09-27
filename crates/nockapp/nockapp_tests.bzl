@@ -8,6 +8,7 @@ NOCKAPP_BOOT_PMA_TESTS = [
     "kernel::boot::tests::bootstraps_pma_from_checkpoint_once",
     "kernel::boot::tests::checkpoint_ahead_of_event_log_recovers_to_sqlite_boundary",
     "kernel::boot::tests::checkpoint_behind_event_log_replays_to_sqlite_boundary",
+    "kernel::boot::tests::compaction_rebuilds_compute_cadence_and_recovers_from_epoch",
     "kernel::boot::tests::export_state_jam_creates_parent_dir",
     "kernel::boot::tests::falls_back_from_corrupt_newest_rotating_snapshot",
     "kernel::boot::tests::falls_back_from_manifest_only_corruption",

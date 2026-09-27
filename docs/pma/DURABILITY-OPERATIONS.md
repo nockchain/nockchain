@@ -8,12 +8,13 @@ The current runtime has:
 
 1. PMA durability enabled by default for normal NockApp boots.
 2. SQLite event durability for accepted events.
-3. An immutable `epoch` snapshot.
+3. An epoch snapshot advanced by compaction into immutable generations.
 4. Rotating snapshots with retention of two ready non-epoch snapshots.
 5. Verified snapshot restore with replay from SQLite `job_jam`.
 6. Fallback across snapshot candidates, then checkpoint/state-jam bootstrap.
 7. Orphan snapshot artifact cleanup into `pma/corrupted_pma/`.
 8. PMA GC on an interval after normal event durability has completed.
+9. Event-log compaction on a cumulative accepted event-processing time threshold, bounded by the older retained rotating snapshot.
 
 ## Relevant CLI Flags
 
@@ -31,13 +32,16 @@ These are the main boot flags operators and production testers should know about
 4. `--rotating-snapshot-interval-event-time`
    Controls how much cumulative accepted event-processing time must elapse before a new rotating snapshot is attempted. Use `none` or `0` to disable rotating snapshots. Default: `900` seconds.
 
-5. `--gc-interval`
+5. `--epoch-compaction-interval-event-time`
+   Controls cumulative accepted event-processing time between epoch compactions, using the same compute-time semantics as snapshot rotation. Default: `1800` seconds. An enabled threshold must be strictly greater than the rotating snapshot threshold (`900` seconds by default); invalid configurations fail before boot creates files. Use `none` or `0` to disable compaction. Disabling rotating snapshots or selecting `--ephemeral` also disables compaction.
+
+6. `--gc-interval`
    Controls PMA GC cadence in wall-clock seconds. Use `none` or `0` to disable PMA GC. Default: `3600` seconds.
 
-6. `--bootstrap-from-chkjam`
+7. `--bootstrap-from-chkjam`
    Copies a jammed checkpoint into the data directory as a bootstrap source. This is a migration/bootstrap path, not the normal steady-state recovery path.
 
-7. `--disable-fsync`
+8. `--disable-fsync`
    Disables filesystem sync calls, including SQLite full-sync durability. This is for benchmarks or local testing only, not production durability testing.
 
 ## Relevant Environment Variables
@@ -52,7 +56,7 @@ Under `data_dir`:
 1. `event-log.sqlite3`
 2. `event-log.sqlite3-wal` and `event-log.sqlite3-shm` when SQLite WAL mode is active
 3. `pma/0.pma`, `pma/1.pma`, `pma/0.meta`, and `pma/1.meta` for operative runtime slabs
-4. `pma/epoch.pma` and `pma/epoch.manifest`
+4. Initial `pma/epoch.pma` / `pma/epoch.manifest`, followed by immutable `pma/epoch-${TAG}.pma` / `pma/epoch-${TAG}.manifest` generations
 5. `pma/snap-${TIMESTAMP}.pma` and `pma/snap-${TIMESTAMP}.manifest`
 6. `pma/corrupted_pma/`
 7. `checkpoints/` for legacy checkpoint jams used during bootstrap or rollback
@@ -62,7 +66,7 @@ Notes:
 1. `epoch` and `snap-*` files are snapshot artifacts.
 2. `0.pma` / `1.pma` are the operative runtime slabs. GC can switch which slab is active.
 3. `corrupted_pma/` is where orphan snapshot artifacts or crash leftovers are moved for later inspection.
-4. The accepted-event log is append-only in the current durability path; plan disk capacity accordingly until pruning/compaction lands.
+4. Compaction prunes accepted events through the epoch boundary after publishing and fully verifying the new epoch. The event suffix needed by both retained rotating snapshots remains in SQLite.
 5. Do not manually edit any of these files while the node is running.
 
 ## Boot Order
@@ -74,11 +78,13 @@ The recovery decision order is:
 1. Valid operative PMA fast path when the PMA event number equals SQLite max event number.
 2. Special first-migration bootstrap: valid PMA with a nonzero event number and an empty event log.
 3. Ready snapshots from SQLite, ordered with the active snapshot first and then remaining ready candidates.
-4. Checkpoint/state-only bootstrap, if it is not ahead of SQLite and replay can reach SQLite max.
-5. Fresh kernel plus event-log replay from event 0, only when SQLite has events and replay continuity is intact.
+4. Checkpoint/state-only bootstrap, if it is at or after the compacted replay floor, not ahead of SQLite, and replay can reach SQLite max.
+5. Fresh kernel plus event-log replay from event 0, only when no prefix has been compacted, SQLite has events, and replay continuity is intact.
 6. Fresh kernel with no replay only when SQLite has no committed events.
 
 If PMA is ahead of, behind, missing from, or invalid relative to the event log, it is not treated as authoritative. Boot attempts verified snapshot restore and event-log replay instead.
+
+Snapshots and checkpoints below the compacted replay floor are skipped. Once compaction has removed a prefix, boot requires a recovery base at or after that floor; fresh state cannot replay the retained suffix alone. The operative PMA fast path still uses SQLite's maximum retained event number, because compaction always retains the accepted head.
 
 If continuity is broken in the event log for the chosen boot base, boot fails rather than silently falling back to stale state.
 
@@ -89,6 +95,18 @@ On boot:
 1. Snapshot artifacts without corresponding ready SQLite rows are moved into `pma/corrupted_pma/`.
 2. If a snapshot candidate fails verification, it is marked `failed` in SQLite and boot continues to the next candidate.
 3. The active snapshot id is updated when a snapshot is successfully restored.
+
+## Epoch Compaction Behavior
+
+Both rotation and compaction count accepted event evaluation time, excluding idle time, rejected events, snapshot copying, and storage maintenance. Their independent counters survive restart through the durations recorded in SQLite. A successful compaction records the accepted head at which it ran, so replay history retained before that head does not count again toward the next compaction.
+
+After an accepted event and any due rotation, compaction checks its compute threshold. It requires two ready rotating snapshots and uses the older one as the new epoch boundary. If fewer than two are available, or the boundary cannot advance, compaction waits. This keeps the epoch at or behind both retained rotations even when an individual event crosses multiple thresholds or snapshot creation falls behind.
+
+A failed compaction attempt waits another full compaction interval of accepted event-processing time before retrying. Restart reconstructs the successful-compaction cadence and may retry immediately if it is already due.
+
+The runtime copies the older rotation into an independent epoch generation, preserves sparse storage, and fully verifies it. A single SQLite transaction publishes the new epoch, retires superseded snapshots, advances the replay floor, and deletes events through that floor. Only after the transaction commits are retired snapshot files removed. A crash before publication leaves the previous epoch and event history available; a crash afterward leaves the new epoch and retained replay suffix available. Boot cleanup handles leftover unpublished or retired files.
+
+Compaction then runs SQLite `VACUUM` and a truncating WAL checkpoint to return freed database and WAL space to the filesystem. Failed physical reclamation remains pending for a later compaction or boot cleanup; it does not undo the durable epoch publication. These operations perform storage IO on the serialized runtime thread and need temporary headroom for the deletion WAL and database rewrite. Compute-time thresholds bound replay work rather than disk bytes, so database size depends on the workload.
 
 ## PMA GC Behavior
 

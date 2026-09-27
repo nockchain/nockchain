@@ -1,0 +1,248 @@
+index_progress visited=5000000 completed=4999900 atom_bytes=6173986 elapsed_secs=1.605 estimated_index_bytes=482353360 stack_frames=133
+index_progress visited=10000000 completed=9999910 atom_bytes=11865762 elapsed_secs=3.354 estimated_index_bytes=964698320 stack_frames=115
+index_progress visited=15000000 completed=14999904 atom_bytes=13225874 elapsed_secs=5.492 estimated_index_bytes=1258299600 stack_frames=122
+index_progress visited=20000000 completed=19999874 atom_bytes=13365354 elapsed_secs=7.649 estimated_index_bytes=1929388240 stack_frames=162
+index_progress visited=25000000 completed=24999856 atom_bytes=13458042 elapsed_secs=9.842 estimated_index_bytes=1929388240 stack_frames=176
+index_progress visited=30000000 completed=29999910 atom_bytes=13517274 elapsed_secs=12.459 estimated_index_bytes=2516590800 stack_frames=109
+index_progress visited=35000000 completed=34999894 atom_bytes=13572570 elapsed_secs=14.712 estimated_index_bytes=3858768080 stack_frames=131
+index_progress visited=40000000 completed=39999871 atom_bytes=13641538 elapsed_secs=16.992 estimated_index_bytes=3858768080 stack_frames=162
+index_progress visited=45000000 completed=44999873 atom_bytes=13684402 elapsed_secs=19.281 estimated_index_bytes=3858768080 stack_frames=151
+index_progress visited=50000000 completed=49999928 atom_bytes=13721314 elapsed_secs=21.583 estimated_index_bytes=3858768080 stack_frames=88
+index_progress visited=55000000 completed=54999855 atom_bytes=13743786 elapsed_secs=23.933 estimated_index_bytes=3858768080 stack_frames=191
+index_progress visited=60000000 completed=59999882 atom_bytes=13797554 elapsed_secs=26.938 estimated_index_bytes=5033173200 stack_frames=145
+index_progress visited=65000000 completed=64999892 atom_bytes=13825082 elapsed_secs=29.239 estimated_index_bytes=5033173200 stack_frames=132
+index_progress visited=70000000 completed=69999898 atom_bytes=13844090 elapsed_secs=31.564 estimated_index_bytes=7717527760 stack_frames=133
+index_progress visited=75000000 completed=74999850 atom_bytes=13876426 elapsed_secs=33.861 estimated_index_bytes=7717527760 stack_frames=205
+index_progress visited=80000000 completed=79999842 atom_bytes=13903210 elapsed_secs=36.169 estimated_index_bytes=7717527760 stack_frames=202
+index_progress visited=85000000 completed=84999874 atom_bytes=13927642 elapsed_secs=38.494 estimated_index_bytes=7717527760 stack_frames=166
+index_progress visited=90000000 completed=89999853 atom_bytes=13950130 elapsed_secs=40.808 estimated_index_bytes=7717527760 stack_frames=181
+index_progress visited=95000000 completed=94999873 atom_bytes=13963330 elapsed_secs=43.146 estimated_index_bytes=7717527760 stack_frames=159
+index_progress visited=100000000 completed=99999881 atom_bytes=13995770 elapsed_secs=45.479 estimated_index_bytes=7717527760 stack_frames=143
+index_progress visited=105000000 completed=104999842 atom_bytes=14023498 elapsed_secs=47.860 estimated_index_bytes=7717527760 stack_frames=195
+index_progress visited=110000000 completed=109999896 atom_bytes=14046138 elapsed_secs=50.362 estimated_index_bytes=7717527760 stack_frames=126
+index_progress visited=115000000 completed=114999873 atom_bytes=14061530 elapsed_secs=52.947 estimated_index_bytes=7717527760 stack_frames=160
+index_progress visited=120000000 completed=119999868 atom_bytes=14071274 elapsed_secs=56.648 estimated_index_bytes=10066338000 stack_frames=168
+index_progress visited=125000000 completed=124999877 atom_bytes=14087986 elapsed_secs=59.061 estimated_index_bytes=10066338000 stack_frames=159
+index_progress visited=130000000 completed=129999851 atom_bytes=14101522 elapsed_secs=61.466 estimated_index_bytes=10066338000 stack_frames=197
+index_progress visited=135000000 completed=134999910 atom_bytes=14131810 elapsed_secs=63.868 estimated_index_bytes=15435047120 stack_frames=110
+index_progress visited=140000000 completed=139999859 atom_bytes=14145962 elapsed_secs=66.281 estimated_index_bytes=15435047120 stack_frames=174
+index_progress visited=145000000 completed=144999910 atom_bytes=14157658 elapsed_secs=68.688 estimated_index_bytes=15435047120 stack_frames=116
+index_progress visited=150000000 completed=149999907 atom_bytes=14174906 elapsed_secs=71.096 estimated_index_bytes=15435047120 stack_frames=117
+index_progress visited=155000000 completed=154999877 atom_bytes=14197434 elapsed_secs=73.527 estimated_index_bytes=15435047120 stack_frames=155
+index_progress visited=160000000 completed=159999875 atom_bytes=14214218 elapsed_secs=75.971 estimated_index_bytes=15435047120 stack_frames=153
+index_progress visited=165000000 completed=164999878 atom_bytes=14227346 elapsed_secs=78.410 estimated_index_bytes=15435047120 stack_frames=146
+index_progress visited=170000000 completed=169999876 atom_bytes=14247082 elapsed_secs=80.840 estimated_index_bytes=15435047120 stack_frames=155
+index_progress visited=175000000 completed=174999877 atom_bytes=14265746 elapsed_secs=83.283 estimated_index_bytes=15435047120 stack_frames=156
+index_progress visited=180000000 completed=179999915 atom_bytes=14285786 elapsed_secs=85.731 estimated_index_bytes=15435047120 stack_frames=101
+index_progress visited=185000000 completed=184999840 atom_bytes=14312018 elapsed_secs=88.191 estimated_index_bytes=15435047120 stack_frames=208
+index_progress visited=190000000 completed=189999914 atom_bytes=14335530 elapsed_secs=90.657 estimated_index_bytes=15435047120 stack_frames=106
+index_progress visited=195000000 completed=194999888 atom_bytes=14349450 elapsed_secs=93.158 estimated_index_bytes=15435047120 stack_frames=140
+index_progress visited=200000000 completed=199999896 atom_bytes=14383786 elapsed_secs=95.624 estimated_index_bytes=15435047120 stack_frames=138
+index_progress visited=205000000 completed=204999851 atom_bytes=14405434 elapsed_secs=98.083 estimated_index_bytes=15435047120 stack_frames=195
+index_progress visited=210000000 completed=209999887 atom_bytes=14426426 elapsed_secs=100.575 estimated_index_bytes=15435047120 stack_frames=141
+index_progress visited=215000000 completed=214999907 atom_bytes=14453474 elapsed_secs=103.095 estimated_index_bytes=15435047120 stack_frames=112
+index_progress visited=220000000 completed=219999914 atom_bytes=14469426 elapsed_secs=105.645 estimated_index_bytes=15435047120 stack_frames=105
+index_progress visited=225000000 completed=224999853 atom_bytes=14493714 elapsed_secs=108.233 estimated_index_bytes=15435047120 stack_frames=177
+index_progress visited=230000000 completed=229999849 atom_bytes=14515562 elapsed_secs=110.863 estimated_index_bytes=15435047120 stack_frames=190
+index_progress visited=235000000 completed=234999872 atom_bytes=14539322 elapsed_secs=115.816 estimated_index_bytes=20132667600 stack_frames=155
+index_progress visited=240000000 completed=239999857 atom_bytes=14561690 elapsed_secs=118.571 estimated_index_bytes=20132667600 stack_frames=174
+index_progress visited=245000000 completed=244999898 atom_bytes=14585178 elapsed_secs=121.155 estimated_index_bytes=20132667600 stack_frames=124
+index_progress visited=250000000 completed=249999892 atom_bytes=14608242 elapsed_secs=123.726 estimated_index_bytes=20132667600 stack_frames=131
+index_progress visited=255000000 completed=254999874 atom_bytes=14629082 elapsed_secs=126.302 estimated_index_bytes=20132667600 stack_frames=155
+index_progress visited=260000000 completed=259999924 atom_bytes=14661618 elapsed_secs=128.884 estimated_index_bytes=20132667600 stack_frames=95
+index_progress visited=265000000 completed=264999884 atom_bytes=14686490 elapsed_secs=131.468 estimated_index_bytes=20132667600 stack_frames=151
+index_progress visited=270000000 completed=269999871 atom_bytes=14717642 elapsed_secs=134.066 estimated_index_bytes=30870085840 stack_frames=168
+index_progress visited=275000000 completed=274999828 atom_bytes=14754914 elapsed_secs=136.645 estimated_index_bytes=30870085840 stack_frames=223
+index_progress visited=280000000 completed=279999897 atom_bytes=14783258 elapsed_secs=139.236 estimated_index_bytes=30870085840 stack_frames=126
+index_progress visited=285000000 completed=284999900 atom_bytes=14815170 elapsed_secs=141.809 estimated_index_bytes=30870085840 stack_frames=129
+index_progress visited=290000000 completed=289999864 atom_bytes=14843962 elapsed_secs=144.382 estimated_index_bytes=30870085840 stack_frames=179
+index_progress visited=295000000 completed=294999843 atom_bytes=14878450 elapsed_secs=146.950 estimated_index_bytes=30870085840 stack_frames=214
+index_progress visited=300000000 completed=299999862 atom_bytes=14920026 elapsed_secs=149.519 estimated_index_bytes=30870085840 stack_frames=182
+index_progress visited=305000000 completed=304999868 atom_bytes=14953114 elapsed_secs=152.092 estimated_index_bytes=30870085840 stack_frames=170
+index_progress visited=310000000 completed=309999857 atom_bytes=14992690 elapsed_secs=154.705 estimated_index_bytes=30870085840 stack_frames=178
+index_progress visited=315000000 completed=314999884 atom_bytes=15041650 elapsed_secs=157.301 estimated_index_bytes=30870085840 stack_frames=147
+index_progress visited=320000000 completed=319999932 atom_bytes=15085002 elapsed_secs=159.906 estimated_index_bytes=30870085840 stack_frames=83
+index_progress visited=325000000 completed=324999864 atom_bytes=15143186 elapsed_secs=162.498 estimated_index_bytes=30870085840 stack_frames=179
+index_progress visited=330000000 completed=329999896 atom_bytes=15199954 elapsed_secs=165.088 estimated_index_bytes=30870085840 stack_frames=129
+index_progress visited=335000000 completed=334999911 atom_bytes=15251250 elapsed_secs=167.702 estimated_index_bytes=30870085840 stack_frames=114
+index_progress visited=340000000 completed=339999873 atom_bytes=15300818 elapsed_secs=170.298 estimated_index_bytes=30870085840 stack_frames=159
+index_progress visited=345000000 completed=344999820 atom_bytes=15388018 elapsed_secs=172.909 estimated_index_bytes=30870085840 stack_frames=236
+index_progress visited=350000000 completed=349999883 atom_bytes=15451946 elapsed_secs=175.505 estimated_index_bytes=30870085840 stack_frames=141
+index_progress visited=355000000 completed=354999906 atom_bytes=15559410 elapsed_secs=178.103 estimated_index_bytes=30870085840 stack_frames=113
+index_progress visited=360000000 completed=359999903 atom_bytes=15652002 elapsed_secs=180.714 estimated_index_bytes=30870085840 stack_frames=119
+index_progress visited=365000000 completed=364999872 atom_bytes=15730034 elapsed_secs=183.320 estimated_index_bytes=30870085840 stack_frames=169
+index_progress visited=370000000 completed=369999888 atom_bytes=15824426 elapsed_secs=186.021 estimated_index_bytes=30870085840 stack_frames=144
+index_progress visited=375000000 completed=374999902 atom_bytes=15949890 elapsed_secs=188.630 estimated_index_bytes=30870085840 stack_frames=122
+index_progress visited=380000000 completed=379999885 atom_bytes=16103442 elapsed_secs=191.241 estimated_index_bytes=30870085840 stack_frames=139
+index_progress visited=385000000 completed=384999843 atom_bytes=16246522 elapsed_secs=193.970 estimated_index_bytes=30870085840 stack_frames=192
+index_progress visited=390000000 completed=389999937 atom_bytes=16547914 elapsed_secs=196.565 estimated_index_bytes=30870085840 stack_frames=87
+index_progress visited=395000000 completed=394999924 atom_bytes=19244010 elapsed_secs=198.845 estimated_index_bytes=30870085840 stack_frames=98
+index_progress visited=400000000 completed=399999931 atom_bytes=21922114 elapsed_secs=201.122 estimated_index_bytes=30870085840 stack_frames=89
+index_progress visited=405000000 completed=404999934 atom_bytes=24562642 elapsed_secs=203.443 estimated_index_bytes=30870085840 stack_frames=85
+index_progress visited=410000000 completed=409999953 atom_bytes=11660382563 elapsed_secs=234.414 estimated_index_bytes=30870085840 stack_frames=59
+index_progress visited=415000000 completed=414999951 atom_bytes=18565010512 elapsed_secs=253.965 estimated_index_bytes=30870085840 stack_frames=60
+index_progress visited=5000000 completed=4999897 atom_bytes=6177122 elapsed_secs=1.604 estimated_index_bytes=482353360 stack_frames=134
+index_progress visited=10000000 completed=9999901 atom_bytes=11875090 elapsed_secs=3.360 estimated_index_bytes=964698320 stack_frames=132
+index_progress visited=15000000 completed=14999912 atom_bytes=13249426 elapsed_secs=5.662 estimated_index_bytes=1258299600 stack_frames=110
+index_progress visited=20000000 completed=19999897 atom_bytes=13383578 elapsed_secs=7.862 estimated_index_bytes=1929388240 stack_frames=128
+index_progress visited=25000000 completed=24999910 atom_bytes=13476218 elapsed_secs=10.060 estimated_index_bytes=1929388240 stack_frames=110
+index_progress visited=30000000 completed=29999887 atom_bytes=13535498 elapsed_secs=12.626 estimated_index_bytes=2516590800 stack_frames=136
+index_progress visited=35000000 completed=34999890 atom_bytes=13590794 elapsed_secs=14.940 estimated_index_bytes=3858768080 stack_frames=138
+index_progress visited=40000000 completed=39999878 atom_bytes=13659762 elapsed_secs=17.244 estimated_index_bytes=3858768080 stack_frames=156
+index_progress visited=45000000 completed=44999889 atom_bytes=13701594 elapsed_secs=19.552 estimated_index_bytes=3858768080 stack_frames=139
+index_progress visited=50000000 completed=49999916 atom_bytes=13739506 elapsed_secs=21.982 estimated_index_bytes=3858768080 stack_frames=107
+index_progress visited=55000000 completed=54999855 atom_bytes=13767898 elapsed_secs=24.366 estimated_index_bytes=3858768080 stack_frames=177
+index_progress visited=60000000 completed=59999901 atom_bytes=13821698 elapsed_secs=27.405 estimated_index_bytes=5033173200 stack_frames=128
+index_progress visited=65000000 completed=64999858 atom_bytes=13849226 elapsed_secs=29.865 estimated_index_bytes=5033173200 stack_frames=186
+index_progress visited=70000000 completed=69999885 atom_bytes=13868194 elapsed_secs=32.216 estimated_index_bytes=7717527760 stack_frames=147
+index_progress visited=75000000 completed=74999900 atom_bytes=13900578 elapsed_secs=34.544 estimated_index_bytes=7717527760 stack_frames=125
+index_progress visited=80000000 completed=79999835 atom_bytes=13927514 elapsed_secs=36.889 estimated_index_bytes=7717527760 stack_frames=218
+index_progress visited=85000000 completed=84999853 atom_bytes=13950314 elapsed_secs=39.226 estimated_index_bytes=7717527760 stack_frames=195
+index_progress visited=90000000 completed=89999852 atom_bytes=13972802 elapsed_secs=41.560 estimated_index_bytes=7717527760 stack_frames=194
+index_progress visited=95000000 completed=94999894 atom_bytes=13986002 elapsed_secs=43.905 estimated_index_bytes=7717527760 stack_frames=136
+index_progress visited=100000000 completed=99999867 atom_bytes=14018410 elapsed_secs=46.376 estimated_index_bytes=7717527760 stack_frames=161
+index_progress visited=105000000 completed=104999897 atom_bytes=14046170 elapsed_secs=48.817 estimated_index_bytes=7717527760 stack_frames=132
+index_progress visited=110000000 completed=109999890 atom_bytes=14068786 elapsed_secs=51.278 estimated_index_bytes=7717527760 stack_frames=134
+index_progress visited=115000000 completed=114999869 atom_bytes=14086434 elapsed_secs=53.816 estimated_index_bytes=7717527760 stack_frames=170
+index_progress visited=120000000 completed=119999860 atom_bytes=14096178 elapsed_secs=57.622 estimated_index_bytes=10066338000 stack_frames=185
+index_progress visited=125000000 completed=124999899 atom_bytes=14112914 elapsed_secs=60.091 estimated_index_bytes=10066338000 stack_frames=125
+index_progress visited=130000000 completed=129999890 atom_bytes=14126394 elapsed_secs=62.563 estimated_index_bytes=10066338000 stack_frames=133
+index_progress visited=135000000 completed=134999857 atom_bytes=14165114 elapsed_secs=64.965 estimated_index_bytes=15435047120 stack_frames=184
+index_progress visited=140000000 completed=139999892 atom_bytes=14179266 elapsed_secs=67.378 estimated_index_bytes=15435047120 stack_frames=131
+index_progress visited=145000000 completed=144999904 atom_bytes=14190938 elapsed_secs=69.784 estimated_index_bytes=15435047120 stack_frames=125
+index_progress visited=150000000 completed=149999879 atom_bytes=14208130 elapsed_secs=72.198 estimated_index_bytes=15435047120 stack_frames=153
+index_progress visited=155000000 completed=154999879 atom_bytes=14233922 elapsed_secs=74.738 estimated_index_bytes=15435047120 stack_frames=161
+index_progress visited=160000000 completed=159999909 atom_bytes=14250602 elapsed_secs=77.183 estimated_index_bytes=15435047120 stack_frames=115
+index_progress visited=165000000 completed=164999860 atom_bytes=14267586 elapsed_secs=79.625 estimated_index_bytes=15435047120 stack_frames=180
+index_progress visited=170000000 completed=169999892 atom_bytes=14283786 elapsed_secs=82.064 estimated_index_bytes=15435047120 stack_frames=141
+index_progress visited=175000000 completed=174999850 atom_bytes=14302450 elapsed_secs=84.497 estimated_index_bytes=15435047120 stack_frames=194
+index_progress visited=180000000 completed=179999878 atom_bytes=14322618 elapsed_secs=86.945 estimated_index_bytes=15435047120 stack_frames=148
+index_progress visited=185000000 completed=184999884 atom_bytes=14350930 elapsed_secs=89.484 estimated_index_bytes=15435047120 stack_frames=145
+index_progress visited=190000000 completed=189999848 atom_bytes=14374442 elapsed_secs=91.924 estimated_index_bytes=15435047120 stack_frames=196
+index_progress visited=195000000 completed=194999848 atom_bytes=14386810 elapsed_secs=94.382 estimated_index_bytes=15435047120 stack_frames=205
+index_progress visited=200000000 completed=199999891 atom_bytes=14422282 elapsed_secs=96.830 estimated_index_bytes=15435047120 stack_frames=136
+index_progress visited=205000000 completed=204999901 atom_bytes=14444394 elapsed_secs=99.408 estimated_index_bytes=15435047120 stack_frames=121
+index_progress visited=210000000 completed=209999866 atom_bytes=14465490 elapsed_secs=101.938 estimated_index_bytes=15435047120 stack_frames=169
+index_progress visited=215000000 completed=214999917 atom_bytes=14492578 elapsed_secs=104.475 estimated_index_bytes=15435047120 stack_frames=103
+index_progress visited=220000000 completed=219999900 atom_bytes=14508314 elapsed_secs=107.021 estimated_index_bytes=15435047120 stack_frames=117
+index_progress visited=225000000 completed=224999855 atom_bytes=14532266 elapsed_secs=109.618 estimated_index_bytes=15435047120 stack_frames=191
+index_progress visited=230000000 completed=229999861 atom_bytes=14554266 elapsed_secs=112.402 estimated_index_bytes=15435047120 stack_frames=168
+index_progress visited=235000000 completed=234999828 atom_bytes=14578610 elapsed_secs=117.473 estimated_index_bytes=20132667600 stack_frames=223
+index_progress visited=240000000 completed=239999854 atom_bytes=14600978 elapsed_secs=120.078 estimated_index_bytes=20132667600 stack_frames=187
+index_progress visited=245000000 completed=244999921 atom_bytes=14624786 elapsed_secs=122.696 estimated_index_bytes=20132667600 stack_frames=97
+index_progress visited=250000000 completed=249999909 atom_bytes=14647618 elapsed_secs=125.368 estimated_index_bytes=20132667600 stack_frames=111
+index_progress visited=255000000 completed=254999877 atom_bytes=14669058 elapsed_secs=128.024 estimated_index_bytes=20132667600 stack_frames=148
+index_progress visited=260000000 completed=259999858 atom_bytes=14701650 elapsed_secs=130.662 estimated_index_bytes=20132667600 stack_frames=190
+index_progress visited=265000000 completed=264999840 atom_bytes=14726474 elapsed_secs=133.299 estimated_index_bytes=20132667600 stack_frames=190
+index_progress visited=270000000 completed=269999854 atom_bytes=14757634 elapsed_secs=135.952 estimated_index_bytes=30870085840 stack_frames=171
+index_progress visited=275000000 completed=274999914 atom_bytes=14794226 elapsed_secs=138.586 estimated_index_bytes=30870085840 stack_frames=107
+index_progress visited=280000000 completed=279999864 atom_bytes=14823514 elapsed_secs=141.220 estimated_index_bytes=30870085840 stack_frames=180
+index_progress visited=285000000 completed=284999880 atom_bytes=14855402 elapsed_secs=143.863 estimated_index_bytes=30870085840 stack_frames=151
+index_progress visited=290000000 completed=289999883 atom_bytes=14884338 elapsed_secs=146.524 estimated_index_bytes=30870085840 stack_frames=147
+index_progress visited=295000000 completed=294999878 atom_bytes=14918474 elapsed_secs=149.169 estimated_index_bytes=30870085840 stack_frames=152
+index_progress visited=300000000 completed=299999877 atom_bytes=14960306 elapsed_secs=151.813 estimated_index_bytes=30870085840 stack_frames=154
+index_progress visited=305000000 completed=304999849 atom_bytes=14993986 elapsed_secs=154.446 estimated_index_bytes=30870085840 stack_frames=190
+index_progress visited=310000000 completed=309999799 atom_bytes=15034114 elapsed_secs=157.080 estimated_index_bytes=30870085840 stack_frames=266
+index_progress visited=315000000 completed=314999843 atom_bytes=15085522 elapsed_secs=159.806 estimated_index_bytes=30870085840 stack_frames=205
+index_progress visited=320000000 completed=319999857 atom_bytes=15129082 elapsed_secs=162.441 estimated_index_bytes=30870085840 stack_frames=183
+index_progress visited=325000000 completed=324999858 atom_bytes=15186362 elapsed_secs=165.071 estimated_index_bytes=30870085840 stack_frames=181
+index_progress visited=330000000 completed=329999842 atom_bytes=15244602 elapsed_secs=167.743 estimated_index_bytes=30870085840 stack_frames=207
+index_progress visited=335000000 completed=334999844 atom_bytes=15296242 elapsed_secs=170.488 estimated_index_bytes=30870085840 stack_frames=207
+index_progress visited=340000000 completed=339999835 atom_bytes=15345826 elapsed_secs=173.107 estimated_index_bytes=30870085840 stack_frames=214
+index_progress visited=345000000 completed=344999894 atom_bytes=15433298 elapsed_secs=175.731 estimated_index_bytes=30870085840 stack_frames=130
+index_progress visited=350000000 completed=349999898 atom_bytes=15496858 elapsed_secs=178.365 estimated_index_bytes=30870085840 stack_frames=124
+index_progress visited=355000000 completed=354999865 atom_bytes=15603602 elapsed_secs=181.011 estimated_index_bytes=30870085840 stack_frames=160
+index_progress visited=360000000 completed=359999871 atom_bytes=15695354 elapsed_secs=183.742 estimated_index_bytes=30870085840 stack_frames=161
+index_progress visited=365000000 completed=364999883 atom_bytes=15774458 elapsed_secs=186.388 estimated_index_bytes=30870085840 stack_frames=146
+index_progress visited=370000000 completed=369999875 atom_bytes=15868586 elapsed_secs=189.019 estimated_index_bytes=30870085840 stack_frames=153
+index_progress visited=375000000 completed=374999909 atom_bytes=15995394 elapsed_secs=191.653 estimated_index_bytes=30870085840 stack_frames=112
+index_progress visited=380000000 completed=379999828 atom_bytes=16152546 elapsed_secs=194.423 estimated_index_bytes=30870085840 stack_frames=228
+index_progress visited=385000000 completed=384999881 atom_bytes=16289786 elapsed_secs=197.102 estimated_index_bytes=30870085840 stack_frames=148
+index_progress visited=390000000 completed=389999894 atom_bytes=16519810 elapsed_secs=199.747 estimated_index_bytes=30870085840 stack_frames=138
+index_progress visited=395000000 completed=394999928 atom_bytes=19220578 elapsed_secs=202.081 estimated_index_bytes=30870085840 stack_frames=92
+index_progress visited=400000000 completed=399999932 atom_bytes=21906106 elapsed_secs=204.426 estimated_index_bytes=30870085840 stack_frames=86
+index_progress visited=405000000 completed=404999934 atom_bytes=24550450 elapsed_secs=206.890 estimated_index_bytes=30870085840 stack_frames=85
+index_progress visited=410000000 completed=409999946 atom_bytes=11055061378 elapsed_secs=236.691 estimated_index_bytes=30870085840 stack_frames=64
+index_progress visited=415000000 completed=414999945 atom_bytes=18643306744 elapsed_secs=258.086 estimated_index_bytes=30870085840 stack_frames=67
+lookup_progress nodes=10000000 unique_hashes=8540941 elapsed_secs=0.382
+lookup_progress nodes=20000000 unique_hashes=10875607 elapsed_secs=0.736
+lookup_progress nodes=30000000 unique_hashes=12020351 elapsed_secs=1.089
+lookup_progress nodes=40000000 unique_hashes=12837152 elapsed_secs=1.443
+lookup_progress nodes=50000000 unique_hashes=13514357 elapsed_secs=1.798
+lookup_progress nodes=60000000 unique_hashes=14105158 elapsed_secs=2.161
+lookup_progress nodes=70000000 unique_hashes=14663045 elapsed_secs=2.521
+lookup_progress nodes=80000000 unique_hashes=15131241 elapsed_secs=3.071
+lookup_progress nodes=90000000 unique_hashes=15488432 elapsed_secs=3.454
+lookup_progress nodes=100000000 unique_hashes=15967188 elapsed_secs=3.848
+lookup_progress nodes=110000000 unique_hashes=16366281 elapsed_secs=4.224
+lookup_progress nodes=120000000 unique_hashes=16724030 elapsed_secs=4.600
+lookup_progress nodes=130000000 unique_hashes=17119170 elapsed_secs=4.983
+lookup_progress nodes=140000000 unique_hashes=17479756 elapsed_secs=5.372
+lookup_progress nodes=150000000 unique_hashes=17902360 elapsed_secs=5.762
+lookup_progress nodes=160000000 unique_hashes=18318847 elapsed_secs=6.156
+lookup_progress nodes=170000000 unique_hashes=18750001 elapsed_secs=6.564
+lookup_progress nodes=180000000 unique_hashes=19208023 elapsed_secs=6.993
+lookup_progress nodes=190000000 unique_hashes=19653926 elapsed_secs=7.388
+lookup_progress nodes=200000000 unique_hashes=20131773 elapsed_secs=7.793
+lookup_progress nodes=210000000 unique_hashes=20571311 elapsed_secs=8.198
+lookup_progress nodes=220000000 unique_hashes=21015268 elapsed_secs=8.584
+lookup_progress nodes=230000000 unique_hashes=21516309 elapsed_secs=8.986
+lookup_progress nodes=240000000 unique_hashes=22068225 elapsed_secs=9.390
+lookup_progress nodes=250000000 unique_hashes=22583467 elapsed_secs=9.789
+lookup_progress nodes=260000000 unique_hashes=23156210 elapsed_secs=10.196
+lookup_progress nodes=270000000 unique_hashes=23726769 elapsed_secs=10.585
+lookup_progress nodes=280000000 unique_hashes=24403114 elapsed_secs=10.985
+lookup_progress nodes=290000000 unique_hashes=24966294 elapsed_secs=11.384
+lookup_progress nodes=300000000 unique_hashes=25672031 elapsed_secs=11.781
+lookup_progress nodes=310000000 unique_hashes=26320206 elapsed_secs=12.174
+lookup_progress nodes=320000000 unique_hashes=27062422 elapsed_secs=12.574
+lookup_progress nodes=330000000 unique_hashes=27914903 elapsed_secs=12.969
+lookup_progress nodes=340000000 unique_hashes=28616570 elapsed_secs=13.368
+lookup_progress nodes=350000000 unique_hashes=29542789 elapsed_secs=14.086
+lookup_progress nodes=360000000 unique_hashes=30813862 elapsed_secs=14.538
+lookup_progress nodes=370000000 unique_hashes=32119397 elapsed_secs=15.002
+lookup_progress nodes=380000000 unique_hashes=34003047 elapsed_secs=15.470
+lookup_progress nodes=390000000 unique_hashes=35984632 elapsed_secs=15.939
+lookup_progress nodes=400000000 unique_hashes=45371216 elapsed_secs=16.382
+lookup_progress nodes=410000000 unique_hashes=53832312 elapsed_secs=16.843
+verify_progress pairs=10000000 atom_bytes=11875258 elapsed_secs=3.720
+verify_progress pairs=20000000 atom_bytes=13383810 elapsed_secs=7.744
+verify_progress pairs=30000000 atom_bytes=13535730 elapsed_secs=12.089
+verify_progress pairs=40000000 atom_bytes=13659994 elapsed_secs=15.966
+verify_progress pairs=50000000 atom_bytes=13739738 elapsed_secs=19.847
+verify_progress pairs=60000000 atom_bytes=13822042 elapsed_secs=24.638
+verify_progress pairs=70000000 atom_bytes=13868538 elapsed_secs=28.588
+verify_progress pairs=80000000 atom_bytes=13927858 elapsed_secs=32.534
+verify_progress pairs=90000000 atom_bytes=13973146 elapsed_secs=36.524
+verify_progress pairs=100000000 atom_bytes=14018754 elapsed_secs=40.531
+verify_progress pairs=110000000 atom_bytes=14069130 elapsed_secs=44.581
+verify_progress pairs=120000000 atom_bytes=14096522 elapsed_secs=50.376
+verify_progress pairs=130000000 atom_bytes=14126738 elapsed_secs=54.519
+verify_progress pairs=140000000 atom_bytes=14179650 elapsed_secs=58.643
+verify_progress pairs=150000000 atom_bytes=14208498 elapsed_secs=62.753
+verify_progress pairs=160000000 atom_bytes=14250842 elapsed_secs=66.866
+verify_progress pairs=170000000 atom_bytes=14284170 elapsed_secs=70.984
+verify_progress pairs=180000000 atom_bytes=14323002 elapsed_secs=75.107
+verify_progress pairs=190000000 atom_bytes=14374930 elapsed_secs=79.250
+verify_progress pairs=200000000 atom_bytes=14422770 elapsed_secs=83.403
+verify_progress pairs=210000000 atom_bytes=14465978 elapsed_secs=87.588
+verify_progress pairs=220000000 atom_bytes=14508802 elapsed_secs=91.822
+verify_progress pairs=230000000 atom_bytes=14554754 elapsed_secs=96.074
+verify_progress pairs=240000000 atom_bytes=14601442 elapsed_secs=103.560
+verify_progress pairs=250000000 atom_bytes=14648106 elapsed_secs=107.811
+verify_progress pairs=260000000 atom_bytes=14702138 elapsed_secs=112.073
+verify_progress pairs=270000000 atom_bytes=14758098 elapsed_secs=116.337
+verify_progress pairs=280000000 atom_bytes=14824002 elapsed_secs=120.619
+verify_progress pairs=290000000 atom_bytes=14884826 elapsed_secs=124.910
+verify_progress pairs=300000000 atom_bytes=14960794 elapsed_secs=129.192
+verify_progress pairs=310000000 atom_bytes=15034602 elapsed_secs=133.486
+verify_progress pairs=320000000 atom_bytes=15129642 elapsed_secs=137.780
+verify_progress pairs=330000000 atom_bytes=15245162 elapsed_secs=142.084
+verify_progress pairs=340000000 atom_bytes=15346386 elapsed_secs=146.374
+verify_progress pairs=350000000 atom_bytes=15497418 elapsed_secs=150.659
+verify_progress pairs=360000000 atom_bytes=15695914 elapsed_secs=154.957
+verify_progress pairs=370000000 atom_bytes=15869146 elapsed_secs=159.266
+verify_progress pairs=380000000 atom_bytes=16153106 elapsed_secs=163.583
+verify_progress pairs=390000000 atom_bytes=16518962 elapsed_secs=167.921
+verify_progress pairs=400000000 atom_bytes=21905138 elapsed_secs=171.818
+verify_progress pairs=410000000 atom_bytes=11029629972 elapsed_secs=176.649

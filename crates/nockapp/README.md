@@ -95,6 +95,29 @@ The `nockapp` library is the primary framework for building NockApps. It provide
 
 For compiling Hoon to Nock, we're also including a pre-release of `hoonc`: a NockApp for the Hoon compiler. `hoonc` can compile Hoon to Nock as a batch-mode command-line process, without the need to spin up an interactive Urbit ship. It is intended both for developer workflows and for CI. `hoonc` is also our first example NockApp. More are coming!
 
+## Durability and storage retention
+
+Normal boots persist accepted events in SQLite and retain an epoch snapshot plus
+two rotating snapshots. Snapshot files preserve sparse storage on supported
+filesystems. Epoch compaction advances the recovery base to the older retained
+rotation and removes the event prefix covered by that base; both rotations keep
+the replay suffix they need.
+
+`--rotating-snapshot-interval-event-time` defaults to `900` cumulative accepted
+event-processing seconds. `--epoch-compaction-interval-event-time` uses the same
+compute-time measure, defaults to `1800`, and must be strictly greater than the
+rotation interval when enabled. Counters resume across restarts. Use `none` or
+`0` to disable either interval; disabling rotation also disables compaction.
+`--ephemeral` disables the entire durability path.
+
+Each new epoch is an independent immutable snapshot generation. Publication,
+retirement, and event pruning commit together in SQLite before old files are
+removed. SQLite `VACUUM` and a truncating WAL checkpoint reclaim disk space after
+compaction. Recovery skips snapshots and checkpoints below the compacted replay
+floor and fails if no eligible recovery base remains. See
+[Durability Operations](../../docs/pma/DURABILITY-OPERATIONS.md) for the on-disk
+layout, recovery order, and maintenance behavior.
+
 ## Logging Configuration
 
 ### Basic Usage

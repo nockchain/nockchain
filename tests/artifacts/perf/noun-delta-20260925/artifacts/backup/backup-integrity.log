@@ -1,0 +1,3 @@
+{"time": "2026-09-25T18:08:12.359477+00:00", "stage": "inventory_verified", "files": 40, "sqlite_bytes": 426889695232}
+{"time": "2026-09-25T18:08:12.359865+00:00", "stage": "sqlite_integrity_started", "sqlite_version": "3.45.1"}
+{"time": "2026-09-25T18:39:53.470493+00:00", "stage": "complete", "result": ["ok"], "ok": true, "seconds": 1901.1112080272287, "sqlite_bytes": 426889695232}

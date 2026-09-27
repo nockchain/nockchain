@@ -4,6 +4,7 @@ use std::sync::Mutex;
 mod pma_regressions {
     pub(crate) mod boot_active_resize;
     pub(crate) mod checkpoint_bootstrap_size;
+    pub(crate) mod epoch_compaction;
     pub(crate) mod event_preflight_growth;
     pub(crate) mod event_resize_failure_boundary;
     pub(crate) mod failed_preserve_recovery;
@@ -34,6 +35,11 @@ fn pma_boot_active_resize_regression() -> TestResult {
 #[test]
 fn pma_checkpoint_bootstrap_size_regression() -> TestResult {
     run_serialized(pma_regressions::checkpoint_bootstrap_size::run_regression)
+}
+
+#[test]
+fn pma_epoch_compaction_regression() -> TestResult {
+    run_serialized(pma_regressions::epoch_compaction::run_regression)
 }
 
 #[test]

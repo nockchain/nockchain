@@ -1,0 +1,23 @@
+	Command being timed: "/opt/nockcloud/backups/noun-delta-bench-20260925/noun-delta-bench bench /inputs/snap-00000001790256128643-00000000000007373518.pma /inputs/snap-00000001790256128643-00000000000007373518.manifest /inputs/snap-00000001790323655190-00000000000007392318.pma /inputs/snap-00000001790323655190-00000000000007392318.manifest /opt/nockcloud/backups/noun-delta-bench-20260925/pair-baseline 20"
+	User time (seconds): 617.65
+	System time (seconds): 24.81
+	Percent of CPU this job got: 88%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 12:02.37
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 109618148
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 119487
+	Minor (reclaiming a frame) page faults: 24577735
+	Voluntary context switches: 318765
+	Involuntary context switches: 10686
+	Swaps: 0
+	File system inputs: 105789152
+	File system outputs: 163272
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

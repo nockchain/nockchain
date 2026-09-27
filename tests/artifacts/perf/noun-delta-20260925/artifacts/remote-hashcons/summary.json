@@ -1,0 +1,16 @@
+{
+  "preparation_seconds": 324.603078638,
+  "base_intern_seconds": 164.334771245,
+  "target_intern_seconds": 160.268307393,
+  "delta_bytes": 82911906,
+  "delta_mib": 79.07095527648926,
+  "delta_percent_of_used_target_bytes": 0.2894991702252749,
+  "peak_rss_kib": 72596520,
+  "peak_rss_gib": 69.23343658447266,
+  "dictionary_estimated_gib": 5.181640759110451,
+  "full_verification_seconds": 72.259069023,
+  "complete_seconds": 397.115385031,
+  "portable_fingerprint_bits": 256,
+  "preparation_single_measurement": true,
+  "global_page_cache_flushed": false
+}
