@@ -16,7 +16,6 @@ use nockchain_libp2p_io::test_support::{
     is_block_by_height_message, jam_block_by_height_request, jam_raw_tx_request,
     request_pow_verifies_at, solve_authenticated_gossip, BatchErrorClass, BatchRequestItem,
     BatchResultItem, BatchResultStatus, NockchainRequest, NockchainResponse, ReqResTestEvent,
-    ResponseEnvelope,
 };
 use serde_bytes::ByteBuf;
 
@@ -43,7 +42,7 @@ async fn assert_batch_ack_round_trip(
     responder: &mut harness::TestPeer,
     responder_peer_id: libp2p::PeerId,
     item_id: u32,
-    message: &'static [u8],
+    _message: &'static [u8],
     transcript: &Transcript,
 ) {
     let response = run_round_trip(
@@ -55,7 +54,7 @@ async fn assert_batch_ack_round_trip(
             nonce: 0,
             items: vec![BatchRequestItem {
                 item_id,
-                message: ByteBuf::from(message.to_vec()),
+                message: ByteBuf::from(jam_block_by_height_request(u64::from(item_id))),
             }],
         },
         NockchainResponse::BatchResult {
@@ -325,7 +324,9 @@ async fn req_res_gen2_batch_round_trip_emits_transcript() {
             nonce: 0,
             items: vec![BatchRequestItem {
                 item_id: 7,
-                message: ByteBuf::from(b"req-res-gen2-batch".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(100),
+                ),
             }],
         },
         NockchainResponse::BatchResult {
@@ -353,7 +354,7 @@ async fn req_res_gen2_batch_round_trip_emits_transcript() {
     );
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("shape=batch-request"));
     assert!(rendered.contains("shape=batch-result"));
 }
@@ -399,19 +400,27 @@ async fn req_res_gen2_mixed_status_batch_result_round_trip() {
         items: vec![
             BatchRequestItem {
                 item_id: 1,
-                message: ByteBuf::from(b"mixed-result".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(101),
+                ),
             },
             BatchRequestItem {
                 item_id: 2,
-                message: ByteBuf::from(b"mixed-ack".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(102),
+                ),
             },
             BatchRequestItem {
                 item_id: 3,
-                message: ByteBuf::from(b"mixed-not-found".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(103),
+                ),
             },
             BatchRequestItem {
                 item_id: 4,
-                message: ByteBuf::from(b"mixed-error".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(104),
+                ),
             },
         ],
     };
@@ -422,10 +431,7 @@ async fn req_res_gen2_mixed_status_batch_result_round_trip() {
                 item_id: 1,
                 status: BatchResultStatus::Result,
                 error: None,
-                envelope: Some(ResponseEnvelope::heard_block(
-                    String::from("mixed-block-id"),
-                    b"mixed-result-payload",
-                )),
+                envelope: Some(harness::valid_block_envelope(100)),
             },
             BatchResultItem {
                 item_id: 2,
@@ -499,7 +505,9 @@ async fn req_res_gen2_mixed_status_batch_result_round_trip() {
             nonce: 0,
             items: vec![BatchRequestItem {
                 item_id: 10,
-                message: ByteBuf::from(b"mixed-followup".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(105),
+                ),
             }],
         },
         NockchainResponse::BatchResult {
@@ -527,7 +535,7 @@ async fn req_res_gen2_mixed_status_batch_result_round_trip() {
 
     let rendered = transcript.render();
     assert!(
-        rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"),
+        rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"),
         "mixed-status test must negotiate gen2; transcript:\n{rendered}"
     );
     assert!(rendered.contains("shape=batch-request"));
@@ -694,7 +702,7 @@ async fn req_res_gen2_concurrent_batch_requests_on_one_connection_route_by_reque
 
     let rendered = transcript.render();
     assert!(
-        rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"),
+        rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"),
         "concurrent batch test must negotiate gen2; transcript:\n{rendered}"
     );
     assert!(
@@ -742,19 +750,27 @@ async fn req_res_gen2_repeated_backpressure_batches_keep_transport_live() {
         items: vec![
             BatchRequestItem {
                 item_id: 1,
-                message: ByteBuf::from(b"bp-round-item-1".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(106),
+                ),
             },
             BatchRequestItem {
                 item_id: 2,
-                message: ByteBuf::from(b"bp-round-item-2".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(107),
+                ),
             },
             BatchRequestItem {
                 item_id: 3,
-                message: ByteBuf::from(b"bp-round-item-3".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(108),
+                ),
             },
             BatchRequestItem {
                 item_id: 4,
-                message: ByteBuf::from(b"bp-round-item-4".to_vec()),
+                message: ByteBuf::from(
+                    nockchain_libp2p_io::test_support::jam_block_by_height_request(109),
+                ),
             },
         ],
     };
@@ -869,7 +885,9 @@ async fn req_res_gen2_authenticated_gossip_round_trip() {
     let requester_peer_id = *requester.swarm.local_peer_id();
     let responder_peer_id = *responder.swarm.local_peer_id();
     let request = solve_authenticated_gossip(
-        &requester_peer_id, &responder_peer_id, b"gen2-authenticated-gossip",
+        &requester_peer_id,
+        &responder_peer_id,
+        &nockchain_libp2p_io::test_support::jam_heard_tx_response(500, 0),
     );
 
     let _requester_addr = wait_for_listen_addr(&mut requester, &transcript).await;
@@ -896,7 +914,7 @@ async fn req_res_gen2_authenticated_gossip_round_trip() {
     ));
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("shape=authenticated-gossip"));
     assert!(rendered.contains("shape=ack"));
 }
@@ -953,7 +971,7 @@ async fn req_res_gen2_large_response_payload_round_trip_succeeds() {
     assert_eq!(observed, response);
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("response_bytes="));
     assert!(rendered.contains("shape=batch-request"));
     assert!(rendered.contains("shape=batch-result"));
@@ -1025,7 +1043,7 @@ async fn req_res_disconnect_during_inflight_request_recovers_after_reconnect() {
     assert_eq!(observed, recovery_response);
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("disconnecting from"));
     assert!(rendered.contains("outbound failure"));
     assert!(rendered.contains("connection closed with"));
@@ -1103,19 +1121,13 @@ async fn req_res_block_by_height_batch_round_trip_uses_gen2() {
                     item_id: 1,
                     status: BatchResultStatus::Result,
                     error: None,
-                    envelope: Some(ResponseEnvelope::heard_block(
-                        String::from("block-42"),
-                        b"block-42-payload",
-                    )),
+                    envelope: Some(harness::valid_block_envelope(42)),
                 },
                 BatchResultItem {
                     item_id: 2,
                     status: BatchResultStatus::Result,
                     error: None,
-                    envelope: Some(ResponseEnvelope::heard_block(
-                        String::from("block-43"),
-                        b"block-43-payload",
-                    )),
+                    envelope: Some(harness::valid_block_envelope(43)),
                 },
             ],
         },
@@ -1131,19 +1143,13 @@ async fn req_res_block_by_height_batch_round_trip_uses_gen2() {
                     item_id: 1,
                     status: BatchResultStatus::Result,
                     error: None,
-                    envelope: Some(ResponseEnvelope::heard_block(
-                        String::from("block-42"),
-                        b"block-42-payload",
-                    )),
+                    envelope: Some(harness::valid_block_envelope(42)),
                 },
                 BatchResultItem {
                     item_id: 2,
                     status: BatchResultStatus::Result,
                     error: None,
-                    envelope: Some(ResponseEnvelope::heard_block(
-                        String::from("block-43"),
-                        b"block-43-payload",
-                    )),
+                    envelope: Some(harness::valid_block_envelope(43)),
                 },
             ],
         }
@@ -1151,7 +1157,7 @@ async fn req_res_block_by_height_batch_round_trip_uses_gen2() {
 
     let rendered = transcript.render();
     assert!(
-        rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"),
+        rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"),
         "BlockByHeight batch must use gen2 protocol; transcript:\n{rendered}"
     );
     assert!(
@@ -1165,9 +1171,8 @@ async fn req_res_block_by_height_batch_round_trip_uses_gen2() {
 }
 
 fn encoded_response_bytes(response: &NockchainResponse) -> usize {
-    cbor4ii::serde::to_vec(Vec::new(), response)
+    nockchain_libp2p_io::test_support::v3_response_wire_size(response)
         .expect("response should encode")
-        .len()
 }
 
 fn gen2_request(item_count: usize) -> NockchainRequest {
@@ -1177,7 +1182,7 @@ fn gen2_request(item_count: usize) -> NockchainRequest {
         items: (0..item_count)
             .map(|idx| BatchRequestItem {
                 item_id: idx as u32 + 1,
-                message: ByteBuf::from(format!("latency-gen2-{idx}").into_bytes()),
+                message: ByteBuf::from(jam_raw_tx_request(idx as u64 + 1)),
             })
             .collect(),
     }
@@ -1190,10 +1195,7 @@ fn gen2_result(item_count: usize, payload_len: usize) -> NockchainResponse {
                 item_id: idx as u32 + 1,
                 status: BatchResultStatus::Result,
                 error: None,
-                envelope: Some(ResponseEnvelope::heard_tx(
-                    format!("latency-tx-{idx}"),
-                    vec![0xCD; payload_len],
-                )),
+                envelope: Some(harness::valid_tx_envelope(idx as u64 + 1, payload_len)),
             })
             .collect(),
     }

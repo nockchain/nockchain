@@ -20,8 +20,8 @@ use crate::p2p_util::PeerIdExt;
 use crate::tip5_util::{tip5_hash_to_base58, tip5_hash_to_base58_stack};
 
 pub(crate) const FACT_POKE_VERSION: u64 = 0;
-const GEN2_BATCH_POW_DOMAIN_SEPARATOR: &[u8] = b"nockchain:req-res:gen2:pow:v1";
-const GOSSIP_POW_DOMAIN_SEPARATOR: &[u8] = b"nockchain:req-res:gossip:pow:v1";
+const GEN2_BATCH_POW_DOMAIN_SEPARATOR: &[u8] = b"nockchain:req-res:gen3:pow:v1";
+const GOSSIP_POW_DOMAIN_SEPARATOR: &[u8] = b"nockchain:req-res:gen3:gossip:pow:v1";
 // Must match +heard-elders in hoon/apps/dumbnet/inner.hoon.
 const HEARD_ELDERS_MAX_IDS: usize = 24;
 /// Maximum encoded noun positions accepted from one network payload.

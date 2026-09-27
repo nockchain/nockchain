@@ -3293,6 +3293,7 @@ fn peer_generation_label(value: i32) -> &'static str {
     match peer_generation(value) {
         RpcPeerReqResGeneration::Gen1 => "gen1",
         RpcPeerReqResGeneration::Gen2 => "gen2",
+        RpcPeerReqResGeneration::Gen3 => "gen3",
         RpcPeerReqResGeneration::Unspecified => "unk",
     }
 }
@@ -3301,6 +3302,7 @@ fn generation_style(value: i32) -> Style {
     match peer_generation(value) {
         RpcPeerReqResGeneration::Gen1 => Style::default().fg(Color::LightRed),
         RpcPeerReqResGeneration::Gen2 => Style::default().fg(Color::LightGreen),
+        RpcPeerReqResGeneration::Gen3 => Style::default().fg(Color::LightCyan),
         RpcPeerReqResGeneration::Unspecified => Style::default().fg(Color::DarkGray),
     }
 }
@@ -3347,9 +3349,10 @@ fn sorted_peer_stats(peers: &[PeerStat]) -> Vec<PeerStat> {
 
 fn peer_generation_rank(value: i32) -> u8 {
     match peer_generation(value) {
-        RpcPeerReqResGeneration::Gen2 => 0,
-        RpcPeerReqResGeneration::Gen1 => 1,
-        RpcPeerReqResGeneration::Unspecified => 2,
+        RpcPeerReqResGeneration::Gen3 => 0,
+        RpcPeerReqResGeneration::Gen2 => 1,
+        RpcPeerReqResGeneration::Gen1 => 2,
+        RpcPeerReqResGeneration::Unspecified => 3,
     }
 }
 
@@ -3357,6 +3360,10 @@ fn build_nous_summary_lines(
     snapshot: Option<&PeerStatsData>,
     peers: &[PeerStat],
 ) -> Vec<Line<'static>> {
+    let gen3_count = peers
+        .iter()
+        .filter(|peer| peer_generation(peer.protocol_generation) == RpcPeerReqResGeneration::Gen3)
+        .count();
     let gen2_count = peers
         .iter()
         .filter(|peer| peer_generation(peer.protocol_generation) == RpcPeerReqResGeneration::Gen2)
@@ -3379,6 +3386,11 @@ fn build_nous_summary_lines(
         ),
         Span::raw(" | "),
         Span::styled(
+            format!("gen3 {}", gen3_count),
+            Style::default().fg(Color::LightCyan),
+        ),
+        Span::raw(" | "),
+        Span::styled(
             format!("gen2 {}", gen2_count),
             Style::default().fg(Color::LightGreen),
         ),
@@ -3391,29 +3403,41 @@ fn build_nous_summary_lines(
         Span::styled(snapshot_age, Style::default().fg(Color::Yellow)),
     ])];
 
-    if let Some(gen2_req_rate) =
-        cohort_average_metric(peers, RpcPeerReqResGeneration::Gen2, peer_request_rate)
+    let (current_generation, baseline_generation) = if gen3_count > 0 {
+        (
+            RpcPeerReqResGeneration::Gen3,
+            if gen2_count > 0 {
+                RpcPeerReqResGeneration::Gen2
+            } else {
+                RpcPeerReqResGeneration::Gen1
+            },
+        )
+    } else {
+        (RpcPeerReqResGeneration::Gen2, RpcPeerReqResGeneration::Gen1)
+    };
+    if let Some(current_req_rate) =
+        cohort_average_metric(peers, current_generation, peer_request_rate)
     {
-        if let Some(gen1_req_rate) =
-            cohort_average_metric(peers, RpcPeerReqResGeneration::Gen1, peer_request_rate)
+        if let Some(baseline_req_rate) =
+            cohort_average_metric(peers, baseline_generation, peer_request_rate)
         {
-            let gen2_rtt = cohort_average_metric(peers, RpcPeerReqResGeneration::Gen2, |peer| {
+            let current_rtt =
+                cohort_average_metric(peers, current_generation, |peer| peer.average_round_trip_ms)
+                    .unwrap_or(0.0);
+            let baseline_rtt = cohort_average_metric(peers, baseline_generation, |peer| {
                 peer.average_round_trip_ms
             })
             .unwrap_or(0.0);
-            let gen1_rtt = cohort_average_metric(peers, RpcPeerReqResGeneration::Gen1, |peer| {
-                peer.average_round_trip_ms
-            })
-            .unwrap_or(0.0);
-            let gen2_batch = cohort_average_metric(peers, RpcPeerReqResGeneration::Gen2, |peer| {
-                peer.average_batch_size
-            })
-            .unwrap_or(0.0);
+            let current_batch =
+                cohort_average_metric(peers, current_generation, |peer| peer.average_batch_size)
+                    .unwrap_or(0.0);
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(
-                        "Speedup: gen2 {:.2}x req/s vs gen1",
-                        speedup_ratio(gen2_req_rate, gen1_req_rate)
+                        "Speedup: {} {:.2}x req/s vs {}",
+                        peer_generation_label(current_generation as i32),
+                        speedup_ratio(current_req_rate, baseline_req_rate),
+                        peer_generation_label(baseline_generation as i32)
                     ),
                     Style::default()
                         .fg(Color::LightGreen)
@@ -3421,23 +3445,23 @@ fn build_nous_summary_lines(
                 ),
                 Span::raw(" | "),
                 Span::styled(
-                    format!("RTT {:.1}ms vs {:.1}ms", gen2_rtt, gen1_rtt),
+                    format!("RTT {:.1}ms vs {:.1}ms", current_rtt, baseline_rtt),
                     Style::default().fg(Color::White),
                 ),
                 Span::raw(" | "),
                 Span::styled(
-                    format!("avg batch {:.2}", gen2_batch),
+                    format!("avg batch {:.2}", current_batch),
                     Style::default().fg(Color::Cyan),
                 ),
             ]));
         } else {
             lines.push(Line::from(
-                "Waiting for at least one gen1 peer to compute mixed-generation speedup.",
+                "Waiting for peers from two protocol generations to compare performance.",
             ));
         }
     } else {
         lines.push(Line::from(
-            "Waiting for at least one gen2 peer to compute mixed-generation speedup.",
+            "Waiting for peers from two protocol generations to compare performance.",
         ));
     }
 
@@ -5254,8 +5278,10 @@ mod tests {
     }
 
     #[test]
-    fn sorted_peer_stats_orders_gen2_before_gen1_then_activity() {
+    fn sorted_peer_stats_orders_generations_then_activity() {
         let sorted = sorted_peer_stats(&[
+            test_peer("gen3-calm", RpcPeerReqResGeneration::Gen3, 5, 50, 50, 30),
+            test_peer("gen3-busy", RpcPeerReqResGeneration::Gen3, 60, 800, 400, 30),
             test_peer("gen1-busy", RpcPeerReqResGeneration::Gen1, 90, 400, 200, 30),
             test_peer("gen2-calm", RpcPeerReqResGeneration::Gen2, 10, 100, 50, 30),
             test_peer("gen2-busy", RpcPeerReqResGeneration::Gen2, 50, 700, 300, 30),
@@ -5275,7 +5301,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             ordered_ids,
-            vec!["gen2-busy", "gen2-calm", "gen1-busy", "unknown"]
+            vec!["gen3-busy", "gen3-calm", "gen2-busy", "gen2-calm", "gen1-busy", "unknown"]
         );
     }
 

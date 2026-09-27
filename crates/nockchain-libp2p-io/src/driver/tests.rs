@@ -43,7 +43,7 @@ use crate::test_support::{
     build_req_res_test_swarm, bundled_block_for_height, first_common_outbound_protocol,
     jam_heard_tx_response, solve_authenticated_gossip, ReqResTestEvent, ReqResTestSwarm,
 };
-use crate::tip5_util::{tip5_hash_to_base58, TIP5_BASE58_MAX_CHARS};
+use crate::tip5_util::tip5_hash_to_base58;
 
 pub static LIBP2P_CONFIG: LazyLock<LibP2PConfig> = LazyLock::new(LibP2PConfig::default);
 
@@ -4000,14 +4000,8 @@ async fn route_response_fact_repeated_heard_elders_re_emits_recovery_window_unti
 }
 
 fn fresh_outbound_request_id() -> request_response::OutboundRequestId {
-    let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
-        request_response::cbor::Behaviour::new(
-            [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
-                request_response::ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        );
+    let mut behaviour =
+        crate::behaviour::build_request_response_behaviour(&LibP2PConfig::default());
     behaviour.send_request(
         &PeerId::random(),
         NockchainRequest::AuthenticatedGossip {
@@ -4055,9 +4049,15 @@ fn tip5_tuple(slab: &mut NounSlab, seed: u64) -> Noun {
 }
 
 fn tip5_zset(slab: &mut NounSlab, seeds: &[u64]) -> Noun {
-    seeds.iter().rev().fold(D(0), |tree, seed| {
-        let item = tip5_tuple(slab, *seed);
-        T(slab, &[item, D(0), tree])
+    seeds.iter().fold(D(0), |tree, seed| {
+        let mut item = tip5_tuple(slab, *seed);
+        nockchain_math::zoon::zset::z_set_put(
+            slab,
+            &tree,
+            &mut item,
+            &nockchain_math::zoon::common::DefaultTipHasher,
+        )
+        .expect("fixture transaction-id set should build")
     })
 }
 
@@ -4071,6 +4071,7 @@ fn heard_block_fact_with_block_seed(
     let parent_id = tip5_tuple(&mut slab, block_seed.wrapping_add(10_000));
     let tx_ids = tip5_zset(&mut slab, tx_seeds);
     let height_atom = Atom::new(&mut slab, height).as_noun();
+    let zero_bignum = T(&mut slab, &[D(nockvm_macros::tas!(b"bn")), D(0)]);
     let page = T(
         &mut slab,
         &[
@@ -4082,8 +4083,8 @@ fn heard_block_fact_with_block_seed(
             D(0),
             D(0),
             D(0),
-            D(0),
-            D(0),
+            zero_bignum,
+            zero_bignum,
             height_atom,
             D(0),
         ],
@@ -4413,21 +4414,8 @@ async fn recv_swarm_action(swarm_rx: &mut tokio::sync::mpsc::Receiver<SwarmActio
 }
 
 fn scry_some_raw_tx(seed: u64, payload_len: usize) -> NounSlab {
-    let mut slab = NounSlab::new();
-    let tx_id = T(
-        &mut slab,
-        &[
-            D(seed),
-            D(seed.saturating_add(1)),
-            D(seed.saturating_add(2)),
-            D(seed.saturating_add(3)),
-            D(seed.saturating_add(4)),
-        ],
-    );
-    let payload = Atom::from_value(&mut slab, vec![0xCDu8; payload_len])
-        .expect("payload atom should build")
-        .as_noun();
-    let raw_tx = T(&mut slab, &[tx_id, payload]);
+    let mut slab: NounSlab = NounSlab::new();
+    let raw_tx = crate::test_support::valid_raw_tx_noun(&mut slab, seed, payload_len);
     let scry_some = T(&mut slab, &[D(0), D(0), raw_tx]);
     slab.set_root(scry_some);
     slab
@@ -4550,9 +4538,6 @@ async fn run_responder_payload_fit_estimator(
                         .estimate_message_bytes(actual_message_bytes[idx]);
                     Ok(Some(BatchItemResponseEstimate {
                         request_kind: "raw-tx-by-id",
-                        envelope: BatchItemResponseEnvelopeEstimate::HeardTx {
-                            tx_id: format!("tx-{item_id}"),
-                        },
                         message_bytes,
                         source,
                     }))
@@ -6817,9 +6802,8 @@ async fn run_two_peer_driver_latency_workload(
         }
         other => panic!("expected SendResponse, got {other:?}"),
     };
-    let response_bytes = cbor4ii::serde::to_vec(Vec::new(), &response)
-        .expect("latency batch response should encode")
-        .len();
+    let response_bytes = crate::test_support::v3_response_wire_size(&response)
+        .expect("latency batch response should encode");
     let requester_response = recv_response_event(&mut requester, &mut responder, transcript).await;
     let NockchainResponse::BatchResult { results } = requester_response else {
         panic!("expected batch result response");
@@ -7584,7 +7568,7 @@ fn test_bundle_request_batch_item_height_distinguishes_bundle_from_classic() {
 }
 
 #[tokio::test]
-async fn test_bundle_response_estimate_uses_bundle_envelope_shape() {
+async fn test_bundle_response_estimate_retains_request_kind_and_wire_hint() {
     let metrics = isolated_test_metrics();
     let driver_state = Arc::new(Mutex::new(P2PState::new(
         metrics, LIBP2P_CONFIG.seen_tx_clear_interval,
@@ -7604,13 +7588,10 @@ async fn test_bundle_response_estimate_uses_bundle_envelope_shape() {
     assert_eq!(estimate.request_kind, "block-with-txs-by-height");
     assert_eq!(estimate.source, "configured_bundle_cap");
 
-    let projected = estimated_result_item(1, &estimate);
-    let envelope = projected
-        .envelope
-        .expect("estimated bundle result should carry an envelope");
-    assert_eq!(envelope.kind, EnvelopeKind::HeardBlockWithTxs);
-    assert!(envelope.tx_envelopes.as_ref().is_some());
-    assert!(envelope.unincluded_tx_ids.as_ref().is_some());
+    assert_eq!(
+        estimate.message_bytes,
+        response_estimate_fallback_message_bytes(limits)
+    );
 }
 
 #[test]
@@ -8842,7 +8823,10 @@ async fn test_execute_batch_request_items_preserves_wire_order_and_mixed_outcome
                     7 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::NotFound),
                     3 => BatchItemExecutionOutcome::Failed(BatchErrorClass::Decode),
                     9 => BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::Result {
-                        envelope: ResponseEnvelope::heard_tx(String::from("tx-9"), [0xAA]),
+                        envelope: ResponseEnvelope::heard_tx(
+                            crate::test_support::base58_for_tip5_seed(9),
+                            jam_heard_tx_response(9, 0),
+                        ),
                     }),
                     _ => unreachable!("unexpected test item"),
                 }
@@ -8866,7 +8850,7 @@ async fn test_execute_batch_request_items_preserves_wire_order_and_mixed_outcome
             .envelope
             .as_ref()
             .and_then(|envelope| envelope.tx_id.as_deref()),
-        Some("tx-9")
+        Some(crate::test_support::base58_for_tip5_seed(9).as_str())
     );
 }
 
@@ -8993,6 +8977,8 @@ fn scry_some_page_with_tx_ids(height: u64, tx_seeds: &[u64]) -> (NounSlab, Strin
     let block_id_noun = tip5_tuple(&mut slab, 10_000 + height);
     let parent_id = tip5_tuple(&mut slab, 20_000 + height);
     let tx_ids = tip5_zset(&mut slab, tx_seeds);
+    let zero_bignum = T(&mut slab, &[D(nockvm_macros::tas!(b"bn")), D(0)]);
+    let height_atom = Atom::new(&mut slab, height).as_noun();
     let page = T(
         &mut slab,
         &[
@@ -9004,9 +8990,9 @@ fn scry_some_page_with_tx_ids(height: u64, tx_seeds: &[u64]) -> (NounSlab, Strin
             D(0),
             D(0),
             D(0),
-            D(0),
-            D(0),
-            D(height),
+            zero_bignum,
+            zero_bignum,
+            height_atom,
             D(0),
         ],
     );
@@ -9039,11 +9025,7 @@ fn base58_for_tip5_seed(seed: u64) -> String {
 }
 
 fn raw_tx_noun(slab: &mut NounSlab, seed: u64, payload_len: usize) -> Noun {
-    let tx_id = tip5_tuple(slab, seed);
-    let payload = Atom::from_value(slab, vec![0xCDu8; payload_len])
-        .expect("payload atom should build")
-        .as_noun();
-    T(slab, &[tx_id, payload])
+    crate::test_support::valid_raw_tx_noun(slab, seed, payload_len)
 }
 
 fn raw_tx_entry_list(slab: &mut NounSlab, seeds: &[u64], payload_len: usize) -> Noun {
@@ -9093,6 +9075,7 @@ fn scry_some_heavy_txs(
     let block_id_noun = tip5_tuple(&mut slab, 10_000 + height);
     let parent_id = tip5_tuple(&mut slab, 20_000 + height);
     let tx_ids = tip5_zset(&mut slab, tx_seeds);
+    let zero_bignum = T(&mut slab, &[D(tas!(b"bn")), D(0)]);
     let page = T(
         &mut slab,
         &[
@@ -9104,22 +9087,34 @@ fn scry_some_heavy_txs(
             D(0),
             D(0),
             D(0),
-            D(0),
-            D(0),
+            zero_bignum,
+            zero_bignum,
             D(height),
             D(0),
         ],
     );
-    let raw_txs = raw_tx_entry_list(&mut slab, tx_seeds, payload_len);
+    let mut tx_ids_base58 = Vec::new();
+    collect_tip5_zset_strings(tx_ids.in_space(&slab.noun_space()), &mut tx_ids_base58)
+        .expect("fixture page transaction IDs should decode in tree order");
+    let seeds_by_id: BTreeMap<_, _> = tx_seeds
+        .iter()
+        .map(|seed| (base58_for_tip5_seed(*seed), *seed))
+        .collect();
+    let ordered_tx_seeds: Vec<_> = tx_ids_base58
+        .iter()
+        .map(|id| {
+            *seeds_by_id
+                .get(id)
+                .expect("page ID should have a fixture seed")
+        })
+        .collect();
+    // Keep the synthetic kernel result in the page's transaction tree order.
+    let raw_txs = raw_tx_entry_list(&mut slab, &ordered_tx_seeds, payload_len);
     let payload = T(&mut slab, &[D(height), block_id_noun, page, raw_txs]);
     let scry_some = T(&mut slab, &[D(0), D(0), payload]);
     slab.set_root(scry_some);
 
     let block_id_base58 = base58_for_tip5_seed(10_000 + height);
-    let tx_ids_base58 = tx_seeds
-        .iter()
-        .map(|seed| base58_for_tip5_seed(*seed))
-        .collect();
 
     (slab, block_id_base58, tx_ids_base58)
 }
@@ -9133,6 +9128,7 @@ fn scry_some_single_block_range_with_txs(
     let block_id_noun = tip5_tuple(&mut slab, 10_000 + height);
     let parent_id = tip5_tuple(&mut slab, 20_000 + height);
     let tx_ids = tip5_zset(&mut slab, tx_seeds);
+    let zero_bignum = T(&mut slab, &[D(tas!(b"bn")), D(0)]);
     let page = T(
         &mut slab,
         &[
@@ -9144,8 +9140,8 @@ fn scry_some_single_block_range_with_txs(
             D(0),
             D(0),
             D(0),
-            D(0),
-            D(0),
+            zero_bignum,
+            zero_bignum,
             D(height),
             D(0),
         ],
@@ -9174,6 +9170,7 @@ fn scry_some_single_block_range_with_validated_txs(
     let block_id_noun = tip5_tuple(&mut slab, 10_000 + height);
     let parent_id = tip5_tuple(&mut slab, 20_000 + height);
     let tx_ids = tip5_zset(&mut slab, tx_seeds);
+    let zero_bignum = T(&mut slab, &[D(tas!(b"bn")), D(0)]);
     let page = T(
         &mut slab,
         &[
@@ -9185,8 +9182,8 @@ fn scry_some_single_block_range_with_validated_txs(
             D(0),
             D(0),
             D(0),
-            D(0),
-            D(0),
+            zero_bignum,
+            zero_bignum,
             D(height),
             D(0),
         ],
@@ -9215,6 +9212,7 @@ fn scry_some_single_block_range_with_raw_tx_index_values(
     let block_id_noun = tip5_tuple(&mut slab, 10_000 + height);
     let parent_id = tip5_tuple(&mut slab, 20_000 + height);
     let tx_ids = tip5_zset(&mut slab, tx_seeds);
+    let zero_bignum = T(&mut slab, &[D(tas!(b"bn")), D(0)]);
     let page = T(
         &mut slab,
         &[
@@ -9226,8 +9224,8 @@ fn scry_some_single_block_range_with_raw_tx_index_values(
             D(0),
             D(0),
             D(0),
-            D(0),
-            D(0),
+            zero_bignum,
+            zero_bignum,
             D(height),
             D(0),
         ],
@@ -9268,6 +9266,7 @@ fn scry_some_multi_block_range_with_txs(
         let block_id_noun = tip5_tuple(&mut slab, 10_000 + height);
         let parent_id = tip5_tuple(&mut slab, 20_000 + height);
         let tx_ids = tip5_zset(&mut slab, tx_seeds);
+        let zero_bignum = T(&mut slab, &[D(tas!(b"bn")), D(0)]);
         let page = T(
             &mut slab,
             &[
@@ -9279,8 +9278,8 @@ fn scry_some_multi_block_range_with_txs(
                 D(0),
                 D(0),
                 D(0),
-                D(0),
-                D(0),
+                zero_bignum,
+                zero_bignum,
                 D(height),
                 D(0),
             ],
@@ -12723,7 +12722,7 @@ async fn req_res_gen2_resident_set_report() {
         println!(
             "{:<26} {:<8} {:>8} {:>10} {:>14} {:>12.3} {:>12.3} {:>10} {:>10} {:>10} {:>10}",
             label,
-            "gen2",
+            "gen3",
             item_count,
             payload_len,
             response_bytes,
@@ -12742,7 +12741,7 @@ async fn req_res_gen2_resident_set_report() {
         samples.push(ResidentSetSample {
             label: label.to_string(),
             topology: String::from("single-process requester-path"),
-            generation: String::from("gen2"),
+            generation: String::from("gen3"),
             request_mix: String::from("raw-tx-only"),
             item_count,
             payload_len,
@@ -12842,13 +12841,13 @@ async fn req_res_gen2_two_peer_latency_report() {
 
         println!(
             "{:<24} {:<8} {:>8} {:>12} {:>14} {:>12.3} {:>12.3} {:<24}",
-            label, "gen2", item_count, payload_len, response_bytes, total_ms, per_item_ms, protocol
+            label, "gen3", item_count, payload_len, response_bytes, total_ms, per_item_ms, protocol
         );
 
         samples.push(TwoPeerLatencySample {
             label: label.to_string(),
             topology: String::from("two-peer driver-path"),
-            generation: String::from("gen2"),
+            generation: String::from("gen3"),
             request_mix: String::from("raw-tx-only"),
             item_count,
             payload_len,
@@ -13134,6 +13133,19 @@ fn test_missing_batch_result_item_ids_returns_unseen_expected_items() {
     assert_eq!(missing, BTreeSet::from([1, 3]));
 }
 
+fn budget_test_elders_envelope(count: usize) -> ResponseEnvelope {
+    let mut slab: NounSlab = NounSlab::new();
+    let mut ids = D(0);
+    for index in (0..count).rev() {
+        let id = T(&mut slab, &[D(index as u64 + 1), D(0), D(0), D(0), D(0)]);
+        ids = T(&mut slab, &[id, ids]);
+    }
+    let heard_elders = make_tas(&mut slab, "heard-elders").as_noun();
+    let message = T(&mut slab, &[heard_elders, D(0), ids]);
+    slab.set_root(message);
+    ResponseEnvelope::heard_elders(slab.jam().as_ref().to_vec())
+}
+
 #[tokio::test]
 async fn test_execute_batch_request_items_preserves_tail_contract_on_overflow() {
     let items = vec![
@@ -13152,8 +13164,8 @@ async fn test_execute_batch_request_items_preserves_tail_contract_on_overflow() 
     ];
     let observed_order = Arc::new(StdMutex::new(Vec::new()));
     let observed_order_clone = Arc::clone(&observed_order);
-    let first_envelope = ResponseEnvelope::heard_tx(String::from("head"), vec![0xAA; 32]);
-    let second_envelope = ResponseEnvelope::heard_tx(String::from("overflow"), vec![0xBB; 256]);
+    let first_envelope = budget_test_elders_envelope(1);
+    let second_envelope = budget_test_elders_envelope(12);
     let first_result = BatchResultItem {
         item_id: 1,
         status: BatchResultStatus::Result,
@@ -13220,7 +13232,7 @@ async fn test_execute_batch_request_items_preserves_tail_contract_on_overflow() 
 }
 
 #[tokio::test]
-async fn test_execute_batch_request_items_marks_oversize_current_item_too_large() {
+async fn test_execute_batch_request_items_checks_actual_size_after_underestimate() {
     let items = vec![
         BatchRequestItem {
             item_id: 1,
@@ -13233,7 +13245,7 @@ async fn test_execute_batch_request_items_marks_oversize_current_item_too_large(
     ];
     let observed_order = Arc::new(StdMutex::new(Vec::new()));
     let observed_order_clone = Arc::clone(&observed_order);
-    let large_envelope = ResponseEnvelope::heard_tx(String::from("too-large"), vec![0xCC; 512]);
+    let large_envelope = budget_test_elders_envelope(24);
     let expected = vec![
         batch_error_result(1, BatchErrorClass::TooLarge),
         batch_error_result(2, BatchErrorClass::Backpressure),
@@ -13261,7 +13273,13 @@ async fn test_execute_batch_request_items_marks_oversize_current_item_too_large(
     let results = execute_batch_request_items(
         &items,
         limit,
-        |_| async { Ok(None) },
+        |_| async {
+            Ok(Some(BatchItemResponseEstimate {
+                request_kind: "elders-by-id",
+                message_bytes: 1,
+                source: "underestimated_test_hint",
+            }))
+        },
         move |item| {
             let observed_order = Arc::clone(&observed_order_clone);
             let item_id = item.item_id;
@@ -13304,7 +13322,7 @@ async fn test_execute_batch_request_items_stops_before_executing_estimated_tail(
     ];
     let observed_order = Arc::new(StdMutex::new(Vec::new()));
     let observed_order_clone = Arc::clone(&observed_order);
-    let head_envelope = ResponseEnvelope::heard_tx(String::from("head"), vec![0xAA; 24]);
+    let head_envelope = budget_test_elders_envelope(1);
     let head_result = BatchResultItem {
         item_id: 1,
         status: BatchResultStatus::Result,
@@ -13313,9 +13331,6 @@ async fn test_execute_batch_request_items_stops_before_executing_estimated_tail(
     };
     let estimated_tail = BatchItemResponseEstimate {
         request_kind: "raw-tx-by-id",
-        envelope: BatchItemResponseEnvelopeEstimate::HeardTx {
-            tx_id: String::from("tail"),
-        },
         message_bytes: 64,
         source: "observed_max",
     };
@@ -13326,11 +13341,10 @@ async fn test_execute_batch_request_items_stops_before_executing_estimated_tail(
     ])
     .expect("bounded fallback result should encode");
 
-    let projected_too_large = batch_result_encoded_bytes(&[
-        head_result.clone(),
-        estimated_result_item(2, &estimated_tail),
-        batch_error_result(3, BatchErrorClass::Backpressure),
-    ])
+    let projected_too_large = estimated_batch_result_bytes(
+        &[head_result.clone(), batch_error_result(3, BatchErrorClass::Backpressure)],
+        &estimated_tail,
+    )
     .expect("projected tail estimate should encode");
     assert!(projected_too_large > limit);
 
@@ -13395,9 +13409,6 @@ async fn test_execute_batch_request_items_marks_estimated_impossible_item_too_la
     let observed_order_clone = Arc::clone(&observed_order);
     let estimate = BatchItemResponseEstimate {
         request_kind: "block-by-height",
-        envelope: BatchItemResponseEnvelopeEstimate::HeardBlock {
-            block_id_bytes_upper_bound: TIP5_BASE58_MAX_CHARS,
-        },
         message_bytes: 96,
         source: "configured_fallback",
     };
@@ -13406,8 +13417,7 @@ async fn test_execute_batch_request_items_marks_estimated_impossible_item_too_la
         batch_error_result(2, BatchErrorClass::Backpressure),
     ])
     .expect("backpressure-only result should encode");
-    let projected_single = batch_result_encoded_bytes(&[estimated_result_item(1, &estimate)])
-        .expect("projected single item should encode");
+    let projected_single = estimate.message_bytes;
     assert!(projected_single > limit);
 
     let results = execute_batch_request_items(
@@ -13453,31 +13463,25 @@ async fn req_res_driver_responder_fit_stops_before_executing_tail_item() {
 
     let small_tx = scry_some_raw_tx(500, 12);
     let expected_head = tx_result_item_from_scry(1, &small_tx);
-    let estimated_message_bytes = expected_head
-        .envelope
-        .as_ref()
-        .expect("expected envelope")
-        .message
-        .len();
+    let estimated_message_bytes = batch_result_encoded_bytes(std::slice::from_ref(&expected_head))
+        .expect("expected singleton response should encode");
     let estimate = BatchItemResponseEstimate {
         request_kind: "raw-tx-by-id",
-        envelope: BatchItemResponseEnvelopeEstimate::HeardTx {
-            tx_id: String::from("tx-estimate"),
-        },
         message_bytes: estimated_message_bytes,
         source: "configured_fallback",
     };
-    let first_projection = batch_result_encoded_bytes(&[
-        estimated_result_item(1, &estimate),
-        batch_error_result(2, BatchErrorClass::Backpressure),
-        batch_error_result(3, BatchErrorClass::Backpressure),
-    ])
+    let first_projection = estimated_batch_result_bytes(
+        &[
+            batch_error_result(2, BatchErrorClass::Backpressure),
+            batch_error_result(3, BatchErrorClass::Backpressure),
+        ],
+        &estimate,
+    )
     .expect("first projected batch should encode");
-    let second_projection = batch_result_encoded_bytes(&[
-        expected_head.clone(),
-        estimated_result_item(2, &estimate),
-        batch_error_result(3, BatchErrorClass::Backpressure),
-    ])
+    let second_projection = estimated_batch_result_bytes(
+        &[expected_head.clone(), batch_error_result(3, BatchErrorClass::Backpressure)],
+        &estimate,
+    )
     .expect("second projected batch should encode");
     let first_actual = batch_result_encoded_bytes(&[
         expected_head.clone(),
@@ -13841,7 +13845,7 @@ async fn req_res_driver_wholesale_inbound_backpressure_reject_recovers_on_same_c
     );
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("outbound failure"));
     assert!(rendered.contains("UnexpectedEof"));
 }
@@ -14027,14 +14031,39 @@ async fn req_res_driver_releases_inbound_slot_after_admitted_request_error() {
         }],
     )
     .expect("malformed item should still fit an authenticated batch");
+    let valid_request = NockchainRequest::new_batch_request(
+        &mut equix::EquiXBuilder::new(),
+        &requester_peer_id,
+        &responder_peer_id,
+        vec![BatchRequestItem {
+            item_id: 1,
+            message: block_by_height_message(1),
+        }],
+    )
+    .expect("valid request should provide a response channel");
     requester
         .behaviour_mut()
         .request_response
-        .send_request(&responder_peer_id, malformed_request);
+        .send_request(&responder_peer_id, valid_request);
 
     let (peer, connection_id, message) =
         recv_request_event(&mut requester, &mut responder, &transcript).await;
     assert_eq!(peer, requester_peer_id);
+
+    // A valid v3 stream supplies the response channel. Inject the internal decode
+    // failure directly to exercise cleanup after admission; v3 rejects it on wire.
+    let message = match message {
+        request_response::Message::Request {
+            request_id,
+            channel,
+            ..
+        } => request_response::Message::Request {
+            request_id,
+            request: malformed_request,
+            channel,
+        },
+        _ => panic!("expected the valid inbound request"),
+    };
 
     run_driver_with_timeout(
         &transcript,
@@ -14655,7 +14684,7 @@ async fn req_res_driver_timeout_updates_peer_stats_snapshot() {
         .iter()
         .find(|entry| entry.peer_id == peer.to_base58())
         .expect("expected peer stats entry");
-    assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
+    assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen3);
     assert_eq!(entry.request_count, 1);
     assert_eq!(entry.failure_count, 1);
     assert_eq!(entry.timeout_count, 1);
@@ -14726,8 +14755,8 @@ async fn req_res_driver_single_response_updates_peer_stats_snapshot() {
     let response = NockchainResponse::BatchResult {
         results: vec![tx_result_outcome(1, 16).into_batch_result_item(0)],
     };
-    let response_bytes =
-        req_res_message_encoded_bytes(&response).expect("response bytes should encode");
+    let response_bytes = crate::test_support::v3_response_wire_size(&response)
+        .expect("response bytes should encode");
     let scripted_traffic =
         build_scripted_traffic_cop(transcript.clone(), Vec::new(), vec![PokeResult::Ack]).await;
     let (swarm_tx, _swarm_rx) = tokio::sync::mpsc::channel(4);
@@ -14762,7 +14791,7 @@ async fn req_res_driver_single_response_updates_peer_stats_snapshot() {
         .iter()
         .find(|entry| entry.peer_id == peer.to_base58())
         .expect("expected peer stats entry");
-    assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen2);
+    assert_eq!(entry.protocol_generation, PeerReqResGeneration::Gen3);
     assert_eq!(entry.request_count, 1);
     assert_eq!(entry.bytes_received, response_bytes as u64);
     assert_eq!(entry.failure_count, 0);

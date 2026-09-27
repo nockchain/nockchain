@@ -66,7 +66,7 @@ const GEN2_BATCH_MAX_ITEMS: usize = 64;
 // 10 MB caps, validated by the LAX1 stacked canary. The full chain-history
 // sweep (44 188 blocks) put the max observed individual raw-tx at 1.2 MiB and
 // the max block-plus-txs bundle at 1.34 MiB, so 10 MB is generous headroom for
-// tuned catch-up. The CBOR codec request/response maximum tracks
+// tuned catch-up. The protobuf codec complete request/response frame maximum tracks
 // `gen2_batch_max_bytes` at runtime (see behaviour.rs), so the three move
 // together.
 const GEN2_BATCH_MAX_BYTES: usize = 10_000_000;
@@ -117,7 +117,7 @@ const ELDERS_DEBOUNCE_RESET: Duration = Duration::from_secs(60);
 const SEEN_TX_CLEAR_INTERVAL: u64 = 30;
 
 // ALL PROTOCOLS MUST HAVE UNIQUE VERSIONS
-const REQ_RES_PROTOCOL_VERSION: &str = "/nockchain-2-req-res";
+const REQ_RES_PROTOCOL_VERSION: &str = "/nockchain-3-req-res";
 const KAD_PROTOCOL_VERSION: &str = "/nockchain-1-kad";
 const IDENTIFY_PROTOCOL_VERSION: &str = "/nockchain-1-identify";
 
@@ -985,10 +985,10 @@ mod tests {
         assert!(PeerExclusionConfig::from_libp2p_config(&config).is_err());
     }
     #[test]
-    fn test_req_res_protocol_version_is_gen2() {
+    fn test_req_res_protocol_version_is_v3() {
         assert_eq!(
             LibP2PConfig::req_res_protocol_version(),
-            "/nockchain-2-req-res"
+            "/nockchain-3-req-res"
         );
     }
 

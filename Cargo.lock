@@ -6667,6 +6667,7 @@ name = "nockchain-e2e"
 version = "0.1.17"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytes",
  "clap",
  "hex",
@@ -6715,6 +6716,7 @@ name = "nockchain-libp2p-io"
 version = "0.1.17"
 dependencies = [
  "async-trait",
+ "base64",
  "bs58",
  "bytes",
  "cbor4ii 1.2.2",
@@ -6734,17 +6736,22 @@ dependencies = [
  "nockapp",
  "nockapp-grpc-proto",
  "nockchain",
+ "nockchain-math",
  "nockchain-types",
  "nockvm",
  "nockvm_macros",
  "noun-serde",
  "num-bigint",
+ "prost 0.14.3",
+ "prost-build",
+ "prost-types",
  "quickcheck",
  "rand 0.9.4",
  "serde",
  "serde_bytes",
  "serde_cbor",
  "serde_json",
+ "sha2 0.10.9",
  "signal-hook",
  "tempfile",
  "tokio",

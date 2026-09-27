@@ -72,7 +72,7 @@ pub(super) async fn handle_inbound_request(
                     record_batch_rejection(&metrics, BatchRejectReason::TooManyItems);
                     warn!(
                         peer = %peer,
-                        generation = "gen2",
+                        generation = "gen3",
                         reject_reason = "too_many_items",
                         item_count,
                         configured_cap = max_items,
@@ -86,7 +86,7 @@ pub(super) async fn handle_inbound_request(
                     record_batch_rejection(&metrics, BatchRejectReason::TooManyBytes);
                     warn!(
                         peer = %peer,
-                        generation = "gen2",
+                        generation = "gen3",
                         reject_reason = "too_many_bytes",
                         item_count = items.len(),
                         observed_bytes = payload_bytes,

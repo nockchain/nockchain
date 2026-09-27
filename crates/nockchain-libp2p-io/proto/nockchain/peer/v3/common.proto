@@ -1,0 +1,31 @@
+syntax = "proto3";
+package nockchain.peer.v3;
+
+// Five Goldilocks limbs in consensus tuple order. Every limb is required by
+// domain validation and must be strictly less than 18446744069414584321.
+message Hash {
+  optional fixed64 limb0 = 1;
+  optional fixed64 limb1 = 2;
+  optional fixed64 limb2 = 3;
+  optional fixed64 limb3 = 4;
+  optional fixed64 limb4 = 5;
+}
+
+// Unsigned arbitrary-precision atom. Zero is the empty byte string; a nonzero
+// atom has no zero most-significant byte. Presence is mandatory even for zero.
+message Atom { optional bytes little_endian = 1; }
+
+// Only for consensus fields whose declared type actually permits arbitrary
+// nouns (proof artifacts, note data and preimages). This is NOT JAM: there is
+// no bit-level parser, encoded atom length, or runtime pointer on the wire.
+// Nodes are in topological order, the last node is the root, all nodes must be
+// reachable, and cell children must index strictly earlier completed nodes.
+message NounValue { repeated NounNode nodes = 1; }
+
+// Either atom is present, or both head and tail are present. Atom bytes follow
+// Atom's canonical unsigned little-endian representation. No mixed forms.
+message NounNode {
+  optional bytes atom = 1;
+  optional uint32 head = 2;
+  optional uint32 tail = 3;
+}

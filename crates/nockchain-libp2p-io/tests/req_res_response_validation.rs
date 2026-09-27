@@ -74,7 +74,7 @@ async fn req_res_response_validation_retries_mismatched_and_missing_raw_tx_items
             status: BatchResultStatus::Result,
             error: None,
             envelope: Some(ResponseEnvelope::heard_tx(
-                String::from("wrong-tx-id"),
+                nockchain_libp2p_io::test_support::base58_for_tip5_seed(91_101),
                 jam_heard_tx_response(91_101, 32),
             )),
         }],
@@ -143,7 +143,7 @@ async fn req_res_response_validation_retries_mismatched_and_missing_raw_tx_items
     assert_eq!(observed_retry_response, retry_response);
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("semantic response validation scheduled retry item_ids=[1, 2]"));
     assert!(rendered.contains("disconnecting from"));
     assert_eq!(rendered.matches("shape=batch-request").count(), 4);
@@ -229,7 +229,7 @@ async fn req_res_response_validation_classifies_non_contiguous_block_range() {
     assert!(retry_requests.is_empty());
 
     let rendered = transcript.render();
-    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-2-req-res\")"));
+    assert!(rendered.contains("expected_common_protocol=Some(\"/nockchain-3-req-res\")"));
     assert!(rendered.contains("semantic range validation scheduled retry item_ids=[7]"));
     assert_eq!(rendered.matches("shape=batch-request").count(), 2);
     assert_eq!(rendered.matches("shape=batch-result").count(), 2);

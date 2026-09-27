@@ -1,0 +1,50 @@
+syntax = "proto3";
+package nockchain.peer.v3;
+
+import "nockchain/peer/v3/common.proto";
+import "nockchain/peer/v3/transaction.proto";
+
+// Complete consensus page. Version 0 is untagged in the consensus noun;
+// version 1 has a leading %1. No other page versions are currently supported.
+message Page {
+  optional uint32 version = 1;
+  Hash digest = 2;
+  // Absence is the Hoon unit ~; presence is [~ proof-or-pow-artifact].
+  NounValue pow = 3;
+  Hash parent = 4;
+  // A set: duplicate hashes are invalid; the noun bridge builds the z-set.
+  repeated Hash tx_ids = 5;
+  PageCoinbase coinbase = 6;
+  Atom timestamp = 7;
+  Atom epoch_counter = 8;
+  PageBigNum target = 9;
+  PageBigNum accumulated_work = 10;
+  optional fixed64 height = 11;
+  // Ordered Goldilocks field elements, each strictly less than the modulus.
+  repeated fixed64 message = 12;
+}
+
+// The [%bn (list u32)] representation. Preserve every limb, including trailing
+// zero limbs; converting through a mathematical integer would lose noun data.
+message PageBigNum { repeated fixed32 limbs = 1; }
+
+message PageCoinbase {
+  oneof kind {
+    PageLegacyCoinbase legacy = 1;
+    PageV1Coinbase v1 = 2;
+  }
+}
+
+// The selected coinbase version must match Page.version. Both maps reject
+// duplicate keys before reconstructing their canonical consensus z-map.
+message PageLegacyCoinbase { repeated PageLegacyCoinbaseEntry entries = 1; }
+message PageLegacyCoinbaseEntry {
+  // Legacy recipients are [keys-required (z-set pubkey)] threshold locks.
+  TxLegacyLock key = 1;
+  optional fixed64 coins = 2;
+}
+message PageV1Coinbase { repeated PageV1CoinbaseEntry entries = 1; }
+message PageV1CoinbaseEntry {
+  Hash key = 1;
+  optional fixed64 coins = 2;
+}

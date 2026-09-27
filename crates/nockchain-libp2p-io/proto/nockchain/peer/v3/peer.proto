@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package nockchain.peer.v3;
+
+import "nockchain/peer/v3/common.proto";
+import "nockchain/peer/v3/page.proto";
+import "nockchain/peer/v3/transaction.proto";
+
+// Exactly one framed message on each libp2p request/response half-stream.
+// These messages are DTOs. A successful protobuf decode is not validation.
+message PeerRequest {
+  oneof kind {
+    BatchRequest batch = 1;
+    AuthenticatedGossip gossip = 2;
+  }
+}
+
+message BatchRequest {
+  optional bytes proof = 1; // Exactly one EquiX SolutionByteArray (16 bytes).
+  optional uint64 nonce = 2;
+  repeated RequestItem items = 3; // Unique item IDs; at most 4096.
+}
+
+message RequestItem {
+  optional uint32 item_id = 1;
+  DataRequest request = 2;
+}
+
+message DataRequest {
+  oneof kind {
+    uint64 block_by_height = 1;
+    EldersRequest elders = 2;
+    Hash transaction_by_id = 3;
+    uint64 block_with_transactions_by_height = 4;
+    BlockRangeRequest block_range = 5;
+  }
+}
+
+message EldersRequest {
+  Hash block_id = 1;
+  // Retained request context, never an authenticated principal. Authentication
+  // uses the sender and receiver identities of the libp2p connection.
+  optional bytes peer_id = 2;
+}
+
+message BlockRangeRequest {
+  optional uint64 start_height = 1;
+  optional uint32 length = 2; // 1..255; range must not overflow u64.
+}
+
+message AuthenticatedGossip {
+  optional bytes proof = 1;
+  optional uint64 nonce = 2;
+  Fact fact = 3;
+}
+
+message Fact {
+  oneof kind {
+    Page block = 1;
+    Transaction transaction = 2;
+    Elders elders = 3;
+  }
+}
+
+message Elders {
+  optional uint64 oldest_height = 1;
+  repeated Hash block_ids = 2; // At most 24 ancestors, in ancestor order.
+}
+
+message PeerResponse {
+  oneof kind {
+    bool acknowledged = 1;
+    BatchResult batch = 2;
+  }
+}
+
+message BatchResult {
+  repeated ResultItem items = 1; // Unique item IDs; at most 4096.
+}
+
+message ResultItem {
+  optional uint32 item_id = 1;
+  oneof outcome {
+    ResponseEnvelope result = 2;
+    Empty acknowledged = 3;
+    Empty not_found = 4;
+    ErrorResult error = 5;
+  }
+}
+
+message Empty {}
+
+message ErrorResult {
+  optional ErrorClass classification = 1;
+}
+
+enum ErrorClass {
+  ERROR_CLASS_UNSPECIFIED = 0;
+  ERROR_CLASS_DECODE = 1;
+  ERROR_CLASS_BACKPRESSURE = 2;
+  ERROR_CLASS_TOO_LARGE = 3;
+  ERROR_CLASS_INVALID_POW = 4;
+  ERROR_CLASS_INTERNAL = 5;
+}
+
+// IDs are derived from the typed payloads, so there is no independent wire
+// metadata which could identify one block while carrying another.
+message ResponseEnvelope {
+  oneof kind {
+    Page block = 1;
+    Transaction transaction = 2;
+    Elders elders = 3;
+    BlockBundle block_bundle = 4;
+    BlockRange block_range = 5;
+  }
+}
+
+message BlockBundle {
+  Page block = 1;
+  repeated Transaction transactions = 2;
+  repeated Hash unincluded_transaction_ids = 3;
+}
+
+message BlockRange {
+  repeated BlockBundle blocks = 1; // 1..255, in ascending height order.
+}

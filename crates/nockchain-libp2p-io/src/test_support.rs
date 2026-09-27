@@ -11,18 +11,16 @@ use bytes::Bytes;
 use futures::AsyncWriteExt;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use libp2p::core::ConnectedPoint;
-use libp2p::request_response::cbor;
 use libp2p::swarm::{ConnectionId, NetworkBehaviour};
 use libp2p::{request_response, Multiaddr, PeerId, Swarm};
 use nockapp::noun::slab::NounSlab;
 use nockapp::utils::make_tas;
-use nockapp::AtomExt;
 use nockvm::noun::{Atom, NounAllocator, D, T};
 use nockvm_macros::tas;
 use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
-use crate::behaviour::request_response_protocols;
+use crate::behaviour::{build_request_response_behaviour, request_response_protocols};
 use crate::config::LibP2PConfig;
 use crate::driver::{
     build_retry_request_contexts, collect_tip5_zset_strings, handle_outbound_request_failure,
@@ -45,6 +43,17 @@ use crate::p2p_state::{
 };
 use crate::peer_stats::{PeerStatsRegistry, PeerStatsSnapshot};
 use crate::tip5_util::tip5_hash_to_base58;
+use crate::v3::codec::ProtobufCodec;
+
+/// Encoded v3 request bytes, including the four-byte frame prefix.
+pub fn v3_request_wire_size(request: &NockchainRequest) -> std::io::Result<usize> {
+    crate::v3::encode_request(request).map(|body| body.len().saturating_add(4))
+}
+
+/// Encoded v3 response bytes, including the four-byte frame prefix.
+pub fn v3_response_wire_size(response: &NockchainResponse) -> std::io::Result<usize> {
+    crate::v3::encode_response(response).map(|body| body.len().saturating_add(4))
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ProtocolTrace {
@@ -138,7 +147,7 @@ pub struct ProtocolRecordingCodec {
     trace: Option<ProtocolTrace>,
     raw_request_injection: RawRequestInjection,
     raw_response_injection: RawResponseInjection,
-    inner: cbor::codec::Codec<NockchainRequest, NockchainResponse>,
+    inner: ProtobufCodec,
 }
 
 impl ProtocolRecordingCodec {
@@ -149,9 +158,10 @@ impl ProtocolRecordingCodec {
         raw_response_injection: RawResponseInjection,
         libp2p_config: &LibP2PConfig,
     ) -> Self {
-        let inner = cbor::codec::Codec::default()
-            .set_request_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64)
-            .set_response_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64);
+        let inner = ProtobufCodec::new(
+            libp2p_config.gen2_batch_max_bytes() as u64,
+            libp2p_config.gen2_batch_max_bytes() as u64,
+        );
         Self {
             actor,
             trace,
@@ -380,14 +390,7 @@ impl ReqResFailureObservabilityProbe {
 }
 
 fn fresh_outbound_request_id() -> request_response::OutboundRequestId {
-    let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
-        request_response::cbor::Behaviour::new(
-            [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
-                request_response::ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        );
+    let mut behaviour = build_request_response_behaviour(&LibP2PConfig::default());
     behaviour.send_request(
         &PeerId::random(),
         NockchainRequest::BatchRequest {
@@ -774,7 +777,9 @@ fn collect_tip5_zset_strings_for_seeds_with_elapsed(
     seeds: &[u64],
 ) -> Result<(Vec<String>, Tip5ZsetTraversalMeasurement), String> {
     let mut slab = NounSlab::new();
-    let zset = tip5_zset(&mut slab, seeds);
+    // Deliberately preserve a deep right spine for the traversal regression.
+    // Wire-page fixtures use the canonical tree builder instead.
+    let zset = skewed_tip5_tree_for_traversal(&mut slab, seeds);
     slab.set_root(zset);
     let space = slab.noun_space();
     let root = unsafe { *slab.root() };
@@ -1105,23 +1110,44 @@ pub fn jam_block_range_with_txs_request(
 /// singleton `Result` payload for raw-tx request/response flows.
 pub fn jam_heard_tx_response(seed: u64, payload_len: usize) -> Vec<u8> {
     let mut slab: NounSlab = NounSlab::new();
-    let tx_id = T(
-        &mut slab,
-        &[
-            D(seed),
-            D(seed.saturating_add(1)),
-            D(seed.saturating_add(2)),
-            D(seed.saturating_add(3)),
-            D(seed.saturating_add(4)),
-        ],
-    );
-    let payload = Atom::from_value(&mut slab, vec![0xCDu8; payload_len])
-        .expect("payload atom should build")
-        .as_noun();
-    let raw_tx = T(&mut slab, &[tx_id, payload]);
+    let raw_tx = valid_raw_tx_noun(&mut slab, seed, payload_len);
     let response = T(&mut slab, &[D(tas!(b"heard-tx")), raw_tx]);
     slab.set_root(response);
     slab.jam().as_ref().to_vec()
+}
+
+/// Construct a complete consensus-shaped v1 transaction for transport tests.
+/// The claimed ID stays under test control; kernel admission is not simulated.
+/// Variable payload bytes occupy based note-data atoms, never a fake tx tail.
+pub(crate) fn valid_raw_tx_noun(
+    slab: &mut NounSlab,
+    seed: u64,
+    payload_len: usize,
+) -> nockvm::noun::Noun {
+    let id = tip5_tuple(slab, seed);
+    if payload_len == 0 {
+        return T(slab, &[D(1), id, D(0)]);
+    }
+    let mut payload = D(0);
+    for chunk in (0..payload_len.div_ceil(7)).rev() {
+        let count = (payload_len - chunk * 7).min(7);
+        let mut bytes = [0u8; 8];
+        bytes[..count].fill(0xCD);
+        // Vary limbs so the fixture's size scales with the requested payload.
+        let limb = u64::from_le_bytes(bytes) ^ chunk as u64;
+        let atom = Atom::new(slab, limb).as_noun();
+        payload = T(slab, &[atom, payload]);
+    }
+    let note_entry = T(slab, &[D(tas!(b"test")), payload]);
+    let note_data = T(slab, &[note_entry, D(0), D(0)]);
+    let output = T(slab, &[D(0), id, note_data, D(0), id]);
+    let seeds = T(slab, &[output, D(0), D(0)]);
+    let spend_body = T(slab, &[D(0), seeds, D(0)]);
+    let spend = T(slab, &[D(0), spend_body]);
+    let name = T(slab, &[id, id, D(0)]);
+    let entry = T(slab, &[name, spend]);
+    let spends = T(slab, &[entry, D(0), D(0)]);
+    T(slab, &[D(1), id, spends])
 }
 
 fn tip5_tuple(slab: &mut NounSlab, seed: u64) -> nockvm::noun::Noun {
@@ -1138,6 +1164,19 @@ fn tip5_tuple(slab: &mut NounSlab, seed: u64) -> nockvm::noun::Noun {
 }
 
 fn tip5_zset(slab: &mut NounSlab, seeds: &[u64]) -> nockvm::noun::Noun {
+    seeds.iter().fold(D(0), |tree, seed| {
+        let mut item = tip5_tuple(slab, *seed);
+        nockchain_math::zoon::zset::z_set_put(
+            slab,
+            &tree,
+            &mut item,
+            &nockchain_math::zoon::common::DefaultTipHasher,
+        )
+        .expect("fixture transaction-id set should build")
+    })
+}
+
+fn skewed_tip5_tree_for_traversal(slab: &mut NounSlab, seeds: &[u64]) -> nockvm::noun::Noun {
     seeds.iter().rev().fold(D(0), |tree, seed| {
         let item = tip5_tuple(slab, *seed);
         T(slab, &[item, D(0), tree])
@@ -1151,11 +1190,10 @@ pub fn base58_for_tip5_seed(seed: u64) -> String {
     tip5_hash_to_base58(noun, &space).expect("tip5 tuple should convert to base58")
 }
 
-/// Build a synthetic bundled block with the same page shape used by the driver
-/// tests. The resulting `block_message` is the jammed page payload, not the
-/// outer `%heard-block` fact wrapper.
+/// Build a synthetic bundled block with a complete `%heard-block` message and
+/// the same page shape used by the driver tests.
 pub fn bundled_block_for_height(height: u64, tx_seeds: &[u64]) -> BundledBlockWithTxs {
-    let (block_id, unincluded_tx_ids, slab) = synthetic_block_page_slab(height, tx_seeds);
+    let (block_id, unincluded_tx_ids, slab) = synthetic_heard_block_response_slab(height, tx_seeds);
 
     BundledBlockWithTxs {
         block_id,
@@ -1175,17 +1213,9 @@ pub fn realistic_heard_block_fact_for_height(
     Ok((block_id, fact, jam_bytes))
 }
 
-fn synthetic_block_page_slab(height: u64, tx_seeds: &[u64]) -> (String, Vec<String>, NounSlab) {
-    let mut slab = NounSlab::new();
-    let page = synthetic_block_page_noun(&mut slab, height, tx_seeds);
-    slab.set_root(page);
-
-    let block_id_base58 = base58_for_tip5_seed(10_000 + height);
-    let tx_ids_base58 = tx_seeds
-        .iter()
-        .map(|seed| base58_for_tip5_seed(*seed))
-        .collect();
-    (block_id_base58, tx_ids_base58, slab)
+pub fn jam_heard_block_response(height: u64, tx_seeds: &[u64]) -> Vec<u8> {
+    let (_, _, slab) = synthetic_heard_block_response_slab(height, tx_seeds);
+    slab.jam().to_vec()
 }
 
 fn synthetic_heard_block_response_slab(
@@ -1214,6 +1244,8 @@ fn synthetic_block_page_noun(
     let block_id = tip5_tuple(slab, 10_000 + height);
     let parent_id = tip5_tuple(slab, 20_000 + height);
     let tx_ids = tip5_zset(slab, tx_seeds);
+    let zero_bignum = T(slab, &[D(nockvm_macros::tas!(b"bn")), D(0)]);
+    let height = Atom::new(slab, height).as_noun();
     T(
         slab,
         &[
@@ -1225,9 +1257,9 @@ fn synthetic_block_page_noun(
             D(0),
             D(0),
             D(0),
-            D(0),
-            D(0),
-            D(height),
+            zero_bignum,
+            zero_bignum,
+            height,
             D(0),
         ],
     )

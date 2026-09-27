@@ -1,0 +1,1096 @@
+{
+  "version": 1,
+  "oracle": "Fixed vectors transcribed from protobuf wire-format rules; expected semantics are independently authored protobuf JSON.",
+  "vectors": [
+    {
+      "id": "optional_scalar_last_explicit_zero",
+      "category": "duplicate_scalar",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a1e0a1000000000000000000000000000000000100710001a06080012020800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block"
+              },
+              {
+                "tas": "by-height"
+              },
+              {
+                "atom": 0
+              }
+            ]
+          }
+        ]
+      },
+      "note": "The second optional nonce is explicitly present zero, not absence."
+    },
+    {
+      "id": "optional_scalar_absence",
+      "category": "presence",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a1a0a10000000000000000000000000000000001a06080012020800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "reject",
+        "canonical_nouns": []
+      },
+      "note": "Protobuf parses; peer domain requires nonce presence."
+    },
+    {
+      "id": "nested_scalar_last_explicit_zero",
+      "category": "duplicate_scalar",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a1e0a100000000000000000000000000000000010001a080809080012020800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block"
+              },
+              {
+                "tas": "by-height"
+              },
+              {
+                "atom": 0
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "singular_message_occurrences_merge",
+      "category": "singular_message_merge",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a240a100000000000000000000000000000000010001a0e080012042a02080712042a021002",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_range": {
+                  "start_height": "7",
+                  "length": 2
+                }
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block-with-txs"
+              },
+              {
+                "tas": "by-range"
+              },
+              {
+                "atom": 7
+              },
+              {
+                "atom": 2
+              }
+            ]
+          }
+        ]
+      },
+      "note": "The singular RequestItem.request merges two occurrences; its same-member range message also merges."
+    },
+    {
+      "id": "same_oneof_message_merges",
+      "category": "oneof_same_message",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a220a100000000000000000000000000000000010001a0c080012082a0208072a021002",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_range": {
+                  "start_height": "7",
+                  "length": 2
+                }
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block-with-txs"
+              },
+              {
+                "tas": "by-range"
+              },
+              {
+                "atom": 7
+              },
+              {
+                "atom": 2
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "same_oneof_empty_message_merges",
+      "category": "oneof_same_message",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a220a100000000000000000000000000000000010001a0c080012082a04080710022a00",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_range": {
+                  "start_height": "7",
+                  "length": 2
+                }
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block-with-txs"
+              },
+              {
+                "tas": "by-range"
+              },
+              {
+                "atom": 7
+              },
+              {
+                "atom": 2
+              }
+            ]
+          }
+        ]
+      },
+      "note": "An empty occurrence of the selected message member does not clear its fields."
+    },
+    {
+      "id": "different_oneof_member_replaces",
+      "category": "oneof_different_member",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a220a100000000000000000000000000000000010001a0c080012082a04080710020800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block"
+              },
+              {
+                "tas": "by-height"
+              },
+              {
+                "atom": 0
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "oneof_switchback_starts_fresh",
+      "category": "oneof_switchback",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a260a100000000000000000000000000000000010001a100800120c2a040807100208002a021002",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_range": {
+                  "length": 2
+                }
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "reject",
+        "canonical_nouns": []
+      },
+      "note": "Returning to the earlier member does not restore its old start_height; the domain rejects missing presence."
+    },
+    {
+      "id": "same_oneof_scalar_last_zero",
+      "category": "oneof_scalar",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a1e0a100000000000000000000000000000000010001a080800120408070800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block"
+              },
+              {
+                "tas": "by-height"
+              },
+              {
+                "atom": 0
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "root_same_oneof_message_merges",
+      "category": "oneof_same_message",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a120a10000000000000000000000000000000000a0a10001a06080012020800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block"
+              },
+              {
+                "tas": "by-height"
+              },
+              {
+                "atom": 0
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "packed_and_unpacked_numeric_segments_concatenate",
+      "category": "repeated_numeric",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "12c0010abd01080012b8010ab5010801122d090100000000000000110000000000000000190000000000000000210000000000000000290000000000000000222d090000000000000000110000000000000000190000000000000000210000000000000000290000000000000000320212003a020a0042020a004a170a0801000000020000000d030000000a000a0404000000520059000000000000000062100500000000000000060000000000000061070000000000000062080800000000000000",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "items": [
+            {
+              "item_id": 0,
+              "result": {
+                "block": {
+                  "version": 1,
+                  "digest": {
+                    "limb0": "1",
+                    "limb1": "0",
+                    "limb2": "0",
+                    "limb3": "0",
+                    "limb4": "0"
+                  },
+                  "parent": {
+                    "limb0": "0",
+                    "limb1": "0",
+                    "limb2": "0",
+                    "limb3": "0",
+                    "limb4": "0"
+                  },
+                  "coinbase": {
+                    "v1": {}
+                  },
+                  "timestamp": {
+                    "little_endian": ""
+                  },
+                  "epoch_counter": {
+                    "little_endian": ""
+                  },
+                  "target": {
+                    "limbs": [
+                      1,
+                      2,
+                      3,
+                      4
+                    ]
+                  },
+                  "accumulated_work": {},
+                  "height": "0",
+                  "message": [
+                    "5",
+                    "6",
+                    "7",
+                    "8"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "heard-block"
+              },
+              {
+                "tuple": [
+                  {
+                    "atom": 1
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "atom": 1
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      }
+                    ]
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      }
+                    ]
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "tas": "bn"
+                      },
+                      {
+                        "list": [
+                          {
+                            "atom": 1
+                          },
+                          {
+                            "atom": 2
+                          },
+                          {
+                            "atom": 3
+                          },
+                          {
+                            "atom": 4
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "tas": "bn"
+                      },
+                      {
+                        "list": []
+                      }
+                    ]
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "list": [
+                      {
+                        "atom": 5
+                      },
+                      {
+                        "atom": 6
+                      },
+                      {
+                        "atom": 7
+                      },
+                      {
+                        "atom": 8
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "note": "fixed32 target limbs and fixed64 message values concatenate packed/unpacked segments in occurrence order, including an empty packed segment."
+    },
+    {
+      "id": "unpacked_numeric_control",
+      "category": "repeated_numeric",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "12bc010ab901080012b4010ab1010801122d090100000000000000110000000000000000190000000000000000210000000000000000290000000000000000222d090000000000000000110000000000000000190000000000000000210000000000000000290000000000000000320212003a020a0042020a004a140d010000000d020000000d030000000d040000005200590000000000000000610500000000000000610600000000000000610700000000000000610800000000000000",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "items": [
+            {
+              "item_id": 0,
+              "result": {
+                "block": {
+                  "version": 1,
+                  "digest": {
+                    "limb0": "1",
+                    "limb1": "0",
+                    "limb2": "0",
+                    "limb3": "0",
+                    "limb4": "0"
+                  },
+                  "parent": {
+                    "limb0": "0",
+                    "limb1": "0",
+                    "limb2": "0",
+                    "limb3": "0",
+                    "limb4": "0"
+                  },
+                  "coinbase": {
+                    "v1": {}
+                  },
+                  "timestamp": {
+                    "little_endian": ""
+                  },
+                  "epoch_counter": {
+                    "little_endian": ""
+                  },
+                  "target": {
+                    "limbs": [
+                      1,
+                      2,
+                      3,
+                      4
+                    ]
+                  },
+                  "accumulated_work": {},
+                  "height": "0",
+                  "message": [
+                    "5",
+                    "6",
+                    "7",
+                    "8"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "heard-block"
+              },
+              {
+                "tuple": [
+                  {
+                    "atom": 1
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "atom": 1
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      }
+                    ]
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      },
+                      {
+                        "atom": 0
+                      }
+                    ]
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "tas": "bn"
+                      },
+                      {
+                        "list": [
+                          {
+                            "atom": 1
+                          },
+                          {
+                            "atom": 2
+                          },
+                          {
+                            "atom": 3
+                          },
+                          {
+                            "atom": 4
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "tuple": [
+                      {
+                        "tas": "bn"
+                      },
+                      {
+                        "list": []
+                      }
+                    ]
+                  },
+                  {
+                    "atom": 0
+                  },
+                  {
+                    "list": [
+                      {
+                        "atom": 5
+                      },
+                      {
+                        "atom": 6
+                      },
+                      {
+                        "atom": 7
+                      },
+                      {
+                        "atom": 8
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "unknown_only_root",
+      "category": "unknown_fields",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "980601",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {},
+      "domain": {
+        "verdict": "reject",
+        "canonical_nouns": []
+      },
+      "note": "An unknown field is not a recognized request operation."
+    },
+    {
+      "id": "known_and_unknown_root",
+      "category": "unknown_fields",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "9806010a1c0a100000000000000000000000000000000010001a06080012020800a2060178",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block"
+              },
+              {
+                "tas": "by-height"
+              },
+              {
+                "atom": 0
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "known_and_unknown_nested_message",
+      "category": "unknown_fields",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a260a100000000000000000000000000000000010001a100800120c2a0a98060110020807a20600",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_range": {
+                  "start_height": "7",
+                  "length": 2
+                }
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block-with-txs"
+              },
+              {
+                "tas": "by-range"
+              },
+              {
+                "atom": 7
+              },
+              {
+                "atom": 2
+              }
+            ]
+          }
+        ]
+      },
+      "note": ""
+    },
+    {
+      "id": "unknown_only_nested_operation",
+      "category": "unknown_fields",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a1d0a100000000000000000000000000000000010001a0708001203980601",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {}
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "reject",
+        "canonical_nouns": []
+      },
+      "note": ""
+    },
+    {
+      "id": "known_oneof_and_unknown_tag",
+      "category": "unknown_fields",
+      "message_type": "nockchain.peer.v3.PeerRequest",
+      "hex": "0a1f0a100000000000000000000000000000000010001a090800120508009a0600",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "proof": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "nonce": "0",
+          "items": [
+            {
+              "item_id": 0,
+              "request": {
+                "block_by_height": "0"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": [
+          {
+            "tuple": [
+              {
+                "tas": "request"
+              },
+              {
+                "tas": "block"
+              },
+              {
+                "tas": "by-height"
+              },
+              {
+                "atom": 0
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Unknown fields cannot select or clear a known oneof member."
+    },
+    {
+      "id": "unknown_enum_value",
+      "category": "enum",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "12080a0608002a020863",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "items": [
+            {
+              "item_id": 0,
+              "error": {
+                "classification": 99
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "reject",
+        "canonical_nouns": []
+      },
+      "note": "Proto3 retains the open enum number; the peer domain rejects unknown classifications."
+    },
+    {
+      "id": "unspecified_enum_zero",
+      "category": "enum",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "12080a0608002a020800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "items": [
+            {
+              "item_id": 0,
+              "error": {
+                "classification": "ERROR_CLASS_UNSPECIFIED"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "reject",
+        "canonical_nouns": []
+      },
+      "note": ""
+    },
+    {
+      "id": "missing_enum_presence",
+      "category": "presence",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "12060a0408002a00",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "items": [
+            {
+              "item_id": 0,
+              "error": {}
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "reject",
+        "canonical_nouns": []
+      },
+      "note": ""
+    },
+    {
+      "id": "known_enum",
+      "category": "enum",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "12080a0608002a020801",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "items": [
+            {
+              "item_id": 0,
+              "error": {
+                "classification": "ERROR_CLASS_DECODE"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": []
+      },
+      "note": ""
+    },
+    {
+      "id": "duplicate_enum_last_known",
+      "category": "duplicate_scalar",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "120a0a0808002a0408630801",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "batch": {
+          "items": [
+            {
+              "item_id": 0,
+              "error": {
+                "classification": "ERROR_CLASS_DECODE"
+              }
+            }
+          ]
+        }
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": []
+      },
+      "note": ""
+    },
+    {
+      "id": "duplicate_oneof_boolean_last_false",
+      "category": "oneof_scalar",
+      "message_type": "nockchain.peer.v3.PeerResponse",
+      "hex": "08010800",
+      "protobuf_verdict": "accept",
+      "expected_semantics": {
+        "acknowledged": false
+      },
+      "domain": {
+        "verdict": "accept",
+        "canonical_nouns": []
+      },
+      "note": ""
+    }
+  ]
+}

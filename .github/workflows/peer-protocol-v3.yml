@@ -1,0 +1,188 @@
+name: Peer protocol v3
+
+on:
+  pull_request:
+    branches: [master, nightly]
+  push:
+    branches: [master, nightly]
+  schedule:
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: peer-v3-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROTOC_VERSION: "36.2"
+  BUF_VERSION: "1.73.0"
+
+jobs:
+  reference:
+    name: Protobuf reference and schema compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout public source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned protobuf tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+            --output "$RUNNER_TEMP/protoc.zip"
+          echo "121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278  $RUNNER_TEMP/protoc.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+          echo "PROTOC_INCLUDE=$RUNNER_TEMP/protoc/include" >> "$GITHUB_ENV"
+          curl --fail --location --retry 3 \
+            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" \
+            --output "$RUNNER_TEMP/buf"
+          echo "8f2986298ad08f0cc1bf999b9797b7c383adf32d7edf0f73d6f1e1a701baeac1  $RUNNER_TEMP/buf" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/buf"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          python -m pip install --require-hashes --only-binary=:all: \
+            -r scripts/peer-v3-conformance-requirements.txt
+
+      - name: Check official protobuf semantics
+        run: python scripts/peer-v3-conformance.py
+
+      - name: Test the loopback rehearsal assertions
+        run: python scripts/test_peer_v3_rehearsal.py
+
+      - name: Lint trusted peer schemas
+        run: buf lint crates/nockchain-libp2p-io
+
+      - name: Check existing v3 schema compatibility
+        shell: bash
+        env:
+          EVENT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          baseline="$EVENT_BASE"
+          if [[ -z "$baseline" || "$baseline" == 0000000000000000000000000000000000000000 ]]; then
+            baseline="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+          if [[ ! "$baseline" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "No prior revision is available for a v3 compatibility comparison." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git cat-file -e "$baseline^{commit}"
+          if ! git cat-file -e "$baseline:crates/nockchain-libp2p-io/proto/nockchain/peer/v3/peer.proto" 2>/dev/null; then
+            echo "Breaking-change comparison: not applicable; the base revision has no peer v3 schema. Schema lint and Cargo schema-profile tests still run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          buf breaking crates/nockchain-libp2p-io \
+            --against ".git#ref=${baseline},subdir=crates/nockchain-libp2p-io"
+          echo "Peer v3 breaking-change comparison passed against ${baseline}." >> "$GITHUB_STEP_SUMMARY"
+
+  protocol:
+    name: Protocol tests with the current kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_LTO: "false"
+      CARGO_PROFILE_TEST_LTO: "false"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_BACKTRACE: "1"
+      RUST_TEST_THREADS: "4"
+    steps:
+      - name: Checkout public source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install native build dependencies and pinned protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang cmake libclang-dev libssl-dev libsqlite3-dev pkg-config
+          curl --fail --location --retry 3 \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+            --output "$RUNNER_TEMP/protoc.zip"
+          echo "121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278  $RUNNER_TEMP/protoc.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+          echo "PROTOC_INCLUDE=$RUNNER_TEMP/protoc/include" >> "$GITHUB_ENV"
+
+      - name: Install the repository Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust build dependencies
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: peer-v3-rust-${{ runner.os }}-no-debug-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            peer-v3-rust-${{ runner.os }}-no-debug-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+            peer-v3-rust-${{ runner.os }}-no-debug-v1-
+
+      # Kernel crates fail if their real JAM asset is missing. The protocol
+      # dependency graph needs only kernels-open-dumb. A cache entry is valid
+      # only for these exact compiler, bootstrap, dependency and Hoon inputs.
+      # Exclude restored Cargo outputs from this source fingerprint.
+      - name: Cache the current consensus kernel
+        id: kernel
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: assets/dumb.jam
+          key: peer-v3-kernel-${{ runner.os }}-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '**/Cargo.toml', '**/*.rs', '**/*.c', '**/*.h', '**/*.S', '**/*.s', 'patches/**', '.cargo/**', 'hoon/**', 'crates/hoonc/hoon/**', 'crates/hoonc/bootstrap/*.jam', 'assets/honc-cold-138.jam', 'scripts/*jam*', 'Makefile', '!target/**', '!**/target/**') }}
+
+      - name: Compile the current consensus kernel
+        if: steps.kernel.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo --config 'profile.dev.package."*".debug=0' build --locked -p hoonc --bin hoonc
+          make assets/dumb.jam \
+            HOONC="$GITHUB_WORKSPACE/target/debug/hoonc" \
+            HOONC_PMA_ROOT="$RUNNER_TEMP/peer-v3-hoonc"
+
+      - name: Run protocol unit, integration, historical, wire and schema tests
+        env:
+          KERNEL_JAM_PATH: ${{ github.workspace }}/assets/dumb.jam
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$KERNEL_JAM_PATH"
+          cargo --config 'profile.dev.package."*".debug=0' \
+            --config 'profile.test.package."*".debug=0' \
+            test --locked --no-fail-fast -p nockchain-libp2p-io --tests
+
+      - name: Test the corpus extractor
+        env:
+          KERNEL_JAM_PATH: ${{ github.workspace }}/assets/dumb.jam
+        run: |
+          cargo --config 'profile.dev.package."*".debug=0' \
+            --config 'profile.test.package."*".debug=0' \
+            test --locked --no-fail-fast -p nockchain-libp2p-io --example extract_peer_corpus
+
+      - name: Test the loopback consensus readers
+        env:
+          KERNEL_JAM_PATH: ${{ github.workspace }}/assets/dumb.jam
+        run: |
+          cargo --config 'profile.dev.package."*".debug=0' \
+            --config 'profile.test.package."*".debug=0' \
+            test --locked -p nockchain-e2e --example peer_v3_head --example peer_v3_tx
