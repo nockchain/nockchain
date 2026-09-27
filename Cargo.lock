@@ -6667,6 +6667,7 @@ name = "nockchain-e2e"
 version = "0.1.17"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytes",
  "clap",
  "hex",

@@ -64,3 +64,38 @@ rust_test(
         "//crates/nockchain-types",
     ] + all_crate_deps(),
 )
+
+rust_binary(
+    name = "peer_v3_tx",
+    srcs = ["examples/peer_v3_tx.rs"],
+    aliases = aliases(),
+    edition = "2021",
+    deps = [
+        "//crates/nockapp",
+        "//crates/nockapp-grpc-proto:nockapp-grpc",
+        "//crates/nockchain-math",
+        "//crates/nockchain-types",
+        "//crates/nockvm/rust/nockvm",
+        "//crates/noun-serde",
+    ] + all_crate_deps(),
+)
+
+rust_test(
+    name = "peer_v3_tx_unit_tests",
+    srcs = ["examples/peer_v3_tx.rs"],
+    aliases = aliases(),
+    compile_data = [
+        "//crates/bridge:test_fixtures",
+        "//crates/nockchain-types/jams:v0/raw-tx.jam",
+        "//crates/nockchain-types/jams:v1/raw-tx.jam",
+    ],
+    edition = "2021",
+    deps = [
+        "//crates/nockapp",
+        "//crates/nockapp-grpc-proto:nockapp-grpc",
+        "//crates/nockchain-math",
+        "//crates/nockchain-types",
+        "//crates/nockvm/rust/nockvm",
+        "//crates/noun-serde",
+    ] + all_crate_deps(),
+)

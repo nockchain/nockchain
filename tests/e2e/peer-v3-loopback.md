@@ -2,7 +2,7 @@
 
 `scripts/peer-v3-loopback-rehearsal.py` runs two real fakenet nodes and a
 separate `zk-pow-mine` process. It checks initial synchronization, authenticated
-block gossip, and catch-up after restarting the receiving node with its
+block gossip, v1 transaction propagation and inclusion, and catch-up after restarting the receiving node with its
 existing identity and state. Both nodes must expose the same proof-bearing
 chain head, and the receiving node must report generation 3 peer traffic.
 Head snapshots come directly from the kernel's private Peek through the
@@ -10,22 +10,47 @@ Head snapshots come directly from the kernel's private Peek through the
 `%heaviest-block` when needed. The public block-details RPC separately
 checks the agreed height, block ID, and proof presence. After restart catch-up,
 the script captures both kernel heads again and requires the same agreement.
-The gossip check also requires a new `libp2p/gossip` event in its local event
-log. This run submits no transactions, so those events establish receipt of
-block gossip during the connected stage. Head agreement is checked
+The block-gossip check also requires a new `libp2p/gossip` event in its local
+event log. No transactions have been submitted at that stage, so those events
+establish receipt of block gossip. Head agreement is checked
 independently; the event count does not identify the particular gossiped block.
 
 This is a short run near genesis. It does **not** test consensus-rule activation
-at height 154500, wallet transaction propagation, mixed-generation peers, or a
+at height 154500, live legacy v0 transaction acceptance, mixed-generation peers, or a
 production rollout. Historical corpus cases separately check representation
 preservation around real activation boundaries.
+
+## Transaction evidence
+
+The run creates fresh miner and recipient wallets, mines to the miner wallet,
+and makes a 1,000-nick payment with normal wallet note selection and fees.
+The wallet and nodes use matching fakenet phase settings. The miner is stopped
+throughout admission and gossip verification; the wallet submits only to A.
+The `peer_v3_tx` helper reconstructs the signed raw transaction from the saved
+wallet `.tx` file, including its witness data. It recomputes the submitted ID,
+which can differ from the wallet filename, and the exact event cause hash.
+
+| Check | Required evidence |
+| --- | --- |
+| Fresh transaction | Absent from both nodes' acceptance and pending queries before submission |
+| Kernel admission | `TransactionAccepted` true on both nodes |
+| Pending propagation | Exact ID in both private `%excluded-txs` sets while both consensus heads remain unchanged |
+| Authenticated gossip | New receiver event with the exact signed-transaction cause hash and configured sender's gossip wire tags |
+| v3 peer traffic | Receiver reports generation 3 and received bytes |
+| Inclusion | After mining resumes, direct block details on both nodes contain that ID in the same proof-bearing block |
+| Pending removal | Included ID absent from both `%excluded-txs` sets |
+
+An RPC acknowledgment or generic gossip count is insufficient. The event
+wire version is 1; it is distinct from peer protocol generation 3. The
+transaction stages record their signed-artifact hash, cause hash, transaction
+ID, matching event number, and inclusion block in `report.json`.
 
 ## Prerequisites
 
 - Python 3, `grpcurl`, and `lsof` (macOS or Linux).
-- `nockchain`, `zk-pow-mine`, and the `peer_v3_head` example built from the current
-  branch.
-- Fresh `assets/dumb.jam` and `assets/miner.jam` compiled from the current Hoon
+- `nockchain`, `zk-pow-mine`, `nockchain-wallet`, and the `peer_v3_head` and
+  `peer_v3_tx` examples built from the current branch.
+- Fresh `assets/dumb.jam`, `assets/miner.jam`, and `assets/wal.jam` compiled from the current Hoon
   sources before building those binaries. Do not silently reuse older compiled
   kernels. Use a fresh `hoonc --new --data-dir` directory for each asset; the
   Makefile's kernel asset targets describe the source entry points.
@@ -41,19 +66,23 @@ preservation around real activation boundaries.
 The older YAML scenarios still expect in-process mining flags. This rehearsal
 uses the current separate-miner interface.
 
-After generating both current assets:
+After generating all three current assets:
 
 ```sh
 KERNEL_JAM_PATH="$PWD/assets/dumb.jam" \
   cargo build --locked -p nockchain --bin nockchain
 KERNEL_JAM_PATH="$PWD/assets/miner.jam" \
   cargo build --locked -p zk-pow-miner --bin zk-pow-mine
+KERNEL_JAM_PATH="$PWD/assets/wal.jam" \
+  cargo build --locked -p nockchain-wallet --bin nockchain-wallet
 KERNEL_JAM_PATH="$PWD/assets/dumb.jam" \
-  cargo build --locked -p nockchain-e2e --example peer_v3_head
+  cargo build --locked -p nockchain-e2e --example peer_v3_head --example peer_v3_tx
 python3 scripts/peer-v3-loopback-rehearsal.py \
   --node-bin target/debug/nockchain \
   --miner-bin target/debug/zk-pow-mine \
-  --head-bin target/debug/examples/peer_v3_head
+  --head-bin target/debug/examples/peer_v3_head \
+  --wallet-bin target/debug/nockchain-wallet \
+  --tx-bin target/debug/examples/peer_v3_tx
 ```
 
 Use the corresponding paths when setting `CARGO_TARGET_DIR`. Pass
@@ -61,10 +90,10 @@ Use the corresponding paths when setting `CARGO_TARGET_DIR`. Pass
 stage. `--work-dir` must be a new directory; otherwise the script creates a
 temporary directory and prints its location.
 
-Build the two binaries separately: their kernel crates use the same
+Build the node, miner, and wallet separately: their kernel crates use the same
 `KERNEL_JAM_PATH` variable for different assets. Explicit paths also avoid a
 shared Cargo target reusing a build-script path from another checkout. Before
-starting either node, the rehearsal verifies that each executable contains
+starting any wallet or node, the rehearsal verifies that each kernel-bearing executable contains
 the complete current kernel asset, then records that check in its report.
 
 An `ai-pow-jets` test executable built from the current branch can check a
@@ -98,7 +127,11 @@ gRPC listeners, and `--no-default-peers`. The receiving node's only configured
 peer is the other loopback node. No production snapshots or node identities
 are used. Discovery can learn only from this isolated peer set; the node has
 no separate switch for disabling Kademlia. Child environments omit inherited
-node/miner/proxy settings. `TRACY_DISABLE` prevents the default profiler's TCP
+node/miner/wallet/proxy settings. Wallet commands use an explicit loopback
+private client and a fresh `NOCKAPP_HOME` inside the run directory. Wallet
+key-generation logs contain test private keys and seed phrases: keep these
+artifacts local. Wallet directories are owner-only and process logs are
+created with mode 0600. `TRACY_DISABLE` prevents the default profiler's TCP
 listener and discovery broadcasts. Application metrics are disabled, and the
 global Gnort registry's first emission is deferred beyond the run's bounded
 stages and cleanup because that registry does not honor the disable setting.
@@ -112,7 +145,7 @@ sandbox. The report records the number of successful process socket checks.
 All owned child processes are stopped when the script finishes or fails. Logs
 and `report.json` remain in the run directory. The report records each agreed
 head, final kernel-head snapshots, peer traffic, gossip-event count, identity
-preservation, node/miner/head-helper binary hashes, the head-query source,
+preservation, node/miner/wallet/helper binary hashes, the head-query source,
 the Git revision, the Hoon source-tree digest and kernel-asset hashes present
 at run time. These hashes document the inputs; rebuild the binaries after
 changing either kernel asset.

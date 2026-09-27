@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Rehearse v3 between two isolated, real fakenet nodes and one ZK miner.
 
-Build current dumb/miner Hoon assets and all three executables before running. The
+Build current dumb/miner/wallet Hoon assets and all five executables before running. The
 script never builds, contacts an external host, or reuses consensus state.
 All listeners and explicit peers use loopback, bootstrap peers are disabled,
 and child environments omit inherited networking/telemetry configuration.
 
-This exercises block synchronization, authenticated block gossip, persistent
-node restart, and catch-up. It does not claim wallet/transaction propagation,
-mixed-version interoperability, or production deployment readiness.
+This exercises block synchronization, authenticated block and v1 transaction
+gossip, transaction inclusion, persistent node restart, and catch-up. It does
+not claim live v0 transaction acceptance, mixed-version interoperability, or
+production deployment readiness.
 Gossip receipt and accepted head agreement are checked independently; event
 counts do not identify which block arrived through gossip.
 """
@@ -20,6 +21,7 @@ import json
 import mmap
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -29,9 +31,9 @@ import tempfile
 import time
 
 
-PKH = "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
 BLOCK_SERVICE = "nockchain.public.v2.NockchainBlockService/"
 METRICS_SERVICE = "nockchain.public.v2.NockchainMetricsService/"
+WALLET_SERVICE = "nockchain.public.v2.NockchainService/"
 VERIFIER_SETUP_SEED_FILE = "verifier-setup-seeds-v2.bin"
 
 
@@ -53,6 +55,18 @@ def check_embedded_kernel(binary, asset):
         with mmap.mmap(executable.fileno(), 0, access=mmap.ACCESS_READ) as contents:
             if contents.find(kernel) < 0:
                 raise RuntimeError(f"{binary.name} does not embed the current {asset.name}; rebuild with explicit KERNEL_JAM_PATH")
+
+
+def wallet_address(output):
+    # Read only the generated public address; keygen also prints private keys.
+    clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    matches = re.findall(
+        r"Active\s+master\s+key\s+is\s+set\s+to\s+([1-9A-HJ-NP-Za-km-z\s]+?)\.", clean,
+    )
+    addresses = {"".join(match.split()) for match in matches}
+    if len(addresses) != 1 or not 40 <= len(next(iter(addresses))) <= 60:
+        raise RuntimeError("could not identify one generated wallet address; see private wallet log")
+    return addresses.pop()
 
 
 def free_port(kind, assigned):
@@ -136,7 +150,7 @@ def source_metadata():
         "hoon_source_tree_sha256": sources.hexdigest(),
         "kernel_assets_sha256": {
             name: file_hash(repository / "assets" / name)
-            for name in ("dumb.jam", "miner.jam")
+            for name in ("dumb.jam", "miner.jam", "wal.jam")
         },
     }
 
@@ -148,12 +162,17 @@ class Rehearsal:
             tempfile.mkdtemp(prefix="nockchain-peer-v3-loopback-")
         )
         if args.work_dir:
-            self.work.mkdir(parents=True, exist_ok=False)
+            self.work.mkdir(mode=0o700, parents=True, exist_ok=False)
         self.processes = {}
         self.logs = {}
         self.log_offsets = {}
         self.born = set()
         self.nodes = {}
+        self.wallets = {}
+        for name in ("miner", "recipient"):
+            directory = self.work / f"wallet-{name}"
+            directory.mkdir(mode=0o700)
+            self.wallets[name] = directory
         assigned_ports = set()
         for name in ("a", "b"):
             work = self.work / name
@@ -179,8 +198,8 @@ class Rehearsal:
             "TRACY_DISABLE": "1",
             # Gnort's global registry does not honor GNORT_DISABLE. Its client
             # is lazy, so defer its first emission beyond every bounded stage
-            # (three boots and seven network/mining waits), including cleanup.
-            "GNORT_DELAY_MILLIS": str(1000 * (3 * args.boot_timeout + 7 * args.stage_timeout + 600)),
+            # (three boots and at most twenty stage/wallet waits), including cleanup.
+            "GNORT_DELAY_MILLIS": str(1000 * (3 * args.boot_timeout + 20 * args.stage_timeout + 600)),
             "STATSD_HOST": "127.0.0.1",
             "RUST_LOG": "info",
             "RAYON_NUM_THREADS": "2",
@@ -193,6 +212,8 @@ class Rehearsal:
             "node_binary_sha256": file_hash(args.node_bin),
             "miner_binary_sha256": file_hash(args.miner_bin),
             "head_binary_sha256": file_hash(args.head_bin),
+            "wallet_binary_sha256": file_hash(args.wallet_bin),
+            "tx_binary_sha256": file_hash(args.tx_bin),
             "head_source": "private consensus Peek through peer_v3_head",
             "isolation": {
                 "network": "127.0.0.1 only",
@@ -206,15 +227,17 @@ class Rehearsal:
             **source_metadata(),
         }
 
-    def spawn(self, name, command, cwd):
+    def spawn(self, name, command, cwd, env=None):
         if name in self.processes:
             raise RuntimeError(f"process {name} already running")
-        log = (self.work / f"{name}.log").open("ab")
+        log = os.fdopen(os.open(
+            self.work / f"{name}.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600,
+        ), "ab")
         self.logs[name] = log
         self.log_offsets[name] = log.tell()
         self.born.discard(name)
         self.processes[name] = subprocess.Popen(
-            command, cwd=cwd, env=self.env, stdout=log,
+            command, cwd=cwd, env=self.env if env is None else env, stdout=log,
             stderr=subprocess.STDOUT, start_new_session=True,
         )
 
@@ -253,20 +276,22 @@ class Rehearsal:
             if process.poll() is not None:
                 self.processes.pop(name, None)
 
-    def healthy(self):
+    def healthy(self, completing=None):
         for name, process in self.processes.items():
             if process.poll() is not None:
+                if name == completing:
+                    continue
                 raise RuntimeError(f"{name} exited with status {process.returncode}")
             check_loopback_sockets(self.args.lsof, process.pid)
             self.report["isolation"]["socket_guard_checks"] += 1
 
-    def wait(self, label, predicate, timeout):
+    def wait(self, label, predicate, timeout, completing=None):
         self.report["active_stage"] = label
         print(f"[{label}] waiting up to {timeout}s", flush=True)
         deadline = time.monotonic() + timeout
         last_error = None
         while time.monotonic() < deadline:
-            self.healthy()
+            self.healthy(completing)
             try:
                 value = predicate()
                 if value:
@@ -350,6 +375,150 @@ class Rehearsal:
                 "AND json_extract(wire_tags_json, '$[0]') = 'gossip'"
             ).fetchone()[0]
 
+    def wallet_command(self, wallet, command, *arguments):
+        name = f"wallet-{wallet}"
+        directory = self.wallets[wallet]
+        self.spawn(name, [
+            str(self.args.wallet_bin), "--client", "private",
+            "--private-grpc-server-host", "127.0.0.1",
+            "--private-grpc-server-port", str(self.nodes["a"]["private"]),
+            "--fakenet", "--fakenet-v1-phase", "1", "--fakenet-bythos-phase", "1",
+            command, *arguments,
+        ], directory, env={**self.env, "NOCKAPP_HOME": str(directory)})
+        process = self.processes[name]
+        offset = self.log_offsets[name]
+        self.wait(
+            f"{name}-{command}", lambda: process.poll() is not None,
+            self.args.stage_timeout, completing=name,
+        )
+        self.stop(name)
+        if process.returncode != 0:
+            raise RuntimeError(f"{name} {command} failed; see private wallet log")
+        with (self.work / f"{name}.log").open("rb") as log:
+            log.seek(offset)
+            return log.read().decode("utf-8", errors="replace")
+
+    def tx_tool(self, *arguments):
+        result = subprocess.run(
+            [str(self.args.tx_bin), *map(str, arguments)],
+            capture_output=True, text=True, timeout=12, env=self.env, check=True,
+        )
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict):
+            raise RuntimeError("transaction helper returned an invalid result")
+        return value
+
+    def tx_pending(self, node, tx_id):
+        result = self.tx_tool("pending", self.nodes[node]["private"], tx_id)
+        if result.get("tx_id") != tx_id or type(result.get("pending")) is not bool:
+            raise RuntimeError("transaction helper returned invalid pending membership")
+        return result["pending"]
+
+    def tx_accepted(self, node, tx_id):
+        result = self.rpc(node, WALLET_SERVICE + "TransactionAccepted", {"txId": {"hash": tx_id}})
+        if type(result.get("accepted")) is not bool:
+            raise RuntimeError("transaction acceptance RPC returned no boolean")
+        return result["accepted"]
+
+    def receiver_event_cursor(self):
+        database = self.nodes["b"]["data"] / "event-log.sqlite3"
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1) as connection:
+            return connection.execute("SELECT coalesce(max(event_num), 0) FROM events").fetchone()[0]
+
+    def transaction_gossip_event(self, after, cause_hash):
+        database = self.nodes["b"]["data"] / "event-log.sqlite3"
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1) as connection:
+            rows = connection.execute(
+                "SELECT event_num, wire_tags_json FROM events "
+                "WHERE event_num > ? AND wire_source = 'libp2p' "
+                "AND wire_version = 1 AND cause_hash = ? ORDER BY event_num",
+                (after, bytes.fromhex(cause_hash)),
+            ).fetchall()
+        expected = ["gossip", "peer-id", self.peer_id("a")]
+        return next((number for number, tags in rows if json.loads(tags) == expected), None)
+
+    def transaction_in_block(self, node, height, tx_id):
+        detail = self.rpc(node, BLOCK_SERVICE + "GetBlockDetails", {"height": str(height)})["details"]
+        if int(detail.get("height", 0)) != height:
+            raise RuntimeError("block details returned an unexpected height")
+        if not any(entry.get("hash") == tx_id for entry in detail.get("txIds", [])):
+            return None
+        if not detail.get("hasPow") or not detail.get("blockId"):
+            raise RuntimeError("transaction inclusion block has no proof or identity")
+        return {"height": height, "block_id": detail["blockId"]}
+
+    def test_transaction(self, minimum):
+        self.report["active_stage"] = "prepare-v1-transaction"
+        if "miner" in self.processes:
+            raise RuntimeError("miner must be stopped before transaction propagation")
+        baseline = self.equal_heads(minimum)
+        if baseline is None:
+            raise RuntimeError("nodes must agree before transaction propagation")
+        directory = self.wallets["miner"]
+        previous = set((directory / "txs").glob("*.tx"))
+        self.wallet_command(
+            "miner", "create-tx", "--to", self.recipient_pkh, "--amount-nicks", "1000",
+        )
+        created = set((directory / "txs").glob("*.tx")) - previous
+        if len(created) != 1:
+            raise RuntimeError("wallet did not create exactly one signed transaction file")
+        tx_path = created.pop()
+        metadata = self.tx_tool("inspect", tx_path)
+        tx_id, cause_hash = metadata.get("tx_id"), metadata.get("cause_hash")
+        if (
+            metadata.get("version") != 1 or not isinstance(tx_id, str)
+            or not isinstance(cause_hash, str) or re.fullmatch(r"[0-9a-f]{64}", cause_hash) is None
+        ):
+            raise RuntimeError("transaction helper did not identify a v1 transaction")
+        for node in ("a", "b"):
+            if self.tx_accepted(node, tx_id) or self.tx_pending(node, tx_id):
+                raise RuntimeError("transaction was already present before submission")
+        before = self.receiver_event_cursor()
+        self.wallet_command("miner", "send-tx", str(tx_path))
+
+        def received():
+            if not all(self.tx_accepted(node, tx_id) and self.tx_pending(node, tx_id) for node in ("a", "b")):
+                return None
+            return self.transaction_gossip_event(before, cause_hash)
+
+        event = self.wait("v1-transaction-propagation", received, self.args.stage_timeout)
+        if any(self.head(node) != baseline for node in ("a", "b")):
+            raise RuntimeError("a new block arrived before transaction propagation was proved")
+        self.report["stages"].append({
+            "name": "v1-transaction-propagation", "head": baseline, "tx_id": tx_id,
+            "wallet_tx_sha256": file_hash(tx_path), "cause_hash": cause_hash,
+            "transaction_version": 1, "submitted_only_to": "a",
+            "absent_before_submission": True, "accepted_and_pending_on_both": True,
+            "heads_unchanged": True, "receiver_gossip_event_num": event,
+            "gossip_evidence": "exact heard-tx cause hash and configured sender",
+            "receiver_peer_stats": self.stats("b", "a"),
+        })
+        print("[v1-transaction-propagation] exact transaction accepted before mining", flush=True)
+
+        def inclusion():
+            height = self.head("a")["height"]
+            for candidate in range(baseline["height"] + 1, height + 1):
+                result = self.transaction_in_block("a", candidate, tx_id)
+                if result is not None:
+                    return result
+            return None
+
+        self.start_miner("mine-transaction")
+        included = self.wait("mine-transaction", inclusion, self.args.stage_timeout)
+        self.stop("miner")
+        target = self.head("a")["height"]
+        synced = self.agreement("v1-transaction-inclusion", target)
+        for node in ("a", "b"):
+            if self.transaction_in_block(node, included["height"], tx_id) != included:
+                raise RuntimeError("nodes did not expose the same transaction inclusion block")
+            if self.tx_pending(node, tx_id):
+                raise RuntimeError("included transaction remains in the pending set")
+        self.report["stages"][-1].update({
+            "tx_id": tx_id, "inclusion_block": included, "included_on_both": True,
+            "removed_from_pending_on_both": True,
+        })
+        return synced
+
     def start_node(self, name, fresh):
         self.report["active_stage"] = f"node-{name}-{'boot' if fresh else 'restart'}"
         node = self.nodes[name]
@@ -380,7 +549,7 @@ class Rehearsal:
         self.spawn("miner", [
             str(self.args.miner_bin),
             "--node-addr", f"http://127.0.0.1:{self.nodes['a']['private']}",
-            "--mining-pkh", PKH, "--num-threads", "1",
+            "--mining-pkh", self.mining_pkh, "--num-threads", "1",
             "--worker-shutdown-timeout-ms", "5000",
         ], self.work)
 
@@ -416,7 +585,11 @@ class Rehearsal:
         assets = Path(__file__).resolve().parent.parent / "assets"
         check_embedded_kernel(self.args.node_bin, assets / "dumb.jam")
         check_embedded_kernel(self.args.miner_bin, assets / "miner.jam")
+        check_embedded_kernel(self.args.wallet_bin, assets / "wal.jam")
         self.report["kernel_assets_embedded_verified"] = True
+        self.mining_pkh = wallet_address(self.wallet_command("miner", "keygen"))
+        self.recipient_pkh = wallet_address(self.wallet_command("recipient", "keygen"))
+        self.wallet_command("miner", "watch", "address", self.mining_pkh)
         if self.args.setup_cache:
             self.report["active_stage"] = "prepare-verifier-cache"
             destination = self.nodes["a"]["data"] / "ai-pow"
@@ -448,6 +621,8 @@ class Rehearsal:
         self.report["stages"][-1]["new_receiver_gossip_events"] = self.gossip_count() - before
         self.report["stages"][-1]["gossip_evidence"] = "block gossip receipt, without block-id correlation"
 
+        gossiped = self.test_transaction(gossiped)
+
         self.report["active_stage"] = "disconnect-receiver"
         identity_before = self.peer_id("b")
         self.stop("node-b")
@@ -473,7 +648,8 @@ class Rehearsal:
         handlers = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
         errors = []
         try:
-            for name in ("miner", "node-b", "node-a"):
+            order = [name for name in self.processes if name not in ("miner", "node-b", "node-a")]
+            for name in [*order, "miner", "node-b", "node-a"]:
                 try:
                     self.stop(name)
                 except Exception as error:
@@ -517,6 +693,8 @@ def main():
     parser.add_argument("--node-bin", required=True, type=Path)
     parser.add_argument("--miner-bin", required=True, type=Path)
     parser.add_argument("--head-bin", required=True, type=Path, help="current peer_v3_head Rust example executable")
+    parser.add_argument("--wallet-bin", required=True, type=Path)
+    parser.add_argument("--tx-bin", required=True, type=Path, help="current peer_v3_tx Rust example executable")
     parser.add_argument("--grpcurl", default=shutil.which("grpcurl"), type=Path)
     parser.add_argument("--lsof", default=shutil.which("lsof"), type=Path)
     parser.add_argument("--work-dir", type=Path, help="new directory; existing paths are refused")
@@ -527,7 +705,7 @@ def main():
     parser.add_argument("--boot-timeout", type=int, default=3600)
     parser.add_argument("--stage-timeout", type=int, default=180)
     args = parser.parse_args()
-    for name in ("node_bin", "miner_bin", "head_bin", "grpcurl", "lsof"):
+    for name in ("node_bin", "miner_bin", "head_bin", "wallet_bin", "tx_bin", "grpcurl", "lsof"):
         path = getattr(args, name)
         if path is None or not path.is_file():
             parser.error(f"{name} must name an existing executable")
