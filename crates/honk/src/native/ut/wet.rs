@@ -34,44 +34,6 @@ impl RedoState {
 }
 
 impl<'a> Ut<'a> {
-    fn redo_fork_fallback_candidate(
-        &mut self,
-        sut: &NRc<NTy>,
-        reference: &NRc<NTy>,
-        hod: bool,
-    ) -> Result<bool> {
-        // Strip %face/%hint (and %hold under `hod`) wrappers to reach the base
-        // tag, then accept only matching base kinds (cell/atom/core).
-        #[derive(PartialEq, Clone, Copy)]
-        enum Base {
-            Cell,
-            Atom,
-            Core,
-            Other,
-        }
-        fn unwrapped(ut: &mut Ut<'_>, typ: &NRc<NTy>, hod: bool) -> Result<Base> {
-            match &**typ {
-                NTy::Face { inner, .. } => unwrapped(ut, &inner.clone(), hod),
-                NTy::Hint { payload, .. } => unwrapped(ut, &payload.clone(), hod),
-                NTy::Hold { .. } if hod => {
-                    let repo = ut.repo(typ.clone())?;
-                    unwrapped(ut, &repo, hod)
-                }
-                NTy::Cell(..) => Ok(Base::Cell),
-                NTy::Atom { .. } => Ok(Base::Atom),
-                NTy::Core { .. } => Ok(Base::Core),
-                _ => Ok(Base::Other),
-            }
-        }
-
-        let sut_tag = unwrapped(self, sut, hod)?;
-        let ref_tag = unwrapped(self, reference, hod)?;
-        Ok(matches!(
-            (sut_tag, ref_tag),
-            (Base::Cell, Base::Cell) | (Base::Atom, Base::Atom) | (Base::Core, Base::Core)
-        ))
-    }
-
     fn fire_wet_rib_contains(
         &mut self,
         sut: &NRc<NTy>,
@@ -99,8 +61,14 @@ impl<'a> Ut<'a> {
         Ok(false)
     }
 
+    /// The vet-time half of hoon-138 `++fire` for a wet arm: unless
+    /// `[sut dox arm]` is already in `rib`, mull the arm against the redone
+    /// core with that key added. `sut` is the call-site subject, not the
+    /// redone core, so a re-entry from an equal subject is cut even when its
+    /// redone core differs.
     pub(super) fn mull_check_wet(
         &mut self,
+        sut: &NRc<NTy>,
         wet_core: NRc<NTy>,
         dox: NRc<NTy>,
         hoon_noun: Noun,
@@ -109,16 +77,16 @@ impl<'a> Ut<'a> {
             return Ok(());
         }
         let hoon_identity = self.canonicalize_nonsemantic_hoon_noun(hoon_noun);
-        if self.fire_wet_rib_contains(&wet_core, &dox, hoon_identity)? {
+        if self.fire_wet_rib_contains(sut, &dox, hoon_identity)? {
             return Ok(());
         }
         self.fire_wet_rib_raw.insert(WetRibKey {
-            subject: native_type_id(&wet_core),
+            subject: native_type_id(sut),
             secondary_subject: native_type_id(&dox),
             gene: NounIdentity::of(hoon_identity),
         });
         self.fire_wet_rib
-            .push((wet_core.clone(), dox.clone(), hoon_identity));
+            .push((sut.clone(), dox.clone(), hoon_identity));
         let result = (|| -> Result<()> {
             let hoon_ast = self.hoon_ast_lookup_result(hoon_noun).map_err(|err| {
                 CompilerError::UnsupportedExpr(format!(
@@ -140,6 +108,12 @@ impl<'a> Ut<'a> {
     }
 
     fn redo_dear(&mut self, state: &RedoState) -> Result<Option<Vec<NLeaf>>> {
+        // hoon-138 `++dear`: an empty `wec` (every reference fork case pruned
+        // by `++sint`) implies void and yields no faces at all, not even the
+        // subject's; more than one reference face stack is a redo-match.
+        if state.wec.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
         if state.wec.len() != 1 {
             return Ok(None);
         }
@@ -240,6 +214,18 @@ impl<'a> Ut<'a> {
 
     pub(super) fn redo_wet_payload(&mut self, payload: Noun, reference: Noun) -> Result<Noun> {
         if let Some(cached) = self.redo_boundary_lookup(payload, reference)? {
+            if self.memo_verify.due(MemoSite::Redo) {
+                let fresh = self.memo_verify_recompute(MemoSite::Redo, false, |ut| {
+                    let payload_n = ut.native_of_cached(payload)?;
+                    let reference_n = ut.native_of_cached(reference)?;
+                    let result_n = ut.redo_dext(payload_n, reference_n, RedoState::default())?;
+                    Ok(live_to_noun(&mut ut.cx, &result_n, ut.slab))
+                });
+                let matched = matches!(fresh, Ok(noun) if self.memo_verify_noun_eq(noun, cached));
+                verify::record(MemoSite::Redo, matched, || {
+                    format!("recomputed ok: {}", fresh.is_ok())
+                });
+            }
             return Ok(cached);
         }
         // Decode payload and reference once, run the native redo, and lower the
@@ -393,19 +379,6 @@ impl<'a> Ut<'a> {
                         self.redo_push_unique_face_stack(&mut merged_wec, stack)?;
                     }
                     reduced_options.push(reduced_option);
-                }
-                if merged_wec.is_empty() {
-                    for option in options.iter() {
-                        if !self.redo_fork_fallback_candidate(&sut, option, hod)? {
-                            continue;
-                        }
-                        let (reduced_option, branch_state) =
-                            self.redo_sint(sut.clone(), option.clone(), hod, state.clone())?;
-                        for stack in branch_state.wec {
-                            self.redo_push_unique_face_stack(&mut merged_wec, stack)?;
-                        }
-                        reduced_options.push(reduced_option);
-                    }
                 }
                 let mut next_state = state;
                 next_state.wec = merged_wec;

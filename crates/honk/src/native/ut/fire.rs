@@ -3,8 +3,9 @@ use super::*;
 impl<'a> Ut<'a> {
     // `fine` resolves a `Port` to a native type and a formula ID. In `fire`, arm
     // cores are native types and each foot is a noun carrying the poly and the
-    // hoon arm-spec.
-    pub(super) fn fine(&mut self, port: &Port) -> Result<(NRc<NTy>, FormulaId)> {
+    // hoon arm-spec. `sut` is the subject `++fine` runs against (hoon-138's
+    // `sut`); `fire` keys its wet-arm recursion guard on it.
+    pub(super) fn fine(&mut self, sut: &NRc<NTy>, port: &Port) -> Result<(NRc<NTy>, FormulaId)> {
         match port {
             Port::Synthetic { typ, formula } => Ok((typ.clone(), *formula)),
             Port::Palo(palo) => match &palo.opal {
@@ -14,7 +15,7 @@ impl<'a> Ut<'a> {
                 }
                 Opal::Arm { axis, arms } => {
                     let axe = tend_big(&palo.vein)?;
-                    let ty = self.fire(arms)?;
+                    let ty = self.fire(sut, arms)?;
                     let slot = self.formula_slot(axe);
                     let formula = self.formula_arena.kick(axis.clone(), slot);
                     Ok((ty, formula))
@@ -23,8 +24,11 @@ impl<'a> Ut<'a> {
         }
     }
 
-    pub(super) fn fire(&mut self, arms: &[(NRc<NTy>, Noun)]) -> Result<NRc<NTy>> {
-        self.fire_with_mode(arms, false)
+    /// hoon-138 `++fire`. `sut` is the call-site subject, the `sut` of the
+    /// `++fire` call: the wet-arm recursion guard `rib` is keyed on
+    /// `[sut dox arm]`, while the arm body is mulled against the redone core.
+    pub(super) fn fire(&mut self, sut: &NRc<NTy>, arms: &[(NRc<NTy>, Noun)]) -> Result<NRc<NTy>> {
+        self.fire_with_mode(sut, arms, false)
     }
 
     fn fire_is_wet_axis_one(&mut self, hoon: Noun) -> bool {
@@ -59,7 +63,7 @@ impl<'a> Ut<'a> {
         Ok(self.cons_hold(dox, hoon))
     }
 
-    fn fire_arm_wet(&mut self, arm_core: NRc<NTy>, hoon: Noun) -> Result<NRc<NTy>> {
+    fn fire_arm_wet(&mut self, sut: &NRc<NTy>, arm_core: NRc<NTy>, hoon: Noun) -> Result<NRc<NTy>> {
         let NTy::Core {
             payload,
             garb,
@@ -88,13 +92,14 @@ impl<'a> Ut<'a> {
             rest.clone(),
         );
         let dox = self.core_dox_native(&garb, &context, &rest)?;
-        self.mull_check_wet(redone_core.clone(), dox, hoon)?;
+        self.mull_check_wet(sut, redone_core.clone(), dox, hoon)?;
         // `[%hold redone_core hoon]`, interned the same way as in `fire_arm_dry`.
         Ok(self.cons_hold(redone_core, hoon))
     }
 
     fn fire_with_mode(
         &mut self,
+        sut: &NRc<NTy>,
         arms: &[(NRc<NTy>, Noun)],
         skip_vet_dry_checks: bool,
     ) -> Result<NRc<NTy>> {
@@ -120,7 +125,7 @@ impl<'a> Ut<'a> {
             }
             let arm_ty = match poly {
                 Poly::Dry => self.fire_arm_dry(core.clone(), hoon, dry_vet_checks_active)?,
-                Poly::Wet => self.fire_arm_wet(core.clone(), hoon)?,
+                Poly::Wet => self.fire_arm_wet(sut, core.clone(), hoon)?,
             };
             options.push(arm_ty);
         }

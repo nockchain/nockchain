@@ -127,11 +127,16 @@ pub struct LazyCoreKey {
     pub poly: PolyKey,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// A `miss` memo key. `assumptions` is the hold-pair set `gil` the verdict was
+/// reached under, each pair ordered and the list sorted, since hoon-138's
+/// `++miss` answers `&` for a pair already in `gil`: the same types can miss
+/// under one set of assumptions and meet under another.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MissKey {
     pub subject: TypeId,
     pub reference: TypeId,
     pub vet: VetMode,
+    pub assumptions: Vec<(TypeId, TypeId)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -325,7 +330,8 @@ mod tests {
     #[test]
     fn compact_ids_do_not_grow_keys() {
         assert!(size_of::<BranSemiKey>() <= size_of::<(u64, u8, u64, u64, u64, usize)>());
-        assert!(size_of::<MissKey>() <= size_of::<(u64, u64, u8)>());
+        // `MissKey` also carries its assumption set, which is part of the verdict.
+        assert!(size_of::<MissKey>() <= size_of::<(u64, u64, u8, Vec<(TypeId, TypeId)>)>());
         assert!(size_of::<WetRibKey>() <= size_of::<(usize, usize, u64)>());
         assert!(size_of::<LazyCoreKey>() <= size_of::<(usize, u64, u8)>());
     }

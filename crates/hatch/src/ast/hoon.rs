@@ -586,7 +586,7 @@ pub enum TermOrPair {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tarp {
-    pub d: u64,
+    pub d: BigUint,
     pub h: u64,
     pub m: u64,
     pub s: u64,
@@ -595,10 +595,10 @@ pub struct Tarp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Date {
-    pub era: bool, // a=? — true = AD, false = BC
-    pub y: u64,    // year (1-based; year 0 = 1 BC, year -1 = 2 BC, etc.)
-    pub m: u64,    // month (1–12)
-    pub t: Tarp,   // time-of-day + day-of-month in tarp.d
+    pub era: bool,  // a=? — true = AD, false = BC
+    pub y: BigUint, // year, counted from 1 in either era
+    pub m: u64,     // month (1–12)
+    pub t: Tarp,    // time-of-day + day-of-month in tarp.d
 }
 
 #[derive(serde::Serialize, PartialEq, Debug, Clone)]

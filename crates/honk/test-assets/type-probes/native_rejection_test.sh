@@ -3,8 +3,8 @@
 # not terminate within a useful test budget.
 set -u
 
-if [[ "$#" -ne 3 ]]; then
-  echo "usage: $0 <honk> <prelude> <probe>" >&2
+if [[ "$#" -lt 3 || "$#" -gt 4 ]]; then
+  echo "usage: $0 <honk> <prelude> <probe> [expected-diagnostic]" >&2
   exit 2
 fi
 
@@ -12,6 +12,7 @@ root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
 honk="${root}/$1"
 prelude="${root}/$2"
 probe="${root}/$3"
+expected="${4:-musk-loop}"
 
 for f in "$honk" "$prelude" "$probe"; do
   [[ -e "$f" ]] || { echo "missing runfile: $f" >&2; exit 1; }
@@ -34,8 +35,8 @@ if [[ -f "$work/output.jam" ]]; then
   echo "honk accepted native rejection probe $3" >&2
   exit 1
 fi
-if ! grep -aq "musk-loop" "$work/honk.log"; then
-  echo "honk rejected without the expected musk-loop diagnostic:" >&2
+if ! grep -aqF -- "$expected" "$work/honk.log"; then
+  echo "honk rejected without the expected $expected diagnostic:" >&2
   tail -10 "$work/honk.log" >&2
   exit 1
 fi

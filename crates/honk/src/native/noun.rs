@@ -27,7 +27,9 @@ pub fn tag(noun: Noun, space: &NounSpace) -> Result<String> {
 }
 
 pub fn term_to_noun<A: NounAllocator>(allocator: &mut A, term: &str) -> Noun {
-    if term == "$" {
+    //  `Atom::from_bytes` on zero bytes builds a malformed atom (and its
+    //  normalization reads out of bounds), so the empty term is spelled here
+    if term == "$" || term.is_empty() {
         return D(0);
     }
     let atom = Atom::from_bytes(allocator, term.as_bytes());

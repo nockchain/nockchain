@@ -111,6 +111,14 @@ pub fn resolve_native_imports(
     resolver.resolve_imports_for(path, true)
 }
 
+/// Parses a whole dependency-tree file, as hoonc's `+parse-dir` does for
+/// every Hoon file before building anything, imported or not.
+pub fn parse_dependency_tree_file(path: &Path) -> Result<()> {
+    let source = std::fs::read_to_string(path)?;
+    parse_native_hoon_source_without_docs(path, source.as_str(), Vec::new(), true)?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImportKind {
     Lib,
@@ -199,10 +207,9 @@ impl NativeImportResolver {
 
         for import in imports.iter().rev() {
             let dep_path = self.resolve_import(path, import.kind, import.suffix.as_str())?;
-            let dep_expr = if import.kind == ImportKind::Bar {
-                data_import_expr(dep_path.as_path())?
-            } else {
-                self.parse(dep_path.as_path())?
+            let dep_expr = match import_kind_for(import.kind, &dep_path) {
+                NativeImportKind::Data => data_import_expr(dep_path.as_path())?,
+                NativeImportKind::Hoon => self.parse(dep_path.as_path())?,
             };
             expr = match &import.face {
                 Some(face) => ast::Hoon::TisLus(
@@ -230,30 +237,9 @@ impl NativeImportResolver {
         imports
             .into_iter()
             .map(|import| {
-                let kind = match import.kind {
-                    ImportKind::Bar => {
-                        // `/*` data imports must declare a mark honk supports.
-                        // Only `%jam` (raw jammed-noun inclusion) is
-                        // implemented; other marks are rejected instead of
-                        // being imported as generic data.
-                        match import.mark.as_deref() {
-                            Some("jam") => NativeImportKind::Data,
-                            other => {
-                                return Err(CompilerError::UnsupportedExpr(format!(
-                                    "/* import `{}` uses mark {} which honk does not support (only %jam)",
-                                    import.suffix,
-                                    other
-                                        .map(|m| format!("%{m}"))
-                                        .unwrap_or_else(|| "<none>".to_string()),
-                                )));
-                            }
-                        }
-                    }
-                    _ => NativeImportKind::Hoon,
-                };
                 let path = self.resolve_import(path, import.kind, import.suffix.as_str())?;
                 Ok(ResolvedNativeImport {
-                    kind,
+                    kind: import_kind_for(import.kind, &path),
                     face: import.face,
                     path,
                 })
@@ -261,43 +247,26 @@ impl NativeImportResolver {
             .collect()
     }
 
+    /// Resolves an import the way hoonc's `+resolve-pile` looks it up in its
+    /// directory map: `/=` and `/*` name one file, `/-` `/+` `/#` try the
+    /// `+get-fit` hyphen variants, and only files hoonc's directory walk keeps
+    /// can be found.
     fn resolve_import(&self, from: &Path, kind: ImportKind, suffix: &str) -> Result<PathBuf> {
-        match kind {
-            ImportKind::Raw => {
-                let mut candidate = PathBuf::new();
-                for segment in suffix.trim_start_matches('/').split('/') {
-                    if !segment.is_empty() {
-                        candidate.push(segment);
-                    }
+        let found = match kind {
+            ImportKind::Raw => path_knots(suffix).and_then(|mut knots| {
+                let last = knots.pop()?;
+                knots.push(format!("{last}.hoon"));
+                self.hoonc_tree_file(&knots.iter().collect::<PathBuf>())
+            }),
+            ImportKind::Bar => path_knots(suffix).and_then(|mut knots| {
+                if knots.len() < 2 {
+                    return None;
                 }
-                if let Some(file_name) = candidate.file_name().and_then(|name| name.to_str()) {
-                    candidate.set_file_name(format!("{file_name}.hoon"));
-                }
-                let path = self.wer_base.join(candidate);
-                if path.is_file() {
-                    return Ok(path);
-                }
-            }
-            ImportKind::Bar => {
-                let mut segments: Vec<&str> = suffix
-                    .trim_start_matches('/')
-                    .split('/')
-                    .filter(|segment| !segment.is_empty())
-                    .collect();
-                if segments.len() >= 2 {
-                    let extension = segments.pop().unwrap_or_default();
-                    let stem = segments.pop().unwrap_or_default();
-                    let mut candidate = PathBuf::new();
-                    for segment in segments {
-                        candidate.push(segment);
-                    }
-                    candidate.push(format!("{stem}.{extension}"));
-                    let path = self.wer_base.join(candidate);
-                    if path.is_file() {
-                        return Ok(path);
-                    }
-                }
-            }
+                let extension = knots.pop()?;
+                let stem = knots.pop()?;
+                knots.push(format!("{stem}.{extension}"));
+                self.hoonc_tree_file(&knots.iter().collect::<PathBuf>())
+            }),
             _ => {
                 let prefix = match kind {
                     ImportKind::Lib => "lib",
@@ -307,13 +276,13 @@ impl NativeImportResolver {
                     ImportKind::Raw => unreachable!("raw import handled above"),
                     ImportKind::Bar => unreachable!("bar import handled above"),
                 };
-                for candidate in suffix_path_candidates(prefix, suffix) {
-                    let path = self.wer_base.join(candidate);
-                    if path.is_file() {
-                        return Ok(path);
-                    }
-                }
+                suffix_path_candidates(prefix, suffix)
+                    .into_iter()
+                    .find_map(|candidate| self.hoonc_tree_file(&candidate))
             }
+        };
+        if let Some(path) = found {
+            return Ok(path);
         }
         if kind == ImportKind::Sys && suffix == "hoon" {
             if let Some(path) = vendored_hoon_sys_path() {
@@ -332,6 +301,28 @@ impl NativeImportResolver {
             "native import not found: `{rune} {suffix}` (from {})",
             from.display()
         )))
+    }
+
+    /// The file at `rel` under the dependency root, if hoonc's directory walk
+    /// would load it.
+    fn hoonc_tree_file(&self, rel: &Path) -> Option<PathBuf> {
+        // The walk's keys hold only plain names (no `.` or `..` knots).
+        if !rel
+            .components()
+            .all(|knot| matches!(knot, Component::Normal(_)))
+        {
+            return None;
+        }
+        let file = rel.file_name()?.to_string_lossy();
+        let skipped_dir = rel.parent().is_some_and(|dirs| {
+            dirs.components()
+                .any(|dir| HOONC_SKIPPED_DIRS.contains(&dir.as_os_str().to_string_lossy().as_ref()))
+        });
+        if skipped_dir || !hoonc_loads_file_name(&file) {
+            return None;
+        }
+        let path = self.wer_base.join(rel);
+        path.is_file().then_some(path)
     }
 
     fn synthetic_urbit_scope_faces(&self, path: &Path, expr: ast::Hoon) -> ast::Hoon {
@@ -393,6 +384,47 @@ impl NativeImportResolver {
     }
 }
 
+/// Directories hoonc's dependency walk skips (`BLACKLISTED_DIRS` in
+/// crates/hoonc/src/lib.rs).
+const HOONC_SKIPPED_DIRS: &[&str] = &["packages", "node_modules", ".git", "target"];
+
+/// File suffixes hoonc's dependency walk loads (`is_valid_file_or_dir` in
+/// crates/hoonc/src/lib.rs).
+const HOONC_LOADED_SUFFIXES: &[&str] =
+    &[".jock", ".hoon", ".txt", ".jam", ".html", ".css", ".js", ".jpg", ".png", ".gif"];
+
+fn hoonc_loads_file_name(name: &str) -> bool {
+    HOONC_LOADED_SUFFIXES
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+/// hoonc compiles a dependency as Hoon when its file name contains `.hoon`
+/// (`+is-hoon` in hoonc.hoon), whichever rune imported it; every other file
+/// is an `$octs` data leaf.
+fn import_kind_for(kind: ImportKind, path: &Path) -> NativeImportKind {
+    let is_hoon = path
+        .file_name()
+        .map(|name| name.to_string_lossy().contains(".hoon"))
+        .unwrap_or(false);
+    if kind == ImportKind::Bar && !is_hoon {
+        NativeImportKind::Data
+    } else {
+        NativeImportKind::Hoon
+    }
+}
+
+/// The knots of a `stap` path rendered as text (`/a/b`); `None` for the
+/// root path or a path with an empty knot, which name no file.
+fn path_knots(path: &str) -> Option<Vec<String>> {
+    let rest = path.strip_prefix('/')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let knots: Vec<String> = rest.split('/').map(ToString::to_string).collect();
+    (!knots.iter().any(String::is_empty)).then_some(knots)
+}
+
 fn urbit_sys_file_exists(wer_base: &Path, name: &str) -> bool {
     if name == "hoon" {
         return vendored_hoon_sys_path().is_some();
@@ -412,192 +444,311 @@ fn vendored_hoon_sys_path() -> Option<PathBuf> {
     }
 }
 
+/// A file's import header as hoonc reads it (`+pile-rule` in hoonc.hoon):
+/// optional whitespace, an optional `/?  <kelvin>` pin, then the `/-`, `/+`,
+/// `/=`, `/*` and `/#` clauses in that order, each clause followed by a gap.
+/// `body_start` is where the Hoon body begins: the byte after the header's
+/// last gap, or 0 when there is no header.
+struct ImportHeader {
+    imports: Vec<ScopedImport>,
+    body_start: usize,
+}
+
 fn parse_leading_imports(source: &str) -> Result<Vec<ScopedImport>> {
+    Ok(parse_import_header(source)?.imports)
+}
+
+fn parse_import_header(source: &str) -> Result<ImportHeader> {
+    let header = HeaderParser {
+        src: source.as_bytes(),
+    };
+    let mut pos = header.gay(0);
+    let mut has_header = false;
+    if let Some(next) = header.kelvin_pin(pos) {
+        pos = next;
+        has_header = true;
+    }
     let mut imports = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
-    let mut index = 0usize;
-
-    while index < lines.len() {
-        let line = lines[index];
-        let trimmed = line.trim_start();
-
-        if trimmed.is_empty() || trimmed.starts_with("::") {
-            index += 1;
-            continue;
+    for rune in [b'-', b'+', b'=', b'*', b'#'] {
+        if let Some((group, next)) = header.rune_group(pos, rune) {
+            imports.extend(group);
+            pos = next;
+            has_header = true;
         }
-        if !trimmed.starts_with('/') {
-            break;
+    }
+    header.reject_leftover_import(pos)?;
+    Ok(ImportHeader {
+        imports,
+        body_start: if has_header { pos } else { 0 },
+    })
+}
+
+/// A hand port of the hoon-138 parsers hoonc's header rule is built from.
+/// Each method takes a byte offset and returns the offset after its match
+/// (`None` on failure); alternatives are ordered and do not backtrack once
+/// one matches, as in Hoon's `;~(pose ...)`.
+struct HeaderParser<'a> {
+    src: &'a [u8],
+}
+
+impl HeaderParser<'_> {
+    fn byte(&self, at: usize) -> Option<u8> {
+        self.src.get(at).copied()
+    }
+
+    fn just(&self, at: usize, byte: u8) -> Option<usize> {
+        (self.byte(at) == Some(byte)).then_some(at + 1)
+    }
+
+    /// `gah`: a newline or a space. Tabs are not Hoon whitespace.
+    fn gah(&self, at: usize) -> Option<usize> {
+        matches!(self.byte(at), Some(b'\n' | b' ')).then_some(at + 1)
+    }
+
+    /// `vul`: a `::` comment of printable bytes ended by a newline.
+    fn vul(&self, at: usize) -> Option<usize> {
+        let mut at = self.just(self.just(at, b':')?, b':')?;
+        while matches!(self.byte(at), Some(byte) if byte >= 32 && byte != 127) {
+            at += 1;
         }
+        self.just(at, b'\n')
+    }
 
-        let mut chars = trimmed.chars();
-        let _slash = chars.next();
-        let Some(rune) = chars.next() else {
-            break;
-        };
-        // A leading `/` whose rune is not an import rune ends the import
-        // block. `/?` (Ford kelvin pin) and `/%` (propagating build) are
-        // import-block runes handled below.
-        if !matches!(rune, '-' | '+' | '=' | '*' | '#' | '?' | '%') {
-            break;
+    /// `(star ;~(pose vul gah))`, which is also `gaw`.
+    fn white(&self, mut at: usize) -> usize {
+        while let Some(next) = self.vul(at).or_else(|| self.gah(at)) {
+            at = next;
         }
+        at
+    }
 
-        let mut clause = chars.as_str().trim().to_string();
-        index += 1;
+    /// `gaq`: a newline, two whitespace characters, or a comment.
+    fn gaq(&self, at: usize) -> Option<usize> {
+        if let Some(next) = self.just(at, b'\n') {
+            return Some(next);
+        }
+        if let Some(next) = self.gah(at) {
+            if let Some(next) = self.gah(next).or_else(|| self.vul(next)) {
+                return Some(next);
+            }
+        }
+        self.vul(at)
+    }
 
-        while index < lines.len() {
-            let continuation = lines[index];
-            if continuation.starts_with(' ') || continuation.starts_with('\t') {
-                let continuation = continuation.trim();
-                if !continuation.is_empty() && !continuation.starts_with("::") {
-                    if !clause.is_empty() {
-                        clause.push(' ');
-                    }
-                    clause.push_str(continuation);
+    /// `gap`: `gaq` then any whitespace and comments.
+    fn gap(&self, at: usize) -> Option<usize> {
+        self.gaq(at).map(|next| self.white(next))
+    }
+
+    /// `gay`: an optional gap.
+    fn gay(&self, at: usize) -> usize {
+        self.gap(at).unwrap_or(at)
+    }
+
+    /// `sym`: a lowercase letter, then lowercase letters, digits and `-`.
+    fn sym(&self, at: usize) -> Option<(String, usize)> {
+        if !matches!(self.byte(at), Some(b'a'..=b'z')) {
+            return None;
+        }
+        let mut end = at + 1;
+        while matches!(self.byte(end), Some(b'a'..=b'z' | b'0'..=b'9' | b'-')) {
+            end += 1;
+        }
+        Some((self.text(at, end), end))
+    }
+
+    /// `stap`: `/` then `/`-separated knots of `[0-9a-z-.~_]`; the last knot
+    /// may be empty only in the root path `/`. Rendered back as text.
+    fn stap(&self, at: usize) -> Option<(String, usize)> {
+        let mut end = self.just(at, b'/')?;
+        let mut last_start = end;
+        loop {
+            while matches!(
+                self.byte(end),
+                Some(b'0'..=b'9' | b'a'..=b'z' | b'-' | b'.' | b'~' | b'_')
+            ) {
+                end += 1;
+            }
+            match self.just(end, b'/') {
+                Some(next) => {
+                    end = next;
+                    last_start = next;
                 }
-                index += 1;
-                continue;
+                None => break,
             }
-            break;
         }
+        let root_only = last_start == at + 1;
+        if last_start == end && !root_only {
+            return None;
+        }
+        Some((self.text(at, end), end))
+    }
 
+    /// `/?  <decimal>` then a gap. `dem` allows `\` gay `/` between digits.
+    fn kelvin_pin(&self, at: usize) -> Option<usize> {
+        let at = self.just(self.just(at, b'/')?, b'?')?;
+        let mut at = self.gap(at)?;
+        at = self.digit(at)?;
+        loop {
+            let resume = self
+                .just(at, b'\\')
+                .map(|next| self.gay(next))
+                .and_then(|next| self.just(next, b'/'))
+                .unwrap_or(at);
+            match self.digit(resume) {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        self.gap(at)
+    }
+
+    fn digit(&self, at: usize) -> Option<usize> {
+        matches!(self.byte(at), Some(b'0'..=b'9')).then_some(at + 1)
+    }
+
+    /// `rune`: `pant (mast gap ;~(pfix fas bus gap fel))`, one or more
+    /// gap-separated clauses followed by a gap. A group that is not followed
+    /// by a gap is dropped whole, as `pant` backtracks.
+    fn rune_group(&self, at: usize, rune: u8) -> Option<(Vec<ScopedImport>, usize)> {
+        let (mut imports, mut end) = self.rune_clause(at, rune)?;
+        while let Some((more, next)) = self.gap(end).and_then(|next| self.rune_clause(next, rune)) {
+            imports.extend(more);
+            end = next;
+        }
+        self.gap(end).map(|next| (imports, next))
+    }
+
+    fn rune_clause(&self, at: usize, rune: u8) -> Option<(Vec<ScopedImport>, usize)> {
+        let at = self.just(self.just(at, b'/')?, rune)?;
+        let at = self.gap(at)?;
         match rune {
-            '=' => imports.push(parse_raw_import_clause(clause.as_str())?),
-            '*' => imports.push(parse_bar_import_clause(clause.as_str())?),
-            '+' => imports.extend(parse_import_clause(ImportKind::Lib, clause.as_str())?),
-            '-' => imports.extend(parse_import_clause(ImportKind::Sur, clause.as_str())?),
-            '#' => imports.extend(parse_import_clause(ImportKind::Dat, clause.as_str())?),
-            // `/?` pins the Ford kelvin version. It is not an import, so it is
-            // accepted and ignored.
-            '?' => {
-                tracing::debug!(clause = %clause, "ignoring /? Ford version pin");
+            b'-' => self.taut_list(at, ImportKind::Sur),
+            b'+' => self.taut_list(at, ImportKind::Lib),
+            b'#' => self.taut_list(at, ImportKind::Dat),
+            b'=' => {
+                let (face, at) = match self.just(at, b'*') {
+                    Some(next) => (None, next),
+                    None => {
+                        let (face, next) = self.sym(at)?;
+                        (Some(face), next)
+                    }
+                };
+                let (suffix, at) = self.stap(self.gap(at)?)?;
+                let import = ScopedImport {
+                    kind: ImportKind::Raw,
+                    face,
+                    mark: None,
+                    suffix,
+                };
+                Some((vec![import], at))
             }
-            // `/%` (propagating build) is a Ford rune honk does not implement,
-            // so it is rejected rather than dropped.
-            '%' => {
-                return Err(CompilerError::UnsupportedExpr(format!(
-                    "/% imports are not supported by honk: `/%{clause}`"
-                )));
+            b'*' => {
+                let (face, at) = self.sym(at)?;
+                let (mark, at) = self.sym(self.just(self.gap(at)?, b'%')?)?;
+                let (suffix, at) = self.stap(self.gap(at)?)?;
+                let import = ScopedImport {
+                    kind: ImportKind::Bar,
+                    face: Some(face),
+                    mark: Some(mark),
+                    suffix,
+                };
+                Some((vec![import], at))
             }
-            _ => unreachable!("rune gated by matches! above"),
+            _ => None,
         }
     }
 
-    Ok(imports)
-}
-
-fn parse_raw_import_clause(clause: &str) -> Result<ScopedImport> {
-    let token = strip_inline_comment(clause).trim();
-    let malformed = || {
-        CompilerError::Parse(format!(
-            "malformed /= import clause: `/={clause}` (expected `face suffix`)"
-        ))
-    };
-    if token.is_empty() {
-        return Err(malformed());
-    }
-
-    let mut parts = token.split_whitespace();
-    let face = parts.next().ok_or_else(malformed)?;
-    let suffix = parts.next().ok_or_else(malformed)?;
-    if parts.next().is_some() {
-        return Err(malformed());
-    }
-    let face = if face == "*" {
-        None
-    } else {
-        Some(face.to_string())
-    };
-    Ok(ScopedImport {
-        kind: ImportKind::Raw,
-        face,
-        mark: None,
-        suffix: suffix.to_string(),
-    })
-}
-
-fn parse_bar_import_clause(clause: &str) -> Result<ScopedImport> {
-    let token = strip_inline_comment(clause).trim();
-    let malformed = || {
-        CompilerError::Parse(format!(
-            "malformed /* import clause: `/*{clause}` (expected `face mark suffix`)"
-        ))
-    };
-    if token.is_empty() {
-        return Err(malformed());
-    }
-
-    let mut parts = token.split_whitespace();
-    let face = parts.next().ok_or_else(malformed)?;
-    let mark = parts.next().ok_or_else(malformed)?;
-    let suffix = parts.next().ok_or_else(malformed)?;
-    if parts.next().is_some() {
-        return Err(malformed());
-    }
-    let face = if face == "*" {
-        None
-    } else {
-        Some(face.to_string())
-    };
-    Ok(ScopedImport {
-        kind: ImportKind::Bar,
-        face,
-        mark: Some(mark.trim_start_matches('%').to_string()),
-        suffix: suffix.to_string(),
-    })
-}
-
-fn parse_import_clause(kind: ImportKind, clause: &str) -> Result<Vec<ScopedImport>> {
-    let mut imports = Vec::new();
-    for item in clause.split(',') {
-        let token = strip_inline_comment(item.trim());
-        if token.is_empty() {
-            continue;
+    /// `(most ;~(plug com gaw) taut-rule)`: comma-separated library names,
+    /// with any whitespace (blank lines and comments included) after a comma
+    /// but none before it.
+    fn taut_list(&self, at: usize, kind: ImportKind) -> Option<(Vec<ScopedImport>, usize)> {
+        let (first, mut end) = self.taut(at, kind)?;
+        let mut imports = vec![first];
+        while let Some((next_import, next)) = self
+            .just(end, b',')
+            .map(|next| self.white(next))
+            .and_then(|next| self.taut(next, kind))
+        {
+            imports.push(next_import);
+            end = next;
         }
-
-        if let Some(rest) = token.strip_prefix('*') {
-            let suffix = rest.trim();
-            if suffix.is_empty() {
-                return Err(CompilerError::Parse(format!(
-                    "malformed import clause item `{token}` (empty `*` suffix)"
-                )));
-            }
-            imports.push(ScopedImport {
-                kind,
-                face: None,
-                mark: None,
-                suffix: suffix.to_string(),
-            });
-        } else if let Some((face, suffix)) = token.split_once('=') {
-            let face = face.trim();
-            let suffix = suffix.trim();
-            if face.is_empty() || suffix.is_empty() {
-                return Err(CompilerError::Parse(format!(
-                    "malformed import clause item `{token}` (expected `face=suffix`)"
-                )));
-            }
-            imports.push(ScopedImport {
-                kind,
-                face: Some(face.to_string()),
-                mark: None,
-                suffix: suffix.to_string(),
-            });
-        } else {
-            imports.push(ScopedImport {
-                kind,
-                face: Some(token.to_string()),
-                mark: None,
-                suffix: token.to_string(),
-            });
-        }
+        Some((imports, end))
     }
-    Ok(imports)
+
+    /// `taut-rule`: `*name` (no face), `face=name`, or `name` (face `name`).
+    fn taut(&self, at: usize, kind: ImportKind) -> Option<(ScopedImport, usize)> {
+        let import = |face: Option<String>, suffix: String| ScopedImport {
+            kind,
+            face,
+            mark: None,
+            suffix,
+        };
+        if let Some(next) = self.just(at, b'*') {
+            let (suffix, end) = self.sym(next)?;
+            return Some((import(None, suffix), end));
+        }
+        let (face, end) = self.sym(at)?;
+        if let Some((suffix, after)) = self.just(end, b'=').and_then(|next| self.sym(next)) {
+            return Some((import(Some(face), suffix), after));
+        }
+        Some((import(Some(face.clone()), face), end))
+    }
+
+    /// hoonc parses the body right after the header, and no Hoon starts with
+    /// an import rune (`/=`, `/-` and `/%` only begin paths when a knot
+    /// follows), so a clause the header rule could not take fails the file.
+    fn reject_leftover_import(&self, at: usize) -> Result<()> {
+        if self.byte(at) != Some(b'/') {
+            return Ok(());
+        }
+        let Some(rune) = self.byte(at + 1) else {
+            return Ok(());
+        };
+        let clause_like = matches!(rune, b'+' | b'*' | b'#' | b'?')
+            || (matches!(rune, b'-' | b'=' | b'%')
+                && matches!(self.byte(at + 2), None | Some(b' ' | b'\n' | b'\t' | b'\r')));
+        if !clause_like {
+            return Ok(());
+        }
+        let line_end = self.src[at..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(self.src.len(), |len| at + len);
+        let line = self.src[..at].iter().filter(|byte| **byte == b'\n').count() + 1;
+        let clause = self.text(at, line_end);
+        if rune == b'%' {
+            return Err(CompilerError::UnsupportedExpr(format!(
+                "/% imports are not supported by honk: `{clause}`"
+            )));
+        }
+        Err(CompilerError::Parse(format!(
+            "malformed /{} import clause at line {line}: `{clause}` (hoonc's import \
+             header needs `/-` `/+` `/=` `/*` `/#` in that order, each clause after a \
+             two-space gap and followed by a gap)",
+            rune as char
+        )))
+    }
+
+    fn text(&self, start: usize, end: usize) -> String {
+        String::from_utf8_lossy(&self.src[start..end]).into_owned()
+    }
 }
 
-fn strip_inline_comment(token: &str) -> &str {
-    match token.find("::") {
-        Some(idx) => token[..idx].trim(),
-        None => token,
+/// Replaces the import header with spaces (keeping newlines) so the Hoon
+/// parser sees only the body at its original line and column, as hoonc's
+/// header rule hands the body to `tall:vang`.
+fn blank_import_header(source: &str, body_start: usize) -> std::borrow::Cow<'_, str> {
+    if body_start == 0 {
+        return std::borrow::Cow::Borrowed(source);
     }
+    let mut blanked: Vec<u8> = source.as_bytes()[..body_start]
+        .iter()
+        .map(|byte| if *byte == b'\n' { b'\n' } else { b' ' })
+        .collect();
+    blanked.extend_from_slice(&source.as_bytes()[body_start..]);
+    // The header rule only consumes ASCII, and the body is untouched.
+    std::borrow::Cow::Owned(String::from_utf8(blanked).expect("blanked header stays UTF-8"))
 }
 
 fn data_import_expr(path: &Path) -> Result<ast::Hoon> {
@@ -641,12 +792,13 @@ fn suffix_path_candidates(prefix: &str, suffix: &str) -> Vec<PathBuf> {
 }
 
 fn hyphen_segment_variants(suffix: &str) -> Vec<Vec<String>> {
-    let parts: Vec<String> = suffix
-        .split('-')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(ToString::to_string)
-        .collect();
+    let parts: Vec<String> = suffix.split('-').map(ToString::to_string).collect();
+    // hoonc's `+segments` splits only a name whose every hyphen-separated
+    // part is non-empty; otherwise (`dbl--dash`, `trail-`) the literal name
+    // is the one candidate.
+    if parts.iter().any(String::is_empty) {
+        return vec![vec![suffix.to_string()]];
+    }
     let mut variants = hyphen_segment_variants_inner(parts.as_slice());
     // Clay tries fewer slashes first.
     variants.reverse();
@@ -708,6 +860,11 @@ fn parse_native_hoon_source_with_wer_dbug_and_docs(
     dbug: bool,
     docs_enabled: bool,
 ) -> Result<ast::Hoon> {
+    // hoonc parses the import header separately and the body from where the
+    // header ends, so the body's first `%spot` starts there.
+    let header = parse_import_header(source)?;
+    let source = blank_import_header(source, header.body_start);
+    let source = source.as_ref();
     let linemap = std::sync::Arc::new(LineMap::new_with_docs(source, docs_enabled));
     let linemap_for_error = std::sync::Arc::clone(&linemap);
     let parsed = native_parser(wer, dbug, linemap)
@@ -1132,6 +1289,10 @@ mod tests {
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
         ];
         assert_eq!(variants, expected);
+        // hoonc's `+segments` keeps a name with an empty part whole.
+        for name in ["dbl--dash", "trail-"] {
+            assert_eq!(hyphen_segment_variants(name), vec![vec![name.to_string()]]);
+        }
     }
 
     #[test]

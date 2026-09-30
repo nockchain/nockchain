@@ -90,3 +90,6 @@ pub fn type_roundtrip_check(type_noun: Noun, space: &NounSpace) -> Result<()> {
 pub trait ToNoun {
     fn to_noun(&self, dst: &mut NounSlab) -> Noun;
 }
+
+#[cfg(test)]
+mod cov_c5;

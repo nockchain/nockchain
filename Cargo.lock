@@ -4741,6 +4741,7 @@ dependencies = [
  "nockasm",
  "nockvm",
  "num-bigint",
+ "proptest",
  "serde",
  "serde_json",
  "smallvec",
