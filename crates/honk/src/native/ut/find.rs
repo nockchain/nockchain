@@ -31,15 +31,13 @@ fn atom_handle_to_string(atom: AtomHandle<'_>) -> Result<String> {
 }
 
 impl<'a> Ut<'a> {
-    // ATOMIC FLIP (C6+C9): the wing-navigation core (find/fond/fend/fund/twin/
-    // resolve_wing_axis + the nested fond_name walker) reads NATIVE types
-    // (`NRc<NTy>`). Deepening subjects stay native (the memory win); leaf-carried
-    // parts (face tool/tune maps, core coil/tomes) are lowered MEMOIZED via
-    // live_leaf_to_noun and decoded with the existing noun helpers. look/loot stay
-    // NOUN (they are namespace/alias maps, not types). Forks rebuild through the
-    // NOUN fork_from_options path (RT-07 mug ordering) and are re-lifted via
-    // native_of. peek/repo are native (C2/C1); mint/play still take noun subjects
-    // (lowered here) until C-final; their TYPE goal becomes cons_noun(&mut self.cx).
+    // Wing navigation (find/fond/fend/fund/twin/resolve_wing_axis and the nested
+    // `fond_name` walker) works on native types. Leaf-carried parts (face tools
+    // and tunes, core coils and tomes) are lowered through the memoized
+    // `live_leaf_to_noun` and decoded with the noun helpers. `look`/`loot` walk
+    // namespace maps and stay noun-based. Forks are rebuilt with the noun
+    // `fork_from_options`, which keeps hoon-138's mug ordering, and lifted back
+    // with `native_of`.
 
     // HOON138:arm=ut:find lines=9472-9484 map=direct status=partial reviewed=2026-03-06
     // HOON138_NOTE:native primary implementation for canonical `++find`; full parity review is still in progress
@@ -54,8 +52,8 @@ impl<'a> Ut<'a> {
         }
     }
 
-    /// Noun-bridged `find` for still-noun callers (mint/play boundary). Returns a
-    /// Port carrying native types; the caller decides how to consume it.
+    /// Test helper: lifts a noun subject to native and runs `find`.
+    #[cfg(test)]
     pub(super) fn find_noun(&mut self, sut: Noun, way: Way, wing: &WingType) -> Result<Port> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.find(sut_n, way, wing)
@@ -83,7 +81,8 @@ impl<'a> Ut<'a> {
         }
     }
 
-    /// Noun-bridged `fend` for still-noun callers (mint_wthx). Returns a native typ.
+    /// Test helper: lifts a noun subject to native and runs `fend`.
+    #[cfg(test)]
     pub(super) fn fend_noun(
         &mut self,
         sut: Noun,
@@ -100,7 +99,6 @@ impl<'a> Ut<'a> {
         if let Some(wing) = reek(gen.clone()) {
             return self.find(sut, way, &wing);
         }
-        // mint is native now (C-final.1a): thread the native subject directly.
         let goal = cons_noun(&mut self.cx);
         let (typ, formula) = self.mint(sut, goal, gen)?;
         Ok(Port::Synthetic { typ, formula })
@@ -126,7 +124,6 @@ impl<'a> Ut<'a> {
             Pony::Void => Ok(Pony::Void),
             Pony::Unmatched(skip) => Ok(Pony::Unmatched(skip)),
             Pony::Synthetic { typ, formula } => {
-                // mint is native now (C-final.1a): thread the native typ directly.
                 let goal = cons_noun(&mut self.cx);
                 let (new_ty, new_formula) =
                     self.mint(typ, goal, &Hoon::Wing(vec![head.clone()]))?;
@@ -140,7 +137,7 @@ impl<'a> Ut<'a> {
                 let current_sut = match &palo.opal {
                     Opal::Leg(typ) => typ.clone(),
                     Opal::Arm { arms, .. } => {
-                        // Fork rebuild via the NOUN fork path (RT-07 ordering).
+                        // Rebuild the fork on the noun path to keep its mug ordering.
                         let mut types = Vec::with_capacity(arms.len());
                         for (typ, _) in arms {
                             types.push(live_to_noun(&mut self.cx, typ, self.slab));
@@ -218,11 +215,8 @@ impl<'a> Ut<'a> {
             }
         }
 
-        // is_term_face reads the NATIVE face tool leaf (lowered) to find a %term
-        // face name. In the noun type shape `[%face [tool inner]]`, the original
-        // walked `sut.tail().head()` to reach the tool; with the native enum the
-        // tool IS the carried leaf, so a %term face is exactly a tool that is an
-        // atom (the term name); any other tool shape (tune map) is not a term face.
+        // Takes the lowered face tool. A %term face is a tool that is an atom (the
+        // term name); any other tool (a tune) is not a term face.
         fn is_term_face(space: &NounSpace, tool: Noun) -> Result<Option<String>> {
             let name_atom = match tool.in_space(space).as_atom() {
                 Ok(atom) => atom,
@@ -281,8 +275,8 @@ impl<'a> Ut<'a> {
             Ok(Some(unit_cell.tail().noun()))
         }
 
-        // %hold cycle guard keyed on interned `Rc` pointer (flip natives are
-        // hash-consed, so ptr == structural identity), mirroring C8's NestSeenSet.
+        // %hold cycle guard keyed on canonical `TypeId`. Types are hash-consed, so
+        // ID equality is structural equality.
         #[derive(Default)]
         struct SeenState {
             hold_path: Vec<TypeId>,
@@ -339,7 +333,7 @@ impl<'a> Ut<'a> {
                     if name.is_none() {
                         return Ok(here(inner, &axe, skip, lon));
                     }
-                    // Lower the face tool leaf BEFORE borrowing noun_space below.
+                    // Lower the face tool before borrowing `noun_space` below.
                     let tool_noun = live_leaf_to_noun(&mut ut.cx, tool, ut.slab);
                     let term_face_name = {
                         let space = ut.slab.noun_space();
@@ -444,7 +438,6 @@ impl<'a> Ut<'a> {
                                     "face tune bridge expression ast missing".to_string(),
                                 )
                             })?;
-                        // mint is native now (C-final.1a): thread inner directly.
                         let noun_goal = cons_noun(&mut ut.cx);
                         let (bridge_ty_n, bridge_formula) =
                             ut.mint(inner.clone(), noun_goal, bridge_hoon_ast.as_ref())?;
@@ -466,8 +459,6 @@ impl<'a> Ut<'a> {
                                 continue;
                             }
                             Pony::Palo(palo) => {
-                                // fine is native (C-final fire): returns the typ
-                                // directly as `NRc<NTy>`, no native_of round-trip.
                                 let (fid_ty_n, fid_formula) = ut.fine(&Port::Palo(palo))?;
                                 let composed =
                                     compose_axis_formula(ut, axe.clone(), bridge_formula);
@@ -524,9 +515,8 @@ impl<'a> Ut<'a> {
                         return Ok(here(sut.clone(), &axe, skip, lon));
                     };
                     let payload = payload.clone();
-                    // garb is native (direct field access); rest is tiny/bounded —
-                    // lower to noun for the noun decoders. The context (deepening
-                    // subject) is not needed here.
+                    // `rest` is small; lower it to a noun for the tome decoders. The
+                    // context (deepening subject) is not needed here.
                     let poly = garb.poly;
                     let vair = garb.vair;
                     let rest = live_leaf_to_noun(&mut ut.cx, rest, ut.slab);
@@ -604,7 +594,7 @@ impl<'a> Ut<'a> {
         Ok(axis)
     }
 
-    /// Noun-bridged `resolve_wing_axis` for still-noun callers.
+    /// `resolve_wing_axis` for a noun subject, lifted to native first.
     pub(super) fn resolve_wing_axis_noun(&mut self, sut: Noun, wing: &WingType) -> Result<BigUint> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.resolve_wing_axis(sut_n, wing)
@@ -630,11 +620,8 @@ impl<'a> Ut<'a> {
     pub(super) fn twin(&mut self, left: Pony, right: Pony) -> Result<Pony> {
         match (left, right) {
             (Pony::Void, other) | (other, Pony::Void) => Ok(other),
-            (Pony::Unmatched(rem), other @ Pony::Palo(_))
-            | (other @ Pony::Palo(_), Pony::Unmatched(rem))
-            | (Pony::Unmatched(rem), other @ Pony::Synthetic { .. })
-            | (other @ Pony::Synthetic { .. }, Pony::Unmatched(rem)) => {
-                let _ = (rem, other);
+            (Pony::Unmatched(_), Pony::Palo(_) | Pony::Synthetic { .. })
+            | (Pony::Palo(_) | Pony::Synthetic { .. }, Pony::Unmatched(_)) => {
                 Err(CompilerError::Noun("find-fork".to_string()))
             }
             (Pony::Unmatched(a), Pony::Unmatched(b)) if a == b => Ok(Pony::Unmatched(a)),
@@ -651,7 +638,7 @@ impl<'a> Ut<'a> {
                 if !self.formula_arena.equal(left_formula, right_formula) {
                     return Err(CompilerError::Noun("find-fork".to_string()));
                 }
-                // Fork rebuild via the NOUN fork path (RT-07 ordering).
+                // Rebuild the fork on the noun path to keep its mug ordering.
                 let left_noun = live_to_noun(&mut self.cx, &left_ty, self.slab);
                 let right_noun = live_to_noun(&mut self.cx, &right_ty, self.slab);
                 let ty_noun = self.fork_from_options(vec![left_noun, right_noun])?;
@@ -691,8 +678,8 @@ impl<'a> Ut<'a> {
                         }
                         let mut merged: Vec<(NRc<NTy>, Noun)> =
                             Vec::with_capacity(left_arms.len().saturating_add(right_arms.len()));
-                        // Arm dedup: the core is a native type (ptr_eq == structural
-                        // because interned); the foot is a hoon arm-spec noun (noun_eq).
+                        // Dedup arms: cores compare by pointer (interned, so pointer
+                        // equality is structural), feet by `noun_eq`.
                         for (core, foot) in left_arms.into_iter().chain(right_arms) {
                             let mut duplicate = false;
                             for (prev_core, prev_foot) in merged.iter() {

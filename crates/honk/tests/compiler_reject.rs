@@ -1,18 +1,18 @@
 //! In-process rejection/acceptance sweep of the type-probe corpus.
 //!
-//! The same .hoon files are normally pair-tested against hoonc at the artifact
-//! level by //crates/honk/test-assets/type-probes (Bazel, strict cmp for
-//! accepts / both-must-reject verdicts). `divergent_bunt` is native-only
+//! Bazel pair-tests the same .hoon files against hoonc at the artifact level
+//! in //crates/honk/test-assets/type-probes (strict cmp for accepts,
+//! both-must-reject for rejects). `divergent_bunt` is native-only there
 //! because canonical hoonc runs away instead of rejecting within the test
-//! budget. This harness runs all of them through `ut.mint` with
-//! the embedded canonical hoon-138 subject type — the same subject the honk
-//! binary compiles files against — so the exercised type-checker branches
+//! budget. This harness runs each probe through `ut.mint_noun` against the
+//! embedded canonical hoon-138 subject type, the same subject the honk binary
+//! compiles files against, so the type-checker branches they exercise
 //! (mint-nice/vain/lost, find/find-fork, fish-core/loop, fire-dry, mull,
 //! redo-match, payload-block, ...) count toward cargo-tarpaulin coverage.
 //!
-//! reject/rest_loop_alias.hoon is deliberately skipped: both compilers
-//! currently reject it via native stack overflow, which would abort the
-//! test process (see the probe's header comment).
+//! reject/rest_loop_alias.hoon is skipped: both compilers reject it via native
+//! stack overflow, which would abort the test process (see the probe's header
+//! comment).
 
 use std::fs;
 use std::path::PathBuf;

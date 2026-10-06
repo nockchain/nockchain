@@ -1,4 +1,4 @@
-#![allow(dead_code, clippy::items_after_test_module)]
+#![allow(clippy::items_after_test_module)]
 
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -36,7 +36,6 @@ use smallvec::SmallVec;
 
 use self::keys::*;
 use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
-use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
 use crate::native::identity::*;
 use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
@@ -88,7 +87,7 @@ struct MuskRuntime {
     mack_core_cache_raw: FastHashMap<NounIdentity, Noun>,
     mack_core_cache_context: Option<EvalFrameId>,
     // Complete seminoun data is canonicalized by `ValueArena`, so equivalent
-    // cores share one exact identity even when their slab addresses differ.
+    // cores share one identity even when their slab addresses differ.
     mack_cache_by_value: FastHashMap<MackKey, Option<Noun>>,
 }
 
@@ -259,43 +258,41 @@ impl Drop for HoonAstScope<'_, '_, '_> {
 
 pub struct Ut<'a> {
     pub slab: &'a mut NounSlab,
-    // Canonical Nock formula graph. Formula-producing compiler paths migrate to
-    // `FormulaId`; noun materialization is retained only at explicit semantic
-    // boundaries and at the final public output boundary.
+    // Canonical Nock formula graph. Formula-producing paths build `FormulaId`s;
+    // nouns are materialized only at explicit semantic boundaries and at the
+    // public output boundary.
     formula_arena: FormulaArena,
     // Canonical structural identities for complete values and abstract
     // seminoun states used by Musk's native evaluator.
     value_arena: ValueArena,
     semi_arena: SemiArena,
-    // Owned per-compile native-IR state (intern table + decode/encode memos +
-    // boundary caches) -- the single home for what used to be module thread-locals.
-    // A disjoint field from `slab`, so the ir free fns can borrow `&mut self.cx`
-    // and `self.slab` together. Its lifetime IS the compile (replaces live_reset).
+    // Per-compile native-IR state: intern table, decode/encode memos, and
+    // boundary caches. It is disjoint from `slab`, so the IR free functions can
+    // borrow `&mut self.cx` and `self.slab` together. It lives as long as the `Ut`.
     cx: Context,
-    // Context taxonomy for last-mile parity work:
+    // Compiler context falls into three groups:
     // - semantic context: `vet` plus active `%rest`/`fan` scope
     // - memo context: recursion-sensitive arm epoch and placeholder signature
     // - recursion guards: in-progress arm state and wet `rib`
     pub vet: bool,
     dbug_locations: Vec<CompilerErrorLocation>,
-    // Memoization tables. New cache keys should derive semantic/memo state from the helper
-    // accessors below rather than hand-assembling context tuples at each cache surface.
-    // Recursion / in-progress guards. These are not caches; they constrain valid memo reuse and
-    // are folded into the memo-context helpers when the cache policy requires it.
+    // Cache keys take semantic and memo state from the context-key helpers
+    // (`cache_context_key` etc.) instead of assembling context tuples by hand.
+    // The recursion and in-progress guards below are not caches; they limit memo
+    // reuse and feed the memo-context helpers where a cache needs them.
     pub arm_in_progress: HashSet<(Arc<str>, TypeId)>,
     pub arm_goal_in_progress: Vec<ArmInProgressEntry>,
     pub arm_placeholder_play_in_progress: HashSet<NounIdentity>,
     pub arm_epoch: ArmEpoch,
     pub lazy_resolver_next_id: LazyResolverId,
     pub lazy_resolvers: HashMap<LazyResolverId, LazyResolverContext>,
-    // RT-05 canonical lazy-core identity: maps a recursive core's structural key
-    // (interned-sut ptr, tomes_sig, poly) to ONE canonical resolver id, so
-    // structurally-equal lazy cores intern to one `Rc` and every pointer-keyed
-    // recursion cut converges. Shares `lazy_resolvers`' whole-compile lifetime
-    // (never cleared by `clear_build_transients`).
+    // Canonical lazy-core identity: maps a recursive core's structural key
+    // (subject type ID, tome signature, poly) to one resolver ID, so structurally
+    // equal lazy cores intern to one type and identity-keyed recursion cuts
+    // converge. Lives as long as `lazy_resolvers`, for the whole compile.
     pub lazy_resolver_canonical_ids: HashMap<LazyCoreKey, LazyResolverId>,
-    // Hybrid oracle-sut parity compilation can opt into exact AST recovery from structurally equal
-    // hoon nouns. Keep this disabled on the normal compiler path.
+    // Exact AST recovery from structurally equal hoon nouns. The honk binary
+    // enables it for prelude builds; the normal compile path keeps it off.
     pub exact_hoon_ast_lookup_enabled: bool,
     pub hoon_identity_cache_raw: HashMap<NounIdentity, Noun>,
     pub hoon_identity_cache_order: VecDeque<NounIdentity>,
@@ -320,10 +317,9 @@ pub struct Ut<'a> {
     // parent. They receive their own dense arena and suspend the parent here;
     // LIFO scope guards restore the previous graph without pointer probing.
     hoon_arena_stack: Vec<HoonArena>,
-    // Retired arenas and signature scratch buffers, recycled so each scope
-    // entry reuses grown map/vec capacity instead of rebuilding it from
-    // empty — scope churn (one per distinct AST root, including every
-    // compiler-generated lowering) made the empty-map growth path hot.
+    // Retired arenas and signature scratch buffers. Each scope entry reuses
+    // their grown capacity; a scope opens for every distinct AST root, including
+    // each compiler-generated lowering, so regrowing empty maps would be hot.
     hoon_arena_pool: Vec<HoonArena>,
     sig_scratch_pool: Vec<(
         FastHashMap<HoonIdentity, HoonSignature>,
@@ -333,15 +329,14 @@ pub struct Ut<'a> {
     pub hoon_ast_ptr_cache_order: VecDeque<HoonIdentity>,
     pub hold_memo: HoldMemoSet,
     // Canonical `++fire` wet-arm validation tracks `[sut dox gen]` in `rib`
-    // to avoid recursive re-entry during `mull` checks. `sut`/`dox` are now native
-    // interned `NRc<NTy>` (ptr-identity == structural identity, hash-consed), so
-    // the rib keys on their `Rc` pointers; the `gen` half stays a canonicalized
-    // hoon noun (kept as both the live noun and its raw address for the fast path).
+    // to avoid recursive re-entry during `mull` checks. `sut` and `dox` are
+    // hash-consed native types, so the rib compares them by identity; `gen` is a
+    // canonicalized hoon noun, kept both as the noun and by raw address.
     fire_wet_rib: Vec<(NRc<NTy>, NRc<NTy>, Noun)>,
     fire_wet_rib_raw: FastHashSet<WetRibKey>,
     // Dynamic `%rest` / `%hold` fan scope. This is part of the semantic execution context.
-    // Canonical `++rest` tracks active loop legs in `fan`; native interns each structural
-    // `[inner hoon]` pair to a stable `leg_id` and keys the active semantic scope by that set.
+    // Canonical `++rest` tracks active loop legs in `fan`; here each structural `[inner hoon]`
+    // pair is interned to a stable `leg_id`, and the active scope is keyed by that set.
     hold_repo_fan_leg_ids: FastHashMap<HoldKey<NounMug>, Vec<HoldRepoFanLegIdEntry>>,
     hold_repo_fan_leg_raw_ids: FastHashMap<HoldKey<NounIdentity>, FanLegId>,
     hold_repo_fan_leg_id_by_hold_raw: FastHashMap<NounIdentity, FanLegId>,
@@ -356,21 +351,16 @@ pub struct Ut<'a> {
     pub hold_repo_fan_context_id: FanContextId,
     pub hold_repo_fan_context_next_id: FanContextId,
     hold_repo_fan_leg_next_id: FanLegId,
-    // Scope-precise fan key: per-Rc-ptr leg-id memo for %hold types, so
-    // `reachable_legs` resolves a hold's leg-id in O(1) amortized (reusing the
-    // existing noun-path leg intern once per distinct hold pointer). Persists for
-    // the whole compile (leg-ids are compile-stable); cleared in clear_build_memos
-    // alongside the fan/lazy state.
+    // Leg ID per `%hold` type ID, so `reachable_legs` finds a hold's leg in O(1)
+    // amortized; the noun-path leg intern runs once per distinct hold. Kept for
+    // the whole compile, since leg IDs are compile-stable.
     hold_repo_fan_leg_id_by_ptr: FastHashMap<TypeId, FanLegId>,
-    // Memoized intersection ids for scoped fan subsets: maps a (active-context-id,
-    // legset-id) pair to its interned subset id, avoiding re-interning the same
-    // (active ∩ legset) Vec across calls. Reuses the same dedup discipline as
-    // refresh_hold_repo_fan_context_id over arbitrary sorted subsets.
+    // Interned IDs for scoped fan subsets (active legs ∩ reachable legs),
+    // bucketed by (sum, xor, len) like `hold_repo_fan_context_by_signature`.
     hold_repo_fan_subset_by_signature:
         FastHashMap<SetSignature, Vec<(Vec<FanLegId>, FanContextId)>>,
-    // Canonical-boundary memoization surface. These are the first caches being
-    // consolidated around Vere-style ut boundaries (`mint`, `mull`, `rest`,
-    // `nest`, `redo`, etc.) instead of helper-local policy tables.
+    // Noun-keyed caches at Vere-style `+ut` boundaries (`mint`, `nest`, `redo`,
+    // `rest`) and related memo tables.
     pub boundary_memo: BoundaryMemoSet,
     pub bran_semi_memo: BucketMemo<BranSemiKey, BranSemiCacheEntry>,
     pub spec_example_cache: HashMap<SpecSignature, VecDeque<(Spec, Arc<Hoon>)>>,
@@ -379,20 +369,18 @@ pub struct Ut<'a> {
     pub spec_factory_open_cache_order: VecDeque<SpecSignature>,
     pub burp_type_cache: HashMap<NounIdentity, Noun>,
     musk: MuskRuntime,
-    // Cross-call persistence for the `miss` memo; only enabled during the
-    // isolated prelude (hoon-138) mint. See miss().
-    /// Cross-call `miss` memo (prelude mint only), retained for a single
-    /// semantic epoch: `(vet, active fan, arm epoch, placeholder context)`.
-    /// `miss` reaches `repo`/`rest`/`redo`, whose state evolves during a
-    /// build; a verdict memoized under one hold-expansion state can flip
-    /// under another (observed: ++dish's `~|` vase constant kept a `%hint`
-    /// fork member hoonc resolves away). Clearing on any epoch change keeps
-    /// within-arm reuse (the perf case) while never reusing across state.
+    /// Cross-call `miss` memo, enabled only for the prelude mint and retained
+    /// for a single semantic epoch: `(vet, active fan, arm epoch, placeholder
+    /// context)`. `miss` reaches `repo`/`rest`/`redo`, whose state evolves
+    /// during a build, so a verdict memoized under one hold-expansion state can
+    /// flip under another (e.g. ++dish's `~|` vase constant kept a `%hint`
+    /// fork member that hoonc resolves away). Clearing on any epoch change keeps
+    /// within-arm reuse and never reuses a verdict across states.
     miss_memo_persist: Option<(CacheContextKey, FastHashMap<MissKey, bool>)>,
-    // `^~` fold outcomes keyed by exact native (bran, formula) identity. Folding is a pure
+    // `^~` fold outcomes keyed by the canonical (bran, formula) pair. Folding is a pure
     // function of these two values: arm resolution through the persistent
-    // lazy resolvers is time-invariant, so both successes and failures are
-    // safe to reuse for the lifetime of the Ut.
+    // lazy resolvers does not change over time, so both successes and failures
+    // are safe to reuse for the lifetime of the `Ut`.
     ktsg_fold_cache: FastHashMap<FoldKey, Option<Noun>>,
     semi_root_blocked_set: Option<Noun>,
     semi_full_blocked_interned: Option<Noun>,
@@ -424,12 +412,11 @@ pub struct Sig64 {
 }
 
 impl Sig64 {
-    // Rolling signature; this is used only as a cache guard against pointer
-    // reuse. It must be stable for a given value within one process, but does
-    // not need to be cryptographic — so it mixes one splitmix64 round per
-    // 8-byte word instead of eight FNV rounds per word. Sub-word tails mix
-    // their length as a second word, which keeps distinct call sequences
-    // distinct without per-byte work.
+    // Rolling signature used only as a cache guard against pointer reuse. It
+    // must be stable for a given value within one process but need not be
+    // cryptographic, so it mixes one splitmix64 round per 8-byte word. Sub-word
+    // tails also mix their length as a second word, which keeps distinct call
+    // sequences distinct without per-byte work.
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
     fn new_with_dbug_spots(include_dbug_spot: bool) -> Self {
@@ -523,22 +510,10 @@ impl Sig64 {
         sig.hoon_signatures.get(&(HoonIdentity::of(hoon))).copied()
     }
 
-    fn hoon_signatures_spot_sensitive(
-        hoon: &Hoon,
-    ) -> Option<(HoonSignature, Vec<HoonArenaBuildNode>)> {
-        let mut sig = Self::new_with_dbug_spots(true);
-        sig.write_hoon(hoon)?;
-        let root = sig
-            .hoon_signatures
-            .get(&(HoonIdentity::of(hoon)))
-            .copied()?;
-        Some((root, sig.hoon_nodes))
-    }
-
-    /// `hoon_signatures_spot_sensitive` over recycled scratch storage: the
-    /// caller lends grown map/vec capacity and always gets it back, filled
-    /// with build nodes on success. Scope entry runs once per distinct AST
-    /// root, so rebuilding these tables from empty was measurable.
+    /// Spot-sensitive signatures for `hoon` and every descendant, computed in
+    /// scratch storage the caller lends. The tables always come back, filled
+    /// with build nodes on success. Scope entry runs once per distinct AST root,
+    /// so rebuilding these tables from empty would be measurable.
     fn hoon_signatures_spot_sensitive_pooled(
         hoon: &Hoon,
         mut signatures: FastHashMap<HoonIdentity, HoonSignature>,
@@ -1381,7 +1356,7 @@ impl Sig64 {
 
         // Hash this node independently, then feed its digest into the enclosing
         // Hoon/helper node. This makes the signature compositional: registering
-        // a root computes each descendant exactly once rather than hashing the
+        // a root computes each descendant once rather than hashing the
         // same suffix again at every recursive mint/play/mull boundary.
         let parent_state = std::mem::replace(&mut self.state, Self::OFFSET);
         match hoon {
@@ -2097,16 +2072,10 @@ impl Sig64 {
 
 impl<'a> Ut<'a> {
     pub fn new(slab: &'a mut NounSlab) -> Self {
-        // Native-types flip: the wing-nav / skin / mull / nest families make the
-        // per-compile intern table + the live_to_noun / live_leaf_to_noun memos
-        // (keyed by Rc/noun pointer, bound to THIS compile's slab) the primary
-        // path. Every fresh `Ut` gets a fresh `cx: Context::new()`, so a prior
-        // compile's slab-bound nouns can never alias into this one (a freed slab's
-        // address is reused by the next compile, otherwise returning a stale
-        // interned Rc / dangling noun). This per-`Ut` Context replaces the old
-        // thread-local `live_reset()` at every compile boundary — notably the test
-        // harnesses that compile many exprs on one thread, which is where the
-        // missing reset surfaced as decode errors.
+        // Every `Ut` gets a fresh `Context`. Its intern table and
+        // `live_to_noun`/`live_leaf_to_noun` memos hold nouns bound to this
+        // compile's slab, and the next compile can reuse a freed slab's address,
+        // so a shared context would return stale types or dangling nouns.
         Self {
             slab,
             formula_arena: FormulaArena::new(),
@@ -2248,16 +2217,14 @@ impl<'a> Ut<'a> {
         self.musk.clear_context_dependent_caches();
     }
 
-    /// Upper bound on the cell-level eval-stack copy cache. The cache remembers
-    /// every cell copied into the eval stack keyed by its *source* slab address,
-    /// so structurally-shared subtrees within and across `^~` folds copy once.
-    /// Over a full hoon-138 self-mint it accreted ~59M entries (~1.6 GB RSS):
-    /// each freshly-minted (deepening) core copies ~150K cells at fresh
-    /// addresses, almost all of which are never queried again once that core's
-    /// copy completes. Capping it is byte-safe — the values are live nouns on
-    /// the long-lived (virtual, non-resident) eval stack, so forgetting them only
-    /// causes a later structurally-identical copy to be re-materialized on the
-    /// eval stack rather than shared; the folded *result* is unchanged.
+    /// Upper bound on the cell-level eval-stack copy cache. The cache maps each
+    /// cell copied onto the eval stack by its *source* slab address, so shared
+    /// subtrees within and across `^~` folds are copied once. Uncapped, a
+    /// hoon-138 self-mint grows it to about 59M entries (about 1.6 GB): each new
+    /// core copies about 150K cells at fresh addresses that are rarely queried
+    /// again. Clearing it does not change fold results: the copies stay live on
+    /// the long-lived eval stack, and a later copy of the same structure is
+    /// re-made rather than shared.
     const MUSK_CORE_CACHE_CAP: usize = 4_000_000;
 
     fn ensure_musk_mack_core_cache_context(&mut self, context: &NockContext) {
@@ -2266,12 +2233,11 @@ impl<'a> Ut<'a> {
             self.musk.mack_core_cache_raw.clear();
             self.musk.mack_core_cache_context = Some(context_id);
         } else if self.musk.mack_core_cache_raw.len() > Self::MUSK_CORE_CACHE_CAP {
-            // Bound RSS: drop the cell-dedup entries accumulated by prior folds.
-            // The current fold re-warms what it needs. Measured on the hoon-138
-            // self-mint: the uncapped map reaches ~59M entries (~13.0 GB peak
-            // RSS); capping at 4M holds peak RSS to ~9.0 GB and *lowers* CPU time
-            // (45.9s vs 47.6s) — the entries past the cap are overwhelmingly
-            // stale, and the smaller hashmap has markedly better cache locality.
+            // Bound RSS by dropping entries from earlier folds; the current fold
+            // re-warms what it needs. On the hoon-138 self-mint, the 4M cap cuts
+            // peak RSS from about 13.0 GB to 9.0 GB and also lowers CPU time
+            // (45.9 s vs 47.6 s): entries past the cap are mostly stale, and the
+            // smaller map has better cache locality.
             self.musk.mack_core_cache_raw.clear();
         }
     }
@@ -2319,13 +2285,11 @@ impl<'a> Ut<'a> {
 
     /// Copy a slab noun onto the musk eval stack with structural sharing:
     /// every cell (and indirect atom) copied is remembered in
-    /// `musk_mack_core_cache_raw`, so the large shared parts of mack call
-    /// cores (batteries, the context chain) are copied exactly once per
-    /// eval context. Successive calls of the same gate then only copy the
-    /// fresh spine and sample. The copies are made outside the per-call
-    /// interpreter snapshot, so they stay live on the eval stack for the
-    /// lifetime of the context, exactly like the whole-core copies this
-    /// replaces.
+    /// `musk.mack_core_cache_raw`, so the large shared parts of mack call
+    /// cores (batteries, the context chain) are copied once per eval context.
+    /// Later calls of the same gate copy only the fresh spine and sample. The
+    /// copies are made outside the per-call interpreter snapshot, so they stay
+    /// live on the eval stack for the lifetime of the context.
     unsafe fn copy_into_eval_stack_shared(
         &mut self,
         context: &mut NockContext,
@@ -2380,11 +2344,8 @@ impl<'a> Ut<'a> {
     }
 
     /// Run `f` with `vet` forced off, restoring the previous value afterward
-    /// (on both Ok and Err). Replaces the hand-rolled raw-pointer `VetGuard`
-    /// drop guards in the type-checker; vet is plain `Copy` state, so a
-    /// save/restore around the call is sufficient and avoids `unsafe` in
-    /// semantic logic. (A panic unwinding through here leaves vet off, but
-    /// honk discards the Ut after any caught compile panic.)
+    /// on both `Ok` and `Err`. A panic unwinding through here leaves `vet` off;
+    /// honk discards the `Ut` after any caught compile panic.
     fn with_vet_off<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
         let prev = std::mem::replace(&mut self.vet, false);
         let result = f(self);
@@ -2412,7 +2373,7 @@ impl<'a> Ut<'a> {
         self.arm_in_progress.clear();
         self.arm_goal_in_progress.clear();
         self.arm_placeholder_play_in_progress.clear();
-        // Lazy resolver contexts are NOT transient: types cached across
+        // Lazy resolver contexts are not transient: types cached across
         // build entries (mint/rest/redo caches) embed `[%lazy 1 id]` battery
         // semis, and hoon-138's equivalent resolver is a pure gate inside
         // the seminoun that remains callable forever. Clearing the registry
@@ -2427,7 +2388,9 @@ impl<'a> Ut<'a> {
         self.bran_semi_memo = Default::default();
     }
 
+    #[cfg(test)]
     const NEST_MUG_BUCKET_LIMIT: usize = 32;
+    #[cfg(test)]
     const NEST_MUG_KEY_LIMIT: usize = 65_536;
     const HOON_CACHE_RAW_KEY_LIMIT: usize = 16_384;
     const BURP_TYPE_CACHE_LIMIT: usize = 65_536;
@@ -2435,20 +2398,14 @@ impl<'a> Ut<'a> {
     const HOON_CACHE_STRUCT_BUCKET_LIMIT: usize = 8;
     const SPEC_CACHE_KEY_LIMIT: usize = 16_384;
     const SPEC_CACHE_BUCKET_LIMIT: usize = 8;
-    const CORE_MINT_CACHE_KEY_LIMIT: usize = 16_384;
-    const CORE_MINT_CACHE_BUCKET_LIMIT: usize = 8;
+    #[cfg(test)]
     const MINT_CACHE_BUCKET_LIMIT: usize = 4;
+    #[cfg(test)]
     const MINT_CACHE_KEY_LIMIT: usize = 16_384;
-    const MULL_CACHE_BUCKET_LIMIT: usize = 4;
-    const MULL_CACHE_KEY_LIMIT: usize = 16_384;
     const REDO_CACHE_BUCKET_LIMIT: usize = 8;
     const REDO_CACHE_KEY_LIMIT: usize = 32_768;
     const REST_CACHE_BUCKET_LIMIT: usize = 8;
     const REST_CACHE_KEY_LIMIT: usize = 32_768;
-    const FISH_CACHE_BUCKET_LIMIT: usize = 8;
-    const FISH_CACHE_KEY_LIMIT: usize = 32_768;
-    const TYPE_BINARY_BOUNDARY_CACHE_BUCKET_LIMIT: usize = 8;
-    const TYPE_BINARY_BOUNDARY_CACHE_KEY_LIMIT: usize = 32_768;
     const BRAN_SEMI_CACHE_KEY_LIMIT: usize = 65_536;
     const BRAN_SEMI_CACHE_BUCKET_LIMIT: usize = 8;
     const HOLD_TYPE_CACHE_BUCKET_LIMIT: usize = 8;
@@ -2494,17 +2451,13 @@ impl<'a> Ut<'a> {
         let Some(entries) = self.hold_repo_fan_leg_ids.get(&key) else {
             return Ok(None);
         };
-        let inner_raw = NounIdentity::of(inner);
-        let hoon_raw = NounIdentity::of(hoon);
         for entry in entries.iter().rev() {
             let inner_match = unsafe { entry.inner.raw_equals(&inner) }
-                || NounIdentity::of(entry.inner) == inner_raw
                 || noun_eq(entry.inner, inner, &self.slab.noun_space())?;
             if !inner_match {
                 continue;
             }
             let hoon_match = unsafe { entry.hoon.raw_equals(&hoon) }
-                || NounIdentity::of(entry.hoon) == hoon_raw
                 || noun_eq(entry.hoon, hoon, &self.slab.noun_space())?;
             if hoon_match {
                 self.hold_repo_fan_leg_raw_ids.insert(raw_key, entry.id);
@@ -2535,9 +2488,9 @@ impl<'a> Ut<'a> {
             },
             id,
         );
-        // The mug store is authoritative and lives for the whole compile; with no
-        // frame arena, `inner`/`hoon` live in the single slab for the whole
-        // compile, so id lookups (noun_eq) stay valid without any relocation.
+        // The mug store is authoritative for the whole compile. `inner` and
+        // `hoon` live in the compile slab, so later `noun_eq` lookups stay valid
+        // without relocation.
         self.hold_repo_fan_leg_ids
             .entry(key)
             .or_default()
@@ -2569,11 +2522,9 @@ impl<'a> Ut<'a> {
         let Some(entries) = self.hold_repo_fan_leg_id_by_hold_mug.get(&hold_mug) else {
             return Ok(None);
         };
-        let hold_raw = NounIdentity::of(hold);
         let mut matched = None;
         for entry in entries.iter().rev() {
             let hold_match = unsafe { entry.hold.raw_equals(&hold) }
-                || NounIdentity::of(entry.hold) == hold_raw
                 || noun_eq(entry.hold, hold, &self.slab.noun_space())?;
             if hold_match {
                 matched = Some(entry.id);
@@ -2581,7 +2532,7 @@ impl<'a> Ut<'a> {
             }
         }
         if let Some(id) = matched {
-            self.hold_repo_fan_leg_id_by_hold_raw_store(hold_raw, id);
+            self.hold_repo_fan_leg_id_by_hold_raw_store(NounIdentity::of(hold), id);
             return Ok(Some(id));
         }
         Ok(None)
@@ -2611,10 +2562,8 @@ impl<'a> Ut<'a> {
             .hold_repo_fan_leg_id_by_hold_mug
             .entry(hold_mug)
             .or_default();
-        let hold_raw = NounIdentity::of(hold);
         for entry in bucket.iter() {
             let hold_match = unsafe { entry.hold.raw_equals(&hold) }
-                || NounIdentity::of(entry.hold) == hold_raw
                 || noun_eq(entry.hold, hold, &self.slab.noun_space())?;
             if hold_match {
                 return Ok(());
@@ -2623,8 +2572,8 @@ impl<'a> Ut<'a> {
         if bucket.len() >= Self::HOLD_REPO_FAN_LEG_HOLD_MUG_BUCKET_LIMIT {
             bucket.pop_front();
         }
-        // `hold` lives in the single compile slab; later cross-arm lookups
-        // (noun_eq) stay valid without any relocation.
+        // `hold` lives in the compile slab, so later cross-arm `noun_eq`
+        // lookups stay valid without relocation.
         bucket.push_back(HoldRepoFanHoldIdEntry { hold, id: leg_id });
         Ok(())
     }
@@ -2652,11 +2601,10 @@ impl<'a> Ut<'a> {
         Ok(leg_id)
     }
 
-    /// Per-`Rc`-ptr leg-id for a `%hold` native type (scope-precise fan key).
-    /// Reuses the existing noun-path leg intern ONCE per distinct hold pointer
-    /// (`hold_repo_fan_leg_id_for_hold_type`), then memoizes ptr -> leg-id, so
-    /// `reachable_legs` resolves a hold's leg-id O(1) amortized. Byte-neutral:
-    /// returns the SAME id `redo_subject_hold_in_fan` would (same intern path).
+    /// Leg ID for a native `%hold` type, memoized by type ID. The first lookup
+    /// per hold goes through the noun-path intern
+    /// (`hold_repo_fan_leg_id_for_hold_type`), so it returns the same ID
+    /// `redo_subject_hold_in_fan` would; later lookups are O(1).
     fn hold_repo_fan_leg_id_for_hold_native(&mut self, hold: &NRc<NTy>) -> Result<FanLegId> {
         let ptr = native_type_id(hold);
         if let Some(id) = self.hold_repo_fan_leg_id_by_ptr.get(&ptr).copied() {
@@ -2677,13 +2625,11 @@ impl<'a> Ut<'a> {
         Ok(leg_id)
     }
 
-    /// The set of `%hold` leg-ids reachable from `t`, sorted and deduped, memoized
-    /// per interned `Rc` pointer (sound because `intern_node` hash-conses, so
-    /// ptr == structural identity). Bottom-up over the Rc DAG (acyclic: a node's
-    /// hash depends on already-interned children), so each distinct node is
-    /// visited at most once and the closure is O(1) amortized per node. See the
-    /// linearity proof in the design memo. The `Fork` case decodes options once
-    /// per fork ptr (also memoized) and unions their legsets.
+    /// The sorted, deduplicated `%hold` leg IDs reachable from `t`, memoized by
+    /// canonical type ID. Types are hash-consed, so the ID is structural
+    /// identity. The type DAG is acyclic (a node's hash depends on its interned
+    /// children), so each distinct node is visited at most once. A `Fork` unions
+    /// its options' legsets.
     fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[FanLegId]>> {
         let id = t.arena_id();
         if let Some(legs) = legset_memo_lookup(&self.cx, id) {
@@ -2694,8 +2640,8 @@ impl<'a> Ut<'a> {
         Ok(legs)
     }
 
-    /// One node of `reachable_legs`' memoized recursion (the `with_stack_guard`
-    /// wraps each level for deep DAGs). See `reachable_legs`.
+    /// One node of `reachable_legs`' memoized recursion; `reachable_legs` wraps
+    /// each level in `with_stack_guard` for deep DAGs.
     fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[FanLegId]>> {
         let legs: Vec<FanLegId> = match &**t {
             NTy::Void | NTy::Noun | NTy::Atom { .. } => Vec::new(),
@@ -2734,11 +2680,10 @@ impl<'a> Ut<'a> {
                 acc
             }
             NTy::Hold { subject, .. } => {
-                // legset(Hold) = {leg_id(self)} ∪ legset(subject). NOT the
-                // repo-expansion: the expansion's holds are reached at the next
-                // descent level (which keys on its own scope). See the
-                // correctness argument §1 (redo_subject_hold_in_fan tests only
-                // leg_id(self); recursion keys per level).
+                // legset(Hold) = {leg_id(self)} ∪ legset(subject), without the
+                // repo expansion: the expansion's holds are reached at the next
+                // descent level, which keys on its own scope. This matches
+                // `redo_subject_hold_in_fan`, which tests only leg_id(self).
                 let subject = subject.clone();
                 let self_leg = self.hold_repo_fan_leg_id_for_hold_native(t)?;
                 let ls = self.reachable_legs(&subject)?;
@@ -2748,8 +2693,7 @@ impl<'a> Ut<'a> {
         Ok(SharedRc::from(legs.into_boxed_slice()))
     }
 
-    /// Sorted-merge-dedup union of two sorted leg-id slices (mirrors the
-    /// NestSeenSet binary-search insert discipline; here a linear merge).
+    /// Union of two sorted, deduplicated leg-ID slices, by linear merge.
     fn merge_sorted_legs(a: &[FanLegId], b: &[FanLegId]) -> Vec<FanLegId> {
         if a.is_empty() {
             return b.to_vec();
@@ -2781,7 +2725,7 @@ impl<'a> Ut<'a> {
         out
     }
 
-    /// Intersection of two sorted leg-id slices (both already sorted+deduped).
+    /// Intersection of two sorted, deduplicated leg-ID slices.
     fn intersect_sorted_legs(a: &[FanLegId], b: &[FanLegId]) -> Vec<FanLegId> {
         if a.is_empty() || b.is_empty() {
             return Vec::new();
@@ -2802,12 +2746,10 @@ impl<'a> Ut<'a> {
         out
     }
 
-    /// Canonicalize an arbitrary sorted-deduped leg-id subset to a stable id,
-    /// reusing the same (sum, xor, len)-bucketed dedup discipline as
-    /// `refresh_hold_repo_fan_context_id` so equal subsets map to one id
-    /// deterministically. Shares the `hold_repo_fan_context_next_id` id space and
-    /// the same id-assignment order, so no new id semantics are introduced.
-    /// Empty subset is the sentinel 0 (identical to today's empty-fan key).
+    /// Map a sorted, deduplicated leg-ID subset to a stable ID. Buckets by
+    /// (sum, xor, len) like `refresh_hold_repo_fan_context_id`, so equal subsets
+    /// get one ID. IDs come from `hold_repo_fan_context_next_id`, the same space
+    /// as whole-fan context IDs. The empty subset maps to 0, the empty-fan key.
     fn intern_fan_subset_id(&mut self, subset: &[FanLegId]) -> FanContextId {
         if subset.is_empty() {
             return FanContextId(0);
@@ -2844,22 +2786,19 @@ impl<'a> Ut<'a> {
         id
     }
 
-    /// The scope-precise fan key is the DEFAULT (STEP 5): it is byte-exact on
-    /// both kernels (dumb 6894a41d…, roswell fea818a1…) and is what lets the
-    /// native hoon-138 arbitrary self-mint COMPLETE (bounded ~13 GB / ~46 s vs
-    /// the old never-completing 38-46 GB). Kept as a single source of truth so the
-    /// cache helpers and the partition tests share one switch.
+    /// Scoped fan keys are always on. They leave kernel output unchanged and
+    /// keep the hoon-138 self-mint bounded (about 13 GB and 46 s; whole-fan keys
+    /// grew to 38-46 GB without finishing). The cache helpers and the partition
+    /// tests share this one switch.
     fn scoped_fan_enabled() -> bool {
         true
     }
 
-    /// Scope-precise fan key for a descent op on `scope` (the deepening subject).
-    /// Projects the active leg-set onto `reachable_legs(scope)`: legs not reachable
-    /// from `scope` can never be tested during its resolution, so they cannot
-    /// change the result (correctness §1-2). Collapses to 0 (the empty-fan key
-    /// shape, already proven by every kernel) for the ~97% of resolutions whose
-    /// intersection is empty. Falls back to the whole-active key when the flag is
-    /// off, so the change is inert until enabled.
+    /// Fan key for a descent on `scope` (the deepening subject). Intersects the
+    /// active leg set with `reachable_legs(scope)`: a leg not reachable from
+    /// `scope` is never tested while resolving it, so it cannot change the
+    /// result. Returns 0, the empty-fan key, when the intersection is empty
+    /// (about 97% of resolutions). With scoping off, returns the whole-fan key.
     fn fan_context_key_scoped(&mut self, scope: &NRc<NTy>) -> Result<FanContextId> {
         if !Self::scoped_fan_enabled() {
             return Ok(self.hold_repo_fan_context_key());
@@ -2875,10 +2814,9 @@ impl<'a> Ut<'a> {
         Ok(self.intern_fan_subset_id(&inter))
     }
 
-    /// Scope-precise fan key over the UNION of two scopes' reachable legs (used
-    /// by dual-perspective ops like mull, where the fan can be consulted from
-    /// either the sut or the dox descent). Byte-safe: any leg that could change
-    /// the result is reachable from at least one of the two scopes.
+    /// Fan key over the union of two scopes' reachable legs, for ops like `mull`
+    /// that can consult the fan from either the `sut` or the `dox` descent. Any
+    /// leg that could change the result is reachable from one of the two scopes.
     fn fan_context_key_scoped_pair(&mut self, a: &NRc<NTy>, b: &NRc<NTy>) -> Result<FanContextId> {
         if !Self::scoped_fan_enabled() {
             return Ok(self.hold_repo_fan_context_key());
@@ -2896,11 +2834,9 @@ impl<'a> Ut<'a> {
         Ok(self.intern_fan_subset_id(&inter))
     }
 
-    /// `fan_context_key_scoped` for a noun-keyed cache surface (redo/rest): when
-    /// the flag is on and the active set is non-empty, lift the noun subject to
-    /// native (content-keyed `native_of_cached`) ONCE and scope on it. Flag-off
-    /// and empty-active short-circuit before any conversion, so the noun path is
-    /// unchanged when the feature is inert.
+    /// `fan_context_key_scoped` for noun-keyed caches (`redo`, `rest`). Decodes
+    /// the subject with `native_of_cached` only when scoping is on and the
+    /// active set is non-empty.
     fn fan_context_key_scoped_noun(&mut self, sut: Noun) -> Result<FanContextId> {
         if !Self::scoped_fan_enabled() {
             return Ok(self.hold_repo_fan_context_key());
@@ -3059,9 +2995,8 @@ impl<'a> Ut<'a> {
         self.hoon_ast_scope_depth -= 1;
         if pushed {
             // The borrowed root may die or its address may be reused after this
-            // call. Drop its graph before restoring the longer-lived parent —
-            // clear() releases every entry while the map/vec capacity recycles
-            // through the pool for the next scope.
+            // call, so drop its graph before restoring the longer-lived parent.
+            // `clear()` releases every entry; the pool keeps the capacity.
             let parent = self
                 .hoon_arena_stack
                 .pop()
@@ -3584,13 +3519,11 @@ impl<'a> Ut<'a> {
         PrefixSignature(hash)
     }
 
-    /// C-final.1b: native-re-keyed `core_mint` boundary cache. The TYPE
-    /// components (sut/gol) are keyed on interned `Rc` pointer identity (==
-    /// structural identity for hash-consed flip types), so the deepening subject
-    /// is never lowered to a noun here. The non-type semantic fields are carried
-    /// VERBATIM from the old `core_mint_cache_key`: `tomes_sig` = mug(tomes_map)
-    /// ^ prefix_signature(prefix) (tomes_map is AST-derived, not a deepening
-    /// type, so it stays a mug), vet, poly, fan, arm_epoch, placeholder.
+    /// Native `core_mint` cache. Subject and goal are keyed by canonical type
+    /// ID, so the subject is never lowered to a noun here. The key also carries
+    /// `tomes_sig` = mug(tomes_map) ^ prefix_signature(prefix) (`tomes_map` comes
+    /// from the AST, so a mug suffices), vet, poly, the fan scope, the arm epoch,
+    /// and the placeholder signature.
     fn core_mint_cache_lookup(
         &mut self,
         sut: &NRc<NTy>,
@@ -3660,11 +3593,9 @@ impl<'a> Ut<'a> {
     }
 
     fn arm_cache_epoch_key(&self) -> ArmEpoch {
-        // `arm_epoch` bumps on every arm enter/exit. If we key caches directly on it, we lose
-        // cross-arm memoization even when no recursion-sensitive context is active.
-        //
-        // Keep full epoch sensitivity while recursion/placeholder state is live, but collapse the
-        // key to 0 when all such state is empty so caches can be reused in the common steady state.
+        // `arm_epoch` bumps on every arm enter and exit, so keying caches on it directly would
+        // defeat cross-arm memoization. The key keeps the epoch while recursion or placeholder
+        // state is live and collapses to 0 when all such state is empty.
         if self.arm_in_progress.is_empty()
             && self.arm_goal_in_progress.is_empty()
             && self.arm_placeholder_play_in_progress.is_empty()
@@ -3689,11 +3620,12 @@ impl<'a> Ut<'a> {
         }
     }
 
+    #[cfg(test)]
     fn mint_cache_key(&mut self, sut: Noun, gol: Noun, gen_sig: HoonSignature) -> MintKey<NounMug> {
-        // mint's result depends on the active fan scope (%hold/%rest legs) and
-        // on in-progress recursive-arm state, exactly like the sibling
-        // core_mint cache — include the full context (fan + arm epoch +
-        // placeholder), all of which collapse to 0 in the steady state.
+        // As with the core_mint cache, mint's result depends on the active fan
+        // scope (%hold/%rest legs) and on in-progress recursive-arm state, so the
+        // key carries fan, arm epoch, and placeholder; all three are 0 in the
+        // steady state.
         let context = self.cache_context_key();
         MintKey {
             subject: self.noun_mug_cached(sut),
@@ -3706,10 +3638,9 @@ impl<'a> Ut<'a> {
         }
     }
 
-    /// C-final.1b: native-re-keyed `mint` boundary cache. TYPE components
-    /// (sut/gol) keyed on interned `Rc` pointer identity; non-type semantic
-    /// fields carried VERBATIM from the old `mint_cache_key` (vet, gen_sig, fan,
-    /// arm_epoch, placeholder).
+    /// Native `mint` cache. Subject and goal are keyed by canonical type ID;
+    /// the key also carries vet, the gene signature, the fan scope, the arm
+    /// epoch, and the placeholder signature.
     fn mint_cache_lookup(
         &mut self,
         sut: &NRc<NTy>,
@@ -3717,9 +3648,9 @@ impl<'a> Ut<'a> {
         gen_sig: HoonSignature,
     ) -> Result<Option<(NRc<NTy>, FormulaId)>> {
         let context = self.cache_context_key();
-        // `mint` cache hits bypass the fresh `nice(sut, gol, typ)` check; include
-        // goal-reachable `%hold` legs in the scoped fan key so cached success is
-        // only reused in a semantically equivalent rest/fan context.
+        // `mint` cache hits bypass the fresh `nice(sut, gol, typ)` check, so the
+        // fan key is scoped on `%hold` legs reachable from the goal as well as the
+        // subject. A cached success is reused only in an equivalent fan context.
         let fan = self.fan_context_key_scoped_pair(sut, gol)?;
         Ok(native_mint_cache_lookup(
             &self.cx, sut, gol, context.semantic.vet_key, gen_sig, fan, context.memo.arm_epoch_key,
@@ -3819,11 +3750,9 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    /// C-final.1b: native-re-keyed `mull` boundary cache. TYPE components
-    /// (sut/gol/dox) keyed on interned `Rc` pointer identity; non-type semantic
-    /// fields carried VERBATIM from the old `mull_cache_key` (vet, gen_sig =
-    /// mug(gen), fan, arm_epoch, placeholder). gen stays a mug (it is the AST
-    /// node, not a deepening type).
+    /// Native `mull` cache. Subject, goal, and `dox` are keyed by canonical type
+    /// ID; the key also carries vet, the gene signature, the fan scope, the arm
+    /// epoch, and the placeholder signature.
     fn mull_cache_lookup(
         &mut self,
         sut: &NRc<NTy>,
@@ -3832,9 +3761,9 @@ impl<'a> Ut<'a> {
         gen_sig: HoonSignature,
     ) -> Result<Option<(NRc<NTy>, NRc<NTy>)>> {
         let context = self.cache_context_key();
-        // mull is dual-perspective (sut + dox). The active fan can be consulted
-        // from EITHER perspective's %hold descent, so scope on the union of both
-        // legsets (legset(sut) ∪ legset(dox)) to stay byte-safe.
+        // mull checks both `sut` and `dox`, and either one's %hold descent can
+        // consult the active fan, so the fan key is scoped on the union of their
+        // reachable legs.
         let fan = self.fan_context_key_scoped_pair(sut, dox)?;
         Ok(native_mull_cache_lookup(
             &self.cx, sut, gol, dox, context.semantic.vet_key, gen_sig, fan,
@@ -3861,11 +3790,8 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    /// C-final.4: native-re-keyed `crop` boundary cache. TYPE components
-    /// (sut/ref) keyed on interned `Rc` pointer identity; the semantic fields
-    /// (vet, fan) are carried VERBATIM from the old `unary_type_boundary_key`.
-    /// VALUE is the native result type. No `live_to_noun` on store / `native_of`
-    /// on hit.
+    /// Native `crop` cache, keyed by the canonical IDs of subject and reference
+    /// plus vet and the fan scope. Stores the native result type.
     fn crop_boundary_lookup(
         &mut self,
         sut: &NRc<NTy>,
@@ -3890,9 +3816,8 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    /// C-final.4: native-re-keyed `fuse` boundary cache. TYPE components
-    /// (sut/ref) keyed on interned `Rc` pointer identity; the semantic fields
-    /// (vet, fan) carried VERBATIM from the old `unary_type_boundary_key`.
+    /// Native `fuse` cache, keyed by the canonical IDs of subject and reference
+    /// plus vet and the fan scope.
     fn fuse_boundary_lookup(
         &mut self,
         sut: &NRc<NTy>,
@@ -4049,10 +3974,8 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    /// C-final.4: native-re-keyed `fish` boundary cache. The TYPE component (sut)
-    /// is keyed on interned `Rc` pointer identity; (axis, vet, fan) carried
-    /// VERBATIM from the old key. VALUE is the canonical formula ID; no
-    /// `live_to_noun` of the deepening type is needed for the key.
+    /// Native `fish` cache, keyed by the subject's canonical ID plus axis, vet,
+    /// and the fan scope. Stores the canonical formula ID.
     fn fish_boundary_lookup(
         &mut self,
         sut: &NRc<NTy>,
@@ -4084,6 +4007,7 @@ impl<'a> Ut<'a> {
         NounMug(get_mug(noun, &space).unwrap_or_else(|| slab_mug(noun, &space)))
     }
 
+    #[cfg(test)]
     fn nest_mug_lookup(&mut self, sut: Noun, ref_: Noun) -> Result<Option<bool>> {
         let semantic = self.semantic_context_key();
         let key = TypeBinaryKey {
@@ -4105,6 +4029,7 @@ impl<'a> Ut<'a> {
         Ok(None)
     }
 
+    #[cfg(test)]
     fn nest_mug_register(&mut self, sut: Noun, ref_: Noun, result: bool) {
         let semantic = self.semantic_context_key();
         let key = TypeBinaryKey {
@@ -4168,9 +4093,8 @@ impl<'a> Ut<'a> {
     }
 
     /// Public noun boundary: lift sut/gol, run native mint, and materialize the
-    /// type and formula once for external consumers.
-    /// CAUTION: this body's `self.mint(...)` is the NATIVE mint (do NOT rename to
-    /// self.mint_noun — that would be infinite self-recursion).
+    /// type and formula once for external consumers. The `self.mint` call is the
+    /// native mint; calling `mint_noun` here would recurse forever.
     pub fn mint_noun(&mut self, sut: Noun, gol: Noun, gen: &Hoon) -> Result<(Noun, Noun)> {
         let space = self.slab.noun_space();
         let sut_n = native_of(&mut self.cx, sut, &space)?;
@@ -4188,11 +4112,6 @@ impl<'a> Ut<'a> {
         gen: &Hoon,
         gen_id: HoonId,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // ATOMIC FLIP (C-final.1a): mint reads/returns native type and formula
-        // handles. C-final.1b: the mint boundary cache is now
-        // native-re-keyed on the interned (sut, gol) `Rc` pointers, so we no
-        // longer lower sut/gol just to compute the cache key. C-final.2: play now
-        // takes a native subject too, so mint no longer lowers sut for play.
         let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
             if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
@@ -4200,17 +4119,10 @@ impl<'a> Ut<'a> {
             }
         }
 
-        // Canonical hoon-138 `++mint` short-circuit:
-        // if subject is void (except direct `dbug`), allow only `%lost`/`%zpzp` under `vet`,
-        // and return `[void [0 0]]`.
-        let is_dbug = match gen {
-            Hoon::Dbug(_, _) => true,
-            _ => false,
-        };
-        let is_allowed_void = match gen {
-            Hoon::Lost(_) | Hoon::ZapZap => true,
-            _ => false,
-        };
+        // hoon-138 `++mint` short-circuit: if the subject is void (except direct `dbug`),
+        // allow only `%lost`/`%zpzp` under `vet`, and return `[void [0 0]]`.
+        let is_dbug = matches!(gen, Hoon::Dbug(_, _));
+        let is_allowed_void = matches!(gen, Hoon::Lost(_) | Hoon::ZapZap);
         if matches!(&*sut, NTy::Void) && !is_dbug {
             if self.vet && !is_allowed_void {
                 return Err(CompilerError::Noun("mint-vain".to_string()));
@@ -4218,9 +4130,8 @@ impl<'a> Ut<'a> {
             return Ok((cons_void(&mut self.cx), self.formula_slot_u64(0)));
         }
 
-        // Retain the native (sut, gol) `Rc`s for the post-match cache store; the
-        // match below moves `sut`/`gol` into the per-arm recursion (Rc clone is
-        // cheap — a refcount bump, NOT a structural copy).
+        // Keep (sut, gol) for the cache store; the match below moves them into
+        // the per-arm recursion. Cloning an `Rc` only bumps a refcount.
         let cache_sut = sut.clone();
         let cache_gol = gol.clone();
         let result = match gen {
@@ -4427,7 +4338,6 @@ impl<'a> Ut<'a> {
         }?;
 
         if let Some(gen_sig) = cache_sig {
-            // C-final.1b: store the native type directly (no lowering).
             self.mint_cache_store(&cache_sut, &cache_gol, gen_sig, result.0.clone(), result.1)?;
         }
 
@@ -4489,7 +4399,7 @@ impl<'a> Ut<'a> {
         }
 
         // getcwd is a syscall and this runs once per `%dbug` node; honk never
-        // chdirs, so resolve the cwd's components exactly once per process.
+        // chdirs, so resolve the cwd's components once per process.
         static CWD_COMPONENTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
         let cwd_components = CWD_COMPONENTS.get_or_init(|| {
             std::env::current_dir()
@@ -4517,11 +4427,8 @@ impl<'a> Ut<'a> {
 
     pub(crate) fn play(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
         let mut scope = self.hoon_ast_scope(gen);
-        // Canonical ++play runs with vet disabled for the entire evaluation
-        // scope; restore it afterward (safe save/restore — see with_vet_off).
-        // ATOMIC FLIP (C-final.2): play TAKES native sut and RETURNS native
-        // Rc<Type>. No compile path lowers the deepening subject to a noun for
-        // play anymore — the subject threads natively (the O(N^2)->O(N) win).
+        // hoon-138 `++play` runs with vet disabled for the whole evaluation;
+        // `with_vet_off` restores it afterward.
         let root = scope.root;
         scope.with_vet_off(|ut| ut.play_arena(sut, root))
     }
@@ -4544,9 +4451,9 @@ impl<'a> Ut<'a> {
         self.play_arena(sut, child)
     }
 
-    /// Noun-input/noun-output bridge for external callers that still hold a noun
-    /// subject (binary prelude seed, fire, tests): native_of the noun sut, run
-    /// native play, lower the native result back to a noun at the boundary.
+    /// Noun-in, noun-out `play` for callers that hold a noun subject (the binary's
+    /// prelude seed, the `%spec` skin test): lifts `sut` with `native_of`, runs
+    /// native play, and lowers the result to a noun.
     pub fn play_noun(&mut self, sut: Noun, gen: &Hoon) -> Result<Noun> {
         let sut = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let r = self.play(sut, gen)?;
@@ -4789,7 +4696,6 @@ impl<'a> Ut<'a> {
                 }
                 Hoon::ZapTis(_p) => Ok(cons_noun(&mut self.cx)),
                 Hoon::ZapPat(wings, q, r) => {
-                    // feel is native (C9); thread the native subject directly.
                     if self.feel(sut.clone(), wings)? {
                         self.play(sut, q)
                     } else {
@@ -4810,10 +4716,7 @@ impl<'a> Ut<'a> {
                         self.play(sut, &acc)
                     }
                 },
-                Hoon::Axis(axis) => {
-                    // peek is native (C2); thread the native subject directly.
-                    self.peek(sut, Way::Free, axis.as_biguint().clone())
-                }
+                Hoon::Axis(axis) => self.peek(sut, Way::Free, axis.as_biguint().clone()),
                 Hoon::BarCen(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Dry),
                 Hoon::BarPat(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Wet),
                 _ => self.play_opened(sut, gen),
@@ -4912,8 +4815,8 @@ impl<'a> Ut<'a> {
         for (term, (what, arms_map)) in tomes.iter() {
             let mut wrapped_map: HashMap<String, Hoon> = HashMap::with_capacity(arms_map.len());
             for (face, expr) in arms_map.iter() {
-                // `~%` clue wrapping (`%cofl`, etc.) nests the original arm body under `TisTar`.
-                // Hold genes can point at the nested original body, so cache it explicitly.
+                // `+*` aliases nest the original arm body under `TisTar`. Hold genes can
+                // point at that nested body, so cache its AST here.
                 self.cache_hoon_ast_for_node(expr);
                 let mut body = expr.clone();
                 for (alas_face, alas_init) in alas.iter().rev() {
@@ -4955,10 +4858,6 @@ impl<'a> Ut<'a> {
     }
 
     fn play_wtcl(&mut self, sut: NRc<NTy>, p: &Hoon, q: &Hoon, r: &Hoon) -> Result<NRc<NTy>> {
-        // gain/lose + play are native (C6/C-final); thread the native subject
-        // directly. The branch RESULT types stay native and the fork is built
-        // via cons_fork (RT-07 mug ordering preserved; mirrors mint_wtcl). The
-        // deepening subject (sut) is never lowered.
         let fex = self.gain(sut.clone(), p)?;
         let wux = self.lose(sut, p)?;
         let mut options = Vec::with_capacity(2);
@@ -4971,7 +4870,7 @@ impl<'a> Ut<'a> {
         self.cons_fork(options)
     }
 
-    // Basically a ternary if-then-else but for Hoon AFAICT
+    // `?:` if-then-else (hoon-138 `++mint` `%wtcl`).
     fn mint_wtcl(
         &mut self,
         sut: NRc<NTy>,
@@ -4982,7 +4881,6 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let bool_ty = ty_bool_n(&mut self.cx, self.slab).1;
         let (_cond_ty, cond_formula) = self.mint(sut.clone(), bool_ty, p)?;
-        // gain/lose are native now (C6); thread the native subject directly.
         let fex = self.gain(sut.clone(), p)?;
         let wux = self.lose(sut.clone(), p)?;
         let fex_void = matches!(&*fex, NTy::Void);
@@ -5000,7 +4898,7 @@ impl<'a> Ut<'a> {
         let (q_ty, q_formula) = self.mint(fex, gol.clone(), q)?;
         let (r_ty, r_formula) = self.mint(wux, gol, r)?;
         let fol = self.formula_cond(duy, q_formula, r_formula);
-        // Native fork build (RT-07 mug ordering preserved via cons_fork).
+        // `cons_fork` keeps members mug-ordered to match hoon-138's treap.
         let ty = self.cons_fork(vec![q_ty, r_ty])?;
         let formula = if ned {
             let toss_tag = term_to_noun(self.slab, "toss");
@@ -5021,15 +4919,12 @@ impl<'a> Ut<'a> {
         p: &Hoon,
         q: &Hoon,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // busk is native now (C-final.2): the subject threads through as a shared
-        // native Rc inside the new %face — no lowering.
         let busked = self.busk(sut, p);
         self.mint(busked, gol, q)
     }
 
     fn busk(&mut self, sut: NRc<NTy>, gen: &Hoon) -> NRc<NTy> {
-        // Canonical ++busk: [%face [~ [gen ~]] sut]. Native now: the subject
-        // threads through as a SHARED native Rc inside the new %face (no lowering).
+        // hoon-138 `++busk`: [%face [~ [gen ~]] sut]. The new %face shares `sut`'s `Rc`.
         let gen_noun = self.hoon_noun_for_node(gen);
         self.cache_hoon_ast_for_node(gen);
         let pair = T(self.slab, &[gen_noun, D(0)]);
@@ -5121,7 +5016,6 @@ impl<'a> Ut<'a> {
         p: &Hoon,
         wing: &WingType,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // play + find are native (C-final.2 / C9). fish takes a native type directly.
         let ref_type = self.play(sut.clone(), p)?;
         let port = self.find(sut.clone(), Way::Read, wing)?;
         let formula = match &port {
@@ -5150,8 +5044,7 @@ impl<'a> Ut<'a> {
         skin: &Skin,
         wing: &WingType,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // fend is native (C9). The skin family still inspects noun-encoded
-        // types, but both static and dynamic tests produce formula handles.
+        // The skin matchers take noun types, so the hit type and subject are lowered.
         let (hit_ty, axis) = self.fend(sut.clone(), Way::Read, wing)?;
         let hit_ty = live_to_noun(&mut self.cx, &hit_ty, self.slab);
         let static_match = self.skin_match_static(hit_ty, skin)?;
@@ -5315,11 +5208,6 @@ impl<'a> Ut<'a> {
         typ: NRc<NTy>,
         axis: A,
     ) -> Result<FormulaId> {
-        // ATOMIC FLIP (consumer C7): fish reads the native type enum. The return
-        // is a formula handle, not a type. C-final.4: the fish boundary cache
-        // is native-re-keyed on the interned `Rc` pointer of `typ`, so the
-        // deepening subject is no longer lowered to a noun here. Deepening children
-        // stay native; leaf-carried parts (atom value, coil via repo) lowered.
         let axis = axis.into();
         if let Some(cached) = self.fish_boundary_lookup(&typ, &axis)? {
             return Ok(cached);
@@ -5341,8 +5229,8 @@ impl<'a> Ut<'a> {
             NTy::Void => Ok(self.formula_quote(D(1))),
             NTy::Noun => Ok(self.formula_quote(D(0))),
             NTy::Atom { .. } => {
-                // The atom value is a (small) carried leaf; lower the whole type
-                // and decode via the existing noun helper.
+                // The atom value is a carried leaf; lower the type and decode it
+                // with the noun helper.
                 let typ_noun = live_to_noun(&mut self.cx, &typ, self.slab);
                 let (_aura, value) = type_atom_parts(typ_noun, &self.slab.noun_space())?;
                 let slot = self.formula_slot(axis);
@@ -5495,7 +5383,7 @@ impl<'a> Ut<'a> {
         self.mint(sut, gol, &expanded)
     }
 
-    // Ternary type match conditional
+    // `?-`: switch on the type of a wing.
     fn mint_wthp(
         &mut self,
         sut: NRc<NTy>,
@@ -5581,8 +5469,6 @@ impl<'a> Ut<'a> {
         //   if jon is ~ or %wait => keep q.pro
         //   else rewrite to %1 noun
         let (ty, formula) = self.mint(sut.clone(), gol, gen)?;
-        // bran_canonical_semi is native (Phase-2 tail): thread the native subject
-        // directly — no `live_to_noun` of the deepening subject.
         let bran = self.bran_canonical_semi(sut)?;
         let fold_key = FoldKey {
             subject: bran,
@@ -5674,22 +5560,18 @@ impl<'a> Ut<'a> {
         id
     }
 
-    /// RT-05 canonical lazy-core identity: return ONE stable resolver id per
-    /// structurally-equal recursive core so `cons_core` interns their lazy forms to
-    /// a single `Rc` and every pointer-keyed recursion cut (mint_cache,
-    /// arm_goal_for_hoon_in_progress, fond hold_path, fish, bran) converges. The
-    /// lazy core's structural identity is exactly `(sut, garb, tomes_map)`, i.e.
-    /// `(Rc::as_ptr(sut), tomes_sig, poly)` — `garb = f(prefix, poly)` folds into
-    /// `tomes_sig` (which already xors `prefix_signature`), and the resolver this id
-    /// keys is fully determined by `(core_type, poly, arms-from-tomes)` (the lazy
-    /// callback goal is always `%noun`, `vet` is read at resolve time, and `gol` is
-    /// not captured). A fresh monotonic id per call made structurally-equal lazy
-    /// cores pointer-distinct, so the deepening subject churned and the cuts only
-    /// fired at the redo-gil backstop depth instead of the natural settling depth —
-    /// O(depth) redundant Type<->Noun boundary work per recursive type. The id is
-    /// transient (completed cores carry an id-free `[%full ~]` semi), so reusing it
-    /// never changes emitted bytes. `sut` is interned (held by the TypeTable for the
-    /// whole compile), so `Rc::as_ptr(sut)` is a stable structural key.
+    /// Returns one stable resolver ID per structurally equal recursive core, so
+    /// `cons_core` interns their lazy forms to a single `Rc` and the pointer-keyed
+    /// recursion cuts (mint cache, `arm_goal_for_hoon_in_progress`, fond
+    /// `hold_path`, fish, bran) converge. A lazy core is identified by
+    /// `(sut, tomes_sig, poly)`: `garb` is a function of prefix and poly, and
+    /// `tomes_sig` already folds in `prefix_signature`. The resolver depends only
+    /// on the core type, poly, and arms (the lazy callback goal is always `%noun`,
+    /// `vet` is read at resolve time, and `gol` is not captured). With a fresh ID
+    /// per call, equal lazy cores would be pointer-distinct and the cuts would fire
+    /// only at the redo-gil backstop depth. Completed cores carry an ID-free
+    /// `[%full ~]` semi, so reusing an ID never changes emitted bytes. `sut` is
+    /// keyed by its arena ID, which is stable for the whole compile.
     fn lazy_resolver_canonical_id(
         &mut self,
         sut: &NRc<NTy>,
@@ -5717,11 +5599,10 @@ impl<'a> Ut<'a> {
         poly: Poly,
         arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
     ) {
-        // Lazy resolvers live for the whole compile and are resolved on demand
-        // (re-minting an arm against `core_type`), including CROSS-ARM: another
-        // core's arm can reference this one. The native deepening `core_type` is a
-        // heap `Rc` and the arm AST nouns live for the whole compile in the single
-        // slab (no per-arm frame recycles them), so nothing needs relocation here.
+        // Lazy resolvers live for the whole compile and resolve on demand by
+        // re-minting an arm against `core_type`, possibly from another core's arm.
+        // `core_type` is a heap `Rc` and the arm AST nouns live in the compile's
+        // single slab, so nothing needs relocation here.
         self.lazy_resolvers.insert(
             resolver_id,
             LazyResolverContext {
@@ -5740,8 +5621,8 @@ impl<'a> Ut<'a> {
         fragment: &BigUint,
     ) -> Result<Option<FormulaId>> {
         // hoon-138 `++laze`: the resolver answers exact arm axes only
-        // (`(~(get by tal) axe)`); any other fragment — including 1, the
-        // whole battery — produces `~` and the caller treats it as blocked.
+        // (`(~(get by tal) axe)`). Any other fragment, including 1 (the whole
+        // battery), produces `~`, which the caller treats as blocked.
         // Completed cores never reach here: `mint_core` stores a
         // materialized `[[%full ~] battery]` semi in the result type.
         if let Some(ctx) = self.lazy_resolvers.get(&resolver_id) {
@@ -5784,8 +5665,6 @@ impl<'a> Ut<'a> {
             }
             return Ok(None);
         };
-        // ATOMIC FLIP perf: the lazy callback goal is native `%noun` (== ty_noun);
-        // build it natively so it threads straight to mint with no re-lift.
         let lazy_goal = cons_noun(&mut self.cx);
         let effective_vet = if poly == Poly::Wet { false } else { self.vet };
         // A true compile cycle (a fold inside an arm requesting that same
@@ -5823,20 +5702,15 @@ impl<'a> Ut<'a> {
         if let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) {
             ctx.in_progress_axes.remove(&fragment);
         }
-        match compiled {
-            Ok(formula) => {
-                // Cache the formula (in the compile slab) for the whole compile.
-                // The cache is read CROSS-ARM (another core resolving this one),
-                // and re-minting on a cache miss is NOT safe: it would run in the
-                // caller's %hold/fan scope, not this arm's, producing a wrong type.
-                // Caching the formula keeps the resolver a pure lookup.
-                if let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) {
-                    ctx.cached_formula_by_axis.insert(fragment, formula);
-                }
-                Ok(Some(formula))
-            }
-            Err(err) => Err(err),
+        let formula = compiled?;
+        // Cache the formula for the whole compile. Other cores read it, and
+        // re-minting on a later miss would run in the caller's %hold/fan scope
+        // instead of this arm's and could produce a wrong type. Caching keeps the
+        // resolver a pure lookup.
+        if let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) {
+            ctx.cached_formula_by_axis.insert(fragment, formula);
         }
+        Ok(Some(formula))
     }
 
     fn semi_import_noun(&mut self, semi: Noun) -> Result<SemiId> {
@@ -6142,8 +6016,7 @@ impl<'a> Ut<'a> {
         if let Some(cached) = memo.get(&key) {
             return Ok(Some(*cached));
         }
-        let result = self.musk_araw_uncached(bus, fol, memo);
-        let result = result?;
+        let result = self.musk_araw_uncached(bus, fol, memo)?;
         if let Some(noun) = result {
             memo.insert(key, noun);
         }
@@ -6549,13 +6422,12 @@ impl<'a> Ut<'a> {
         // so catch the allocation panic, restore the stack to its pre-call
         // position, and report fold failure.
         //
-        // On success, cold/warm/cache are PRESERVED out of the frame
-        // (`with_stack_frame`) rather than rolled back: jet registrations
-        // and the pointer unifications performed by their battery
-        // comparisons are pure and monotone, and discarding them forced
-        // every subsequent mack to redo full structural equality walks
-        // against the jet state — quadratic in practice and the dominant
-        // cost of fold-heavy kernel compiles.
+        // On success, `with_stack_frame` preserves cold/warm/cache out of the
+        // frame instead of rolling them back. Jet registrations and the
+        // pointer unifications from their battery comparisons are pure and
+        // monotone; discarding them would make every later mack redo full
+        // structural equality walks against the jet state, which is
+        // quadratic and dominates fold-heavy kernel compiles.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             context.with_stack_frame(0, |context| {
                 let axis_noun = Atom::new(&mut context.stack, axis).as_noun();
@@ -6648,13 +6520,8 @@ impl<'a> Ut<'a> {
         }
     }
 
-    // PHASE-2 TAIL: the bran/seminoun projection now reads the NATIVE type enum
-    // (`NRc<NTy>`) directly instead of decoding type nouns + bridging face/hint/
-    // hold via `repo_noun`. The deepening subject (payload/cell/face/hint/hold
-    // chains) is never lowered: recursion threads the shared native children, the
-    // %hold cycle guard + raw-recursion guard key on the interned `Rc` pointer
-    // (`NRc::as_ptr`), and the cache re-keys on that pointer (no mug of the
-    // deepening subject). The OUTPUT stays a seminoun (semi_* algebra is noun).
+    // hoon-138 `++bran`: project a native type onto a seminoun. The %hold cycle
+    // guard compares `Rc` pointers and the memo keys on the subject's arena ID.
     fn bran_canonical_semi(&mut self, sut: NRc<NTy>) -> Result<SemiId> {
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
         self.bran_canonical_semi_inner(sut, &mut seen_holds)
@@ -6742,19 +6609,14 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         seen_holds: &mut Vec<NRc<NTy>>,
     ) -> Result<SemiId> {
-        // Matches hoon-138 `++bran` exactly: cycles are broken ONLY at `%hold`
-        // (via `seen_holds` == hoon's `gil`); every other (shared, non-hold)
-        // subtree is re-descended and the result memoized (`bran_semi_cache` ==
-        // hoon's `~+`). An earlier global ancestor guard (`seen_raw`) over-blocked
-        // here: when a non-hold subtree was re-encountered as an ancestor through
-        // a `%hold` expansion, `++bran` re-descends it (blocking only at the inner
-        // hold, so the result is a *partial* seminoun), whereas the ancestor guard
-        // collapsed the whole subtree to fully-blocked. That produced
-        // `[%full [~ ~ ~]]` (the `*seminoun` bunt) where hoonc computes the actual
-        // `[%full ~]` complete stencil — the first divergence in the native
-        // hoon-138 self-mint vs hoonc. Termination is preserved: the Rc type DAG
-        // is acyclic, and the only logical cycles run through `%hold` (whose repo
-        // is the lazy back-edge), which `seen_holds` still guards.
+        // Mirrors hoon-138 `++bran`: cycles break only at `%hold` (`seen_holds` is
+        // hoon's `gil`), and every other shared subtree is re-descended and
+        // memoized (`bran_semi_memo` is hoon's `~+`). A non-hold subtree met again
+        // through a `%hold` expansion is re-descended and blocks only at the inner
+        // hold, giving a partial seminoun. Blocking the whole subtree instead
+        // yields the `[%full [~ ~ ~]]` bunt where hoonc computes `[%full ~]`.
+        // This terminates because the `Rc` type DAG is acyclic and its only
+        // logical cycles run through `%hold`, which `seen_holds` guards.
         if Self::bran_seen_holds_contains(seen_holds, &sut) {
             return Ok(self.semi_full_blocked());
         }
@@ -6775,8 +6637,8 @@ impl<'a> Ut<'a> {
         match &*sut {
             NTy::Noun | NTy::Void => Ok(self.semi_full_blocked()),
             NTy::Atom { .. } => {
-                // Atoms are leaf-only (no deepening): lower the small atom type
-                // and reuse the existing noun decoder (mirrors atom_nest).
+                // Atoms carry only leaves: lower the atom type and decode it with
+                // the noun helper, as `atom_nest` does.
                 let sut_noun = live_to_noun(&mut self.cx, &sut, self.slab);
                 let (_aura, bits) = type_atom_parts(sut_noun, &self.slab.noun_space())?;
                 Ok(match bits {
@@ -6792,9 +6654,8 @@ impl<'a> Ut<'a> {
                 self.semi_combine(hed, tal)
             }
             NTy::Core { payload, rest, .. } => {
-                // payload + context are native (recurse native); only the bounded
-                // `rest` leaf (battery seminoun + tomes) is lowered to read the
-                // coil's seminoun head.
+                // Recurse into the payload; lower only the `rest` leaf to read the
+                // coil's battery seminoun (hoon's `p.r.q.sut`).
                 let payload = payload.clone();
                 let rest_noun = live_leaf_to_noun(&mut self.cx, rest, self.slab);
                 let space = self.slab.noun_space();
@@ -6922,7 +6783,6 @@ impl<'a> Ut<'a> {
     }
 
     fn play_ketvar(&mut self, sut: NRc<NTy>, p: &Hoon, vair: Vair) -> Result<NRc<NTy>> {
-        // play + wrap_type are native; thread the native subject/result directly.
         let p_ty = self.play(sut, p)?;
         self.wrap_type(p_ty, vair)
     }
@@ -6935,7 +6795,6 @@ impl<'a> Ut<'a> {
     fn play_note(&mut self, sut: NRc<NTy>, note: &Note, inner: &Hoon) -> Result<NRc<NTy>> {
         // Canonical `++play`:
         //   [%note *]  (hint [sut p.gen] $(gen q.gen))
-        // play + hint_type are native; thread the native subject directly.
         let payload = self.play(sut.clone(), inner)?;
         let note_noun = note_to_noun(self.slab, note)?;
         self.hint_type(sut, note_noun, payload)
@@ -7117,7 +6976,6 @@ impl<'a> Ut<'a> {
         pairs: &[(WingType, Hoon)],
     ) -> Result<NRc<NTy>> {
         for (sub_wing, expr) in pairs {
-            // play is native (C-final): thread the native subject directly.
             let patch_type = self.play(sut.clone(), expr)?;
             let (_axis, edited) = self.tack(typ, sub_wing, patch_type)?;
             typ = edited;
@@ -7152,7 +7010,6 @@ impl<'a> Ut<'a> {
                     let (_axis, next_hag) = self.toss(sub_wing, patch_type, &hag)?;
                     hag = next_hag;
                 }
-                // fire is native (C-final): arm cores are already `NRc<NTy>`.
                 self.fire(&hag)
             }
         }
@@ -7183,8 +7040,7 @@ impl<'a> Ut<'a> {
     }
 
     fn play_tune(&mut self, sut: NRc<NTy>, tune: &TermOrTune) -> Result<NRc<NTy>> {
-        // play_tune wraps the WHOLE subject in a %face; native now: the subject
-        // threads through as a SHARED native Rc inside the new %face (no lowering).
+        // Wraps the whole subject in a %face that shares `sut`'s `Rc`.
         let tool = term_or_tune_to_noun(self.slab, tune)?;
         let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         Ok(cons_face(&mut self.cx, tool_leaf, sut))
@@ -7270,8 +7126,8 @@ impl<'a> Ut<'a> {
         let typ = self.play(sut.clone(), &typ_expr)?;
         let typ = self.nice(sut.clone(), gol, typ)?;
 
-        // Mirror hoon-138 `%zpgl` mint shape without introducing an extra binding.
-        // This keeps the compiled noun aligned with canonical dynock fixtures.
+        // Mirrors the hoon-138 `%zpgl` mint expansion without an extra binding, so
+        // the compiled formula matches the dynock fixtures.
         let target_type = Hoon::TisGar(
             Box::new(Hoon::ZapGar(Box::new(Hoon::KetTar(Box::new(spec.clone()))))),
             Box::new(Hoon::Axis((2u64).into())),
@@ -7296,7 +7152,7 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let noun_ty = cons_noun(&mut self.cx);
         let ty = self.nice(sut.clone(), gol, noun_ty.clone())?;
-        // hoon-138: `%zpts` compiles inner with `gol=%noun` under `vet=|`.
+        // hoon-138 `%zpts` mints the inner hoon under `vet=|`, where the goal is unchecked.
         self.with_vet_off(|ut| {
             let (_p_ty, p_formula) = ut.mint(sut, noun_ty, p)?;
             let p_formula = ut.formula_materialize(p_formula);
@@ -7313,7 +7169,6 @@ impl<'a> Ut<'a> {
         q: &Hoon,
         r: &Hoon,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // feel is native (C9): thread the native subject directly.
         let found = self.feel(sut.clone(), wings)?;
         if found {
             self.mint(sut, gol, q)
@@ -7331,8 +7186,8 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, FormulaId)> {
         // Canonical hoon-138 open() lowering:
         //   [%tsbr *] => [%tsls ~(example ax p.gen) q.gen]
-        // This is NOT `=+ *spec ...`; using `%kttr` would inject `%ktsg` folding that the
-        // canonical `%tsbr` path does not perform.
+        // This is not `=+ *spec ...`: going through `%kttr` would add `%ktsg` folding,
+        // which `%tsbr` does not do.
         let example = self.spec_example_cached(spec);
         let expanded = Hoon::TisLus(Box::new(example.as_ref().clone()), Box::new(q.clone()));
         self.mint(sut, gol, &expanded)
@@ -7371,7 +7226,6 @@ impl<'a> Ut<'a> {
         gol: NRc<NTy>,
         wing: &WingType,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // find + fine are native (C9 / C-final): fine returns the typ directly.
         let port = self.find(sut.clone(), Way::Read, wing)?;
         let (ty, formula) = self.fine(&port)?;
         let ty = self.nice(sut, gol, ty)?;
@@ -7387,9 +7241,7 @@ impl<'a> Ut<'a> {
     ) -> Result<Option<NRc<NTy>>> {
         let hoon_raw = NounIdentity::of(hoon);
 
-        // ATOMIC FLIP perf: core/goal are interned native Rcs, so structural
-        // equality is exactly pointer identity (hash-cons guarantees one canonical
-        // Rc per type) — Rc::ptr_eq replaces the noun as_raw/noun_eq compare.
+        // Core and goal are hash-consed, so pointer identity is structural equality.
         for entry in self.arm_goal_in_progress.iter().rev() {
             let entry_hoon_raw = NounIdentity::of(entry.hoon);
             let core_match = NRc::ptr_eq(&entry.core, &core);
@@ -7418,20 +7270,12 @@ impl<'a> Ut<'a> {
         self.find(sut, Way::Read, wing)
     }
 
-    /// Noun-bridged `cnts_base_port` for still-noun callers (play_cnts/mint_cnts).
-    fn cnts_base_port_noun(&mut self, sut: Noun, wing: &WingType) -> Result<Port> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        self.cnts_base_port(sut_n, wing)
-    }
-
-    /// CONTENT-keyed `native_of` for the recursive-type hot path (redo/repo/fire
-    /// rebuild structurally-equal nouns at fresh addresses every level). The
-    /// address-keyed decode memo misses on those, forcing a full re-walk + re-jam
-    /// of the Jammed leaves (fork treaps, batteries) — the dominant decode cost.
-    /// Here a fresh-but-equal noun reuses the prior interned `Rc` after one
-    /// `noun_eq` verify, skipping the decode entirely. Returns EXACTLY what
-    /// `native_of` would (the canonical interned `Rc`), so it is byte-exact; mug
-    /// collisions just fall through to a real decode.
+    /// Content-keyed `native_of` for recursive types. `redo` and `fire` rebuild
+    /// structurally equal nouns at fresh addresses, which miss the address-keyed
+    /// decode memo and force a re-walk and re-jam of the jammed leaves (fork
+    /// treaps, batteries). A mug hit confirmed by `noun_eq` reuses the interned
+    /// `Rc` without decoding. Returns the same canonical `Rc` as `native_of`;
+    /// mug collisions fall through to a real decode.
     fn native_of_cached(&mut self, noun: Noun) -> Result<NRc<NTy>> {
         let mug = self.noun_mug_cached(noun);
         for cand in native_of_mug_candidates(&self.cx, mug) {
@@ -7455,7 +7299,6 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         pairs: &[(WingType, Hoon)],
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // cnts_base_port + tack/toss are native (C9): thread the native subject.
         let port = self.cnts_base_port(sut.clone(), wing)?;
         let palo = match port {
             Port::Palo(palo) => palo,
@@ -7471,7 +7314,7 @@ impl<'a> Ut<'a> {
         let mut edits: Vec<(BigUint, FormulaId)> = Vec::with_capacity(pairs.len());
         match palo.opal {
             Opal::Leg(mut base_leg) => {
-                for (_idx, (sub_wing, expr)) in pairs.iter().enumerate() {
+                for (sub_wing, expr) in pairs.iter() {
                     let goal = cons_noun(&mut self.cx);
                     let (patch_ty, patch_formula) = self.mint(sut.clone(), goal, expr)?;
                     let (edit_axis, edited_leg) = self.tack(base_leg, sub_wing, patch_ty)?;
@@ -7490,13 +7333,13 @@ impl<'a> Ut<'a> {
                 arms,
             } => {
                 let mut hag = arms;
-                for (_idx, (sub_wing, expr)) in pairs.iter().enumerate() {
+                for (sub_wing, expr) in pairs.iter() {
                     let goal = cons_noun(&mut self.cx);
                     let (patch_ty, patch_formula) = self.mint(sut.clone(), goal, expr)?;
                     let (edit_axis, next_hag) = self.toss(sub_wing, patch_ty, &hag)?;
                     // hoon-138 `++ergo` always threads `hag` through `q.dix`, even when the
-                    // sample edit is `%void`; the subsequent `++fire` is responsible for
-                    // rejecting non-core arm subjects.
+                    // sample edit is `%void`; the later `++fire` rejects non-core arm
+                    // subjects.
                     hag = next_hag;
                     edits.push((edit_axis, patch_formula));
                 }
@@ -7505,7 +7348,6 @@ impl<'a> Ut<'a> {
 
                 let hike = self.hike_formula(base_axis, &edits)?;
                 let formula = self.formula_arena.kick(arm_axis, hike);
-                // fire is native (C-final): arm cores are already `NRc<NTy>`.
                 let arm_ty = self.fire(&hag)?;
                 let ty = self.nice(sut, gol, arm_ty)?;
                 Ok((ty, formula))
@@ -7542,7 +7384,7 @@ impl<'a> Ut<'a> {
         tune: &TermOrTune,
     ) -> Result<(NRc<NTy>, FormulaId)> {
         let tool = term_or_tune_to_noun(self.slab, tune)?;
-        // %face over the native subject (collapse-aware cons_face).
+        // `%face` over the subject; `cons_face` collapses a void subject to void.
         let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         let ty = cons_face(&mut self.cx, tool_leaf, sut.clone());
         let ty = self.nice(sut, gol, ty)?;
@@ -7740,12 +7582,6 @@ impl<'a> Ut<'a> {
         Ok(Arc::<str>::from(key))
     }
 
-    fn core_context_from_payload(&mut self, payload: Noun) -> Result<Noun> {
-        // Canonical hoon-138 core construction stores the current subject as core context.
-        // Keep one path here: context is exactly the payload subject used to build the core.
-        Ok(payload)
-    }
-
     // HOON138:arm=ut:mine lines=9768-9916 map=envelope status=partial reviewed=2026-03-06
     // HOON138_NOTE:core-construction path implementing canonical `++mine` with native helpers
     fn mint_core(
@@ -7756,20 +7592,16 @@ impl<'a> Ut<'a> {
         tomes: &HashMap<String, Tome>,
         poly: Poly,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // Canonical layered-core construction keeps prior arms in payload/context ancestry.
-        // New core tomes contain only the newly declared arms; inherited arms are resolved via
-        // `%core` payload traversal in `fond`, not by copying old tomes into the new battery.
-        // PHASE 2 (native coil context): mint_core TAKES native sut/gol and the
-        // core_mint cache is native-Rc-keyed, so the deepening subject `sut` is
-        // NEVER lowered to a noun. `gol` (the goal, not the deepening subject) is
-        // lowered once for goal_core_for_mine's noun-side walk. The core payload
-        // AND context are both the SHARED native `sut`.
+        // Layered cores keep prior arms in the payload/context ancestry. The new core's
+        // tomes hold only the newly declared arms; `fond` resolves inherited arms by
+        // walking `%core` payloads, not by copying old tomes into the new battery.
+        // `sut` is never lowered to a noun; `gol` is lowered once for the noun-side
+        // walk in `goal_core_for_mine`. The core's payload and context are both `sut`.
         let gol_noun = live_to_noun(&mut self.cx, &gol, self.slab);
         let tomes_map = self.tomes_map_from_ast(tomes)?;
         if let Some((cached_ty, cached_formula)) =
             self.core_mint_cache_lookup(&sut, &gol, tomes_map, prefix, poly)?
         {
-            // C-final.1b: native-re-keyed cache returns the native type directly.
             return Ok((cached_ty, cached_formula));
         }
         let garb = garb_native(prefix.as_deref(), poly, Vair::Gold);
@@ -7795,10 +7627,9 @@ impl<'a> Ut<'a> {
             }
         }
 
-        // Canonical hoon-138 `++mine` compiles arm formulas against a `%lazy`
-        // battery seminoun (`++laze`) in a single pass.
-        // RT-05: a CONTENT-ADDRESSED resolver id (keyed on the lazy core's
-        // structural identity) so structurally-equal recursive cores intern to one
+        // hoon-138 `++mine` compiles arm formulas against a `%lazy` battery
+        // seminoun (`++laze`) in a single pass. The resolver id is content-addressed
+        // (subject, tomes, poly), so structurally equal recursive cores intern to one
         // `Rc` and the pointer-keyed cuts converge at the natural settling depth.
         let tomes_sig = TomesSignature(u64::from(
             self.noun_mug_cached(tomes_map).0 ^ Self::prefix_signature(prefix.as_deref()).0,
@@ -7806,13 +7637,10 @@ impl<'a> Ut<'a> {
         let resolver_id = self.lazy_resolver_canonical_id(&sut, tomes_sig, poly);
         let lazy_semi = self.semi_noun_lazy_root(resolver_id);
         let lazy_rest = T(self.slab, &[lazy_semi, tomes_map]);
-        // PHASE 2: build the NATIVE lazy core (the deepening site) ONCE, native-only
-        // (cons_core), with payload AND context = the SHARED native `sut`. No noun
-        // core, no sut lowering. Threading this interned Rc to the battery builder
-        // means each of N arms reuses ONE core; the context is a shared Rc (never
-        // jammed/copied) — this is the O(N^2) fix. The same Rc is stored in the
-        // lazy resolver context so cross-arm in-progress cycle detection compares
-        // pointer identity.
+        // Build the lazy core once, with payload and context both `sut`. Every arm
+        // reuses this interned `Rc`, so the context is shared rather than copied per
+        // arm. The resolver context stores the same `Rc`, so cross-arm in-progress
+        // cycle detection compares pointer identity.
         let core_native_lazy = {
             let space = self.slab.noun_space();
             let rest_leaf = live_leaf_from_noun(&mut self.cx, lazy_rest, &space);
@@ -7824,11 +7652,10 @@ impl<'a> Ut<'a> {
                 rest_leaf,
             )
         };
-        // RT-05: with a content-addressed id the same canonical core can be reached
-        // again (e.g. distinct gol/vet but identical lazy-core identity). Register
-        // exactly once — the resolver content is determined by the id-key, and
-        // re-registering would reset its `cached_formula_by_axis`/`in_progress_axes`,
-        // dropping the cross-arm formula cache and the in-progress guard.
+        // The same id can come back (for example with a different gol or vet).
+        // Register it once: re-registering would reset `cached_formula_by_axis` and
+        // `in_progress_axes`, dropping the cross-arm formula cache and the in-progress
+        // guard.
         if !self.lazy_resolvers.contains_key(&resolver_id) {
             let mut lazy_arms = HashMap::new();
             self.collect_lazy_resolver_arms_from_tomes_map(
@@ -7847,18 +7674,14 @@ impl<'a> Ut<'a> {
         // hoon-138's `++laze` resolver is a pure gate embedded in the lazy
         // seminoun: types that captured the lazy battery (e.g. `%hold`s of
         // in-flight arms, cached mint results) keep resolving single arms
-        // forever. Removing the context here left dead resolver ids inside
-        // long-lived types, turning their batteries permanently blocked and
-        // breaking constant folds that hoonc performs.
+        // forever. Removing the context would leave dead resolver ids inside
+        // long-lived types, blocking their batteries permanently and breaking
+        // constant folds that hoonc performs.
         let battery = self.build_tomes_battery_from_maps(
             tomes_map, core_native_lazy, poly, goal_for_arms, expected_tomes_map,
         )?;
         let semi_noun = self.semi_noun_full(battery);
         let rest = T(self.slab, &[semi_noun, tomes_map]);
-        // PHASE 2: mint_core RETURNS the core's native Rc<Type> — THE
-        // subject-deepening site — built native-only via cons_core with payload AND
-        // context = the SHARED native `sut`. No noun core is built (nice is native +
-        // identity-on-success; the cache is native-keyed) and `sut` is never lowered.
         let core_native = {
             let space = self.slab.noun_space();
             let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
@@ -7872,9 +7695,7 @@ impl<'a> Ut<'a> {
         };
         let battery_formula = self.formula_quote(battery);
         let formula = self.formula_cons(battery_formula, payload_formula);
-        // nice is native now (C-final.1a); validate the native core type.
-        // nice is identity-on-success, so `ty` == `core_native`; cache the
-        // validated native type directly (C-final.1b: no lowering to a noun).
+        // `nice` returns its input on success, so `ty` is `core_native`.
         let ty = self.nice(sut.clone(), gol.clone(), core_native.clone())?;
         self.core_mint_cache_store(&sut, &gol, tomes_map, prefix, poly, ty, formula)?;
         Ok((core_native, formula))
@@ -7889,8 +7710,6 @@ impl<'a> Ut<'a> {
         hud: Poly,
         dom: &HashMap<String, Tome>,
     ) -> Result<(NRc<NTy>, FormulaId)> {
-        // ATOMIC FLIP (C-final.1a): mine TAKES native sut/gol. wrap_type/nice are
-        // native now; thread directly.
         let prefix = nym.map(str::to_string);
         let (mut ty, formula) = self.mint_core(sut.clone(), gol.clone(), &prefix, dom, hud)?;
         if mel != Vair::Gold {
@@ -7907,11 +7726,9 @@ impl<'a> Ut<'a> {
         tomes: &HashMap<String, Tome>,
         poly: Poly,
     ) -> Result<NRc<NTy>> {
-        // PHASE 2 (native coil context): play_core TAKES native sut and RETURNS
-        // native Rc<Type>. The native core embeds the SHARED native payload AND the
-        // SHARED native context (both = sut), so the deepening subject is NEVER
-        // lowered to a noun. Only the tiny garb + bounded rest are built as nouns
-        // for the carried leaves; cons_core mirrors ty_core's void-collapse.
+        // The core's payload and context are both `sut`, which is never lowered to a
+        // noun. Only the `rest` leaf is built as a noun. `cons_core` collapses a void
+        // payload to void, as `ty_core` does.
         let tomes_map = self.tomes_map_from_ast(tomes)?;
         let garb = garb_native(prefix.as_deref(), poly, Vair::Gold);
         // Canonical hoon-138 `%play` builds cores with `*seminoun` (blocked by default).
@@ -8049,8 +7866,8 @@ impl<'a> Ut<'a> {
                     let coil = coil_from_parts(self.slab, garb, context, rest);
                     return Ok(Some(ty_core(self.slab, payload, coil)));
                 }
-                // hoon-138 `++get-tomes` deliberately returns `~` for forked goal cores after
-                // chapter-count validation, so arm-count/name/type checks are disabled here too.
+                // hoon-138 `++get-tomes` returns `~` for forked goal cores after the
+                // chapter-count check, so the arm count, name, and type checks are skipped.
                 "fork" => return Ok(None),
                 "face" => current = type_face_inner(current, &self.slab.noun_space())?,
                 "hint" => current = type_hint_inner(current, &self.slab.noun_space())?,
@@ -8091,11 +7908,9 @@ impl<'a> Ut<'a> {
         expected_arms_map: Option<Noun>,
         arm_key: Noun,
     ) -> Result<NRc<NTy>> {
-        // ATOMIC FLIP perf: return the per-arm mint goal NATIVELY so it threads
-        // straight into mint. The common case is %noun (cons_noun(&mut self.cx) == ty_noun);
-        // the Some branch plays the goal-core subject and keeps the native result
-        // (goal_for_arms is only native_of'd here, in the rare goal-typed mine —
-        // it is NOT the deepening core).
+        // The per-arm goal is `%noun` unless the goal is a core; then it is the goal
+        // core's matching arm, played against the goal core. Only this rare path
+        // decodes `goal_for_arms`, which is not the deepening core.
         let Some(expected_arms_map) = expected_arms_map else {
             return Ok(cons_noun(&mut self.cx));
         };
@@ -8216,9 +8031,7 @@ impl<'a> Ut<'a> {
     fn build_tomes_battery_from_maps(
         &mut self,
         tomes_map: Noun,
-        // ATOMIC FLIP perf: the NATIVE deepening core, threaded from mint_core. It
-        // is only passed through (to recursion + build_arms_battery_from_map ->
-        // mint); never decoded here. One interned Rc shared across all N arms.
+        // The lazy core from `mint_core`, passed through to every arm's `mint`.
         core_type: NRc<NTy>,
         poly: Poly,
         goal_for_arms: Noun,
@@ -8291,10 +8104,6 @@ impl<'a> Ut<'a> {
     fn build_arm_formula_direct(
         &mut self,
         key: Arc<str>,
-        // ATOMIC FLIP perf: the NATIVE deepening core and NATIVE goal. Both go
-        // straight into native `mint` (no native_of re-lift of the O(N) core per
-        // arm — that was the O(N^2) bug). The in-progress dedup keys off the
-        // interned Rc pointer identity.
         core_type: NRc<NTy>,
         poly: Poly,
         goal: NRc<NTy>,
@@ -8328,8 +8137,7 @@ impl<'a> Ut<'a> {
         let arm_vet = if skip_vet { false } else { prev_vet };
         self.vet = arm_vet;
 
-        // The in-progress dedup id is the interned core Rc's pointer (one canonical
-        // Rc per type via hash-cons), replacing the old noun as_raw() identity.
+        // The in-progress key uses the core's canonical type ID.
         let core_type_id = native_type_id(&core_type);
         let in_progress_key = (Arc::clone(&key), core_type_id);
         let in_progress_entry = ArmInProgressEntry {
@@ -8342,8 +8150,6 @@ impl<'a> Ut<'a> {
         self.arm_in_progress.insert(in_progress_key.clone());
         self.arm_goal_in_progress.push(in_progress_entry);
         self.arm_epoch = ArmEpoch(self.arm_epoch.0.wrapping_add(1));
-        // core_type/goal are the NATIVE deepening core + goal: thread straight to
-        // native mint (no per-arm native_of re-lift — the O(N^2) -> O(N) win).
         let result = self.mint(core_type.clone(), goal.clone(), hoon);
         self.vet = prev_vet;
         self.arm_in_progress.remove(&in_progress_key);
@@ -8365,29 +8171,15 @@ impl<'a> Ut<'a> {
             ))
         );
         self.arm_epoch = ArmEpoch(self.arm_epoch.0.wrapping_add(1));
-        let (ty, formula) = match result {
-            Ok(ok) => ok,
-            Err(err) => {
-                return Err(with_arm_context(key.as_ref(), err));
-            }
-        };
-        // prune_recursive_holds takes the arm RESULT type as a noun. `ty` is the
-        // native mint result (the arm's output, NOT the deepening core), so
-        // lowering it per arm is bounded and acceptable; the deepening core is
-        // never lowered.
-        let ty_noun = live_to_noun(&mut self.cx, &ty, self.slab);
-        let _ty = self.prune_recursive_holds(ty_noun, hoon_noun)?;
-
+        let (_ty, formula) = result.map_err(|err| with_arm_context(key.as_ref(), err))?;
         Ok(formula)
     }
 
     fn build_arms_battery_from_map(
         &mut self,
         arms_map: Noun,
-        // ATOMIC FLIP perf: native deepening core, passed through to the per-arm
-        // builder -> mint. `goal` stays a noun: it is the goal-core play SUBJECT
-        // forwarded to goal_arm_expected_type (not the small per-arm mint goal,
-        // which that helper produces natively).
+        // `goal` is the goal core as a noun, the play subject for
+        // `goal_arm_expected_type`; that helper produces each arm's mint goal.
         core_type: NRc<NTy>,
         poly: Poly,
         goal: Noun,
@@ -8447,10 +8239,6 @@ impl<'a> Ut<'a> {
             self.build_arms_battery_from_map(right, core_type, poly, goal, expected_arms_map)?;
         Ok(T(self.slab, &[formula, left_bat, right_bat]))
     }
-
-    // garb_from_parts (noun garb builder) is superseded by `garb_native`, which
-    // builds the native `Garb` struct fed to `cons_core`; the byte-identical noun
-    // emission now lives in `Garb::to_noun`.
 
     fn semi_noun_full(&mut self, noun: Noun) -> Noun {
         let full = term_to_noun(self.slab, "full");
@@ -8601,8 +8389,7 @@ impl<'a> Ut<'a> {
     }
 
     fn nice(&mut self, _sut: NRc<NTy>, gol: NRc<NTy>, typ: NRc<NTy>) -> Result<NRc<NTy>> {
-        // ATOMIC FLIP (C-final.1a): nice reads/returns native (mirrors mull_nice,
-        // which is the goal-nest check in the mull context). Identity-on-success.
+        // Mirrors `mull_nice`. Returns `typ` unchanged on success.
         if !self.vet {
             return Ok(typ);
         }
@@ -8616,8 +8403,8 @@ impl<'a> Ut<'a> {
     }
 
     fn hint_type(&mut self, inner: NRc<NTy>, note: Noun, payload: NRc<NTy>) -> Result<NRc<NTy>> {
-        // ATOMIC FLIP (C-final.1a): hint_type reads/returns native. The hint head
-        // is the noun pair `[inner_noun note]`; collapse void/noun -> payload.
+        // The hint head is the noun pair `[inner note]`. A void or noun payload is
+        // returned unchanged.
         match &*payload {
             NTy::Void | NTy::Noun => return Ok(payload),
             _ => {}
@@ -8628,9 +8415,9 @@ impl<'a> Ut<'a> {
         Ok(cons_hint(&mut self.cx, head_leaf, payload))
     }
 
-    /// Native-shadow `hint_type` (INC2): on the void/noun collapse hoon-138
-    /// returns `payload` itself, so the native is the payload's own native.
-    #[allow(dead_code)]
+    /// Test helper: `hint_type` over a (noun, native) pair. On a void or noun
+    /// payload hoon-138 returns `payload` itself, so both halves pass through.
+    #[cfg(test)]
     fn hint_type_n(
         &mut self,
         inner: Noun,
@@ -8731,125 +8518,16 @@ impl<'a> Ut<'a> {
         })
     }
 
-    fn prune_recursive_holds(&mut self, typ: Noun, hoon_noun: Noun) -> Result<Noun> {
-        // This traversal can get very deep (e.g. large recursive molds in hoon-138).  Use an
-        // explicit stack to avoid Rust stack overflows in release tests.
-        let mut seen: HashSet<NounIdentity> = HashSet::new();
-        let mut todo: Vec<Noun> = vec![typ];
-        let mut post: Vec<Noun> = Vec::new();
-        while let Some(node) = todo.pop() {
-            let raw = NounIdentity::of(node);
-            if !seen.insert(raw) {
-                continue;
-            }
-            post.push(node);
-            match type_tag(node, &self.slab.noun_space())?.as_str() {
-                "fork" => {
-                    for option in type_fork_options(node, &self.slab.noun_space())? {
-                        todo.push(option);
-                    }
-                }
-                "cell" => {
-                    let (head, tail) = type_cell_parts(node, &self.slab.noun_space())?;
-                    todo.push(head);
-                    todo.push(tail);
-                }
-                "face" => {
-                    todo.push(type_face_inner(node, &self.slab.noun_space())?);
-                }
-                "hint" => {
-                    let (_inner, _note, payload) = type_hint_parts(node, &self.slab.noun_space())?;
-                    todo.push(payload);
-                }
-                "core" => {
-                    let (payload, coil) = type_core_parts(node, &self.slab.noun_space())?;
-                    let (_garb, context, _rest) = coil_parts(coil, &self.slab.noun_space())?;
-                    todo.push(payload);
-                    todo.push(context);
-                }
-                _ => {}
-            }
-        }
-        let mut memo: HashMap<NounIdentity, Noun> =
-            HashMap::with_capacity(post.len().saturating_mul(2));
-        for node in post.into_iter().rev() {
-            let raw = NounIdentity::of(node);
-            let result = match type_tag(node, &self.slab.noun_space())?.as_str() {
-                "hold" => {
-                    let _ = hoon_noun;
-                    let (_inner, _hoon) = type_hold_parts(node, &self.slab.noun_space())?;
-                    node
-                }
-                "fork" => {
-                    let options = type_fork_options(node, &self.slab.noun_space())?;
-                    let mut kept = Vec::with_capacity(options.len());
-                    for option in options {
-                        let opt_raw = NounIdentity::of(option);
-                        let pruned = memo.get(&opt_raw).copied().unwrap_or(option);
-                        if type_tag(pruned, &self.slab.noun_space())? == "void" {
-                            continue;
-                        }
-                        kept.push(pruned);
-                    }
-                    match kept.len() {
-                        0 => ty_void(self.slab),
-                        1 => kept[0],
-                        _ => self.fork_from_options(kept)?,
-                    }
-                }
-                "cell" => {
-                    let (head, tail) = type_cell_parts(node, &self.slab.noun_space())?;
-                    let head_raw = NounIdentity::of(head);
-                    let tail_raw = NounIdentity::of(tail);
-                    let head = memo.get(&head_raw).copied().unwrap_or(head);
-                    let tail = memo.get(&tail_raw).copied().unwrap_or(tail);
-                    ty_cell(self.slab, head, tail)
-                }
-                "face" => {
-                    let inner = type_face_inner(node, &self.slab.noun_space())?;
-                    let inner_raw = NounIdentity::of(inner);
-                    let inner = memo.get(&inner_raw).copied().unwrap_or(inner);
-                    type_face_with_inner(self.slab, node, inner)?
-                }
-                "hint" => {
-                    let (inner, note, payload) = type_hint_parts(node, &self.slab.noun_space())?;
-                    let payload_raw = NounIdentity::of(payload);
-                    let payload = memo.get(&payload_raw).copied().unwrap_or(payload);
-                    ty_hint(self.slab, inner, note, payload)
-                }
-                "core" => {
-                    let (payload, coil) = type_core_parts(node, &self.slab.noun_space())?;
-                    let (garb, context, rest) = coil_parts(coil, &self.slab.noun_space())?;
-                    let payload_raw = NounIdentity::of(payload);
-                    let context_raw = NounIdentity::of(context);
-                    let payload = memo.get(&payload_raw).copied().unwrap_or(payload);
-                    let context = memo.get(&context_raw).copied().unwrap_or(context);
-                    let new_coil = coil_from_parts(self.slab, garb, context, rest);
-                    ty_core(self.slab, payload, new_coil)
-                }
-                _ => node,
-            };
-            memo.insert(raw, result);
-        }
-        let root_raw = NounIdentity::of(typ);
-        Ok(*memo.get(&root_raw).unwrap_or(&typ))
-    }
-
     fn nest(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<bool> {
-        // ATOMIC FLIP (consumer C8): nest reads the native enum directly. The
-        // deepening children (cell/face/hint/core payloads) stay native (no
-        // lowering — this is the memory win). Leaf-carried parts (coil, fork set,
-        // atom aura/bits) are lowered via live_to_noun / live_leaf_to_noun
-        // (memoized) and decoded with the existing noun helpers. Type identity for
-        // the seen-hold / gil / memo sets uses the interned `Rc` pointer as a
-        // canonical id (flip natives are hash-consed), replacing the old noun
-        // interner. repo/peek are native (C1/C2); play still takes a noun subject
-        // (lowered here) until C-final. The boundary cache is native-keyed
-        // (intern.rs) — keying on noun mugs would force lowering the deepening
-        // subject per call, which is O(N^2) over the deepening chain.
+        // Walks native types. Cell, face, hint, and core children stay native; leaf
+        // parts (core rest, fork set, atoms) are lowered through the memoized
+        // `live_to_noun`/`live_leaf_to_noun` and decoded with the noun helpers. The
+        // seen-hold, gil, and memo sets key on canonical type IDs. The boundary cache
+        // in intern.rs is keyed natively, since keying on noun mugs would lower the
+        // deepening subject on every call.
         let semantic = self.semantic_context_key();
-        // nest descends and repos %hold on BOTH sut and ref, so scope the fan on
-        // the union of both legsets (legset(sut) ∪ legset(ref)).
+        // nest descends into and repos `%hold`s on both sut and ref, so the fan is
+        // scoped on the union of both legsets.
         let fan = self.fan_context_key_scoped_pair(&sut, &ref_)?;
         if let Some(cached) = nest_cache_lookup(&self.cx, &sut, &ref_, semantic.vet_key, fan) {
             return Ok(cached);
@@ -8867,18 +8545,13 @@ impl<'a> Ut<'a> {
             &mut gil,
             &mut memo,
         )?;
-        // Native exposes only the top-level seg=0,reg=0 case (jet-cacheable).
-        let seg_empty = true;
-        let reg_empty = true;
-        let cacheable = (result && reg_empty) || (!result && seg_empty);
-        if cacheable {
-            nest_cache_store(&mut self.cx, &sut, &ref_, semantic.vet_key, fan, result);
-        }
+        // The top-level call starts with empty seen-hold sets, so every result is
+        // cacheable.
+        nest_cache_store(&mut self.cx, &sut, &ref_, semantic.vet_key, fan, result);
         Ok(result)
     }
 
-    /// Noun-bridged `nest` for not-yet-flipped callers (C8): lift both type nouns
-    /// to native, run native nest. Drops as callers flip (C-final).
+    /// `nest` on noun types: decodes both with `native_of` and runs the native `nest`.
     fn nest_noun(&mut self, sut: Noun, ref_: Noun) -> Result<bool> {
         let space = self.slab.noun_space();
         let sut_n = native_of(&mut self.cx, sut, &space)?;
@@ -8886,10 +8559,9 @@ impl<'a> Ut<'a> {
         self.nest(sut_n, ref_n)
     }
 
-    /// Return the native children of a `%fork`. A one-shot traversal stays
-    /// transient; the second promotes the vector into the native DAG so every
-    /// later consumer is a direct slice walk. The exact Hoon set treap remains
-    /// attached as the byte-exact serialization witness.
+    /// Returns the native children of a `%fork`. The first traversal decodes them
+    /// transiently; the second caches the vector on the fork node, so later walks
+    /// read a slice. The Hoon set treap stays attached for serialization.
     fn fork_options_native<'fork>(
         &mut self,
         fork: &'fork NRc<NTy>,
@@ -8934,14 +8606,8 @@ impl<'a> Ut<'a> {
         ))
     }
 
-    /// Native `core_dox` (C8): build the doppelganger context-core from a carried
-    /// coil leaf without lowering the (possibly deep) payload. `core_dox` ignores
-    /// the payload, so a `%noun` placeholder is byte-identical.
-    /// Native `core_dox`: `++dox` rebuilds the core as `core(context, garb', rest)`
-    /// where `garb'` forces vair=gold and payload becomes the context. PHASE 2:
-    /// built native-only with the SHARED native `context` (no native_of of the
-    /// deepening subject). `garb`/`rest` are lowered (tiny/bounded) so garb_with_vair
-    /// can rewrite the garb; the new garb leaf round-trips byte-identically.
+    /// Builds hoon-138's `dox` core, `[%core q.q.p q.p(r.p %gold)]`: the context
+    /// becomes the payload and the vair is forced to gold. Nothing is lowered.
     fn core_dox_native(
         &mut self,
         garb: &NGarb,
@@ -9267,8 +8933,8 @@ impl<'a> Ut<'a> {
             } => (payload.clone(), garb.clone(), context.clone(), rest.clone()),
             _ => return Err(CompilerError::Noun("nest_core: ref not a core".to_string())),
         };
-        // coil-equal short-circuit: garb/rest leaf-equal AND context ptr-equal
-        // (interned natives are canonical, so structural equality == ptr identity).
+        // Equal coils reduce to a payload nest. Contexts are hash-consed, so pointer
+        // equality is structural equality.
         if sut_garb == ref_garb
             && NRc::ptr_eq(&sut_context_n, &ref_context_n)
             && sut_rest == ref_rest
@@ -9277,10 +8943,8 @@ impl<'a> Ut<'a> {
                 sut_payload, ref_payload, depth, seen_sut_holds, seen_ref_holds, gil, memo,
             );
         }
-        // PHASE 2: garb is native (direct field access); rest is tiny/bounded —
-        // lower to noun for the noun coil decoders. The CONTEXT is already native
-        // (the deepening win: no native_of, no lowering of the deepening subject).
-        // The native garb/Leaf rest are kept for the native core_dox rebuild below.
+        // Only the small rest leaves are lowered, for the noun tome decoders; the
+        // contexts stay native.
         let sut_rest_noun = live_leaf_to_noun(&mut self.cx, &sut_rest, self.slab);
         let ref_rest_noun = live_leaf_to_noun(&mut self.cx, &ref_rest, self.slab);
         let sut_poly = sut_garb.poly;
@@ -9570,9 +9234,7 @@ impl<'a> Ut<'a> {
     }
 
     fn wrap_type(&mut self, typ: NRc<NTy>, vair: Vair) -> Result<NRc<NTy>> {
-        // ATOMIC FLIP (consumer C3): wrap_type reads + rebuilds the native enum.
-        // Branch rebuilds use the collapse-aware cons_* ctors. The core coil and
-        // the fork set stay noun in Phase 1 (lowered via to_noun); repo is native.
+        // Rebuilds with the collapse-aware `cons_*` constructors.
         match &*typ {
             NTy::Cell(head, tail) => {
                 let head = head.clone();
@@ -9590,8 +9252,6 @@ impl<'a> Ut<'a> {
                 let payload = payload.clone();
                 let context = context.clone();
                 let rest = rest.clone();
-                // garb is native: read + rewrite the vair directly. context
-                // (deepening subject) and rest stay native/leaf — no lowering.
                 let current_vair = garb.vair;
                 if current_vair != Vair::Gold && vair != Vair::Lead {
                     return Err(CompilerError::Noun("wrap-core".to_string()));
@@ -9626,14 +9286,6 @@ impl<'a> Ut<'a> {
             }
             NTy::Void | NTy::Noun | NTy::Atom { .. } => Ok(typ.clone()),
         }
-    }
-
-    /// Noun-bridged `wrap_type` for not-yet-flipped callers (C3). Drops as
-    /// callers flip.
-    fn wrap_type_noun(&mut self, typ: Noun, vair: Vair) -> Result<Noun> {
-        let native = native_of(&mut self.cx, typ, &self.slab.noun_space())?;
-        let r = self.wrap_type(native, vair)?;
-        Ok(live_to_noun(&mut self.cx, &r, self.slab))
     }
 
     fn burp_fork_set_run(&mut self, set: Noun) -> Result<Noun> {
@@ -9679,17 +9331,12 @@ impl<'a> Ut<'a> {
                 let semi = rest_cell.head().noun();
                 let tomes = rest_cell.tail().noun();
                 let semi = if self.semi_is_full_complete(semi)? {
-                    // Canonical hoon-138 `++burp`: keep a `[%full ~]`-complete coil
-                    // seminoun as-is. (The earlier fragment-`%spot` strip here was a
-                    // NET REGRESSION: hoonc's seminoun spotting is context-dependent —
-                    // it KEEPS the spot on cores embedded in type specs/mold samples
-                    // like the `++map` `$|` validator's `(tree (pair))` sample (self-mint
-                    // divergence byte 881767) and BARES it on the top-level output coil
-                    // cores (byte 1776224). Stripping all moved the first divergence
-                    // BACKWARD (881767 < 1776224). honk's natural mint emits all spotted,
-                    // which is correct for the type-embedded cores; the remaining bug #2
-                    // is honk over-spotting the OUTPUT-coil cores. Apps have no such
-                    // cores, so kernels are byte-exact either way.)
+                    // hoon-138 `++burp` keeps a `[%full ~]` coil seminoun as-is, so no
+                    // `%spot` stripping happens here. hoonc keeps the spot on cores
+                    // embedded in type specs and mold samples (such as the `++map` `$|`
+                    // validator's `(tree (pair))` sample) but drops it on top-level
+                    // output coil cores. honk spots both; the output-coil cores are a
+                    // known self-mint divergence that apps do not hit.
                     semi
                 } else {
                     // Canonical hoon-138 `++burp` replaces any unresolved seminoun state
@@ -9768,17 +9415,10 @@ impl<'a> Ut<'a> {
                 Pony::Palo(palo) => Port::Palo(palo),
                 Pony::Synthetic { typ, formula } => Port::Synthetic { typ, formula },
             };
-            // fine is native (C-final): returns the typ directly for fond.
             let (ty, _formula) = self.fine(&port)?;
             current = ty;
         }
         Ok(true)
-    }
-
-    /// Noun-bridged `feel` for still-noun callers.
-    fn feel_noun(&mut self, sut: Noun, wings: &[WingType]) -> Result<bool> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        self.feel(sut_n, wings)
     }
 
     fn take<F>(
@@ -9949,27 +9589,12 @@ impl<'a> Ut<'a> {
         self.chip(false, sut, gen)
     }
 
-    /// Noun-bridged `gain` for still-noun callers (play_wtcl/mint_wtcl).
-    fn gain_noun(&mut self, sut: Noun, gen: &Hoon) -> Result<Noun> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        let r = self.gain(sut_n, gen)?;
-        Ok(live_to_noun(&mut self.cx, &r, self.slab))
-    }
-
-    /// Noun-bridged `lose` for still-noun callers (play_wtcl/mint_wtcl).
-    fn lose_noun(&mut self, sut: Noun, gen: &Hoon) -> Result<Noun> {
-        let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
-        let r = self.lose(sut_n, gen)?;
-        Ok(live_to_noun(&mut self.cx, &r, self.slab))
-    }
-
     fn chip(&mut self, how: bool, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
         match gen {
             // Source-location/debug wrappers are non-semantic.
             Hoon::Dbug(_, inner) | Hoon::Note(_, inner) => self.chip(how, sut, inner.as_ref()),
             Hoon::WutTis(spec, wing) => {
                 let example = self.spec_example_cached(spec);
-                // play is native (C-final.2); thread the native subject directly.
                 let ref_type = self.play(sut.clone(), example.as_ref())?;
                 self.cool(how, sut, wing, ref_type)
             }
@@ -10034,9 +9659,7 @@ impl<'a> Ut<'a> {
                 ut.crop(a, ref_for_duz.clone())
             }
         };
-        let (_axis, ty) = self.take(sut.clone(), &palo.vein, &duz)?;
-        // Native identity collapse: interned ptr == structural identity.
-        let ty = if NRc::ptr_eq(&ty, &sut) { sut } else { ty };
+        let (_axis, ty) = self.take(sut, &palo.vein, &duz)?;
         Ok(ty)
     }
 
@@ -10105,9 +9728,8 @@ impl<'a> Ut<'a> {
                 let payload = self.gain_skin_inner(sut.clone(), ref_, inner, seen)?;
                 let help_noun = noun_expr_to_noun(self.slab, help);
                 let note_noun = tagged1(self.slab, "help", help_noun);
-                // hoon-138 `hint_type(sut, note, payload)`: the hint "inner" slot is
-                // the subject type itself, so the native head leaf is `[sut note]`.
-                // cons_hint preserves the void/noun collapse hint_type applies.
+                // The hint head is `[sut note]`, as in `hint_type`; `cons_hint` applies
+                // the same void/noun collapse.
                 let sut_noun = live_to_noun(&mut self.cx, &sut, self.slab);
                 let head_noun = T(self.slab, &[sut_noun, note_noun]);
                 let head_leaf =
@@ -10256,7 +9878,7 @@ impl<'a> Ut<'a> {
                     return Ok(cons_void(&mut self.cx));
                 }
                 // hoon-138 `ar:gain` preserves a core only for the generic cell skin tail
-                // (`[%cell head %noun]`).  More specific tail skins refine the core as an
+                // (`[%cell head %noun]`). More specific tail skins refine the core as an
                 // ordinary cell and must not leave the arm namespace available.
                 if matches!(tail, Skin::Base(BaseType::NounExpr)) {
                     Ok(cons_core(&mut self.cx, head_ty, garb, context, rest))
@@ -10530,7 +10152,7 @@ impl<'a> Ut<'a> {
                 let ref_tail = ref_tail.clone();
                 let lef = self.lose_skin_inner(sut.clone(), ref_head.clone(), head, seen)?;
                 let rig = self.lose_skin_inner(sut, ref_tail.clone(), tail, seen)?;
-                // 3-way fork rebuild (RT-07 ordering preserved via cons_fork).
+                // Three-way fork; `cons_fork` builds hoon-138's mug-ordered treap.
                 let cell_lr = cons_cell(&mut self.cx, lef.clone(), rig.clone());
                 let cell_l = cons_cell(&mut self.cx, lef, ref_tail);
                 let cell_r = cons_cell(&mut self.cx, ref_head, rig);
@@ -10654,9 +10276,7 @@ impl<'a> Ut<'a> {
     }
 
     fn fuse(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<NRc<NTy>> {
-        // ATOMIC FLIP (consumer C4): native. C-final.4: the fuse boundary cache is
-        // native-re-keyed on the interned (sut, ref) `Rc` pointers, so the
-        // deepening subject is no longer lowered to a noun here.
+        // The boundary cache keys on canonical type IDs, so `sut` is never lowered.
         if let Some(cached) = self.fuse_boundary_lookup(&sut, &ref_)? {
             return Ok(cached);
         }
@@ -10666,7 +10286,8 @@ impl<'a> Ut<'a> {
         Ok(result)
     }
 
-    /// Noun-bridged `fuse` for not-yet-flipped callers (C4). Drops at C-final.
+    /// Test helper: `fuse` on noun types.
+    #[cfg(test)]
     fn fuse_noun(&mut self, sut: Noun, ref_: Noun) -> Result<Noun> {
         let sn = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let rn = native_of(&mut self.cx, ref_, &self.slab.noun_space())?;
@@ -10675,11 +10296,10 @@ impl<'a> Ut<'a> {
     }
 
     fn miss(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<bool> {
-        // ATOMIC FLIP (consumer C5b): native. seen/memo keyed by native pointer.
+        // `seen` and the memo key on canonical type IDs.
         let mut seen: Vec<(TypeId, TypeId)> = Vec::new();
         if let Some((stored_epoch, mut memo)) = self.miss_memo_persist.take() {
-            let context = self.cache_context_key();
-            let epoch = context;
+            let epoch = self.cache_context_key();
             if stored_epoch != epoch {
                 memo.clear();
             }
@@ -10691,7 +10311,8 @@ impl<'a> Ut<'a> {
         self.miss_dext(sut, ref_, &mut seen, &mut memo)
     }
 
-    /// Noun-bridged `miss` for not-yet-flipped callers (C5b). Drops at C-final.
+    /// Test helper: `miss` on noun types.
+    #[cfg(test)]
     fn miss_noun(&mut self, sut: Noun, ref_: Noun) -> Result<bool> {
         let sn = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let rn = native_of(&mut self.cx, ref_, &self.slab.noun_space())?;
@@ -10719,16 +10340,14 @@ impl<'a> Ut<'a> {
             vet: VetMode(self.vet),
         }
     }
-    /// Memo over raw (sut, ref_, vet, rest-context) keys, scoped to one
-    /// outer `miss` call. Without it, sibling fork branches re-explore
-    /// identical hold expansions and a single outer `miss` over hoon-138
-    /// types performs >10^8 recursive calls. The memo is deliberately NOT
-    /// persisted across calls: `miss` reaches `repo`/`rest`/`redo`, whose
-    /// cached state evolves during a build, and verdicts memoized under
-    /// earlier state can flip (observed via shadow validation as
-    /// cached=true/fresh=false mismatches, manifesting as redo-match
-    /// miscompiles in batch builds). Within one call the state is
-    /// consistent and unconditional reuse is validated by the parity corpus.
+    /// Memo over (sut, ref, vet) keys. Without it, sibling fork branches
+    /// re-explore identical hold expansions and one outer `miss` over hoon-138
+    /// types makes more than 10^8 recursive calls. `miss` reaches
+    /// `repo`/`rest`/`redo`, whose cached state changes during a build, so a
+    /// verdict memoized under earlier state can flip (seen as redo-match
+    /// miscompiles in batch builds). The memo therefore lives for one outer
+    /// `miss` call, or, under `set_miss_memo_persistence`, until the cache
+    /// context key changes.
     fn miss_dext(
         &mut self,
         sut: NRc<NTy>,
@@ -10752,8 +10371,6 @@ impl<'a> Ut<'a> {
         memo: &mut FastHashMap<MissKey, bool>,
     ) -> Result<bool> {
         if NRc::ptr_eq(&sut, &ref_) {
-            // C-final.4: nest is native; call it directly on the deepening type
-            // instead of lowering to a noun for nest_noun.
             let void = cons_void(&mut self.cx);
             return self.nest(void, sut.clone());
         }
@@ -10763,7 +10380,6 @@ impl<'a> Ut<'a> {
         match &*sut {
             NTy::Void => Ok(true),
             NTy::Noun => {
-                // C-final.4: native nest directly (no live_to_noun bridge).
                 let void = cons_void(&mut self.cx);
                 self.nest(void, ref_.clone())
             }
@@ -10946,9 +10562,7 @@ impl<'a> Ut<'a> {
     }
 
     fn crop(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<NRc<NTy>> {
-        // ATOMIC FLIP (consumer C5): native. C-final.4: the crop boundary cache is
-        // native-re-keyed on the interned (sut, ref) `Rc` pointers, so the
-        // deepening subject is no longer lowered to a noun here.
+        // The boundary cache keys on the interned (sut, ref) `Rc` pointers.
         if let Some(cached) = self.crop_boundary_lookup(&sut, &ref_)? {
             return Ok(cached);
         }
@@ -10958,7 +10572,8 @@ impl<'a> Ut<'a> {
         Ok(result)
     }
 
-    /// Noun-bridged `crop` for not-yet-flipped callers (C5). Drops at C-final.
+    /// Noun-bridged `crop` for tests: lifts both types, crops, lowers the result.
+    #[cfg(test)]
     fn crop_noun(&mut self, sut: Noun, ref_: Noun) -> Result<Noun> {
         let sn = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let rn = native_of(&mut self.cx, ref_, &self.slab.noun_space())?;
@@ -11010,7 +10625,7 @@ impl<'a> Ut<'a> {
                     let st = st.clone();
                     let rh = rh.clone();
                     let rt = rt.clone();
-                    // hoon-138 nest(ref_head, sut_head); nest still noun (C8) -> lower.
+                    // hoon-138 `(nest(sut p.ref) | p.sut)`, through the noun bridge.
                     let rh_noun = live_to_noun(&mut self.cx, &rh, self.slab);
                     let sh_noun = live_to_noun(&mut self.cx, &sh, self.slab);
                     if !self.nest_noun(rh_noun, sh_noun)? {
@@ -11213,30 +10828,26 @@ impl<'a> Ut<'a> {
         Ok(T(self.slab, &[tag, set]))
     }
 
-    /// Native-shadow `fork_from_options` (INC2). The boundary fork carries the
-    /// mug-ordered set as one opaque leaf (RT-07), and the empty/single collapses
-    /// yield void/the single member — `native_of` on the result captures all
-    /// three cases byte-exactly without reordering the set.
-    #[allow(dead_code)]
+    /// Test helper: `fork_from_options` paired with its native form. `native_of`
+    /// keeps the mug-ordered set treap intact and covers the void and
+    /// single-member collapses.
+    #[cfg(test)]
     fn fork_from_options_n(&mut self, options: Vec<Noun>) -> Result<(Noun, NRc<NTy>)> {
         let noun = self.fork_from_options(options)?;
         let native = native_of(&mut self.cx, noun, &self.slab.noun_space())?;
         Ok((noun, native))
     }
 
-    /// Native `%fork` constructor — the keystone of the redo/fire/repo native
-    /// flip. Takes NATIVE options and returns the canonical interned fork type,
-    /// so callers in the type SCC never round-trip the whole fork through a noun
-    /// (`live_to_noun(opt); fork_from_options; native_of`). The mug-ordered treap
-    /// build is DELEGATED to `fork_from_options` over the per-`Rc`-memoized
-    /// lowering of each option, so the emitted `%set` leaf is byte-IDENTICAL by
-    /// construction (zero treap re-derivation; RT-07 deferred). All collapse
-    /// rules (empty->void, single->bare member, void-drop, nested-fork union)
-    /// come free from `fork_from_options`; the single result is content-keyed via
-    /// `native_of_cached` so a structurally-equal fork reuses one interned `Rc`.
+    /// Native `%fork` constructor. Takes native options and returns the
+    /// canonical interned fork type. The treap is built by `fork_from_options`
+    /// over each option's memoized lowering, so the `%set` leaf matches
+    /// hoon-138's mug-ordered treap byte for byte, and the collapse rules
+    /// (empty to void, single to the bare member, void-drop, nested-fork union)
+    /// come from there too. The result goes through `native_of_cached`, so
+    /// structurally equal forks share one interned `Rc`.
     fn cons_fork(&mut self, options: Vec<NRc<NTy>>) -> Result<NRc<NTy>> {
-        // Native forms of the exact Hoon empty/singleton collapse avoid building,
-        // mugging, and decoding a treap for the overwhelmingly cheap cases.
+        // Empty and single-option inputs collapse here, as in hoon-138 `++fork`,
+        // without building, mugging, and decoding a treap.
         match options.as_slice() {
             [] => return Ok(cons_void(&mut self.cx)),
             [only] if matches!(&**only, NTy::Void) => {
@@ -11256,9 +10867,8 @@ impl<'a> Ut<'a> {
     }
 
     fn atom_nest(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<bool> {
-        // ATOMIC FLIP (consumer C8): atoms are small, so lowering the carried
-        // aura/bits leaves via the whole-type to_noun is cheap and reuses the
-        // existing noun decoder.
+        // Atom types are small, so lowering them to nouns is cheap and lets the
+        // noun decoder read the aura and constant.
         let sut = live_to_noun(&mut self.cx, &sut, self.slab);
         let ref_ = live_to_noun(&mut self.cx, &ref_, self.slab);
         let (sut_aura, sut_val) = type_atom_parts(sut, &self.slab.noun_space())
@@ -11282,9 +10892,8 @@ impl<'a> Ut<'a> {
     }
 
     fn peek<A: Into<BigUint>>(&mut self, sut: NRc<NTy>, way: Way, axis: A) -> Result<NRc<NTy>> {
-        // ATOMIC FLIP (consumer C2): peek reads the native enum directly. The
-        // seen-hold dedup, the core coil, and the fork set stay noun-keyed in
-        // Phase 1 (lowered via to_noun); repo is native (C1).
+        // The seen-hold set keys on the lowered hold noun and the axis; the rest
+        // of the walk reads native types.
         fn seen_hold(
             ut: &mut Ut<'_>,
             seen: &mut HashMap<HoldAxisHash, Vec<(Noun, BigUint)>>,
@@ -11358,8 +10967,7 @@ impl<'a> Ut<'a> {
                         return Ok(cons_noun(&mut ut.cx));
                     }
                     let payload = payload.clone();
-                    // garb is native (direct field access); the context (deepening
-                    // subject) is not needed here.
+                    // Only the garb's variance matters; the core's context is unused.
                     let vair = garb.vair;
                     let (sam, con) = peel(way, vair);
                     let tow = if mas == BigUint::from(1u32) {
@@ -11419,18 +11027,17 @@ impl<'a> Ut<'a> {
         go(self, sut, way, axis.into(), &mut seen_holds)
     }
 
-    /// Noun-bridged `peek` for not-yet-flipped callers (C2): lift sut, run native
-    /// peek, lower the result. Drops as callers flip.
+    /// Noun-bridged `peek`: lifts `sut`, runs native `peek`, lowers the result.
     fn peek_noun<A: Into<BigUint>>(&mut self, sut: Noun, way: Way, axis: A) -> Result<Noun> {
         let native = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let r = self.peek(native, way, axis)?;
         Ok(live_to_noun(&mut self.cx, &r, self.slab))
     }
 
-    /// Grow the native stack before recursing into deep type operations
-    /// (`redo`, `mull`, `nest`). Without this, deeply nested types overflow
-    /// the Rust stack on consumers running with a default 8 MB thread stack.
-    /// Constants match the `mint`/`play` guard in `native/mod.rs`.
+    /// Grows the native stack before recursing into deep type operations
+    /// (`redo`, `mull` and its arm walkers, `reachable_legs`). Without this,
+    /// deeply nested types overflow a default 8 MB thread stack. Constants
+    /// match `NativeCompiler::with_large_stack` in `native/mod.rs`.
     fn with_stack_guard<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         #[cfg(test)]
         {
@@ -11459,11 +11066,9 @@ impl<'a> Ut<'a> {
         dox: NRc<NTy>,
         gen: &Hoon,
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
-        // ATOMIC FLIP (consumer C7): mull reads/returns the native enum.
-        // C-final.1b: the mull boundary cache is native-re-keyed on the interned
-        // (sut, gol, dox) `Rc` pointers, so sut/gol/dox are no longer lowered to
-        // nouns to build the cache key. The retained native AST supplies the
-        // same spot-sensitive structural identity without noun materialization.
+        // The boundary cache keys on the interned (sut, gol, dox) `Rc` pointers
+        // and the gene's spot-sensitive signature; the gene is lowered to a noun
+        // only when the AST has no signature.
         let gen_sig = match self.mint_cache_signature(gen) {
             Some(signature) => signature,
             None => {
@@ -11479,10 +11084,8 @@ impl<'a> Ut<'a> {
             return Err(CompilerError::Noun("mull-none".to_string()));
         }
 
-        // Grow the native stack for deep recursion safety (matches mint/play).
         let result =
             self.with_stack_guard(|ut| ut.mull_inner(sut.clone(), gol.clone(), dox.clone(), gen))?;
-        // C-final.1b: store the native (p, q) types directly (no lowering).
         self.mull_cache_store(
             &sut,
             &gol,
@@ -11494,11 +11097,9 @@ impl<'a> Ut<'a> {
         Ok(result)
     }
 
-    /// Noun-bridged `mull` for not-yet-flipped callers (C7): lift sut/gol/dox to
-    /// native, run native mull, lower both result types. Drops as callers flip.
-    /// Currently only exercised by tests (the live noun caller in wet.rs calls
-    /// native `mull` directly with native_of'd args); kept for future callers.
-    #[allow(dead_code)]
+    /// Noun-bridged `mull` for tests: lifts sut/gol/dox to native, runs `mull`,
+    /// and lowers both result types.
+    #[cfg(test)]
     fn mull_noun(&mut self, sut: Noun, gol: Noun, dox: Noun, gen: &Hoon) -> Result<(Noun, Noun)> {
         let space = self.slab.noun_space();
         let sut_n = native_of(&mut self.cx, sut, &space)?;
@@ -11624,7 +11225,7 @@ impl<'a> Ut<'a> {
                 Ok((p_wrapped, q_wrapped))
             }
 
-            // ---- Cast: %ktls ----
+            // ---- Cast: %ktdt ----
             Hoon::KetDot(p, q) => {
                 let lowered = Self::lower_ktdt(p, q);
                 self.mull(sut, gol, dox, &lowered)
@@ -11666,7 +11267,6 @@ impl<'a> Ut<'a> {
 
             // ---- Hint note: %note ----
             Hoon::Note(note, inner) => {
-                // hint_type is native now (C-final.1a): thread sut/dox + payloads.
                 let vat = self.mull(sut.clone(), gol, dox.clone(), inner)?;
                 let note_noun = note_to_noun(self.slab, note)?;
                 let p_ty = self.hint_type(sut, note_noun, vat.0)?;
@@ -11701,7 +11301,6 @@ impl<'a> Ut<'a> {
 
             // ---- Merge/busk: %tscm ----
             Hoon::TisCom(p, q) => {
-                // busk is native now (C-final.2): thread the native subjects directly.
                 let boc = self.busk(sut, p);
                 let nuf = self.busk(dox, p);
                 self.mull(boc, gol, nuf, q)
@@ -11712,8 +11311,7 @@ impl<'a> Ut<'a> {
                 let bool_gol = ty_bool_n(&mut self.cx, self.slab).1;
                 let _nor = self.mull(sut.clone(), bool_gol, dox.clone(), p)?;
 
-                // True branch: apply gain to both sut and dox. gain/lose are native
-                // now (C6) — thread the native subjects directly.
+                // True branch: apply gain to both sut and dox.
                 let hiq: (NRc<NTy>, NRc<NTy>) = {
                     let fex_p = self.gain(sut.clone(), p)?;
                     let fex_q = self.gain(dox.clone(), p)?;
@@ -11751,7 +11349,7 @@ impl<'a> Ut<'a> {
                     }
                 };
 
-                // Fork both results (RT-07 mug ordering preserved via cons_fork).
+                // Fork both results (cons_fork keeps the mug-ordered treap).
                 let p_ty = self.cons_fork(vec![hiq.0, ran.0])?;
                 let p_ty = self.mull_nice(sut, gol, p_ty)?;
                 let q_ty = self.cons_fork(vec![hiq.1, ran.1])?;
@@ -11760,8 +11358,7 @@ impl<'a> Ut<'a> {
 
             // ---- Type test: %fits ----
             Hoon::Fits(p, wing) => {
-                // Play the pattern from both perspectives. play + mint are native
-                // (C-final): thread the native subjects directly.
+                // Play the pattern from both perspectives.
                 let waz_p = self.play(sut.clone(), p)?;
                 let waz_q = self.play(dox.clone(), p)?;
 
@@ -11778,7 +11375,7 @@ impl<'a> Ut<'a> {
                 let pov_p = self.type_test_formula_on_axis(waz_p, syx_p.clone())?;
                 let pov_q = self.type_test_formula_on_axis(waz_q, syx_q.clone())?;
 
-                // Assert axes AND fish nock are identical (pov_* are FORMULAS).
+                // Assert the axes and the fish formulas are identical.
                 if syx_p != syx_q || !self.formula_arena.equal(pov_p, pov_q) {
                     return Err(CompilerError::Noun("mull-bonk-a".to_string()));
                 }
@@ -11788,8 +11385,7 @@ impl<'a> Ut<'a> {
 
             // ---- Aura test: %wthx ----
             Hoon::WutHax(_skin, wing) => {
-                // fend from both perspectives. fend is native now (C9): thread the
-                // native subjects + read native types directly.
+                // fend from both perspectives.
                 let (new_type, new_axis) = self.fend(sut.clone(), Way::Read, wing)?;
                 let (old_type, old_axis) = self.fend(dox.clone(), Way::Read, wing)?;
 
@@ -11797,7 +11393,7 @@ impl<'a> Ut<'a> {
                 if new_axis != old_axis {
                     return Err(CompilerError::Noun("mull-bonk-x".to_string()));
                 }
-                // Assert old type nests in new (type.new ⊆ type.old)
+                // Assert the new type nests in the old (type.new ⊆ type.old)
                 if !self.nest(old_type, new_type)? {
                     return Err(CompilerError::Noun("mull-bonk-x".to_string()));
                 }
@@ -11826,7 +11422,7 @@ impl<'a> Ut<'a> {
             }
 
             // ---- Vase: %zpts ----
-            // hoon-138: (beth %noun) — no recursion on p.gen
+            // hoon-138: (beth %noun), with no recursion on p.gen
             Hoon::ZapTis(_p) => {
                 let noun_ty = cons_noun(&mut self.cx);
                 self.mull_beth(sut, gol, noun_ty)
@@ -11847,7 +11443,7 @@ impl<'a> Ut<'a> {
             // ---- Type extraction: %zpgl ----
             Hoon::ZapGal(spec, _q) => {
                 // hoon-138: (beth (play [%kttr p.gen]))
-                // Note: hoon-138 has a comment "XX is this right?" here.
+                // hoon-138 marks this arm "XX is this right?".
                 let kttr = Hoon::KetTar(Box::new(spec.as_ref().clone()));
                 let ty = self.play(sut.clone(), &kttr)?;
                 self.mull_beth(sut, gol, ty)
@@ -11855,7 +11451,6 @@ impl<'a> Ut<'a> {
 
             // ---- Conditional compilation: %zppt ----
             Hoon::ZapPat(wings, q, r) => {
-                // feel is native now (C9): thread the native subjects directly.
                 let feel_sut = self.feel(sut.clone(), wings)?;
                 let feel_dox = self.feel(dox.clone(), wings)?;
                 if feel_sut != feel_dox {
@@ -11880,7 +11475,7 @@ impl<'a> Ut<'a> {
                 self.mull_beth(sut, gol, void_ty)
             }
 
-            // ---- Sugar forms that lower via open() before mull ----
+            // ---- Sugar forms lowered before mull ----
             // TisLus (=+) lowers to TisGar => handled above
             Hoon::TisLus(p, q) => {
                 let lowered = Hoon::TisGar(
@@ -11996,9 +11591,9 @@ impl<'a> Ut<'a> {
         hud: Poly,
         tomes: &HashMap<String, Tome>,
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
-        // PHASE 2: the core payload AND context (sut/dox) are both SHARED native
-        // Rc<Type> — never lowered to a noun. Only the tiny garb + bounded rest are
-        // built as noun leaves; cons_core mirrors ty_core's void-collapse.
+        // Payload and context stay shared native types. The coil rest is a noun
+        // leaf pairing a fully blocked seminoun (standing in for `laze`) with the
+        // arm map; cons_core collapses a void payload to void, like ty_core.
         let tomes_map = self.tomes_map_from_ast(tomes)?;
         // Construct yet = core(sut, [nym hud gold], sut, laze, dom)
         let garb = garb_native(nym, hud, Vair::Gold);
@@ -12082,7 +11677,6 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         pairs: &[(WingType, Hoon)],
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
-        // find/Port are native (C6+C9): thread the native subjects directly.
         let lug_p = self.find(sut.clone(), Way::Read, wing)?;
         let lug_q = self.find(dox.clone(), Way::Read, wing)?;
         self.mull_cnts_with_ports(sut, gol, dox, &lug_p, &lug_q, pairs)
@@ -12108,7 +11702,6 @@ impl<'a> Ut<'a> {
         lug_q: &Port,
         pairs: &[(WingType, Hoon)],
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
-        // Port carries native types now (C6+C9): read them directly.
         match (lug_p, lug_q) {
             // Both synthetic: assert no edits, return both types
             (Port::Synthetic { typ: typ_p, .. }, Port::Synthetic { typ: typ_q, .. }) => {
@@ -12146,9 +11739,6 @@ impl<'a> Ut<'a> {
         palo_q: &Palo,
         rig: &[(WingType, Hoon)],
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
-        // Palo/Opal/tack/toss carry native types now (C6+C9). zil.0/zil.1 (native
-        // mull results) thread straight into native tack/toss; fire stays on the
-        // NOUN path (arm cores lowered just before the fire call).
         self.with_stack_guard(|ut| match (&palo_p.opal, &palo_q.opal) {
             // Both legs: tack both sides for each edit
             (Opal::Leg(leg_p), Opal::Leg(leg_q)) => {
@@ -12202,8 +11792,7 @@ impl<'a> Ut<'a> {
                     hag_p = dix_p.1;
                     hag_q = dix_q.1;
                 }
-                // Fire sut-side with vet on, dox-side with vet off. fire is native
-                // (C-final): arm cores are already `NRc<NTy>`.
+                // Fire the sut side with the current vet, the dox side with vet off.
                 let p_ty = ut.fire(&hag_p)?;
                 let q_ty = ut.with_vet_off(|ut| ut.fire(&hag_q))?;
                 Ok((p_ty, q_ty))
@@ -12237,8 +11826,7 @@ fn atom_is_flag(atom: &ParsedAtom) -> bool {
 }
 
 fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
-    // Delegate to the shared structural equality (moved to `native::noun` so the
-    // IR `Leaf` impls can use it too). Same name/signature: callers unchanged.
+    // Local alias for the shared structural equality in `native::noun`.
     crate::native::noun::noun_eq(a, b, space)
 }
 
@@ -12282,8 +11870,7 @@ fn slot_formula_axis_big(slab: &mut NounSlab, axis: BigUint) -> Noun {
 }
 
 fn slab_mug(noun: Noun, space: &NounSpace) -> u32 {
-    // Delegate to the shared iterative mug (moved to `native::noun` alongside
-    // `noun_eq`). Same name/signature: callers unchanged.
+    // Local alias for the shared iterative mug in `native::noun`.
     crate::native::noun::slab_mug(noun, space)
 }
 
@@ -12896,10 +12483,6 @@ fn garb_parts(noun: Noun, space: &NounSpace) -> Result<(Noun, Noun, Noun)> {
     Ok((cell.head().noun(), tail.head().noun(), tail.tail().noun()))
 }
 
-// garb_poly/garb_vair (noun-path garb field decoders) are superseded by direct
-// field access on the native `Garb` struct (the %core garb is no longer a noun
-// leaf); `garb_parts` survives for the remaining noun-coil bridge `garb_with_vair`.
-
 fn foot_parts(noun: Noun, space: &NounSpace) -> Result<(Poly, Noun)> {
     let cell = noun
         .in_space(space)
@@ -13131,24 +12714,21 @@ fn tend_big(vein: &[Option<BigUint>]) -> Result<BigUint> {
     Ok(axis)
 }
 
-/// Chunked mint of a `=> p1 => … => body` compose chain. Mirrors `mint_tsgr`'s
-/// composition exactly — each pre-body layer minted with goal `%noun` against
-/// the carried subject, the body with the outer `gol`, formulas folded right via
-/// `comb` — but mints each layer in its OWN fresh `Ut`/slab, carrying only the
-/// subject type and per-layer formulas back into `out_slab` and dropping each
-/// layer's working slab. Peak working memory bounds to one layer + the carried
-/// subject instead of the cumulative whole — the basis for a bounded native
-/// prelude mint (Step 2).
+/// Test-only prototype of a chunked mint for a `=> p1 => … => body` compose
+/// chain. Only `chunked_tisgar_chain_matches_monolithic_mint` calls it; the
+/// production chunked prelude mint is `mint_honc_prelude_chunked` in
+/// `bin/honk.rs`.
 ///
-/// Output is byte-identical to monolithic mint when each layer's cores have full
-/// batteries (so the per-layer lazy resolvers, dropped with each working slab,
-/// are unnecessary for cross-layer name resolution). The
-/// `chunked_tisgar_chain_matches_monolithic_mint` test guards that invariant.
+/// Composes like `mint_tsgr_arena`: each pre-body layer mints with goal `%noun`
+/// against the carried subject, the body with the outer `gol`, and the formulas
+/// fold right through `comb`. Each layer mints in its own `Ut` and slab, and
+/// only the subject type and the layer's formula are copied into `out_slab`.
 ///
-/// NOTE: `out_slab` still accumulates each carried subject copy (only the latest
-/// is live); reclaiming the stale copies (ping-pong out-slabs or
-/// checkpoint/rewind around the subject copy) is the memory optimization to add
-/// once correctness is established.
+/// The output matches the monolithic mint byte for byte when each layer's cores
+/// have full batteries, so cross-layer name resolution never needs the lazy
+/// resolvers dropped with each working slab. `out_slab` keeps every carried
+/// subject copy, though only the latest is live.
+#[cfg(test)]
 pub(crate) fn mint_tisgar_chain_chunked(
     out_slab: &mut NounSlab,
     sut: Noun,
@@ -13167,13 +12747,10 @@ pub(crate) fn mint_tisgar_chain_chunked(
     let mut layer_formulas: Vec<Noun> = Vec::with_capacity(layers.len());
     let last = layers.len() - 1;
     for (i, layer) in layers.iter().enumerate() {
-        // Each layer mints in a FRESH slab. The per-`Ut` `cx: Context::new()`
-        // (constructed in `Ut::new` below) gives this layer a fresh native intern
-        // table + lowering memos (live_to_noun / the nest cache) — they key on
-        // canonical `Rc` pointers but hold slab-bound nouns, and would otherwise
-        // hand this layer a noun allocated in a prior layer's (dropped) slab.
-        // Cross-layer state crosses via the `subject`/`gol` nouns copied in below
-        // and is re-interned fresh within this layer.
+        // Each layer gets a fresh slab and a fresh `Ut`, whose `Context` holds
+        // slab-bound nouns in its intern table and lowering memos; sharing one
+        // across layers would hand out nouns from a dropped slab. Only the
+        // `subject` and `gol` nouns cross layers, copied in below.
         let mut layer_slab: NounSlab = NounSlab::new();
         {
             let mut ut = Ut::new(&mut layer_slab);
@@ -13193,7 +12770,7 @@ pub(crate) fn mint_tisgar_chain_chunked(
 
     let mut formula = layer_formulas.pop().expect("compose chain has a body");
     while let Some(head) = layer_formulas.pop() {
-        formula = comb(out_slab, head, formula)?;
+        formula = crate::native::formula::comb(out_slab, head, formula)?;
     }
     Ok((subject, formula))
 }
@@ -13219,6 +12796,7 @@ fn ty_atom(slab: &mut NounSlab, aura: &str, value: Option<Noun>) -> Noun {
     T(slab, &[tag, aura_noun, bits])
 }
 
+#[cfg(test)]
 fn ty_face(slab: &mut NounSlab, name: &str, inner: Noun) -> Noun {
     let name_noun = term_to_noun(slab, name);
     ty_face_tool(slab, name_noun, inner)
@@ -13283,20 +12861,16 @@ fn coil_from_parts(slab: &mut NounSlab, garb: Noun, context: Noun, rest: Noun) -
 }
 
 // ---------------------------------------------------------------------------
-// Native-shadow type constructors (native-types migration, INC1).
+// Paired type constructors.
 //
-// Each `ty_*_n` builds the SAME noun as its `ty_*` sibling — byte-identical, via
-// the exact same code — AND the corresponding interned native `Rc<Type>`, built
-// from its children's ALREADY-native `Rc<Type>` (O(n): no re-decode of children;
-// the shared Rc is reused even when the noun side rebuilds). Branch constructors
-// mirror hoon-138's collapse rules by reading the RESULT noun's tag, so a
-// collapsed core/face/hint yields Void/Noun native exactly when the noun does.
-// Leaf constructors (atom/fork/bool) capture leaf content via the memoized
-// `native_of` (O(1) on a freshly-built leaf noun). All native nodes intern
-// through the one shared thread-local table (`live_intern`/`native_of`).
-//
-// Additive: the noun-only `ty_*` call sites are untouched; callers migrate to
-// `_n` incrementally (INC2+). Validated per-node by `assert_native_eq`.
+// Each `ty_*_n` builds the same noun as its `ty_*` sibling, by calling it, and
+// the matching interned native type from its children's native types, so no
+// child is re-decoded. The face, hint, and core constructors read the result
+// noun's tag, so a hoon-138 collapse yields a native Void or Noun exactly when
+// the noun collapses. The atom, fork, and bool constructors lift the leaf noun
+// with `native_of`. Nodes intern in the caller's `Context`. Only `ty_atom_n`
+// and `ty_bool_n` are used outside tests; `native_ctor_tests` checks each pair
+// with `assert_native_eq`.
 // ---------------------------------------------------------------------------
 use crate::native::ir::ty::TypeRef as NRc;
 
@@ -13375,17 +12949,16 @@ use crate::native::ir::intern::{
 use crate::native::ir::leaf::Leaf as NLeaf;
 use crate::native::ir::ty::{garb_native, visit_fork_set_members, Garb as NGarb, Type as NTy};
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_noun_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
     (ty_noun(slab), live_intern(cx, NTy::Noun))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_void_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
     (ty_void(slab), live_intern(cx, NTy::Void))
 }
 
-#[allow(dead_code)]
 fn ty_atom_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13397,7 +12970,7 @@ fn ty_atom_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_cell_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13409,7 +12982,7 @@ fn ty_cell_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_face_tool_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13434,7 +13007,7 @@ fn ty_face_tool_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_face_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13445,7 +13018,7 @@ fn ty_face_n(
     ty_face_tool_n(cx, slab, name_noun, inner)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_hint_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13459,8 +13032,8 @@ fn ty_hint_n(
         Ok(TypeTagKind::Void) => live_intern(cx, NTy::Void),
         Ok(TypeTagKind::Noun) => live_intern(cx, NTy::Noun),
         _ => {
-            // noun = [%hint [inner note] payload]; capture the actual [inner note]
-            // head ty_hint built (no redundant allocation).
+            // noun = [%hint [inner note] payload]; reuse the [inner note] cell
+            // that ty_hint built.
             let head = noun
                 .in_space(&space)
                 .as_cell()
@@ -13480,7 +13053,7 @@ fn ty_hint_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_hold_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13499,7 +13072,7 @@ fn ty_hold_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_core_n(
     cx: &mut Context,
     slab: &mut NounSlab,
@@ -13530,14 +13103,13 @@ fn ty_core_n(
     (noun, native)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn ty_fork_n(cx: &mut Context, slab: &mut NounSlab, options: Vec<Noun>) -> (Noun, NRc<NTy>) {
     let noun = ty_fork(slab, options);
     let native = native_of(cx, noun, &slab.noun_space()).expect("ty_fork_n native");
     (noun, native)
 }
 
-#[allow(dead_code)]
 fn ty_bool_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
     let noun = ty_bool(slab);
     let native = native_of(cx, noun, &slab.noun_space()).expect("ty_bool_n native");
@@ -13614,15 +13186,14 @@ mod native_ctor_tests {
         let hoon = T(&mut slab, &[D(1), D(0)]);
         let (n, t) = ty_hold_n(&mut cx, &mut slab, subj, hoon);
         check(&slab, n, &t);
-        // richer cell-leaf gene (Jammed cell leaf round-trip: jam->cue->copy)
+        // hold with a cell gene (a non-direct leaf)
         let subj2 = ty_atom_n(&mut cx, &mut slab, "ud", None);
         let g_inner = T(&mut slab, &[D(1), D(2)]);
         let gene2 = T(&mut slab, &[g_inner, D(3)]);
         let (n, t) = ty_hold_n(&mut cx, &mut slab, subj2, gene2);
         check(&slab, n, &t);
 
-        // core non-collapse. garb = [nym poly vair]; D(0) is no longer a valid
-        // garb noun (the native `Garb` decodes the [nym poly vair] cell shape).
+        // core non-collapse. `Garb::from_noun` needs a [nym poly vair] cell.
         let payload2 = ty_atom_n(&mut cx, &mut slab, "ud", None);
         let ctx = ty_noun_n(&mut cx, &mut slab);
         let garb = {
@@ -13756,10 +13327,10 @@ mod native_ctor_tests {
         assert!(NRc::ptr_eq(&singleton_fork, &fork));
     }
 
-    // STEP 1 unit: reachable_legs of a Hold-over-Cell DAG returns exactly the
-    // hold's leg-id; non-hold types return ∅; and the scoped-fan intersection is 0
-    // when the active set is disjoint from the legset (collapses to the empty-fan
-    // key). Also checks the legset/intern are pure (memoized) per pointer.
+    // reachable_legs of a hold-over-cell DAG is the hold's leg-id, types with no
+    // holds have none, and a scoped-fan intersection disjoint from the legset is
+    // empty (the empty-fan key, 0). Also checks that legsets and subset IDs are
+    // stable across calls.
     #[test]
     fn reachable_legs_and_scoped_fan_intersection() -> Result<()> {
         let mut slab: NounSlab = NounSlab::new();
@@ -14549,8 +14120,8 @@ fn cell_type(slab: &mut NounSlab, head: Noun, tail: Noun) -> Result<Noun> {
     Ok(ty_cell(slab, head, tail))
 }
 
-/// Native cell type constructor: collapse cell(void,_)/cell(_,void) to void.
-#[allow(dead_code)]
+/// Paired `cell_type`: collapses cell(void,_) and cell(_,void) to void.
+#[cfg(test)]
 fn cell_type_n(
     cx: &mut Context,
     slab: &mut NounSlab,

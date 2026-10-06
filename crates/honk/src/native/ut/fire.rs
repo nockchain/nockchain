@@ -1,13 +1,9 @@
 use super::*;
 
 impl<'a> Ut<'a> {
-    // ATOMIC FLIP (C-final fire): `fine` reads the now-native Port (typ: NRc<NTy>)
-    // and returns a native type plus canonical formula ID. `fire` is native end-to-end: arm
-    // CORES are native `NRc<NTy>` (the deepening-subject site), foot stays a noun
-    // (it carries poly + the hoon arm-spec). The Type<->Noun round-trips that
-    // bracketed every fire call (`live_to_noun` the arm cores in, `native_of` the
-    // result out) are gone — the arm cores in `Opal::Arm` are already native, and
-    // the result feeds native `nice`/`fond`/find natively.
+    // `fine` resolves a `Port` to a native type and a formula ID. In `fire`, arm
+    // cores are native types and each foot is a noun carrying the poly and the
+    // hoon arm-spec.
     pub(super) fn fine(&mut self, port: &Port) -> Result<(NRc<NTy>, FormulaId)> {
         match port {
             Port::Synthetic { typ, formula } => Ok((typ.clone(), *formula)),
@@ -18,7 +14,6 @@ impl<'a> Ut<'a> {
                 }
                 Opal::Arm { axis, arms } => {
                     let axe = tend_big(&palo.vein)?;
-                    // fire is native: the arm cores are already `NRc<NTy>`.
                     let ty = self.fire(arms)?;
                     let slot = self.formula_slot(axe);
                     let formula = self.formula_arena.kick(axis.clone(), slot);
@@ -44,7 +39,6 @@ impl<'a> Ut<'a> {
         hoon: Noun,
         dry_vet_checks_active: bool,
     ) -> Result<NRc<NTy>> {
-        // Destructure the core natively: payload + coil parts (garb/context/rest).
         let NTy::Core {
             payload,
             garb,
@@ -60,8 +54,8 @@ impl<'a> Ut<'a> {
             return Err(CompilerError::Noun("fire-dry".to_string()));
         }
         let dox = self.core_dox_native(garb, &context, rest)?;
-        // hold = [%hold dox hoon], interned identically to the old
-        // ty_hold_cached(dox_noun, hoon) -> native_of path (RISK 5).
+        // `[%hold dox hoon]`, interned to the same type that `native_of` gives
+        // for the noun `ty_hold_cached(dox, hoon)`.
         Ok(self.cons_hold(dox, hoon))
     }
 
@@ -79,14 +73,13 @@ impl<'a> Ut<'a> {
         let garb = garb.clone();
         let context = context.clone();
         let rest = rest.clone();
-        // redo_wet_payload keeps its (Noun, Noun) -> Noun boundary: lower the two
-        // leaves (payload + context) here, redo, then re-lift the redone payload.
+        // `redo_wet_payload` takes and returns nouns: lower payload and context,
+        // redo, then lift the redone payload back to native.
         let payload_noun = live_to_noun(&mut self.cx, &payload, self.slab);
         let context_noun = live_to_noun(&mut self.cx, &context, self.slab);
         let redone_payload_noun = self.redo_wet_payload(payload_noun, context_noun)?;
         let redone_payload = self.native_of_cached(redone_payload_noun)?;
-        // Rebuild the redone core natively via cons_core (mirrors
-        // coil_from_parts + ty_core: same garb/context/rest leaves, new payload).
+        // Same garb, context, and rest; new payload.
         let redone_core = cons_core(
             &mut self.cx,
             redone_payload,
@@ -96,8 +89,7 @@ impl<'a> Ut<'a> {
         );
         let dox = self.core_dox_native(&garb, &context, &rest)?;
         self.mull_check_wet(redone_core.clone(), dox, hoon)?;
-        // hold = [%hold redone_core hoon], interned identically to the old
-        // ty_hold_cached(redone_core_noun, hoon) -> native_of path (RISK 5).
+        // `[%hold redone_core hoon]`, interned the same way as in `fire_arm_dry`.
         Ok(self.cons_hold(redone_core, hoon))
     }
 
@@ -139,10 +131,9 @@ impl<'a> Ut<'a> {
         }
     }
 
-    /// Native `%hold` constructor — `[%hold inner hoon]`, interned through the one
-    /// canonical table. The gene is the RAW arm hoon exactly as `++fire`
-    /// (hoon-138.hoon:9529) stores it: holds carry the verbatim tome hoon and
-    /// `++open` lowering happens only when a hold is forced (repo/rest/play).
+    /// Builds the interned `[%hold inner hoon]`. The gene is the raw arm hoon, as
+    /// `++fire` (hoon-138.hoon:9529) stores it; `++open` lowering happens only
+    /// when the hold is forced (repo/rest/play).
     fn cons_hold(&mut self, inner: NRc<NTy>, hoon: Noun) -> NRc<NTy> {
         let gene = live_leaf_from_noun(&mut self.cx, hoon, &self.slab.noun_space());
         live_intern(
@@ -154,9 +145,8 @@ impl<'a> Ut<'a> {
         )
     }
 
-    // Noun `core_dox`: superseded by `core_dox_native` on the live fire path
-    // (which builds the SAME context-core natively without lowering the payload).
-    // Retained as the test oracle for `core_dox_uses_context_payload`.
+    // Noun counterpart of `core_dox_native`, exercised by the
+    // `core_dox_uses_context_payload` test.
     #[cfg(test)]
     pub(super) fn core_dox(&mut self, core: Noun) -> Result<Noun> {
         let space = self.slab.noun_space();

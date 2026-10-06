@@ -62,12 +62,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         compiler_fingerprint(&manifest_dir)?
     );
 
-    // The canonical hoonc `$octs` type is a required parity input: data
-    // imports (`/*`) must vase their bytes with hoonc's `$octs` hold, not a
-    // local `[p=@ud q=@]` approximation. Refuse to build without it rather
-    // than embedding an empty placeholder that silently degrades `/*` output.
-    // Regenerate with `just hoonc-octs-type-138-asset` (or the Bazel target).
-    // Bootstrap builds that genuinely lack the checked-in asset may point
+    // Data imports (`/*`) vase their bytes with hoonc's canonical `$octs` hold,
+    // not a local `[p=@ud q=@]` approximation, so the build fails without that
+    // asset instead of embedding an empty placeholder. Regenerate it with
+    // `just hoonc-octs-type-138-asset` (or the Bazel target). Bootstrap builds
+    // that lack the checked-in asset may point
     // HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE at an alternate jam.
     println!("cargo:rerun-if-env-changed=HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE");
     let hoonc_octs_type_asset_path = if let Some(override_path) =

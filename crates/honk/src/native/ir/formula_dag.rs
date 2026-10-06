@@ -1,8 +1,7 @@
 //! Arena-indexed, hash-consed Nock formula DAG.
 //!
-//! Unlike the historical `Rc<Formula>` shadow, this representation is designed
-//! to be the compiler's live formula value. Every child edge is a compact
-//! [`FormulaId`], structurally equal nodes share one ID, and a formula is
+//! This is the compiler's live formula representation. Every child edge is a
+//! compact [`FormulaId`], structurally equal nodes share one ID, and a formula is
 //! materialized into the compile slab at most once. Quoted constants and hint
 //! clues remain opaque leaves: importing `[1 constant]` never walks the
 //! potentially large constant noun.
@@ -237,7 +236,7 @@ impl FormulaArena {
         })
     }
 
-    /// Import a legacy formula noun once. Quoted constants and hint clues are
+    /// Import a formula noun once. Quoted constants and hint clues are
     /// opaque leaves, so this is proportional to formula structure rather than
     /// to the data embedded in it.
     pub fn import(&mut self, noun: Noun, space: &NounSpace) -> Result<FormulaId> {
@@ -327,9 +326,8 @@ impl FormulaArena {
                 _ => FormulaNode::Raw(Leaf::from_noun_raw(noun, space)),
             })
         })();
-        // `%hand` deliberately admits extension and malformed formulas. Treat
-        // anything outside the canonical shape as an opaque leaf rather than
-        // rejecting source the historical noun compiler accepted.
+        // `%hand` admits extension and malformed formulas. Anything outside the
+        // canonical shape becomes an opaque leaf rather than an error.
         let node = decoded.unwrap_or_else(|_| FormulaNode::Raw(Leaf::from_noun_raw(noun, space)));
         let id = self.intern_with_materialized(node, Some(noun));
         if !noun.is_direct() {
@@ -641,8 +639,8 @@ mod tests {
     #[test]
     fn import_preserves_noncanonical_hand_formula_as_opaque() {
         let mut slab = NounSlab::new();
-        // `%hand`'s historical AST encoder uses this noncanonical `%10`
-        // shape. It is source data we must preserve, not reject or reinterpret.
+        // `%hand` source can carry this noncanonical `%10` shape. Import must
+        // preserve it, not reject or reinterpret it.
         let core = T(&mut slab, &[D(0), D(1)]);
         let noun = T(&mut slab, &[D(10), D(2), core]);
         let mut arena = FormulaArena::new();

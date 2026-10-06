@@ -105,11 +105,10 @@ impl BuildCache {
                 {
                     return Err("cache pack hash mismatch".into());
                 }
-                // blake3 above pins these as exactly the bytes the write path
-                // produced, and both write paths only emit canonical
-                // encodings, so decoding validates everything that matters —
-                // re-encoding the whole bundle to prove canonicality cost a
-                // full serialization of every pack on every warm start.
+                // The blake3 check pins these as bytes a write path produced,
+                // and both write paths emit only canonical encodings. Decoding
+                // is enough; a canonicality re-encode would reserialize every
+                // pack on every warm start.
                 let bundle = Rc::new(NasmBundle::from_bytes(&bytes)?);
                 self.loaded_packs
                     .insert(metadata.pack_blake3.clone(), bundle.clone());
@@ -217,11 +216,11 @@ impl BuildCache {
                 pack_bytes: graph.len() as u64,
                 root_name: entry.root_name.to_string(),
             };
-            // Metadata is rename-atomic but deliberately not fsynced: losing a
-            // metadata file to a crash produces a cache miss, which the read
-            // path already tolerates, and per-file F_FULLFSYNC on macOS costs
-            // more than the entire logical write. The pack itself stays synced
-            // above so metadata can never outlive the bytes it points at.
+            // Metadata is rename-atomic but not fsynced. A metadata file lost
+            // to a crash is a cache miss, which the read path tolerates, and
+            // per-file F_FULLFSYNC on macOS costs more than the whole logical
+            // write. The pack is synced above, so metadata never outlives the
+            // bytes it points at.
             atomic_write(
                 &metadata_path,
                 &serde_json::to_vec_pretty(&metadata)?,
@@ -619,8 +618,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cache.stats().writes, 1);
-        // A fresh cache instance must read the prebuilt pack from disk exactly
-        // as it reads packs written through the parsing path.
+        // A fresh cache instance must read the prebuilt pack from disk the same
+        // way it reads packs written through the parsing path.
         let mut fresh = BuildCache::new(temp.path().to_path_buf(), false);
         let cached = fresh
             .read(key, CacheObjectKind::EntryProduct)

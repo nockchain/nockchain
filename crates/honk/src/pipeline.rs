@@ -234,8 +234,8 @@ impl NativeImportResolver {
                     ImportKind::Bar => {
                         // `/*` data imports must declare a mark honk supports.
                         // Only `%jam` (raw jammed-noun inclusion) is
-                        // implemented; reject others rather than silently
-                        // importing them as generic data.
+                        // implemented; other marks are rejected instead of
+                        // being imported as generic data.
                         match import.mark.as_deref() {
                             Some("jam") => NativeImportKind::Data,
                             other => {
@@ -366,9 +366,8 @@ impl NativeImportResolver {
             return Vec::new();
         };
         let required_sys: Vec<(&str, Option<&str>)> = match stem {
-            // Urbit-mode prelude:
-            // non-sys files get zuse in scope.
-            // zuse itself depends on lull. lull expects `..part` from /sys/hoon.
+            // Urbit-mode prelude: non-sys files get zuse in scope, zuse
+            // depends on lull, and lull expects `..part` from /sys/hoon.
             "zuse" => vec![("lull", Some("lull"))],
             "lull" => vec![("hoon", Some("part"))],
             "hoon" => Vec::new(),
@@ -436,9 +435,8 @@ fn parse_leading_imports(source: &str) -> Result<Vec<ScopedImport>> {
             break;
         };
         // A leading `/` whose rune is not an import rune ends the import
-        // block (e.g. the body starts). `/?` (Ford kelvin pin) and `/%`
-        // (propagating build) are import-block runes honk handles
-        // explicitly below.
+        // block. `/?` (Ford kelvin pin) and `/%` (propagating build) are
+        // import-block runes handled below.
         if !matches!(rune, '-' | '+' | '=' | '*' | '#' | '?' | '%') {
             break;
         }
@@ -468,13 +466,13 @@ fn parse_leading_imports(source: &str) -> Result<Vec<ScopedImport>> {
             '+' => imports.extend(parse_import_clause(ImportKind::Lib, clause.as_str())?),
             '-' => imports.extend(parse_import_clause(ImportKind::Sur, clause.as_str())?),
             '#' => imports.extend(parse_import_clause(ImportKind::Dat, clause.as_str())?),
-            // `/?` pins the Ford kelvin version; it is not an import. Accept
-            // and ignore it rather than silently treating it as data.
+            // `/?` pins the Ford kelvin version. It is not an import, so it is
+            // accepted and ignored.
             '?' => {
                 tracing::debug!(clause = %clause, "ignoring /? Ford version pin");
             }
-            // `/%` (propagating build) is a real Ford rune honk does not
-            // implement; reject rather than silently dropping it.
+            // `/%` (propagating build) is a Ford rune honk does not implement,
+            // so it is rejected rather than dropped.
             '%' => {
                 return Err(CompilerError::UnsupportedExpr(format!(
                     "/% imports are not supported by honk: `/%{clause}`"
@@ -813,9 +811,9 @@ fn hoon_path_for_any(path: &Path, deps_dir: &Path) -> Vec<String> {
         return hoon_path_for_absolute(rel);
     }
 
-    // Entry files outside the deps root: prefer a cwd-relative spot so the
-    // artifact does not bake in the build machine's absolute paths (same
-    // canonicalization dbug_path applies to error display).
+    // An entry file outside the deps root gets a cwd-relative spot, so the
+    // artifact does not embed the build machine's absolute paths. dbug_path
+    // shortens error-display paths the same way.
     if let Ok(cwd) = std::env::current_dir() {
         if let Ok(canonical_cwd) = cwd.canonicalize() {
             if let Ok(rel) = canonical_path.strip_prefix(&canonical_cwd) {

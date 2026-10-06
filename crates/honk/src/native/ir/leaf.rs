@@ -1,14 +1,11 @@
-//! Provenanced owned leaves for the native IR (plan §3.9, RT-04).
+//! Noun leaves carried by the native IR.
 //!
-//! Formulas (and, for typed Dynock, types) carry noun leaves: quoted constants
-//! (`[1 const]`), hint clues, dbug spot tuples. A **bare `Noun`** leaf is an
-//! alien-pointer hazard, so the IR carries an owned, provenance-free
-//! representation: a small direct atom inline, or owned jam bytes for anything
-//! larger. `to_noun` materializes the leaf into a destination slab through a
-//! checked copy (never splicing a foreign pointer). The production copy-cache
-//! lives in `docs/native-compiler/PHASE0-PROVENANCE-DESIGN.md`; this is the
-//! Phase-1 shadow form.
-#![allow(dead_code)]
+//! Types and formulas carry noun leaves: quoted constants (`[1 const]`), hint
+//! clues, dbug spots, and the non-recursive parts of types. A leaf is a small
+//! atom inline, owned jam bytes (the slab-independent form used by the
+//! round-trip checks), or a raw noun in the compile slab (the live compile
+//! path). `to_noun` copies the leaf into a destination slab. See
+//! `docs/native-compiler/PHASE0-PROVENANCE-DESIGN.md`.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -20,44 +17,40 @@ use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace};
 
 use crate::native::identity::*;
 
-/// An owned, provenance-safe noun leaf.
+/// A noun leaf carried by a native type or formula.
 ///
-/// `Jammed` caches a content hash computed once at creation, so hash-consing the
-/// types/formulas that CARRY these leaves (core coil, fork set, etc.) is O(1) per
-/// leaf instead of re-hashing the (potentially large) bytes on every intern —
-/// without this, interning deepened types with big coils is O(N^2). `Eq`
-/// short-circuits on `Arc` pointer identity (the common case, since `native_of`
-/// memoizes leaves by source-noun identity), falling back to a content compare
-/// only on a hash match across distinct allocations.
+/// `Jammed` and `Noun` cache a hash (content hash or mug) computed once at
+/// creation, so hash-consing the types and formulas that carry them is O(1) per
+/// leaf instead of rehashing large leaves on every intern. `Jammed` equality
+/// short-circuits on `Arc` pointer identity and compares bytes only on a hash
+/// match across distinct allocations.
 #[derive(Clone, Debug)]
 pub enum Leaf {
-    /// A direct (≤ 63-bit) atom, stored inline.
+    /// An atom that fits in a `u64`, stored inline.
     Direct(u64),
-    /// Anything larger (big atoms, cells) as owned jam bytes + a cached content
-    /// hash — provenance-free, cued into the destination slab by `to_noun`.
+    /// Anything larger (big atoms, cells) as owned jam bytes plus a cached
+    /// content hash; `to_noun` cues it into the destination slab.
     Jammed(Arc<[u8]>, JamHash),
-    /// A RAW noun + cached mug. Carried WITHOUT jam/cue round-trips — the
-    /// jam-elimination win. Safe because the compile slab never recycles the
-    /// address the noun points at (the frame arena was retired), so the noun
-    /// stays live for the whole compile. Built only via [`Leaf::from_noun_raw`]
-    /// on the LIVE compile path; the oracle path ([`Leaf::from_noun`]) uses
-    /// `Jammed`. The two never share an interned table within one compile, so the
-    /// cross-variant `PartialEq => false` is never exercised.
+    /// A raw noun plus its cached mug, carried without a jam/cue round trip. The
+    /// compile slab never recycles the noun's address, so it stays valid for the
+    /// whole compile. Built only by [`Leaf::from_noun_raw`] on the live compile
+    /// path; the round-trip path ([`Leaf::from_noun`]) uses `Jammed`. The two
+    /// never share an intern table, so the cross-variant `PartialEq => false`
+    /// case never arises.
     Noun(Noun, NounMug),
 }
 
 impl Leaf {
-    /// Capture `noun` (resolved in `space`) as an owned, provenance-free leaf:
-    /// atoms `<= u64` become `Direct`, everything larger is `Jammed` (owned jam
-    /// bytes). The ORACLE path — slab-agnostic, used by `Type::from_noun` and the
-    /// round-trip oracle. The LIVE compile path uses [`Leaf::from_noun_raw`].
+    /// Capture `noun` (resolved in `space`) as an owned leaf: atoms `<= u64`
+    /// become `Direct`, everything larger is `Jammed`. Slab-independent; used by
+    /// the round-trip checks. The live compile path uses [`Leaf::from_noun_raw`].
     pub fn from_noun(noun: Noun, space: &NounSpace) -> Self {
         if let Ok(atom) = noun.in_space(space).as_atom() {
             if let Ok(v) = atom.as_u64() {
                 return Leaf::Direct(v);
             }
         }
-        // Larger / cell: jam through a scratch slab so we own the bytes.
+        // Larger atoms and cells: jam through a scratch slab to own the bytes.
         let mut scratch: NounSlab = NounSlab::new();
         scratch.copy_into(noun, space);
         let bytes: Arc<[u8]> = Arc::from(&scratch.jam()[..]);
@@ -66,11 +59,10 @@ impl Leaf {
         Leaf::Jammed(bytes, JamHash(hasher.finish()))
     }
 
-    /// Capture `noun` as a LIVE-path leaf: atoms `<= u64` become `Direct`,
-    /// everything larger is carried as a raw `Leaf::Noun` (no jam/cue round-trip
-    /// — the jam-elimination win). Safe because the compile slab never recycles
-    /// the noun's address (the frame arena was retired), so the raw noun stays
-    /// live for the whole compile.
+    /// Capture `noun` for the live compile path: atoms `<= u64` become `Direct`,
+    /// everything larger is carried as a raw `Leaf::Noun` without a jam/cue round
+    /// trip. The compile slab never recycles the noun's address, so the raw noun
+    /// stays valid for the whole compile.
     pub fn from_noun_raw(noun: Noun, space: &NounSpace) -> Self {
         if let Ok(atom) = noun.in_space(space).as_atom() {
             if let Ok(v) = atom.as_u64() {
@@ -92,9 +84,8 @@ impl Leaf {
                     .expect("leaf jam bytes must cue");
                 dst.copy_into(cued, &scratch.noun_space())
             }
-            // Generic/oracle path: copy into a possibly-different slab. The LIVE
-            // path (`live_leaf_to_noun`) returns the noun as-is (no copy) since
-            // it is already `dst`-resident — that is the cue elimination.
+            // Copy into a possibly different slab. `live_leaf_to_noun` skips the
+            // copy because the noun already lives in the compile slab.
             Leaf::Noun(n, _) => dst.copy_into(*n, &NounSpace::empty()),
         }
     }
@@ -107,10 +98,9 @@ impl PartialEq for Leaf {
             (Leaf::Jammed(a, ha), Leaf::Jammed(b, hb)) => {
                 ha == hb && (Arc::ptr_eq(a, b) || a[..] == b[..])
             }
-            // Mug pre-filter then the EXACT structural compare — the same
-            // equivalence jam-equality gives for `Jammed`, so interning collapses
-            // `Noun` leaves to the identical canonical set. Cross-variant pairs
-            // never occur within one compile (raw is compile-wide-constant).
+            // Mug pre-filter, then an exact structural compare: the same
+            // equivalence jam equality gives for `Jammed`. Cross-variant pairs
+            // never occur within one intern table.
             (Leaf::Noun(n1, m1), Leaf::Noun(n2, m2)) => {
                 m1 == m2
                     && crate::native::noun::noun_eq(*n1, *n2, &NounSpace::empty()).unwrap_or(false)

@@ -219,9 +219,8 @@ fn create_native_test_context() -> Context {
 
 #[tokio::test]
 async fn core_extension_preserves_previous_arms_native() {
-    // This mirrors the hoon-138 "layering" pattern:
-    // a core (`|%`) is compiled, then a second `|%` is compiled in that core-subject,
-    // and should still be able to resolve earlier arms (unadorned, without `^`).
+    // Mirrors hoon-138 core layering: a second `|%` compiled against a first `|%`
+    // subject resolves the earlier arms by bare name (without `^`).
     let expr = parse_hoon_test_source_expr("core_extension_preserves_previous_arms.hoon");
     let mut compiler = native_compiler().await;
     let compiled = compiler.compile_expr(&expr).expect("compile failed");
@@ -234,8 +233,7 @@ async fn core_extension_preserves_previous_arms_native() {
 #[test]
 fn trap_recursion_can_update_sample_field_native() {
     // hoon-138 `++met` uses a `|-` trap and recurses with `$()` updates targeting sample faces.
-    // This should resolve wings like `b` correctly even when the trap subject has been extended
-    // via `=+` bindings.
+    // Wings like `b` must resolve even though `=+` has extended the trap subject.
     let expr = parse_expr(
         r#"|=  [a=@ b=@]
 ^-  @
@@ -290,8 +288,8 @@ fn trap_recursion_sample_field_with_alias_mold_native() {
 
 #[test]
 fn trap_recursion_sample_field_with_container_molds_native() {
-    // Reproduces the surrounding hoon-138 "containers" molds (`bloq`, `step`, `bite`) to ensure
-    // `$()` recursion still resolves sample faces in the presence of nested faced molds.
+    // Reproduces the surrounding hoon-138 "containers" molds (`bloq`, `step`, `bite`) to check
+    // that `$()` recursion resolves sample faces in the presence of nested faced molds.
     let expr = parse_expr(
         r#"|%
 +$  bloq  @
@@ -322,8 +320,8 @@ fn trap_recursion_sample_field_with_container_molds_native() {
 
 #[test]
 fn layered_core_trap_recursion_resolves_sample_faces_native() {
-    // Same idea as hoon-138 layering: build a core (layer1), then extend it (layer2) and ensure
-    // a trapped `$()` recursion inside a layer2 arm can still resolve sample faces.
+    // Same idea as hoon-138 layering: build a core (layer1), then extend it (layer2); a trapped
+    // `$()` recursion inside a layer2 arm must resolve sample faces.
     let expr = parse_expr(
         r#"=>  |%
 +$  bloq  @
@@ -1376,12 +1374,12 @@ async fn compile_bloq_example_native_fast_repro() {
     let mut native = native_compiler().await;
     let mut compiled = native.compile_expr(&expr).expect("native compile failed");
 
-    // hoon-138's ++fire always returns [%hold core hoon], so the top-level type
-    // tag is "hold".  The hold expands (via repo) to a %hint-wrapped atom type,
-    // but mint/blow return the hold as-is — matching hoon-138 semantics.
+    // hoon-138's ++fire returns [%hold core hoon] for a dry arm, so the top-level
+    // type tag is "hold". The hold expands (via repo) to a %hint-wrapped atom type,
+    // but mint/blow return the hold unexpanded, as hoon-138 does.
     assert_eq!(compiled_type_tag(&compiled).as_deref(), Some("hold"));
-    // The formula evaluates to 0 (the bunt of `@`) because `++musk` constant-folds
-    // the `=<($ bloq)` example to `[1 0]`, yielding the atom default value.
+    // The formula evaluates to 0, the bunt of `@`, because `++musk` constant-folds
+    // the `=<($ bloq)` example to `[1 0]`.
     let desc = eval_formula_desc(&compiled.jam());
     assert_eq!(desc, "0", "unexpected bloq formula result shape: {desc}");
 }
@@ -2042,11 +2040,11 @@ async fn compile_lost_error_includes_dbug_location_metadata() {
     assert_eq!(location.end_col, Some(0));
 }
 
-/// Minimal reproduction of the kethep-before-barhep bug:
-/// `^-` placed before `=+ c=0 |-` causes "find failed for wing [Term("c")]"
+/// Kethep before barhep: with `^-` placed before `=+ c=0 |-`, wing `c` must resolve inside
+/// the trap rather than fail with "find failed for wing [Term("c")]".
 #[test]
 fn compile_kethep_barhep_wing_c_native() {
-    // This is the minimal repro from hoon-138's ++dvr arm
+    // Minimal repro from hoon-138's ++dvr arm.
     let src = r#"|=  [a=@ b=@]
 ^-  [p=@ q=@]
 =+  c=0
@@ -2126,9 +2124,7 @@ a"#;
 }
 
 /// Minimal hoon-138 style reproduction: `++flop` uses `|*`, `=> .(a (homo a))`, `^+ a`, and a `|-`
-/// trap that references `a` (and `t.a` / `i.a`).
-///
-/// Currently, hoon-138 list-logic fails in `++flop` with:
+/// trap that references `a` (and `t.a` / `i.a`). Guards against `++flop` failing with
 /// `native mint: find failed for wing [Term("a")]`.
 #[test]
 fn compile_list_flop_trap_wing_a_native() {
@@ -2170,7 +2166,7 @@ fn compile_list_flop_trap_wing_a_native() {
 
 #[test]
 fn compile_chained_layers_fl_rou_rau_vet_true_native() {
-    // Hoon-138 defines `++fn` in an earlier core layer than `++fl`.  Ensure strict mode can:
+    // Hoon-138 defines `++fn` in an earlier core layer than `++fl`. Strict mode must:
     // - resolve `fn` via the parent chain
     // - compile `++fl`'s nested `=> ~% ... |%` structure
     // - compile `++rou` calling `++rau` where `++rau` uses `a.a`
@@ -2354,8 +2350,7 @@ u.a
     );
 }
 
-/// `%set-logic`-style `++dif` recursion shape with local `d`/`e` bindings and `n.d`/`r.d` access.
-/// Minimal repro: |- with $ recursion
+/// Minimal repro: `|-` with `$` recursion.
 #[test]
 fn compile_barhep_dollar_recursion_minimal() {
     let expr = parse_expr(
@@ -2378,7 +2373,8 @@ $(a 1)"#,
     );
 }
 
-/// This is intended as a fast repro for wing-resolution regressions in the `in/dif` path.
+/// `%set-logic`-style `++dif` recursion shape with local `d`/`e` bindings and `n.d`/`r.d` access;
+/// a fast repro for wing-resolution regressions in the `in/dif` path.
 #[test]
 fn compile_set_logic_dif_local_d_recursion_vet_false_native() {
     let expr = parse_expr(
@@ -2427,8 +2423,8 @@ fn compile_set_logic_dif_local_d_recursion_vet_false_native() {
     );
 }
 
-/// Same as `compile_wing_u_after_wutsig_tisbar_unit_make_vet_true_native`, but with a recursive
-/// `list` mold to match hoon-138-style `unit (list @)` samples.
+/// `?~` narrowing of a `=|`-bound unit keeps its `u` face, with a recursive `list` mold to
+/// match hoon-138-style `unit (list @)` samples.
 #[test]
 fn compile_wing_u_after_wutsig_tisbar_unit_list_make_vet_true_native() {
     let src = r#"=>
@@ -2461,9 +2457,9 @@ fn compile_wing_u_after_wutsig_tisbar_unit_list_make_vet_true_native() {
     );
 }
 
-/// Like `compile_wing_u_after_wutsig_via_tilde_get_vet_true_native`, but with an outer subject that
-/// does *not* itself contain a `u` face. This catches cases where we accidentally type the result
-/// of `~(get ...)` as the gate core rather than the *unit* returned by slamming it.
+/// `u.c` resolves after `?~` when `c` comes from `~(get ...)` and the outer subject has no `u`
+/// face. This catches typing the result of `~(get ...)` as the gate core rather than the unit
+/// returned by slamming it.
 #[test]
 fn compile_wing_u_after_wutsig_via_tilde_get_outer_subject_has_no_u_vet_true_native() {
     let src = r#"|%
@@ -2508,11 +2504,10 @@ fn compile_wing_u_after_wutsig_via_tilde_get_outer_subject_has_no_u_vet_true_nat
 // =========================================================================
 // Targeted strict semantic parity tests
 //
-// These are source-Hoon, parse-valid samples chosen to exercise the strict
-// rejection/acceptance surfaces where honk can drift from canonical ++mint,
-// ++fire, and ++mull behavior.  They intentionally do not run hoonc; each case
-// was chosen as a stable semantic oracle and the automated test only runs honk.
-// The helper calls ++mint rather than ++play because ++play disables vet recursively.
+// Source-Hoon, parse-valid samples that exercise the strict rejection/acceptance
+// surfaces where honk can drift from canonical ++mint, ++fire, and ++mull. Each
+// case is a stable semantic oracle, so the tests run only honk, not hoonc. The
+// helper calls ++mint rather than ++play because ++play disables vet recursively.
 // =========================================================================
 
 fn mint_source_with_vet(src: &str, vet: bool) -> Result<(), String> {
@@ -2585,7 +2580,7 @@ fn metamorphic_seed_sources() -> Vec<(&'static str, String)> {
         ),
     ];
 
-    // Finite property-style generator over simple molds.  Each generated source has the
+    // Finite property-style generator over simple molds. Each generated source has the
     // same semantic shape; the cross-product exercises parser lowering, ++play, ++mint,
     // and ++nice with different mold structures without invoking hoonc in steady-state tests.
     for (idx, spec) in ["@", "[@ @]", "?", "(unit @)", "$?(~ [@ @])"]
@@ -3200,20 +3195,16 @@ fn strict_source_vet_only_rejections_compile_without_vet() {
 // =========================================================================
 // Wet polymorphism (++mull) tests
 //
-// These test the complete ++mull implementation. Tests are structured as:
-// 1. Unit tests: verify mull succeeds/fails for specific wet gate patterns
-// 2. Oracle parity tests: compare native compiler output against pre-generated
-//    Bazel artifacts for wet polymorphism hoon files
+// Wet gate patterns that must compile with vet on (so ++mull checks the wet
+// arms) and with vet off.
 // =========================================================================
 
-// --- Unit tests: basic wet gate compilation with vet=true ---
-
-/// Helper: parse and compile with vet=true (mull is active for wet arms)
+/// Parses and mints with vet=true, so mull checks wet arms.
 fn compile_wet_with_vet(src: &str) -> Result<(), String> {
     mint_source_with_vet(src, true)
 }
 
-/// Helper: parse and compile with vet=false
+/// Parses and mints with vet=false.
 fn compile_wet_without_vet(src: &str) -> Result<(), String> {
     mint_source_with_vet(src, false)
 }
