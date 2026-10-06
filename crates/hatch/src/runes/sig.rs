@@ -12,6 +12,7 @@ pub fn sig_runes_tall<'src>(
     choice((
         just('%').ignore_then(sigcen(hoon.clone())),
         just('/').ignore_then(sigfas(hoon.clone())),
+        just('$').ignore_then(sigbuc(hoon.clone())),
         just('_').ignore_then(sigcab(hoon.clone())),
         just('+').ignore_then(siglus(hoon.clone())),
         just('!').ignore_then(sigzap(hoon.clone())),
@@ -31,6 +32,7 @@ pub fn sig_runes_wide<'src>(
     choice((
         just('%').ignore_then(sigcen_wide(hoon_wide.clone())),
         just('/').ignore_then(sigfas_wide(hoon_wide.clone())),
+        just('$').ignore_then(sigbuc_wide(hoon_wide.clone())),
         just('!').ignore_then(sigzap_wide(hoon_wide.clone())),
         just('<').ignore_then(siggal_wide(hoon_wide.clone())),
         just('?').ignore_then(sigwut_wide(hoon_wide.clone())),
@@ -138,9 +140,31 @@ pub fn sigzap<'src>(
 }
 
 pub fn sigzap_wide<'src>(
+    hoon_wide: impl ParserExt<'src, Hoon>,
+) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
+    two_hoons_wide(hoon_wide.clone())
+        .delimited_by(just('('), just(')'))
+        .map(|(p, q)| Hoon::SigZap(Box::new(p), Box::new(q)))
+}
+
+pub fn sigbuc<'src>(
     hoon: impl ParserExt<'src, Hoon>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    two_hoons_tall(hoon.clone()).map(|(p, q)| Hoon::SigZap(Box::new(p), Box::new(q)))
+    gap()
+        .ignore_then(term())
+        .then_ignore(gap())
+        .then(hoon.clone())
+        .map(|(p, q)| Hoon::SigBuc(p, Box::new(q)))
+}
+
+pub fn sigbuc_wide<'src>(
+    hoon_wide: impl ParserExt<'src, Hoon>,
+) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
+    term()
+        .then_ignore(just(' '))
+        .then(hoon_wide.clone())
+        .delimited_by(just('('), just(')'))
+        .map(|(p, q)| Hoon::SigBuc(p, Box::new(q)))
 }
 
 pub fn sigbar<'src>(

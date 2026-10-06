@@ -1,0 +1,54 @@
+load("//:rules_hoon/defs.bzl", "honk_library", "hoon_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Coverage probes: each `*.hoon` here is compiled by hoonc and honk
+# (--arbitrary, empty deps) and the jams must be byte-identical. Probes in
+# `divergent/` pin known divergences and are tagged manual until fixed.
+PROBES = [f[:-len(".hoon")] for f in glob(["*.hoon"], allow_empty = True)]
+
+DIVERGENT = [f[:-len(".hoon")] for f in glob(["divergent/*.hoon"], allow_empty = True)]
+
+[
+    hoon_library(
+        name = "{}_ref".format(name),
+        src = "{}.hoon".format(name),
+        arbitrary = True,
+        output = True,
+        deps_dir = "_empty_hoon_deps",
+    )
+    for name in PROBES + DIVERGENT
+]
+
+[
+    honk_library(
+        name = "{}_native".format(name),
+        src = "{}.hoon".format(name),
+        arbitrary = True,
+        deps_dir = "_empty_hoon_deps",
+    )
+    for name in PROBES + DIVERGENT
+]
+
+[
+    sh_test(
+        name = "{}_parity_test".format(name),
+        size = "small",
+        srcs = ["//assets/native:kernel_parity_test.sh"],
+        args = [
+            "$(rootpath :{}_ref)".format(name),
+            "$(rootpath :{}_native)".format(name),
+        ],
+        data = [
+            ":{}_ref".format(name),
+            ":{}_native".format(name),
+        ],
+        tags = ["manual"] if name in DIVERGENT else [],
+    )
+    for name in PROBES + DIVERGENT
+]
+
+test_suite(
+    name = "coverage_parity_test",
+    tests = ["{}_parity_test".format(name) for name in PROBES],
+)

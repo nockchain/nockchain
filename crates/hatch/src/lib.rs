@@ -30,3 +30,6 @@ extern crate self as hatch;
 mod parser_main;
 
 pub use parser_main::parser as native_parser;
+
+#[cfg(test)]
+mod cov;

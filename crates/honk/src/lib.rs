@@ -117,3 +117,8 @@ pub fn wrap_formula_as_dynock_trap(slab: &mut NounSlab, formula: Noun) -> Noun {
     let battery = T(slab, &[D(1), formula]);
     T(slab, &[battery, D(0)])
 }
+
+#[cfg(test)]
+mod cov_c6;
+#[cfg(test)]
+mod cov_t1;

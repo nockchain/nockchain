@@ -121,7 +121,10 @@ impl<'a> Ut<'a> {
         let mor = self.fond(sut, way, tail)?;
 
         let out = match mor {
-            Pony::Void => Ok(Pony::Void),
+            // hoon-138 `++fond` switches on `-.mor` without a `?~` guard, so a
+            // void search for the rest of the wing crashes, in `feel` as well
+            // as in `find`.
+            Pony::Void => Err(CompilerError::Noun("fond: void wing tail".to_string())),
             Pony::Unmatched(skip) => Ok(Pony::Unmatched(skip)),
             Pony::Synthetic { typ, formula } => {
                 let goal = cons_noun(&mut self.cx);
@@ -459,7 +462,7 @@ impl<'a> Ut<'a> {
                                 continue;
                             }
                             Pony::Palo(palo) => {
-                                let (fid_ty_n, fid_formula) = ut.fine(&Port::Palo(palo))?;
+                                let (fid_ty_n, fid_formula) = ut.fine(&sut, &Port::Palo(palo))?;
                                 let composed =
                                     compose_axis_formula(ut, axe.clone(), bridge_formula);
                                 let formula = ut.formula_comb(composed, fid_formula);
@@ -586,6 +589,7 @@ impl<'a> Ut<'a> {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn resolve_wing_axis(&mut self, sut: NRc<NTy>, wing: &WingType) -> Result<BigUint> {
         if wing.is_empty() {
             return Ok(BigUint::from(1u32));
@@ -595,6 +599,7 @@ impl<'a> Ut<'a> {
     }
 
     /// `resolve_wing_axis` for a noun subject, lifted to native first.
+    #[cfg(test)]
     pub(super) fn resolve_wing_axis_noun(&mut self, sut: Noun, wing: &WingType) -> Result<BigUint> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.resolve_wing_axis(sut_n, wing)

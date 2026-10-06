@@ -1,0 +1,308 @@
+load("//:rules_hoon/defs.bzl", "honk_library", "hoon_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Coverage probes: each `*.hoon` here is compiled by hoonc and honk
+# (--arbitrary, empty deps) and the jams must be byte-identical. Probes in
+# `divergent/` pin known divergences and are tagged manual until fixed.
+PROBES = [f[:-len(".hoon")] for f in glob(["*.hoon"], allow_empty = True)]
+
+DIVERGENT = [f[:-len(".hoon")] for f in glob(["divergent/*.hoon"], allow_empty = True)]
+
+[
+    hoon_library(
+        name = "{}_ref".format(name),
+        src = "{}.hoon".format(name),
+        arbitrary = True,
+        output = True,
+        deps_dir = "_empty_hoon_deps",
+    )
+    for name in PROBES + DIVERGENT
+]
+
+[
+    honk_library(
+        name = "{}_native".format(name),
+        src = "{}.hoon".format(name),
+        arbitrary = True,
+        deps_dir = "_empty_hoon_deps",
+    )
+    for name in PROBES + DIVERGENT
+]
+
+[
+    sh_test(
+        name = "{}_parity_test".format(name),
+        size = "small",
+        srcs = ["//assets/native:kernel_parity_test.sh"],
+        args = [
+            "$(rootpath :{}_ref)".format(name),
+            "$(rootpath :{}_native)".format(name),
+        ],
+        data = [
+            ":{}_ref".format(name),
+            ":{}_native".format(name),
+        ],
+        tags = ["manual"] if name in DIVERGENT else [],
+    )
+    for name in PROBES + DIVERGENT
+]
+
+
+# c6 multi-file pairings. Import resolution and kernel (standard-mode) builds
+# do not fit the single-file probe format above, so each pairing is
+# (name, entry, dependency root, arbitrary): the entry and the dependency root
+# are relative to this package, and every file under the root is an input both
+# compilers see. Divergent pairings pin known hoonc/honk disagreements (see
+# UNCOVERED.md); their tests are tagged manual.
+C6_PAIRINGS = [
+    ("c6_imports", "imports/app/entry.hoon", "imports", True),
+    ("c6_imports_kernel", "imports/app/kernel.hoon", "imports", False),
+    ("c6_outside_kernel", "outside/app/kernel.hoon", "outside/deps", False),
+    ("c6_sur_lib_spot", "sur-lib-spot/app/entry.hoon", "sur-lib-spot", True),
+    ("c6_dat_eager", "dat-eager/app/entry.hoon", "dat-eager", True),
+    ("c6_dat_core", "dat-core/app/entry.hoon", "dat-core", True),
+    ("c6_comment_after_comma", "comment-after-comma/app/entry.hoon", "comment-after-comma", True),
+    ("c6_blank_continuation", "blank-continuation/app/entry.hoon", "blank-continuation", True),
+    ("c6_double_hyphen", "double-hyphen/app/entry.hoon", "double-hyphen", True),
+    ("c6_bar_mark", "bar-mark/app/entry.hoon", "bar-mark", True),
+    ("c6_bar_hoon", "bar-hoon/app/entry.hoon", "bar-hoon", True),
+    ("c6_hoon_root_marker", "root-marker/a/open/hoon/app/kernel.hoon", "root-marker/b/open/hoon", False),
+]
+
+C6_DIVERGENT_PAIRINGS = []
+
+C6_PACKAGE = "crates/honk/test-assets/type-probes/coverage/c6"
+
+[
+    hoon_library(
+        name = "{}_ref".format(name),
+        src = src,
+        arbitrary = arbitrary,
+        output = True,
+        deps = glob(["{}/**".format(root)], exclude = [src]),
+        deps_dir = "{}/{}".format(C6_PACKAGE, root),
+    )
+    for name, src, root, arbitrary in C6_PAIRINGS + C6_DIVERGENT_PAIRINGS
+]
+
+[
+    honk_library(
+        name = "{}_native".format(name),
+        src = src,
+        arbitrary = arbitrary,
+        deps = glob(["{}/**".format(root)], exclude = [src]),
+        deps_dir = "{}/{}".format(C6_PACKAGE, root),
+    )
+    for name, src, root, arbitrary in C6_PAIRINGS + C6_DIVERGENT_PAIRINGS
+]
+
+[
+    sh_test(
+        name = "{}_parity_test".format(name),
+        size = "small",
+        srcs = ["//assets/native:kernel_parity_test.sh"],
+        args = [
+            "$(rootpath :{}_ref)".format(name),
+            "$(rootpath :{}_native)".format(name),
+        ],
+        data = [
+            ":{}_ref".format(name),
+            ":{}_native".format(name),
+        ],
+        tags = ["manual"] if name.startswith("divergent/") else [],
+    )
+    for name, _, _, _ in C6_PAIRINGS + C6_DIVERGENT_PAIRINGS
+]
+
+
+# c6 rejection trees: both compilers must refuse to build the entry against
+# the dependency root (verdict = artifact absence, rejection_tree_test.sh).
+# Each is (name, dependency root under reject/); the entry is app/entry.hoon.
+C6_REJECTION_TREES = [
+    ("bar_bare_mark", "bar-bare-mark"),
+    ("bar_star_face", "bar-star-face"),
+    ("lib_before_sur", "lib-before-sur"),
+    ("one_space_gap", "one-space-gap"),
+    ("raw_after_dat", "raw-after-dat"),
+    ("skipped_dir", "skipped-dir"),
+    ("tab_continuation", "tab-continuation"),
+    ("tab_in_comment", "tab-in-comment"),
+    ("trailing_comma", "trailing-comma"),
+    ("unreachable_bad_path", "unreachable-bad-path"),
+    ("unreachable_broken_file", "unreachable-broken-file"),
+    ("unreachable_cycle", "unreachable-cycle"),
+    ("unreachable_missing_import", "unreachable-missing-import"),
+]
+
+# Rejection trees whose entry is built as a kernel (standard mode) rather than
+# with --arbitrary.
+C6_STANDARD_REJECTION_TREES = [
+    ("standard_not_gate", "standard-not-gate"),
+]
+
+[
+    sh_test(
+        name = "c6_reject_{}_test".format(name),
+        size = "small",
+        srcs = ["rejection_tree_test.sh"],
+        args = [
+            "$(rootpath //crates/hoonc:hoonc_bin)",
+            "$(rootpath //crates/honk:honk)",
+            "$(rootpath //hoon/common:hoon.hoon)",
+            "$(rootpath reject/{}/app/entry.hoon)".format(root),
+            "{}/reject/{}".format(C6_PACKAGE, root),
+        ] + mode,
+        data = glob(["reject/{}/**".format(root)]) + [
+            "//crates/honk:honk",
+            "//crates/hoonc:hoonc_bin",
+            "//hoon/common:hoon.hoon",
+        ],
+    )
+    for name, root, mode in [(n, r, []) for n, r in C6_REJECTION_TREES] +
+                            [(n, r, ["standard"]) for n, r in C6_STANDARD_REJECTION_TREES]
+]
+
+# c6 CLI pairings that the hoon_library/honk_library rules cannot express:
+# dynock output modes and a batch manifest built twice against a persistent
+# cache (the second, all-hits pass is the one compared). Both compilers run
+# with the same scrubbed environment and workspace-relative paths as the
+# rules above, over the `imports` tree.
+C6_TREE = C6_PACKAGE + "/imports"
+
+C6_HOONC = (
+    "set -e; root=$$PWD; scratch=$$root/$(@D)/.$$(basename $@)_scratch; " +
+    "rm -rf $$scratch; mkdir -p $$scratch/home $$scratch/tmp; " +
+    "trap 'rm -rf \"$$scratch\"' EXIT; cd $$scratch; " +
+    "env -i HOME=$$scratch/home XDG_DATA_HOME=$$scratch/home/.local/share " +
+    "XDG_CONFIG_HOME=$$scratch/home/.config TMPDIR=$$scratch/tmp RUST_LOG=warn " +
+    "$$root/$(execpath //crates/hoonc:hoonc_bin) --new {flag} --output out.jam " +
+    "$$root/{src} $$root/" + C6_TREE + "; mv out.jam $$root/$@"
+)
+
+C6_HONK = (
+    "set -e; scratch=$$PWD/$(@D)/.$$(basename $@)_scratch; " +
+    "rm -rf $$scratch; mkdir -p $$scratch/home $$scratch/tmp; " +
+    "trap 'rm -rf \"$$scratch\"' EXIT; " +
+    "env -i HOME=$$scratch/home TMPDIR=$$scratch/tmp " +
+    "$(execpath //crates/honk:honk) {flag} --output $@ " +
+    "--prelude $(execpath //hoon/common:hoon.hoon) {src} " + C6_TREE
+)
+
+C6_MODE_PAIRINGS = [
+    ("c6_dynock", "--dynock", "imports/app/gate.hoon"),
+    ("c6_dynock_typed", "--dynock-typed", "imports/app/gate.hoon"),
+]
+
+[
+    genrule(
+        name = "{}_ref".format(name),
+        srcs = glob(["imports/**"]),
+        outs = ["{}_ref.jam".format(name)],
+        cmd = C6_HOONC.format(flag = flag, src = C6_PACKAGE + "/" + src),
+        tools = ["//crates/hoonc:hoonc_bin"],
+    )
+    for name, flag, src in C6_MODE_PAIRINGS
+]
+
+[
+    genrule(
+        name = "{}_native".format(name),
+        srcs = glob(["imports/**"]) + ["//hoon/common:hoon.hoon"],
+        outs = ["{}_native.jam".format(name)],
+        cmd = C6_HONK.format(flag = flag, src = C6_PACKAGE + "/" + src),
+        tools = ["//crates/honk:honk"],
+    )
+    for name, flag, src in C6_MODE_PAIRINGS
+]
+
+# A batch built twice against one --cache-dir: the cold pass builds only the
+# arbitrary entry; the warm pass reuses its product and cached dependency
+# vases for the standard (kernel) and dynock-typed entries. The kernel line
+# lists every file of the tree for the directory hash (plus an empty field).
+genrule(
+    name = "c6_batch_natives",
+    srcs = glob(["imports/**"]) + ["//hoon/common:hoon.hoon"],
+    outs = [
+        "c6_batch_arb_native.jam",
+        "c6_batch_kernel_native.jam",
+        "c6_batch_typed_native.jam",
+    ],
+    cmd = (
+        "set -e; scratch=$$PWD/$(RULEDIR)/.c6_batch_scratch; " +
+        "rm -rf $$scratch; mkdir -p $$scratch/home $$scratch/tmp $$scratch/cache; " +
+        "trap 'rm -rf \"$$scratch\"' EXIT; " +
+        "printf '%s\\t%s\\tarbitrary\\n' " +
+        "$(RULEDIR)/c6_batch_arb_native.jam " + C6_TREE + "/app/entry.hoon " +
+        "> $$scratch/cold.tsv; " +
+        "files=$$(find -L " + C6_TREE + " -type f | sort | tr '\\n' '\\t'); " +
+        "{ cat $$scratch/cold.tsv; " +
+        "printf '%s\\t%s\\tstandard\\t%s\\n' $(RULEDIR)/c6_batch_kernel_native.jam " +
+        C6_TREE + "/app/kernel.hoon \"$$files\"; " +
+        "printf '%s\\t%s\\tdynock-typed\\n' $(RULEDIR)/c6_batch_typed_native.jam " +
+        C6_TREE + "/app/gate.hoon; } > $$scratch/warm.tsv; " +
+        "for pass in cold warm; do " +
+        "env -i HOME=$$scratch/home TMPDIR=$$scratch/tmp " +
+        "$(execpath //crates/honk:honk) --cache-dir $$scratch/cache " +
+        "--batch-manifest $$scratch/$$pass.tsv " +
+        "--prelude $(execpath //hoon/common:hoon.hoon) " + C6_TREE + "; done"
+    ),
+    tools = ["//crates/honk:honk"],
+)
+
+[
+    filegroup(
+        name = "c6_batch_{}_native".format(kind),
+        srcs = [":c6_batch_{}_native.jam".format(kind)],
+    )
+    for kind in ["arb", "kernel", "typed"]
+]
+
+# The batch outputs are compared with hoonc's single-entry builds.
+[
+    genrule(
+        name = "c6_batch_{}_ref".format(kind),
+        srcs = [ref],
+        outs = ["c6_batch_{}_ref.jam".format(kind)],
+        cmd = "cp $< $@",
+    )
+    for kind, ref in [
+        ("arb", ":c6_imports_ref"),
+        ("kernel", ":c6_imports_kernel_ref"),
+        ("typed", ":c6_dynock_typed_ref"),
+    ]
+]
+
+C6_CLI_PAIRINGS = [
+    "c6_dynock",
+    "c6_dynock_typed",
+    "c6_batch_arb",
+    "c6_batch_kernel",
+    "c6_batch_typed",
+]
+
+[
+    sh_test(
+        name = "{}_parity_test".format(name),
+        size = "small",
+        srcs = ["//assets/native:kernel_parity_test.sh"],
+        args = [
+            "$(rootpath :{}_ref)".format(name),
+            "$(rootpath :{}_native)".format(name),
+        ],
+        data = [
+            ":{}_ref".format(name),
+            ":{}_native".format(name),
+        ],
+    )
+    for name in C6_CLI_PAIRINGS
+]
+
+test_suite(
+    name = "coverage_parity_test",
+    tests = ["{}_parity_test".format(name) for name in PROBES] +
+            ["{}_parity_test".format(name) for name, _, _, _ in C6_PAIRINGS] +
+            ["{}_parity_test".format(name) for name in C6_CLI_PAIRINGS] +
+            ["c6_reject_{}_test".format(name) for name, _ in C6_REJECTION_TREES] +
+            ["c6_reject_{}_test".format(name) for name, _ in C6_STANDARD_REJECTION_TREES],
+)

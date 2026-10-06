@@ -2465,19 +2465,26 @@ fn redo_fork_overlap_without_nest_kept() {
 }
 
 #[test]
-fn redo_fork_no_match_errors() {
+fn redo_fork_no_match_drops_faces() {
+    // hoon-138 `++dear`: when `++sint` prunes every reference fork case, `wec`
+    // is empty and the redone type carries no faces at all, neither the
+    // reference's nor the subject's; it is not a redo-match.
     let mut slab = NounSlab::new();
-    let payload = ty_atom(&mut slab, "ud", None);
+    let payload_inner = ty_atom(&mut slab, "ud", None);
+    let payload = ty_face(&mut slab, "p", payload_inner);
     let cell_a_head = ty_noun(&mut slab);
     let cell_a_tail = ty_noun(&mut slab);
     let cell_a = ty_cell(&mut slab, cell_a_head, cell_a_tail);
     let cell_b_head = ty_void(&mut slab);
     let cell_b_tail = ty_noun(&mut slab);
     let cell_b = ty_cell(&mut slab, cell_b_head, cell_b_tail);
-    let reference = ty_fork(&mut slab, vec![cell_a, cell_b]);
+    let face_a = ty_face(&mut slab, "a", cell_a);
+    let reference = ty_fork(&mut slab, vec![face_a, cell_b]);
     let mut ut = Ut::new(&mut slab);
-    let result = ut.redo_wet_payload(payload, reference);
-    assert!(result.is_err(), "no-match fork should error");
+    let result = ut
+        .redo_wet_payload(payload, reference)
+        .expect("no-match fork redo");
+    assert!(noun_eq(result, payload_inner, &ut.slab.noun_space()).expect("noun_eq"));
 }
 
 #[test]
@@ -2728,7 +2735,7 @@ fn crop_hold_seen_is_scoped_to_branch() {
 }
 
 #[test]
-fn mull_wthx_does_not_call_skin_match_static() {
+fn mull_wthx_does_not_call_fish() {
     let mut slab = NounSlab::new();
     let atom = ty_atom(&mut slab, "$", None);
     let sut_tail = ty_noun(&mut slab);
@@ -2740,9 +2747,9 @@ fn mull_wthx_does_not_call_skin_match_static() {
         vec![Limb::Axis((2u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
-    ut.skin_match_static_calls = 0;
+    ut.skin_fish_calls = 0;
     ut.mull_noun(sut, gol, dox, &gen).expect("mull");
-    assert_eq!(ut.skin_match_static_calls, 0);
+    assert_eq!(ut.skin_fish_calls, 0);
 }
 
 #[test]
@@ -3009,25 +3016,16 @@ fn core_mint_deterministic() {
     );
 }
 
-// Fast repro of the dumb-kernel `poly:$` failure:
-//   "native mint: find failed for wing [Parent(0, None), Axis(12)]" (way=Rite).
-//
-// Only `lower_censig` (mod.rs) builds the wing `[Parent(0,None), Axis(12)]`, for
-// the first (non-last) argument of a multi-arg cen-sig (`~(arm core a b ...)`):
-// `wing_axe = peg(6,2) = 12`. `fond` (find.rs) resolves `Axis(12)` first via
-// `peek`, then applies the nameless `Parent(0,None)` via `fond_name`. When
-// `peek(sut, Rite, 12u64)` returns `NTy::Void`, the nameless-parent walk returns
-// `Pony::Void` and `find` errors.
-//
-// This source mints in under 1ms (no prelude, unlike the 153s dumb-kernel
-// compile) and fails with that error. A peek/fond fix should make it mint; the
-// assertion then flips to `is_ok()`.
+// `~(arm door a b)` replaces the door's sample: hoon-138 `++open %cnsg` edits
+// +12 and +13 of the door with the arguments. This door's sample is a single
+// atom (`|_ s=@`), so there is no +12 and the edit fails. hoonc rejects this
+// source the same way (`find ,.+12`), so the error here is correct behavior,
+// not a honk bug; `lower_censig` builds the same wing as `++open`.
 #[test]
-fn repro_censig_two_arg_wing_find_failure() {
+fn censig_on_an_atom_sample_door_is_rejected() {
     use std::path::Path;
 
-    // Door (`|_ s=@`) with a 2-arg arm `f`, called via `~(f d 1 2)`. The arm body
-    // uses only its own sample, so no stdlib is needed.
+    // Door (`|_ s=@`) with a gate arm `f`, called as `~(f d 1 2)`.
     let src = "=/  d  |_  s=@\n++  f  |=  [x=@ y=@]  [x y s]\n--\n~(f d 1 2)";
 
     let gen = crate::pipeline::parse_native_hoon_source_without_docs(
