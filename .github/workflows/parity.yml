@@ -13,20 +13,25 @@ name: Compiler parity
 # memory footprint (rules_hoon/hoon.bzl resource_set) so Bazel does not
 # co-schedule both compiles of a pair on a 16GB runner.
 
-# Keep this expensive workflow scoped to Honk changes. The workflow path is
-# included so changes to the gate exercise the gate itself.
+# Keep this expensive workflow scoped to Honk changes, including hatch, its
+# parser. The workflow path is included so changes to the gate exercise the
+# gate itself. Pull requests run it whatever their base branch, so a PR
+# stacked on another Honk PR is checked before its base lands.
+# workflow_dispatch runs it by hand on any ref.
 
 on:
   push:
     branches: ["master", "nightly"]
     paths:
+      - "crates/hatch/**"
       - "crates/honk/**"
       - ".github/workflows/parity.yml"
   pull_request:
-    branches: ["master", "nightly"]
     paths:
+      - "crates/hatch/**"
       - "crates/honk/**"
       - ".github/workflows/parity.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
