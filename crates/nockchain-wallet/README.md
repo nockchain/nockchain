@@ -190,6 +190,14 @@ nockchain-wallet derive-child 42 --hardened --label "my-key"
 
 Derives a child public or private key at the given index from the current master key.
 
+### Derive a Batch of Child Keys
+
+```bash
+nockchain-wallet derive-child-batch --start-index <0-2147483647> --count <n> --hardened
+```
+
+Derives `count` contiguous child keys starting at `--start-index`, in one call. Same hardened/unhardened distinction as `derive-child`.
+
 ### Managing Addresses
 
 ```bash
@@ -243,6 +251,18 @@ Shows only the notes associated with the specified public key. Useful for filter
 
 You must add the watch-only identifier to the wallet before it will be recognized.
 
+### Multisig Watch Listing
+
+```bash
+# List notes for an already-watched multisig, in CSV format
+nockchain-wallet list-notes-by-multisig-csv <first-name>
+
+# Show the aggregate balance of an already-watched multisig
+nockchain-wallet show-balance-multisig <first-name>
+```
+
+`<first-name>` is the base58 first-name printed when you ran `watch multisig` (see [Watch-Only Tracking](#watch-only-tracking)).
+
 ### List Notes by Public Key (CSV format)
 
 ```bash
@@ -254,10 +274,21 @@ Outputs matching notes in CSV format suitable for analysis or reporting. The out
 ### Show Wallet Data
 
 ```bash
+# Aggregate wallet balance: total notes and total nicks held
 nockchain-wallet show-balance
-```
 
-Displays the aggregate wallet balance, including the total number of notes and the total nicks held. Additional `%show` paths are not exposed via the CLI.
+# Export a master public key
+nockchain-wallet export-master-pubkey
+
+# Show the seed phrase for the current master key
+nockchain-wallet show-seedphrase
+
+# Show the master zpub extended public key
+nockchain-wallet show-master-zpub
+
+# Show the key tree structure (add --include-values to show values at each path)
+nockchain-wallet show-key-tree
+```
 
 ## Transaction Creation
 
@@ -518,6 +549,19 @@ nockchain-wallet \
 - The wallet asks the Nockchain node whether it has validated the transaction (consistency check). A `true` response means the node accepted the transaction, not that it currently resides in the mempool. You can use this command to check whether a transaction was accepted by the network; it is necessary for inclusion in a block but not sufficient when timelocks are present.
 - Currently, the private API cannot be queried with this request
 - The command is lightweight and does not perform a full balance sync.
+
+### Check a transaction's lifecycle status
+
+```bash
+# Report once and exit
+nockchain-wallet tx-status <base58-tx-id>
+
+# Poll until confirmed (or up to --timeout-secs, default 600)
+nockchain-wallet tx-status <base58-tx-id> --wait
+nockchain-wallet tx-status <base58-tx-id> --wait --timeout-secs 120
+```
+
+Reports whether the transaction is confirmed (with block height and confirmation count), still pending in the mempool, or unknown to the node.
 
 
 ## Message Signing and Verification
