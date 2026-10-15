@@ -158,7 +158,7 @@ fn has_exit_effect(effects: &[NounSlab]) -> bool {
                     .as_atom()
                     .ok()
                     .and_then(|atom| atom.as_u64().ok())
-                    .map(|tag| tag == u64::from(tas!(b"exit")))
+                    .map(|tag| tag == tas!(b"exit"))
                     .unwrap_or(false)
             })
             .unwrap_or(false)
