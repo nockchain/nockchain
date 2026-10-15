@@ -858,18 +858,51 @@ impl BlockExplorerCache {
     ) -> GrpcResult<TransactionDetails> {
         tracing::Span::current().record("height", &tracing::field::display(meta.height));
         tracing::Span::current().record("tx_id", &tracing::field::display(tx_id.to_base58()));
-        let block = self
-            .load_block_with_transactions(handle, meta.height)
-            .await?;
-
-        let metadata = block.metadata.clone();
-        let (hash, tx) = block
-            .txs
+        let (hash, tx) = self
+            .load_block_transactions(handle, &meta.block_id)
+            .await?
             .into_iter()
             .find(|(hash, _)| hash == tx_id)
             .ok_or(NockAppGrpcError::NotFound)?;
 
-        Ok(build_transaction_details(&metadata, &hash, tx))
+        Ok(build_transaction_details(meta, &hash, tx))
+    }
+
+    /// Peek `[%block-transactions bid=@ ~]` -> `(unit (unit (z-map tx-id:t tx:t)))`.
+    #[tracing::instrument(
+        name = "block_explorer_cache.load_block_transactions",
+        skip(self, handle),
+        fields(block_id = tracing::field::Empty)
+    )]
+    async fn load_block_transactions(
+        &self,
+        handle: &Arc<dyn BalanceHandle>,
+        block_id: &Hash,
+    ) -> GrpcResult<Vec<(Hash, DecodedTx)>> {
+        let block_id_b58 = block_id.to_base58();
+        tracing::Span::current().record("block_id", &tracing::field::display(&block_id_b58));
+        let mut path_slab = NounSlab::new();
+        let tag = nockapp::utils::make_tas(&mut path_slab, "block-transactions").as_noun();
+        let block_id_noun = block_id_b58.to_noun(&mut path_slab);
+        let path_noun = nockvm::noun::T(&mut path_slab, &[tag, block_id_noun, SIG]);
+        path_slab.set_root(path_noun);
+
+        let result = handle
+            .peek(path_slab)
+            .await
+            .map_err(NockAppGrpcError::from)?
+            .ok_or(NockAppGrpcError::PeekFailed)?;
+
+        let result_noun = unsafe { result.root() };
+        let space = result.noun_space();
+        let inner = decode_option_handle(result_noun.in_space(&space))
+            .map_err(NockAppGrpcError::NounDecode)?
+            .ok_or(NockAppGrpcError::PeekReturnedNoData)?;
+        let txs = decode_option_handle(inner)
+            .map_err(NockAppGrpcError::NounDecode)?
+            .ok_or(NockAppGrpcError::NotFound)?;
+
+        extract_transactions_from_map(&txs).map_err(NockAppGrpcError::NounDecode)
     }
 
     /// Peek /heaviest-chain ~ to get current tip
@@ -1006,49 +1039,6 @@ impl BlockExplorerCache {
             Ok(None) => Ok(false),
             Err(e) => Err(NockAppGrpcError::from(e)),
         }
-    }
-
-    #[tracing::instrument(
-        name = "block_explorer_cache.load_block_with_transactions",
-        skip(self, handle),
-        fields(height = tracing::field::Empty)
-    )]
-    async fn load_block_with_transactions(
-        &self,
-        handle: &Arc<dyn BalanceHandle>,
-        height: u64,
-    ) -> GrpcResult<BlockEntryWithTxs> {
-        tracing::Span::current().record("height", &tracing::field::display(height));
-        let mut path_slab = NounSlab::new();
-        let tag = nockapp::utils::make_tas(&mut path_slab, "heaviest-chain-blocks-range").as_noun();
-        let height_noun = direct_height_noun(height)?;
-        let path_noun = nockvm::noun::T(&mut path_slab, &[tag, height_noun, height_noun, SIG]);
-        path_slab.set_root(path_noun);
-
-        let result = handle
-            .peek(path_slab)
-            .await
-            .map_err(NockAppGrpcError::from)?
-            .ok_or(NockAppGrpcError::PeekFailed)?;
-
-        let result_noun = unsafe { result.root() };
-        let space = result.noun_space();
-        let entries = decode_optional_optional_vec_handles(result_noun.in_space(&space))
-            .map_err(NockAppGrpcError::NounDecode)?
-            .ok_or(NockAppGrpcError::PeekReturnedNoData)?;
-
-        let mut parsed = Vec::new();
-        for entry in entries {
-            parsed.push(
-                BlockEntryWithTxs::from_noun_handle(&entry)
-                    .map_err(NockAppGrpcError::NounDecode)?,
-            );
-        }
-
-        parsed
-            .into_iter()
-            .find(|entry| entry.metadata.height == height)
-            .ok_or(NockAppGrpcError::PeekReturnedNoData)
     }
 
     /// Peek /heaviest-chain-blocks-range/[start]/[end] ~
@@ -1607,43 +1597,6 @@ fn extract_tx_ids_from_map(
     }
 
     Ok(tx_ids)
-}
-
-struct BlockEntryWithTxs {
-    metadata: BlockMetadata,
-    txs: Vec<(Hash, DecodedTx)>,
-}
-
-impl BlockEntryWithTxs {
-    fn from_noun_handle(noun: &NounHandle) -> std::result::Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let height = BlockHeight::from_noun_handle(&cell.head())?;
-
-        let tail = cell
-            .tail()
-            .as_cell()
-            .map_err(|_| NounDecodeError::ExpectedCell)?;
-        let block_id = Hash::from_noun_handle(&tail.head())?;
-
-        let page_and_txs = tail
-            .tail()
-            .as_cell()
-            .map_err(|_| NounDecodeError::ExpectedCell)?;
-        let page_header = decode_page_header(page_and_txs.head())?;
-        let txs_full = extract_transactions_from_map(&page_and_txs.tail())?;
-        let tx_ids = txs_full.iter().map(|(hash, _)| hash.clone()).collect();
-
-        Ok(Self {
-            metadata: BlockMetadata {
-                height: height.0 .0,
-                block_id,
-                parent_id: page_header.parent,
-                timestamp: page_header.timestamp,
-                tx_ids,
-            },
-            txs: txs_full,
-        })
-    }
 }
 
 fn extract_transactions_from_map(
@@ -2728,7 +2681,12 @@ mod tests {
     use nockapp::nockapp::error::NockAppError;
     use nockapp::wire::WireRepr;
     use nockchain_math::belt::Belt;
-    use nockchain_types::tx_engine::common::{BigNum, BlockHeight, CoinbaseSplit, Hash, Page};
+    use nockchain_math::zoon::zmap::ZMap;
+    use nockchain_math::zoon::zset::ZSet;
+    use nockchain_types::tx_engine::common::{
+        BigNum, BlockHeight, CoinbaseSplit, Hash, Nicks, Page, Version,
+    };
+    use nockchain_types::tx_engine::v1::{Note, NoteData, NoteV1, RawTx as RawTxV1, Seeds, Spends};
     use nockvm::noun::NounAllocator;
     use noun_serde::{NounDecode, NounEncode};
 
@@ -2966,15 +2924,6 @@ mod tests {
         assert!(
             matches!(
                 cache
-                    .load_block_with_transactions(&balance_handle, u64::MAX)
-                    .await,
-                Err(NockAppGrpcError::InvalidRequest(_))
-            ),
-            "load_block_with_transactions should reject u64::MAX"
-        );
-        assert!(
-            matches!(
-                cache
                     .peek_blocks_range(&balance_handle, nockvm::noun::DIRECT_MAX + 1, 0)
                     .await,
                 Err(NockAppGrpcError::InvalidRequest(_))
@@ -3090,6 +3039,146 @@ mod tests {
         assert_eq!(handle.requested_ranges(), vec![(128, 255)]);
         assert_eq!(cache.get_max_height(), 255);
         assert_eq!(cache.take_backfill_resume().await, Some(127));
+    }
+
+    struct KernelTxHandle {
+        block_id: Hash,
+        txs: Vec<(Hash, u64)>,
+    }
+
+    impl KernelTxHandle {
+        fn raw_tx(id: &Hash) -> RawTxV1 {
+            RawTxV1 {
+                version: Version::V1,
+                id: id.clone(),
+                spends: Spends(Vec::new()),
+            }
+        }
+
+        fn encode_block_transactions(&self) -> NounSlab {
+            let txs = self.txs.iter().map(|(id, total_size)| {
+                let output = (
+                    Note::V1(NoteV1::new(
+                        BlockHeight(Belt(5)),
+                        Name::new(id.clone(), test_hash(30)),
+                        NoteData::new(Vec::new()),
+                        Nicks(7),
+                    )),
+                    Seeds(Vec::new()),
+                );
+                let outputs = ZSet::try_from_items([output]).expect("outputs z-set should encode");
+                (
+                    id.clone(),
+                    (1u64, (Self::raw_tx(id), (*total_size, outputs))),
+                )
+            });
+            let mut slab = NounSlab::new();
+            let noun = Some(Some(
+                ZMap::try_from_entries(txs).expect("tx z-map should encode"),
+            ))
+            .to_noun(&mut slab);
+            slab.set_root(noun);
+            slab
+        }
+
+        fn encode_block_range(&self) -> NounSlab {
+            let txs = self
+                .txs
+                .iter()
+                .map(|(id, _)| (id.clone(), Self::raw_tx(id)));
+            let entry = (
+                BlockHeight(Belt(5)),
+                (
+                    self.block_id.clone(),
+                    (
+                        Page {
+                            digest: self.block_id.clone(),
+                            pow: None,
+                            parent: test_hash(20),
+                            tx_ids: self.txs.iter().map(|(id, _)| id.clone()).collect(),
+                            coinbase: CoinbaseSplit::V1,
+                            timestamp: 50,
+                            epoch_counter: 0,
+                            target: BigNum::from_u64(1),
+                            accumulated_work: BigNum::from_u64(6),
+                            height: 5,
+                            msg: Vec::new(),
+                        },
+                        ZMap::try_from_entries(txs).expect("raw-tx z-map should encode"),
+                    ),
+                ),
+            );
+            let mut slab = NounSlab::new();
+            let noun = Some(Some(vec![entry])).to_noun(&mut slab);
+            slab.set_root(noun);
+            slab
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BalanceHandle for KernelTxHandle {
+        async fn peek(
+            &self,
+            path: NounSlab,
+        ) -> std::result::Result<Option<NounSlab>, NockAppError> {
+            let space = path.noun_space();
+            let root = unsafe { *path.root() };
+            let items = path_items(root, &space);
+            let tag = String::from_noun(&items[0], &space).expect("path tag should decode");
+
+            match tag.as_str() {
+                "block-transactions" => {
+                    let block_id = String::from_noun(&items[1], &space)
+                        .expect("block id should decode as a cord");
+                    assert_eq!(block_id, self.block_id.to_base58());
+                    Ok(Some(self.encode_block_transactions()))
+                }
+                "heaviest-chain-blocks-range" => Ok(Some(self.encode_block_range())),
+                other => panic!("unexpected peek path tag: {other}"),
+            }
+        }
+
+        async fn poke(
+            &self,
+            _wire: WireRepr,
+            _payload: NounSlab,
+        ) -> std::result::Result<PokeResult, NockAppError> {
+            Err(NockAppError::OtherError(
+                "poke not supported in test handle".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_details_come_from_block_transactions() {
+        let metrics = crate::public_nockchain::v2::metrics::init_metrics();
+        let cache = BlockExplorerCache::new(metrics);
+        let block_id = test_hash(10);
+        let (first, second) = (test_hash(200), test_hash(100));
+        let handle: Arc<dyn BalanceHandle> = Arc::new(KernelTxHandle {
+            block_id: block_id.clone(),
+            txs: vec![(first.clone(), 111), (second.clone(), 222)],
+        });
+        cache
+            .insert_blocks(vec![(
+                5,
+                block_id.clone(),
+                test_hash(20),
+                50,
+                vec![first, second.clone()],
+            )])
+            .await;
+
+        let details = cache
+            .load_transaction_details(&handle, &second)
+            .await
+            .expect("confirmed transaction should decode");
+
+        assert_eq!(details.tx_id, second.to_base58());
+        assert_eq!(details.size_bytes, 222);
+        assert_eq!(details.outputs.len(), 1);
+        assert_eq!(details.height, 5);
+        assert_eq!(details.block_id, Some(hash_to_proto(&block_id)));
     }
 
     fn test_hash(seed: u64) -> Hash {
