@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use libp2p::PeerId;
 use nockapp::noun::slab::NounSlab;
+use nockapp::utils::scry::ScryResult;
 use nockapp::NockAppError;
 use nockvm::noun::{NounAllocator, NounHandle};
 #[cfg(test)]
@@ -11,7 +12,7 @@ use tokio::time::Instant;
 use tracing::info;
 
 use crate::driver::gen2::*;
-use crate::driver::SwarmActionDispatcher;
+use crate::driver::{heaviest_block_scry_slab, SwarmActionDispatcher};
 use crate::messages::NockchainFact;
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::P2PState;
@@ -244,6 +245,45 @@ pub(crate) fn collect_tip5_zset_strings(
         stack.push((branches.tail(), false));
         stack.push((node, true));
         stack.push((branches.head(), false));
+    }
+    Ok(())
+}
+
+pub(crate) async fn resync_frontier_from_kernel(
+    traffic: traffic_cop::TrafficCop,
+    driver_state: Arc<Mutex<P2PState>>,
+    swarm_tx: mpsc::Sender<SwarmAction>,
+) -> Result<(), NockAppError> {
+    let scry_res = traffic
+        .peek(None, heaviest_block_scry_slab())
+        .await?
+        .ok_or_else(|| {
+            NockAppError::OtherError(String::from("heaviest-block peek returned nothing"))
+        })?;
+    let height = {
+        let space = scry_res.noun_space();
+        match ScryResult::from_noun(unsafe { scry_res.root() }, &space) {
+            ScryResult::Some(page) => block_height_from_page_noun(page)?,
+            ScryResult::Nothing => return Ok(()),
+            ScryResult::BadPath | ScryResult::Invalid => {
+                return Err(NockAppError::OtherError(String::from(
+                    "heaviest-block peek returned an unexpected scry result",
+                )))
+            }
+        }
+    };
+    let should_flush_deferred = {
+        let mut state_guard = driver_state.lock().await;
+        state_guard.advance_first_negative(height);
+        state_guard.has_ready_deferred_heard_blocks()
+    };
+    if should_flush_deferred {
+        SwarmActionDispatcher::Channel(&swarm_tx)
+            .dispatch(SwarmAction::FlushDeferredHeardBlocks)
+            .await
+            .map_err(|_| {
+                NockAppError::OtherError(String::from("Failed to queue deferred heard-block flush"))
+            })?;
     }
     Ok(())
 }

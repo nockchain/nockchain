@@ -2398,6 +2398,109 @@ async fn buffered_seen_effect_queues_deferred_flush_without_waiting_on_swarm_que
     );
 }
 
+struct Resync {
+    result: Result<(), NockAppError>,
+    first_negative: u64,
+    flushes: usize,
+    highest_seen: f64,
+}
+
+async fn resync_after_lag(
+    first_negative: u64,
+    kernel_heaviest: Option<NounSlab>,
+    deferred_height: Option<u64>,
+) -> Resync {
+    let scripted_traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        vec![kernel_heaviest],
+        Vec::new(),
+    )
+    .await;
+    let metrics = isolated_test_metrics();
+    let state_arc = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    {
+        let mut state_guard = state_arc.lock().await;
+        state_guard.first_negative = first_negative;
+        if let Some(height) = deferred_height {
+            let (block, _) = heard_block_fact_with_tx_ids(height, &[]);
+            let NockchainFact::HeardBlock(block_id, _) = &block else {
+                panic!("expected heard-block fact");
+            };
+            assert!(state_guard.defer_heard_block(
+                PeerId::random(),
+                height,
+                block_id.clone(),
+                block
+            ));
+        }
+    }
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
+    let result = gen2::resync_frontier_from_kernel(
+        scripted_traffic.traffic.clone(),
+        Arc::clone(&state_arc),
+        swarm_tx,
+    )
+    .await;
+    let mut flushes = 0;
+    while let Ok(action) = swarm_rx.try_recv() {
+        assert!(matches!(action, SwarmAction::FlushDeferredHeardBlocks));
+        flushes += 1;
+    }
+    let first_negative = state_arc.lock().await.first_negative;
+    Resync {
+        result,
+        first_negative,
+        flushes,
+        highest_seen: metrics.highest_block_height_seen.swap(0.0),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lag_resyncs_stale_frontier_and_flushes_deferred_block() {
+    let (heaviest, _, _) = scry_some_page_with_tx_ids(10, &[]);
+    let resync = resync_after_lag(10, Some(heaviest), Some(11)).await;
+    assert!(resync.result.is_ok());
+    assert_eq!(resync.first_negative, 11);
+    assert_eq!(resync.flushes, 1);
+    assert_eq!(resync.highest_seen, 10.0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lag_resync_never_lowers_frontier() {
+    let (heaviest, _, _) = scry_some_page_with_tx_ids(10, &[]);
+    let resync = resync_after_lag(15, Some(heaviest), None).await;
+    assert!(resync.result.is_ok());
+    assert_eq!(resync.first_negative, 15);
+    assert_eq!(resync.flushes, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lag_resync_with_no_heaviest_block_changes_nothing() {
+    let mut empty = NounSlab::new();
+    let nothing = T(&mut empty, &[D(0), D(0)]);
+    empty.set_root(nothing);
+    let resync = resync_after_lag(0, Some(empty), Some(1)).await;
+    assert!(resync.result.is_ok());
+    assert_eq!(resync.first_negative, 0);
+    assert_eq!(resync.flushes, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lag_resync_reports_a_failed_peek_and_changes_nothing() {
+    let resync = resync_after_lag(10, None, Some(11)).await;
+    assert!(resync.result.is_err());
+    assert_eq!((resync.first_negative, resync.flushes), (10, 0));
+
+    let mut bad_path = NounSlab::new();
+    bad_path.set_root(D(0));
+    let resync = resync_after_lag(10, Some(bad_path), Some(11)).await;
+    assert!(resync.result.is_err());
+    assert_eq!((resync.first_negative, resync.flushes), (10, 0));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seen_effect_does_not_flush_prefetch_without_kernel_height_request() {
     let metrics = isolated_test_metrics();

@@ -11,6 +11,14 @@ use tracing::{debug, trace, warn};
 use crate::messages::{NockchainDataRequest, NockchainResponse};
 use crate::metrics::NockchainP2PMetrics;
 
+pub(crate) fn heaviest_block_scry_slab() -> NounSlab {
+    let mut slab = NounSlab::new();
+    let tag = make_tas(&mut slab, "heaviest-block").as_noun();
+    let noun = T(&mut slab, &[tag, D(0)]);
+    slab.set_root(noun);
+    slab
+}
+
 fn block_by_height_scry_slab(height: u64) -> Result<NounSlab, NockAppError> {
     let mut slab = NounSlab::new();
     let height_atom = Atom::new(&mut slab, height).as_noun();

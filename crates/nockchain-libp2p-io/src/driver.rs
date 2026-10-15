@@ -67,8 +67,8 @@ pub(crate) use gen2::{
     validate_response_envelope_for_request,
 };
 pub(crate) use kernel_io::{
-    create_response_result_from_payload, create_scry_response, record_crown_error_metric,
-    request_to_scry_slab,
+    create_response_result_from_payload, create_scry_response, heaviest_block_scry_slab,
+    record_crown_error_metric, request_to_scry_slab,
 };
 
 //TODO This wire is a placeholder for now. The libp2p driver is entangled with the other types of nockchain pokes
@@ -676,26 +676,39 @@ pub fn make_libp2p_driver(
                             dial_more_peers(&mut swarm, state_guard, &peer_exclusions);
                         }
                     },
-                    Ok(noun_slab) = effect_handle.next_effect() => {
-                        let connected_peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
-                        // Preserve kernel effect ordering within a poke burst so
-                        // adjacent block requests can queue before trailing gossip
-                        // effects interleave. Buffering those actions locally keeps
-                        // the select loop from awaiting its own bounded swarm queue.
-                        let mut swarm_actions =
-                            SwarmActionDispatcher::Buffered(&mut buffered_swarm_actions);
-                        handle_effect_with_dispatcher(
-                            noun_slab,
-                            &mut swarm_actions,
-                            connected_peers,
-                            req_res_gen2_bundle_enabled,
-                            prefetch_config,
-                            req_res_limits,
-                            Arc::clone(&driver_state),
-                            metrics.clone(),
-                            peer_exclusions.clone(),
-                        )
-                        .await?;
+                    effect @ (Ok(_) | Err(NockAppError::BroadcastRecvLaggedError(_))) = effect_handle.next_effect() => match effect {
+                        Ok(noun_slab) => {
+                            let connected_peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
+                            // Preserve kernel effect ordering within a poke burst so
+                            // adjacent block requests can queue before trailing gossip
+                            // effects interleave. Buffering those actions locally keeps
+                            // the select loop from awaiting its own bounded swarm queue.
+                            let mut swarm_actions =
+                                SwarmActionDispatcher::Buffered(&mut buffered_swarm_actions);
+                            handle_effect_with_dispatcher(
+                                noun_slab,
+                                &mut swarm_actions,
+                                connected_peers,
+                                req_res_gen2_bundle_enabled,
+                                prefetch_config,
+                                req_res_limits,
+                                Arc::clone(&driver_state),
+                                metrics.clone(),
+                                peer_exclusions.clone(),
+                            )
+                            .await?;
+                        }
+                        Err(lagged) => {
+                            warn!(error = %lagged, "Kernel effects lost; resyncing the seen frontier");
+                            join_set.spawn(
+                                "frontier_resync".to_string(),
+                                gen2::resync_frontier_from_kernel(
+                                    traffic_cop.clone(),
+                                    Arc::clone(&driver_state),
+                                    swarm_tx.clone(),
+                                ),
+                            );
+                        }
                     },
                     Some(event) = swarm.next() => {
                         match event {
@@ -1867,28 +1880,7 @@ async fn handle_effect_with_dispatcher(
                         );
 
                         if let Some(block_height) = block_height {
-                            if state_guard.first_negative <= block_height {
-                                metrics.highest_block_height_seen.swap(block_height as f64);
-                                state_guard.first_negative = block_height + 1;
-                                trace!(
-                                    "Setting state_guard.first_negative to {:?}",
-                                    state_guard.first_negative
-                                );
-
-                                // Check if we should clear the tx cache
-                                if block_height
-                                    >= state_guard.last_tx_cache_clear_height
-                                        + state_guard.seen_tx_clear_interval
-                                {
-                                    debug!(
-                                        "Clearing seen_txs cache at block height {}",
-                                        block_height
-                                    );
-                                    debug!("Cache before clearing: {:?}", state_guard.seen_txs);
-                                    state_guard.seen_txs.clear();
-                                    state_guard.last_tx_cache_clear_height = block_height;
-                                }
-                            }
+                            state_guard.advance_first_negative(block_height);
                         }
                         state_guard.has_ready_deferred_heard_blocks()
                     };

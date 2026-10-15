@@ -2293,6 +2293,23 @@ impl P2PState {
         true
     }
 
+    pub fn advance_first_negative(&mut self, block_height: u64) {
+        if self.first_negative > block_height {
+            return;
+        }
+        self.metrics
+            .highest_block_height_seen
+            .swap(block_height as f64);
+        self.first_negative = block_height + 1;
+        trace!("Setting state_guard.first_negative to {:?}", self.first_negative);
+        if block_height >= self.last_tx_cache_clear_height + self.seen_tx_clear_interval {
+            debug!("Clearing seen_txs cache at block height {}", block_height);
+            debug!("Cache before clearing: {:?}", self.seen_txs);
+            self.seen_txs.clear();
+            self.last_tx_cache_clear_height = block_height;
+        }
+    }
+
     pub fn finish_processing_block_seen(&mut self, block_id: &str) {
         self.processing_blocks.remove(block_id);
         if self.seen_blocks.insert(block_id.to_owned()) {
