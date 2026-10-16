@@ -1998,6 +1998,12 @@ impl NockchainBlockService for NockchainBlockServer {
                     .add_timing(&request_start.elapsed());
                 Err(Status::not_found("Transaction not found"))
             }
+            Err(err @ NockAppGrpcError::CacheWarming) => {
+                metrics
+                    .block_explorer_get_transaction_details_error
+                    .add_timing(&request_start.elapsed());
+                Err(err.into())
+            }
             Err(err) => {
                 metrics
                     .block_explorer_get_transaction_details_error
@@ -2291,6 +2297,27 @@ mod tests {
 
         assert_eq!(collected_sorted, expected_sorted);
         assert_eq!(handle.peek_calls(), 1, "cache should prevent second peek");
+    }
+
+    #[tokio::test]
+    async fn get_transaction_details_is_unavailable_while_cache_warms() {
+        let (update, _) = fixtures::make_balance_update(1);
+        let handle = Arc::new(MockHandle::new(update));
+        let metrics = init_metrics();
+        let cache = Arc::new(BlockExplorerCache::new(metrics.clone()));
+        let server = NockchainBlockServer::new(handle, cache, metrics);
+        let (name, _) = fixtures::make_named_note(15);
+
+        let status = server
+            .get_transaction_details(Request::new(GetTransactionDetailsRequest {
+                tx_id: Some(Base58Hash {
+                    hash: Hash::to_base58(&name.first),
+                }),
+            }))
+            .await
+            .expect_err("a warming cache must not answer");
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]

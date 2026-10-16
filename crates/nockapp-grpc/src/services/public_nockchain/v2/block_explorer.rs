@@ -837,6 +837,10 @@ impl BlockExplorerCache {
             return Ok(tx_details);
         }
 
+        if !self.blocks_by_height.read().await.contains_key(&0) {
+            return Err(NockAppGrpcError::CacheWarming);
+        }
+
         // If not found, see if it's pending
         if self.transaction_pending(handle, tx_id).await? {
             return Err(NockAppGrpcError::TxPending);
@@ -2994,6 +2998,96 @@ mod tests {
             0,
             "non-direct heights must be rejected before any kernel peek"
         );
+    }
+
+    struct PoolKnowsTxHandle;
+
+    #[async_trait::async_trait]
+    impl BalanceHandle for PoolKnowsTxHandle {
+        async fn peek(
+            &self,
+            path: NounSlab,
+        ) -> std::result::Result<Option<NounSlab>, NockAppError> {
+            let space = path.noun_space();
+            let root = unsafe { path.root() };
+            let segments = <Vec<String>>::from_noun(&root, &space).expect("peek path");
+            assert_eq!(
+                segments.first().map(String::as_str),
+                Some("raw-transaction")
+            );
+            Ok(Some(NounSlab::new()))
+        }
+
+        async fn poke(
+            &self,
+            _wire: WireRepr,
+            _payload: NounSlab,
+        ) -> std::result::Result<PokeResult, NockAppError> {
+            Err(NockAppError::OtherError(
+                "poke not supported in test handle".into(),
+            ))
+        }
+    }
+
+    async fn cache_with_heights(heights: std::ops::RangeInclusive<u64>) -> BlockExplorerCache {
+        let cache = BlockExplorerCache::new(crate::public_nockchain::v2::metrics::init_metrics());
+        let blocks = heights
+            .map(|h| {
+                (
+                    h,
+                    test_hash(h * 100),
+                    test_hash(h * 100 + 50),
+                    h * 10,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        cache.insert_blocks(blocks).await;
+        cache
+    }
+
+    #[tokio::test]
+    async fn transaction_details_unavailable_until_cache_holds_genesis() {
+        let cache = cache_with_heights(1..=2).await;
+        let handle: Arc<dyn BalanceHandle> = Arc::new(PoolKnowsTxHandle);
+
+        assert!(matches!(
+            cache
+                .load_transaction_details(&handle, &test_hash(9000))
+                .await,
+            Err(NockAppGrpcError::CacheWarming)
+        ));
+    }
+
+    #[tokio::test]
+    async fn transaction_details_pending_once_cache_holds_genesis() {
+        let cache = cache_with_heights(0..=1).await;
+        let handle: Arc<dyn BalanceHandle> = Arc::new(PoolKnowsTxHandle);
+
+        assert!(matches!(
+            cache
+                .load_transaction_details(&handle, &test_hash(9000))
+                .await,
+            Err(NockAppGrpcError::TxPending)
+        ));
+    }
+
+    #[tokio::test]
+    async fn transaction_details_served_from_cache_while_warming() {
+        let cache = BlockExplorerCache::new(crate::public_nockchain::v2::metrics::init_metrics());
+        let tx_id = test_hash(9000);
+        cache
+            .insert_blocks(vec![
+                (5, test_hash(500), test_hash(550), 50, Vec::new()),
+                (6, test_hash(600), test_hash(650), 60, vec![tx_id.clone()]),
+            ])
+            .await;
+        let handle: Arc<dyn BalanceHandle> = Arc::new(NoDataHandle::default());
+
+        assert!(!matches!(
+            cache.load_transaction_details(&handle, &tx_id).await,
+            Err(NockAppGrpcError::CacheWarming)
+        ));
     }
 
     struct RecordingRangeHandle {

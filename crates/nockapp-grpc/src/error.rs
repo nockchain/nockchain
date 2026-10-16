@@ -43,6 +43,9 @@ pub enum NockAppGrpcError {
     #[error("Transaction pending")]
     TxPending,
 
+    #[error("Block explorer cache is still indexing")]
+    CacheWarming,
+
     #[error("Transaction not found")]
     NotFound,
 
@@ -125,6 +128,11 @@ impl From<NockAppGrpcError> for tonic::Status {
             TxPending => (
                 tonic::Code::FailedPrecondition,
                 "Transaction pending".to_string(),
+                ErrorCode::PeekReturnedNoData,
+            ),
+            CacheWarming => (
+                tonic::Code::Unavailable,
+                "Block explorer cache is still indexing".to_string(),
                 ErrorCode::PeekReturnedNoData,
             ),
             NotFound => (
