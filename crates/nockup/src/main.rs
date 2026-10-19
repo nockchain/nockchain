@@ -9,6 +9,12 @@ use nockup::{commands, version};
 async fn main() {
     let cli = Cli::parse();
 
+    // Optional registry override (URL or local path); falls back to the
+    // NOCKUP_REGISTRY env var and then the built-in default when unset.
+    if let Some(source) = cli.registry.as_deref() {
+        nockup::resolver::registry::set_registry_source(source);
+    }
+
     let result = match cli.command {
         // Hierarchical commands
         Some(Commands::Project(cmd)) => commands::build::run(cmd).await,
