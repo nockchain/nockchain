@@ -69,7 +69,6 @@ The work claim depends on BLAKE3's keyed-hash and collision resistance, determin
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — data flow and crate boundaries.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — invariants, assumptions, and attack classes.
-- [`docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md`](docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md) — dated audit record and remediation evidence.
 
 ```sh
 cargo test -p ai-pow

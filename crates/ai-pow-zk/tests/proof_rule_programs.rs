@@ -34,7 +34,8 @@ fn preserves_both_reference_programs_including_partial_chunks() {
             s_a: [2; 32],
             s_b: [3; 32],
         };
-        let schedule = StripIndexSchedule::from_tile(&params, 0, 0).unwrap();
+        let schedule = StripIndexSchedule::from_tile(&params, 0, 0)
+            .expect("reference parameters should define a valid strip schedule");
         for (rules, expected) in [(ProofRules::Legacy, legacy), (ProofRules::Hardened, hardened)] {
             let program = canonical_program_for_strip_schedule_with_rules(
                 &params,
@@ -43,7 +44,7 @@ fn preserves_both_reference_programs_including_partial_chunks() {
                 1 << 15,
                 rules,
             )
-            .unwrap();
+            .expect("reference strip schedule should produce a canonical proof program");
             let mut hash = blake3::Hasher::new();
             hash.update(&(program.width as u64).to_le_bytes());
             for value in &program.values {

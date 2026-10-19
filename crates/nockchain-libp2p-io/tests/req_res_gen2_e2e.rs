@@ -16,7 +16,7 @@ use nockchain_libp2p_io::test_support::{
     is_block_by_height_message, jam_block_by_height_request, jam_raw_tx_request,
     request_pow_verifies_at, solve_authenticated_gossip, BatchErrorClass, BatchRequestItem,
     BatchResultItem, BatchResultStatus, NockchainRequest, NockchainResponse, ReqResTestEvent,
-    ResponseEnvelope,
+    ResponseEnvelope, TransportResponse,
 };
 use serde_bytes::ByteBuf;
 
@@ -104,7 +104,7 @@ async fn run_concurrent_batch_round_trip_reversing_responses(
 ) -> ConcurrentBatchRoundTripObservation {
     struct PendingInboundResponse {
         request_id: request_response::InboundRequestId,
-        channel: request_response::ResponseChannel<NockchainResponse>,
+        channel: request_response::ResponseChannel<TransportResponse>,
     }
 
     let first_expected_item_ids = batch_request_item_ids(&first_request);
@@ -184,7 +184,7 @@ async fn run_concurrent_batch_round_trip_reversing_responses(
                                             .swarm
                                             .behaviour_mut()
                                             .request_response
-                                            .send_response(second_pending.channel, second_response.clone())
+                                            .send_response(second_pending.channel, TransportResponse::outgoing(second_response.clone()))
                                             .expect("second overlapping response should send");
                                         transcript.record(
                                             responder.name,
@@ -199,7 +199,7 @@ async fn run_concurrent_batch_round_trip_reversing_responses(
                                             .swarm
                                             .behaviour_mut()
                                             .request_response
-                                            .send_response(first_pending.channel, first_response.clone())
+                                            .send_response(first_pending.channel, TransportResponse::outgoing(first_response.clone()))
                                             .expect("first overlapping response should send");
                                         transcript.record(
                                             responder.name,
@@ -231,6 +231,7 @@ async fn run_concurrent_batch_round_trip_reversing_responses(
                         SwarmEvent::Behaviour(ReqResTestEvent::RequestResponse(request_response::Event::Message { peer, message, .. })) => {
                             match message {
                                 request_response::Message::Response { request_id, response } => {
+                                    let response = response.message;
                                     transcript.record(
                                         requester.name,
                                         format!(

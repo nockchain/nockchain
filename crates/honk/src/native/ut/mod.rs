@@ -13737,14 +13737,18 @@ mod native_ctor_tests {
         let left_n = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(0)));
         let right_n = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(1)));
 
-        let empty = ut.cons_fork(Vec::new()).unwrap();
+        let empty = ut
+            .cons_fork(Vec::new())
+            .expect("construct empty native fork");
         assert!(matches!(&*empty, NTy::Void));
-        let singleton = ut.cons_fork(vec![left_n.1.clone()]).unwrap();
+        let singleton = ut
+            .cons_fork(vec![left_n.1.clone()])
+            .expect("construct singleton native fork");
         assert!(NRc::ptr_eq(&singleton, &left_n.1));
 
         let fork = ut
             .cons_fork(vec![left_n.1.clone(), right_n.1.clone()])
-            .unwrap();
+            .expect("construct two-member native fork");
         let NTy::Fork { options, .. } = &*fork else {
             panic!("two distinct members must produce a fork");
         };
@@ -13752,7 +13756,9 @@ mod native_ctor_tests {
             options.get().is_none(),
             "native fork edges must remain lazy until first traversal"
         );
-        let transient = ut.fork_options_native(&fork).unwrap();
+        let transient = ut
+            .fork_options_native(&fork)
+            .expect("traverse native fork options once");
         assert_eq!(transient.len(), 2);
         let NTy::Fork { options, .. } = &*fork else {
             unreachable!()
@@ -13762,16 +13768,23 @@ mod native_ctor_tests {
             "a one-shot fork must not retain its child vector"
         );
         drop(transient);
-        let materialized = ut.fork_options_native(&fork).unwrap();
+        let materialized = ut
+            .fork_options_native(&fork)
+            .expect("materialize native fork options on repeated traversal");
         assert!(std::ptr::eq::<[NRc<NTy>]>(
             options.get().expect("fork edges populated").as_slice(),
             &*materialized
         ));
-        let historical = ut.fork_from_options(vec![left_n.0, right_n.0]).unwrap();
+        let historical = ut
+            .fork_from_options(vec![left_n.0, right_n.0])
+            .expect("construct historical two-member fork");
         let emitted = live_to_noun(&mut ut.cx, &fork, ut.slab);
-        assert!(noun_eq(historical, emitted, &ut.slab.noun_space()).unwrap());
+        assert!(noun_eq(historical, emitted, &ut.slab.noun_space())
+            .expect("compare historical and emitted native fork nouns"));
 
-        let singleton_fork = ut.cons_fork(vec![fork.clone()]).unwrap();
+        let singleton_fork = ut
+            .cons_fork(vec![fork.clone()])
+            .expect("construct singleton fork containing a native fork");
         assert!(NRc::ptr_eq(&singleton_fork, &fork));
     }
 

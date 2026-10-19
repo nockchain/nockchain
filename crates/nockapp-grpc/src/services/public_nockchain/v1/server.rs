@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use gnort::instrument::TimingCount;
-use nockapp::driver::{NockAppHandle, PokeResult};
+use nockapp::driver::{NativePokeObserver, NockAppHandle, PokeResult};
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::WireRepr;
 use nockchain_types::tx_engine::v0;
@@ -26,6 +26,7 @@ use crate::pb::common::v1::{Acknowledged, ErrorCode, ErrorStatus};
 use crate::pb::public::v1::nockchain_service_server::{NockchainService, NockchainServiceServer};
 use crate::pb::public::v1::*;
 use crate::public_nockchain::v1::cache::CachedBalanceEntry;
+use crate::public_nockchain::v2::server::transaction_poke_observer;
 use crate::v1::pagination::{decode_cursor, PageCursor, PageKey};
 use crate::wire_conversion::{create_grpc_wire, grpc_wire_to_nockapp};
 
@@ -42,6 +43,7 @@ pub trait BalanceHandle: Send + Sync {
         &self,
         wire: WireRepr,
         payload: NounSlab,
+        observer: Option<NativePokeObserver>,
     ) -> std::result::Result<PokeResult, nockapp::nockapp::error::NockAppError>;
 }
 
@@ -60,8 +62,12 @@ impl BalanceHandle for NockAppBalanceHandle {
         &self,
         wire: WireRepr,
         payload: NounSlab,
+        observer: Option<NativePokeObserver>,
     ) -> std::result::Result<PokeResult, nockapp::nockapp::error::NockAppError> {
-        self.0.poke(wire, payload).await
+        match observer {
+            Some(observer) => self.0.poke_observed(wire, payload, observer).await,
+            None => self.0.poke(wire, payload).await,
+        }
     }
 }
 
@@ -630,8 +636,9 @@ impl NockchainService for PublicNockchainGrpcServer {
             }
         };
 
+        let observer = transaction_poke_observer(tx_id_domain);
         let started_poke = Instant::now();
-        let poke_result = self.handle.poke(wire, payload_slab).await;
+        let poke_result = self.handle.poke(wire, payload_slab, observer).await;
         metrics
             .send_tx_poke_time
             .add_timing(&started_poke.elapsed());
@@ -840,6 +847,7 @@ mod tests {
             &self,
             _wire: WireRepr,
             _payload: NounSlab,
+            _observer: Option<NativePokeObserver>,
         ) -> std::result::Result<PokeResult, nockapp::nockapp::error::NockAppError> {
             Err(nockapp::nockapp::error::NockAppError::OtherError(
                 "poke not supported in mock".into(),

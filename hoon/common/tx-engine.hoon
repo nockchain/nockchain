@@ -22,8 +22,7 @@
 ::    boundary semantics also live in the 2-arg
 ::    +post-asert-activation:v1 (used by +new-candidate); the inline
 ::    `gte` here is the canonical definition for callers that read
-::    phase.zk-asert from blockchain-constants. See
-::    014-aletheia-emissions-audit.md finding #3.
+::    phase.zk-asert from blockchain-constants: height >= phase.zk-asert.
 ++  post-asert-activation
   |=  height=@
   ^-  ?
@@ -458,6 +457,7 @@
     ^-  ?
     ?|  =(height zk-pow-v5-phase)
         =(height harden-phase)
+        =(height (need consensus-batch-phase))
     ==
   ::
   ++  ai-pow-hardening-required
@@ -469,7 +469,22 @@
   ::  boundary in Hoon; the certificate cannot choose its admission rules.
   ++  ai-pow-proof-rules
     |=  height=page-number
-    ^-  ?(%legacy %hardened)
+    ^-  ?(%legacy %hardened %consrule)
+    (ai-pow-proof-rules-at height consensus-batch-phase)
+  ::
+  ::  Shared immutable boundary for consensus admission and both ASERT lanes.
+  ++  consensus-batch-phase
+    ^-  (unit page-number)
+    [~ 170.000]
+  ::
+  ++  ai-pow-proof-rules-at
+    |=  [height=page-number activation=(unit page-number)]
+    ^-  ?(%legacy %hardened %consrule)
+    ?^  activation
+      ?>  (gth u.activation harden-phase)
+      ?:  (gte height u.activation)
+        %consrule
+      ?:((ai-pow-hardening-required height) %hardened %legacy)
     ?:((ai-pow-hardening-required height) %hardened %legacy)
   ::
   ++  ai-pow-canonical-witnesses-required  ai-pow-hardening-required
@@ -510,6 +525,22 @@
   ++  asert-reset-zk-anchor-target
     ^-  @
     (div max-target-atom (mul asert-reset-reference-zk-hashes-per-second zk-pow-v5-zk-ideal-block-time))
+  ::
+  ::  The consensus batch uses 100 billion ZK hashes/s and 20 ExaMAC/s.
+  ::  Keep both historical reference anchors unchanged.
+  ++  consensus-batch-reference-zk-hashes-per-second
+    ^~  100.000.000.000
+  ::
+  ++  consensus-batch-zk-anchor-target
+    ^-  @
+    (div max-target-atom (mul consensus-batch-reference-zk-hashes-per-second zk-pow-v5-zk-ideal-block-time))
+  ::
+  ++  consensus-batch-reference-ai-macs-per-second
+    ^~  20.000.000.000.000.000.000
+  ::
+  ++  consensus-batch-ai-anchor-target
+    ^-  @
+    (div (bex 256) (mul consensus-batch-reference-ai-macs-per-second zk-pow-v5-ai-ideal-block-time))
   ::
   ::  +dual-puzzle-phase: the height at which the dual-puzzle regime begins, and
   ::  therefore the first height at which heaviness is priced per puzzle.
@@ -810,6 +841,13 @@
     ?^  -.form  (compute-id:raw-tx:v0 form)
     (compute-id:raw-tx:v1 form)
   ::
+  ::  Admission shape only; v0 and contextual fund authorization are unchanged.
+  ++  valid-stub-axes
+    |=  =form
+    ^-  ?
+    ?^  -.form  %.y
+    (valid-stub-axes:raw-tx:v1 form)
+  ::
   ++  validate
     |=  =form
     ^-  ?
@@ -1047,6 +1085,15 @@
     =/  root=hash  (hash:lock sc)
     [root sc h]
   --
+::  Select only recovery maturity; ordinary authorization is never gated.
+++  fund-minimum-at
+  |=  height=page-number
+  ^-  (unit page-number)
+  =/  phase=(unit page-number)  consensus-batch-phase:page
+  ?~  phase  ~
+  ?:  (lth height u.phase)  ~
+  [~ coinbase-timelock-min]
+:::
 ++  spends
   =<  form
   =+  spends:v1
@@ -1067,6 +1114,7 @@
         max-size
         bythos-phase
         ai-pow-activation-height
+        (fund-minimum-at page-num)
     ==
   ::
   ::  count note-data words as stored on output notes (outputs are built by

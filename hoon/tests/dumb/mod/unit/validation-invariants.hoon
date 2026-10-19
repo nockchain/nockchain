@@ -1,9 +1,7 @@
-::  tests/dumb/mod/unit/review-fixes.hoon
+::  tests/dumb/mod/unit/validation-invariants.hoon
 ::
-::    unit tests for three bugs fixed in PR review:
-::      fix-1: miner emits candidate block's own target, not targets[parent]
-::      fix-2: height check runs before ASERT walk in validate-page-without-txs
-::      fix-3a: kernel-state-6 decodes with pre-ASERT constants shape
+::    unit tests for candidate-target identity, validation order,
+::    persisted constants schemas, positive work, and activation checkpoints.
 /=  helpers  /tests/dumb/helpers
 /=  dcon     /apps/dumbnet/lib/consensus
 /=  dmin     /apps/dumbnet/lib/miner
@@ -15,13 +13,13 @@
 ::
 =>
 |%
-::  bc-fix: low phase.zk-asert so tests cross activation without building
+::  bc-validation: low phase.zk-asert so tests cross activation without building
 ::  thousands of blocks. mirrors bc-asert in asert-activation.hoon.
 ::  v1-phase must be <= phase.zk-asert (enforced by inner.hoon load arm),
 ::  and the height-5 candidate built by add-n-pages must be v1 so it
 ::  carries the post-activation fund slot — otherwise consensus rejects
 ::  the block via +check-fund-split.
-++  bc-fix
+++  bc-validation
   %*  .  default-bc:helpers
     blocks-per-epoch            1.000.000
     v1-phase                    5
@@ -35,19 +33,19 @@
 --
 ::
 |%
-++  h  ~(. helpers bc-fix)
-++  t  ~(. txe bc-fix)
+++  h  ~(. helpers bc-validation)
+++  t  ~(. txe bc-validation)
 ::  +der: pre-activation derived-state (read-only extra arg for consensus/miner doors)
 ++  der  ^-  derived-state  *derived-state
 ::
-::  fix-1 (a): post-ASERT, the candidate's stored target must differ from
+::  Post-ASERT, the candidate's stored target must differ from
 ::  targets[parent]. targets[parent.digest] holds the *parent's own* ASERT
 ::  target (computed at parent's height); the candidate's target is computed
 ::  at candidate height = parent height + 1. with 600 s block spacing vs
 ::  150 s ideal the chain runs slow, so each successive height gets a
 ::  strictly larger target — the two are never equal.
-++  test-fix1-candidate-target-differs-from-targets-parent
-  =/  bc   bc-fix
+++  test-candidate-target-differs-from-targets-parent
+  =/  bc   bc-validation
   =/  con  (initial-consensus-state-custom:h bc)
   ::  build 5 blocks (heights 1-5); height 5 is the first post-ASERT block
   =^  _=page:t  con  (add-n-pages:h 5 con default-retain:h)
@@ -55,19 +53,18 @@
   =/  new-m=mining-state
     (~(heard-new-block dmin m der bc) con *@da)
   =/  cand=page:t  candidate-block.new-m
-  ::  old buggy lookup: targets[parent-digest] = parent's own ASERT target
+  ::  targets[parent-digest] contains the parent's own ASERT target
   =/  parent-digest  ~(parent get:page:t cand)
   =/  stale-target   (~(got h-by targets.con) parent-digest)
-  ::  correct value: candidate's own stored target field
+  ::  compare against the candidate's own stored target field
   =/  cand-target    ~(target get:page:t cand)
   %+  expect-eq  !>(%.y)
   !>(!=(stale-target cand-target))
 ::
-::  fix-1 (b): the candidate's target field equals compute-target-asert at
-::  candidate height. this pins that the miner stores the right value and
-::  that reading it directly (the fix) gives the correct target.
-++  test-fix1-candidate-target-matches-compute-target-asert
-  =/  bc   bc-fix
+::  The candidate's target field equals compute-target-asert at candidate
+::  height, independently of the parent's stored target.
+++  test-candidate-target-matches-compute-target-asert
+  =/  bc   bc-validation
   =/  con  (initial-consensus-state-custom:h bc)
   =^  _=page:t  con  (add-n-pages:h 5 con default-retain:h)
   =/  m=mining-state  initial-mining-state:h
@@ -80,22 +77,15 @@
   =/  got       ~(target get:page:t cand)
   %+  expect-eq  !>(expected)  !>(got)
 ::
-::  fix-2: a block whose parent is a pre-anchor block (e.g., genesis) but
-::  that falsely claims a height >= phase.zk-asert must return %page-height-invalid
-::  rather than crashing inside find-anchor-min-ts. before the fix, the ASERT
-::  target computation ran first and walked ancestry looking for the anchor
-::  height, which doesn't exist in a pre-anchor chain, crashing on a missing
-::  got key.
+::  A block whose parent is pre-anchor (here, genesis) but that claims
+::  a height >= phase.zk-asert must return %page-height-invalid before
+::  ASERT ancestry traversal.
 ::
-::  the fixture is a v1 candidate (coinbase version %1, consistent with the
-::  faked post-v1-phase height) because validation order moved after the fix
-::  landed: +coinbase-version-valid-at-height now rejects before the height
-::  guard, and the original v0 fixture tripped it first
-::  (%coinbase-version-height-mismatch instead of %page-height-invalid).
-::  building the child as v1 lets every earlier check pass so the height
-::  guard itself is what fires — which is the fix-2 property under test.
-++  test-fix2-fake-post-asert-height-returns-height-invalid
-  =/  bc   bc-fix
+::  The v1 candidate has a coinbase version consistent with its claimed
+::  post-v1-phase height. Earlier validation checks therefore pass, making
+::  the parent/child height guard the rejection boundary under test.
+++  test-fake-post-asert-height-returns-height-invalid
+  =/  bc   bc-validation
   =/  con  (initial-consensus-state-custom:h bc)
   ::  genesis is the only block in state; it is the known parent.
   =/  genesis=page:t
@@ -140,13 +130,13 @@
     %+  expect-eq  !>(%page-height-invalid)  !>(+.result)
   ==
 ::
-::  fix-3a: kernel-state-6 uses blockchain-constants-v1-pre-asert (the
+::  kernel-state-6 uses blockchain-constants-v1-pre-asert (the
 ::  frozen pre-ASERT shape, no asert-* fields). kernel-state-7 uses the
 ::  frozen phase-1 shape (five asert-* fields, no
 ::  anchor-min-timestamp.zk-asert). their default constants nouns must
 ::  differ — the pre-ASERT type has five fewer trailing fields,
 ::  producing a shorter noun.
-++  test-fix3a-kernel-state-6-constants-shape-pre-asert
+++  test-kernel-state-6-constants-shape-pre-asert
   =/  k6=kernel-state-6  *kernel-state-6
   =/  k7=kernel-state-7  *kernel-state-7
   %+  expect-eq  !>(%.y)
@@ -162,16 +152,10 @@
   %+  expect-eq  !>(%.y)
   !>(!=(constants.k7 constants.k8))
 ::
-::  fix-3 (finding 3): compute-work clamps to minimum 1 so blocks at
-::  max-target still contribute non-zero accumulated work. before the fix,
-::  max-target-atom / (max-target-atom + 1) integer-divides to 0, making
-::  a max-target block unable to advance the heaviest chain.
-::
-::  the late-upgrade guard (finding 4) fires on mainnet only — it compares
-::  the genesis message hash against realnet-genesis-msg:dk, which never
-::  matches in fakenet tests. no test is written for it.
-++  test-fix3-max-target-work-nonzero
-  =/  t    ~(. txe bc-fix)
+::  compute-work clamps to minimum 1 so blocks at max-target still
+::  contribute positive accumulated work.
+++  test-max-target-work-nonzero
+  =/  t    ~(. txe bc-validation)
   =/  work=bignum:bignum  (compute-work:page:t max-target:t)
   %+  expect-eq  !>(%.y)
   !>((gth (merge:bignum work) 0))
@@ -184,7 +168,7 @@
 ::  reproduce the canonical mainnet block digests at heights 65,499 and
 ::  65,500 (observed from the canonical chain at phase-2 cutover time).
 ++  test-phase-2-checkpoint-65499-pinned
-  =/  cd  ~(checkpointed-digests dcon *consensus-state der bc-fix)
+  =/  cd  ~(checkpointed-digests dcon *consensus-state der bc-validation)
   =/  expected
     (from-b58:hash:txe 'vYekzUpi6o95oA6qHfvcq9kVRzFMZLuUw33YxXQRqNCvBHwU7wys73')
   ?>  (~(has z-by cd) %65.499)
@@ -192,7 +176,7 @@
   !>((~(got z-by cd) %65.499))
 ::
 ++  test-phase-2-checkpoint-65500-pinned
-  =/  cd  ~(checkpointed-digests dcon *consensus-state der bc-fix)
+  =/  cd  ~(checkpointed-digests dcon *consensus-state der bc-validation)
   =/  expected
     (from-b58:hash:txe '4dr8f3hWcQfgSMUrKRcNb1Z4nwzECbbUuqDYUp8G4WF6G5ocFXzPp2')
   ?>  (~(has z-by cd) %65.500)
@@ -202,7 +186,7 @@
 ::  the anchor and activation digests are distinct hashes — sanity that
 ::  the cutover values weren't transcribed identically.
 ++  test-phase-2-checkpoint-anchor-and-activation-differ
-  =/  cd  ~(checkpointed-digests dcon *consensus-state der bc-fix)
+  =/  cd  ~(checkpointed-digests dcon *consensus-state der bc-validation)
   =/  anchor      (~(got z-by cd) %65.499)
   =/  activation  (~(got z-by cd) %65.500)
   %+  expect-eq  !>(%.y)

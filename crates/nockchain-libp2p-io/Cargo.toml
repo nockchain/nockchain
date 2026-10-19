@@ -10,6 +10,7 @@ async-trait = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
 cbor4ii = { workspace = true, features = ["serde1", "use_std"] }
+cbor4ii-transport = { package = "cbor4ii", version = "=0.3.3", features = ["serde1", "use_std"] }
 config = { workspace = true }
 dashmap = { workspace = true }
 either = { workspace = true }
@@ -42,6 +43,7 @@ rand = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["alloc", "derive", "serde_derive"] }
 serde_bytes = { workspace = true, features = ["alloc"] }
 signal-hook = { workspace = true }
+smallvec = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 
@@ -56,6 +58,7 @@ quickcheck = { workspace = true }
 serde_cbor = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tonic = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 zkvm-jetpack = { workspace = true }

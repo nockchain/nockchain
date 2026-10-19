@@ -41,14 +41,50 @@ async fn ensure_parent_dirs(path: &str) -> std::io::Result<()> {
 
 async fn prepare_file_write(path: &str, contents: &[u8]) -> std::io::Result<File> {
     ensure_parent_dirs(path).await?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .await?;
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
     file.write_all(contents).await?;
     Ok(file)
+}
+
+#[cfg(all(test, unix))]
+mod permissions_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::prepare_file_write;
+
+    #[tokio::test]
+    async fn file_write_restricts_existing_permissive_export() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("keys.export");
+        std::fs::write(&path, b"old").expect("seed file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("set permissive mode");
+
+        let file = prepare_file_write(path.to_str().expect("path"), b"secret")
+            .await
+            .expect("write export");
+        assert_eq!(
+            file.metadata()
+                .await
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read(&path).expect("contents"), b"secret");
+    }
 }
 
 async fn write_then_flush(path: &str, contents: &[u8]) -> std::io::Result<()> {

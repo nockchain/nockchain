@@ -84,10 +84,11 @@ That’s it—the API surface piggybacks on the running node; there is no separa
 
 ## Critical operational notes
 
-- The Block Explorer endpoints (`GetBlocks`, `GetTransactionBlock`, `GetTransactionDetails`) are backed by an in-memory cache of the heaviest chain. They do **not** stream mempool contents; pending transactions are only reported as “pending”.
-- Cache warm-up: on first successful seed, the newest up to 1024 blocks (one range chunk) are available first, then older heights backfill in the background. Plan for a brief window where pagination returns nothing until seeding succeeds.
-- Reorgs: the cache follows the reported heaviest chain but does not yet prune orphaned entries, so short-lived stale data can appear after a reorg.
+- The Block Explorer endpoints (`GetBlocks`, `GetTransactionBlock`, `GetTransactionDetails`) are backed by an in-memory cache of the heaviest chain, not a mempool stream. Both transaction endpoints return retryable `Unavailable` for confirmation-index misses while canonical history is incomplete; a retained raw transaction alone does not prove pending status. With complete canonical history, a present raw transaction returns `Pending`; an encoded absent raw transaction returns `NotFound`. Malformed or failed scries remain errors.
+- Cache warm-up: on first successful seed, the newest up to 128 blocks (one range chunk) are available first, then older heights backfill in the background. Pagination can return nothing until seeding succeeds.
+- Reorgs: cache commits check range heights, parent links, adjacent cached boundaries, seed/final tip identity, and chain generation. Detected divergence quarantines retained canonical reads with retryable `Unavailable` before replacement I/O. Transient replacement-fetch failures retain indexes and backfill progress; validated reconciliation atomically retains common ancestry, replaces the orphan suffix, restores authority and resumes backfill. Old-generation work cannot publish into or clear the recovered cache. A decoded replacement with no proven common ancestor, or an explicit consistency failure, discards unverified history. Reads can lag until a reorg is observed and warm-up or recovery can leave gaps; freshness is eventual, not a fixed-time or per-request guarantee.
+- Historical backfill fetches one bounded range at a time and yields between successful chunks without a mandatory fixed delay. Unavailable history retains retry backoff.
 - Observability: gnort metrics (prefixed `nockchain_public_grpc.*`) emit cache timings, heaviest-chain freshness, and RPC success/error counts. Use them to verify your deployment is healthy.
-- This binary boots with the `zkvm-jetpack::produce_prover_hot_state` jet set. Use the main `nockchain` binary for node operation that requires AI-PoW verifier jets and setup tables.
+- This binary prepares the same mandatory consensus AI verifier runtime as `nockchain`, including verifier jets and setup tables; it is not a zkVM-only query node.
 
 Deployments today are integration testbeds, not hardened services. Control access, scrape the metrics, and expect breaking changes until we tag an official release.

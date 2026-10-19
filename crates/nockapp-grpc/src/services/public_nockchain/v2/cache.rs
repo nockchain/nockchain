@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::hash::Hash;
 use std::ops::Bound;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use nockapp_grpc_proto::pb::common::*;
@@ -20,26 +21,63 @@ pub const MAX_PAGE_SIZE: usize = 1_024;
 pub const DEFAULT_PAGE_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_PAGE_SIZE: usize = 600;
 const PER_ENTRY_OVERHEAD: usize = 8;
+const MAX_BALANCE_CACHE_ENTRIES: usize = 4_096;
+
+#[derive(Debug)]
+struct BoundedBalanceCache<K: Eq + Hash, V> {
+    map: dashmap::DashMap<K, Arc<V>>,
+    insertion_order: Mutex<VecDeque<K>>,
+}
+
+impl<K: Clone + Eq + Hash, V> BoundedBalanceCache<K, V> {
+    fn new() -> Self {
+        Self {
+            map: dashmap::DashMap::new(),
+            insertion_order: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<Arc<V>> {
+        self.map.get(key).map(|entry| entry.clone())
+    }
+
+    fn insert(&self, key: K, value: Arc<V>) {
+        // Serialize writers so concurrent misses cannot push the map past its
+        // cap. Readers may keep an evicted entry alive while responding.
+        let mut order = self
+            .insertion_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.map.contains_key(&key) {
+            self.map.insert(key, value);
+            return;
+        }
+        while order.len() >= MAX_BALANCE_CACHE_ENTRIES {
+            if let Some(oldest) = order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        order.push_back(key.clone());
+        self.map.insert(key, value);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AddressBalanceCache {
-    map: dashmap::DashMap<PageKeyAddress, Arc<CachedBalanceEntryAddress>>,
+    inner: Arc<BoundedBalanceCache<PageKeyAddress, CachedBalanceEntryAddress>>,
 }
 
 impl AddressBalanceCache {
     pub fn new() -> Self {
         Self {
-            map: dashmap::DashMap::new(),
+            inner: Arc::new(BoundedBalanceCache::new()),
         }
     }
 
     pub fn get(&self, key: &PageKeyAddress) -> Option<Arc<CachedBalanceEntryAddress>> {
         // Right now, we look for an exact match
         // In the future, we may want to return the latest entry if no exact match is found
-        if let Some(entry) = self.map.get(key) {
-            return Some(entry.clone());
-        }
-        None
+        self.inner.get(key)
     }
 
     pub fn insert(
@@ -56,7 +94,7 @@ impl AddressBalanceCache {
             entry.block_height_value,
             entry.block_id.clone(),
         );
-        self.map.insert(key, entry.clone());
+        self.inner.insert(key, entry.clone());
         entry
     }
 }
@@ -198,23 +236,20 @@ impl CachedBalanceEntryAddress {
 
 #[derive(Clone, Debug)]
 pub struct FirstNameBalanceCache {
-    map: dashmap::DashMap<PageKeyFirstName, Arc<CachedBalanceEntryFirstName>>,
+    inner: Arc<BoundedBalanceCache<PageKeyFirstName, CachedBalanceEntryFirstName>>,
 }
 
 impl FirstNameBalanceCache {
     pub fn new() -> Self {
         Self {
-            map: dashmap::DashMap::new(),
+            inner: Arc::new(BoundedBalanceCache::new()),
         }
     }
 
     pub fn get(&self, key: &PageKeyFirstName) -> Option<Arc<CachedBalanceEntryFirstName>> {
         // Right now, we look for an exact match
         // In the future, we may want to return the latest entry if no exact match is found
-        if let Some(entry) = self.map.get(key) {
-            return Some(entry.clone());
-        }
-        None
+        self.inner.get(key)
     }
 
     pub fn insert(
@@ -228,7 +263,7 @@ impl FirstNameBalanceCache {
             entry.block_height_value,
             entry.block_id.clone(),
         );
-        self.map.insert(key, entry.clone());
+        self.inner.insert(key, entry.clone());
         entry
     }
 }
@@ -396,6 +431,22 @@ mod tests {
     use crate::v2::pagination::{cmp_name, decode_cursor_address};
 
     const PAGE_SIZE: usize = 2;
+
+    #[test]
+    fn balance_cache_eviction_bounds_unique_keys() {
+        let cache = BoundedBalanceCache::<u64, u64>::new();
+        for key in 0..(MAX_BALANCE_CACHE_ENTRIES as u64 + 100) {
+            cache.insert(key, Arc::new(key));
+            assert!(cache.map.len() <= MAX_BALANCE_CACHE_ENTRIES);
+        }
+        assert!(cache.get(&0).is_none());
+        let newest = MAX_BALANCE_CACHE_ENTRIES as u64 + 99;
+        assert_eq!(cache.get(&newest).as_deref(), Some(&newest));
+
+        cache.insert(newest, Arc::new(newest + 1));
+        assert_eq!(cache.map.len(), MAX_BALANCE_CACHE_ENTRIES);
+        assert_eq!(cache.get(&newest).as_deref(), Some(&(newest + 1)));
+    }
 
     #[tokio::test]
     async fn cache_paginates_without_duplicates() {

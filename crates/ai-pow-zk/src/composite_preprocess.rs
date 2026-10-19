@@ -192,51 +192,51 @@ pub fn fill_preprocessed_row(row_idx: usize, desc: &RowDescriptor, row: &mut [Va
 /// program of length `program.len()`, padded to `total_rows`. Pads
 /// with [`RowDescriptor::padding`] entries.
 pub fn build_preprocessed_columns(program: &[RowDescriptor], total_rows: usize) -> Vec<[Val; 22]> {
-    use p3_field::integers::QuotientMap;
     assert!(total_rows >= program.len(), "total_rows < program length");
-    let mut out = Vec::with_capacity(total_rows);
-    for row_idx in 0..total_rows {
-        let desc = if row_idx < program.len() {
-            program[row_idx]
-        } else {
-            RowDescriptor::padding()
-        };
-        let control_prep = ControlChip::pack_control_prep_full(
-            &desc.selectors, desc.mat_id, desc.is_fold, desc.fold_slot, desc.fold_stripe,
-            desc.msg_pair, desc.seg_reset,
-        );
-        // PROGRAM_COLS order = [CONTROL_PREP,
-        // NOISE_PACKED_PREP+0..8, CV_OR_TWEAK_PREP, AB_ID_PREP,
-        // A_ID[0..4], B_ID[0..4], STARK_ROW_IDX,
-        // SX_CONTROL_PREP, RB_CONTROL_PREP].
-        let hi = desc.noise_packed_hi;
-        let q = |v: i64| <Val as QuotientMap<i64>>::from_int(v);
-        out.push([
-            <Val as QuotientMap<u64>>::from_int(control_prep),
-            q(desc.noise_packed),
-            q(hi[0]),
-            q(hi[1]),
-            q(hi[2]),
-            q(hi[3]),
-            q(hi[4]),
-            q(hi[5]),
-            q(hi[6]),
-            <Val as QuotientMap<u64>>::from_int(desc.cv_or_tweak),
-            <Val as QuotientMap<u64>>::from_int(desc.ab_id),
-            <Val as QuotientMap<u64>>::from_int(desc.a_ids[0]),
-            <Val as QuotientMap<u64>>::from_int(desc.a_ids[1]),
-            <Val as QuotientMap<u64>>::from_int(desc.a_ids[2]),
-            <Val as QuotientMap<u64>>::from_int(desc.a_ids[3]),
-            <Val as QuotientMap<u64>>::from_int(desc.b_ids[0]),
-            <Val as QuotientMap<u64>>::from_int(desc.b_ids[1]),
-            <Val as QuotientMap<u64>>::from_int(desc.b_ids[2]),
-            <Val as QuotientMap<u64>>::from_int(desc.b_ids[3]),
-            <Val as QuotientMap<u64>>::from_int(row_idx as u64),
-            <Val as QuotientMap<u64>>::from_int(desc.sx_control),
-            <Val as QuotientMap<u64>>::from_int(desc.rb_control),
-        ]);
-    }
-    out
+    (0..total_rows)
+        .map(|row_idx| {
+            let desc = program
+                .get(row_idx)
+                .copied()
+                .unwrap_or_else(RowDescriptor::padding);
+            preprocessed_program_row(row_idx, &desc)
+        })
+        .collect()
+}
+
+pub(crate) fn preprocessed_program_row(row_idx: usize, desc: &RowDescriptor) -> [Val; 22] {
+    use p3_field::integers::QuotientMap;
+    let control_prep = ControlChip::pack_control_prep_full(
+        &desc.selectors, desc.mat_id, desc.is_fold, desc.fold_slot, desc.fold_stripe,
+        desc.msg_pair, desc.seg_reset,
+    );
+    // PROGRAM_COLS order is shared with the witness-derived program.
+    let hi = desc.noise_packed_hi;
+    let q = |v: i64| <Val as QuotientMap<i64>>::from_int(v);
+    [
+        <Val as QuotientMap<u64>>::from_int(control_prep),
+        q(desc.noise_packed),
+        q(hi[0]),
+        q(hi[1]),
+        q(hi[2]),
+        q(hi[3]),
+        q(hi[4]),
+        q(hi[5]),
+        q(hi[6]),
+        <Val as QuotientMap<u64>>::from_int(desc.cv_or_tweak),
+        <Val as QuotientMap<u64>>::from_int(desc.ab_id),
+        <Val as QuotientMap<u64>>::from_int(desc.a_ids[0]),
+        <Val as QuotientMap<u64>>::from_int(desc.a_ids[1]),
+        <Val as QuotientMap<u64>>::from_int(desc.a_ids[2]),
+        <Val as QuotientMap<u64>>::from_int(desc.a_ids[3]),
+        <Val as QuotientMap<u64>>::from_int(desc.b_ids[0]),
+        <Val as QuotientMap<u64>>::from_int(desc.b_ids[1]),
+        <Val as QuotientMap<u64>>::from_int(desc.b_ids[2]),
+        <Val as QuotientMap<u64>>::from_int(desc.b_ids[3]),
+        <Val as QuotientMap<u64>>::from_int(row_idx as u64),
+        <Val as QuotientMap<u64>>::from_int(desc.sx_control),
+        <Val as QuotientMap<u64>>::from_int(desc.rb_control),
+    ]
 }
 
 #[cfg(test)]

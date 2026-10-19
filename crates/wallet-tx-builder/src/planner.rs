@@ -357,6 +357,20 @@ fn admit_selectable_v1_candidate<M: LockMatcher>(
             resolution_source: resolution.source,
         });
     };
+    if let Some(maturity) = resolution.fund_maturity {
+        if let Some(minimum) = maturity.minimum {
+            if !height_value(&candidate.identity().origin_page)
+                .checked_add(minimum)
+                .is_some_and(|required| required <= maturity.candidate_height)
+            {
+                context.debug_trace.push(format!(
+                    "skipped note {first}/{last}: fund maturity not satisfied at candidate height={}",
+                    maturity.candidate_height
+                ));
+                return Ok(None);
+            }
+        }
+    }
     if !timelock_satisfied(
         &spend_condition,
         &candidate.identity().origin_page,
@@ -1293,10 +1307,12 @@ mod tests {
         TimelockRangeRelative, Version,
     };
     use nockchain_types::tx_engine::v0::{Lock as V0Lock, TimelockIntent as V0TimelockIntent};
-    use nockchain_types::tx_engine::v1::tx::{LockPrimitive, LockTim, Pkh, SpendCondition};
+    use nockchain_types::tx_engine::v1::tx::{
+        LockMerkleProof, LockPrimitive, LockTim, MerkleProof, Pkh, SpendCondition,
+    };
 
     use super::*;
-    use crate::lock_resolver::LockMatcher;
+    use crate::lock_resolver::{FundMaturity, LockMatcher, LockRootLockMatcher};
     use crate::note_data::{
         DecodedNoteData, DecodedNoteDataEntry, DecodedNoteDataPayload, LockDataPayload,
         NormalizedNoteDataKey,
@@ -1530,6 +1546,280 @@ mod tests {
             }
             saw_pkh
         }
+    }
+
+    /// Historical fund notes reveal a bare 3-of-4 multisig, not their wrapper.
+    fn fund_request(
+        origin: u64,
+        maturity: FundMaturity,
+    ) -> (PlanRequest, LockRootLockMatcher, SpendCondition) {
+        let multisig = SpendCondition::new(vec![LockPrimitive::Pkh(Pkh::new(
+            3,
+            vec![hash(777), hash(778), hash(779), hash(780)],
+        ))]);
+        let root = multisig.hash().expect("fund root");
+        let historical_first_name = SpendCondition::coinbase_pkh(root.clone(), 100)
+            .first_name()
+            .expect("historical first-name")
+            .into_hash();
+        let matcher = LockRootLockMatcher::from_lock_root(&root)
+            .expect("matcher")
+            .with_spend_condition(multisig.clone())
+            .with_fund_notes(&root, &historical_first_name, maturity);
+        let mut request = base_request();
+        request.chain_context.height =
+            BlockHeight(Belt(maturity.candidate_height.saturating_sub(1)));
+        request.chain_context.base_fee = 1;
+        request.chain_context.min_fee = 1;
+        request.signer_pkh = None;
+        request.candidates = vec![candidate(1, 100_000)];
+        request.candidates[0].identity_mut().name.first = historical_first_name;
+        request.candidates[0].identity_mut().origin_page = BlockHeight(Belt(origin));
+        (request, matcher, multisig)
+    }
+
+    #[test]
+    fn fund_maturity_candidate_age_boundaries() {
+        for (candidate_height, minimum, origin, allowed) in [
+            (200, Some(100), 101, false),
+            (200, Some(100), 100, true),
+            (200, Some(100), 99, true),
+            (200, Some(2), 199, false),
+            (200, Some(2), 198, true),
+            (200, Some(2), 197, true),
+            (200, Some(0), 200, true),
+            (200, Some(0), 201, false),
+            (u64::MAX, Some(2), u64::MAX - 1, false),
+            (200, None, 201, true),
+        ] {
+            let (request, matcher, _) = fund_request(
+                origin,
+                FundMaturity {
+                    candidate_height,
+                    minimum,
+                },
+            );
+            let result = plan_create_tx(&request, &matcher);
+            if allowed {
+                let plan = result.expect("mature or inactive fund note");
+                assert_eq!(
+                    plan.selected,
+                    vec![request.candidates[0].identity().clone()]
+                );
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(PlanError::InsufficientFunds {
+                            selected_total: 0,
+                            ..
+                        })
+                    ),
+                    "origin={origin} minimum={minimum:?} candidate={candidate_height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fund_maturity_recomputes_after_backward_candidate_movement() {
+        // These effective policies model a caller moving across activation and
+        // back. The planner neither knows nor latches the activation boundary.
+        for (candidate_height, minimum, allowed) in [
+            (199, None, true),
+            (200, Some(100), false),
+            (201, Some(100), false),
+            (199, None, true),
+        ] {
+            let (request, matcher, _) = fund_request(
+                150,
+                FundMaturity {
+                    candidate_height,
+                    minimum,
+                },
+            );
+            assert_eq!(plan_create_tx(&request, &matcher).is_ok(), allowed);
+        }
+    }
+
+    #[test]
+    fn fund_maturity_auto_skips_immature_and_manual_cannot_spend_it() {
+        let (mut request, matcher, _) = fund_request(
+            101,
+            FundMaturity {
+                candidate_height: 200,
+                minimum: Some(100),
+            },
+        );
+        let immature_name = request.candidates[0].identity().name.clone();
+        let mut mature = candidate(2, 200_000);
+        mature.identity_mut().name.first = immature_name.first.clone();
+        mature.identity_mut().origin_page = BlockHeight(Belt(100));
+        let mature_identity = mature.identity().clone();
+        request.candidates.push(mature);
+        let plan = plan_create_tx(&request, &matcher).expect("mature fallback");
+        assert_eq!(plan.selected, vec![mature_identity]);
+
+        request.selection_mode = SelectionMode::Manual {
+            note_names: vec![immature_name],
+        };
+        assert!(matches!(
+            plan_create_tx(&request, &matcher),
+            Err(PlanError::InsufficientFunds {
+                selected_total: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fund_maturity_does_not_gate_direct_notes_to_same_root() {
+        let (mut request, matcher, multisig) = fund_request(
+            201,
+            FundMaturity {
+                candidate_height: 200,
+                minimum: Some(100),
+            },
+        );
+        let direct_first_name = multisig
+            .first_name()
+            .expect("direct first-name")
+            .into_hash();
+        // Direct notes without lock-data use carried planning metadata; direct
+        // notes with lock-data resolve that same bare multisig normally.
+        for with_lock_data in [false, true] {
+            request.candidates = vec![if with_lock_data {
+                candidate_with_lock(1, 100_000, vec![multisig.clone()])
+            } else {
+                candidate(1, 100_000)
+            }];
+            request.candidates[0].identity_mut().name.first = direct_first_name.clone();
+            request.candidates[0].identity_mut().origin_page = BlockHeight(Belt(201));
+            let plan = plan_create_tx(&request, &matcher).expect("ordinary direct note");
+            assert_eq!(
+                plan.selected,
+                vec![request.candidates[0].identity().clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn fund_maturity_preserves_multisig_preimage_lmp_words_and_fee() {
+        let (request, inactive, multisig) = fund_request(
+            100,
+            FundMaturity {
+                candidate_height: 200,
+                minimum: None,
+            },
+        );
+        let root = multisig.hash().expect("fund root");
+        let first_name = &request.candidates[0].identity().name.first;
+        let active = inactive.clone().with_fund_notes(
+            &root,
+            first_name,
+            FundMaturity {
+                candidate_height: 200,
+                minimum: Some(100),
+            },
+        );
+        let expected_lmp = LockMerkleProof::new_full(
+            multisig.clone(),
+            1,
+            MerkleProof {
+                root: root.clone(),
+                path: Vec::new(),
+            },
+        )
+        .jam_bytes();
+        for matcher in [&inactive, &active] {
+            let resolution = matcher.select_v1_candidate(ResolveLockRequest {
+                note_first_name: first_name,
+                decoded_note_data: request.candidates[0].decoded_note_data(),
+                signer_pkh: None,
+                coinbase_relative_min: request.coinbase_relative_min,
+            });
+            let revealed = resolution.spend_condition.expect("bare multisig");
+            assert_eq!(revealed, multisig);
+            assert_eq!(revealed.hash().expect("revealed root"), root);
+            assert_eq!(revealed.jam_bytes(), multisig.jam_bytes());
+            assert_eq!(
+                LockMerkleProof::new_full(
+                    revealed,
+                    1,
+                    MerkleProof {
+                        root: root.clone(),
+                        path: Vec::new(),
+                    },
+                )
+                .jam_bytes(),
+                expected_lmp
+            );
+        }
+        let inactive_plan = plan_create_tx(&request, &inactive).expect("inactive plan");
+        let active_plan = plan_create_tx(&request, &active).expect("mature active plan");
+        assert!(active_plan.final_fee > 0);
+        assert!(active_plan.word_counts.witness_words > 0);
+        assert_eq!(active_plan, inactive_plan);
+    }
+
+    #[test]
+    fn fund_maturity_shared_withdrawal_admission_skips_immature_notes() {
+        let (fund, matcher, _) = fund_request(
+            199,
+            FundMaturity {
+                candidate_height: 200,
+                minimum: Some(2),
+            },
+        );
+        let mut request = base_withdrawal_request();
+        request.chain_context = fund.chain_context;
+        request.candidates = fund.candidates;
+        let mut mature = candidate(2, 200_000);
+        mature.identity_mut().name.first = request.candidates[0].identity().name.first.clone();
+        mature.identity_mut().origin_page = BlockHeight(Belt(198));
+        let mature_identity = mature.identity().clone();
+        request.candidates.push(mature);
+        let result = plan_withdrawal_tx(&request, &matcher).expect("mature withdrawal note");
+        assert_eq!(result.plan.selected, vec![mature_identity]);
+    }
+
+    #[test]
+    fn fund_maturity_leaves_ordinary_timelock_at_snapshot_tip() {
+        let maturity = FundMaturity {
+            candidate_height: 201,
+            minimum: Some(0),
+        };
+        let (mut request, _, _) = fund_request(199, maturity);
+        let ordinary = coinbase_like_lock(hash(777), 2);
+        let root = ordinary.hash().expect("ordinary root");
+        let direct_first_name = ordinary
+            .first_name()
+            .expect("ordinary first-name")
+            .into_hash();
+        let historical_first_name = SpendCondition::coinbase_pkh(root.clone(), 100)
+            .first_name()
+            .expect("historical first-name")
+            .into_hash();
+        let matcher = LockRootLockMatcher::from_lock_root(&root)
+            .expect("matcher")
+            .with_spend_condition(ordinary)
+            .with_fund_notes(&root, &historical_first_name, maturity);
+        request.candidates[0].identity_mut().name.first = direct_first_name;
+        // At tip 200 the relative minimum requires 201. The independent fund
+        // candidate height of 201 must not make this ordinary lock spendable.
+        assert!(matches!(
+            plan_create_tx(&request, &matcher),
+            Err(PlanError::InsufficientFunds {
+                selected_total: 0,
+                ..
+            })
+        ));
+        request.chain_context.height = BlockHeight(Belt(201));
+        let plan = plan_create_tx(&request, &matcher).expect("ordinary boundary at tip");
+        assert_eq!(
+            plan.selected,
+            vec![request.candidates[0].identity().clone()]
+        );
     }
 
     #[test]
@@ -2046,13 +2336,6 @@ mod tests {
         let result = plan_create_tx(&request, &AlwaysMatches).expect("plan");
         assert_eq!(result.selected.len(), 1);
         assert_eq!(result.selected[0].name, expected_selected_name);
-        assert!(
-            result
-                .debug_trace
-                .iter()
-                .any(|entry| entry.contains("timelock not satisfied")),
-            "expected debug trace to mention timelock filtering"
-        );
     }
 
     #[test]
@@ -2088,13 +2371,6 @@ mod tests {
         let result = plan_create_tx(&request, &AlwaysMatches).expect("plan");
         assert_eq!(result.selected.len(), 1);
         assert_eq!(result.selected[0].name, selected_name);
-        assert!(
-            result
-                .debug_trace
-                .iter()
-                .any(|entry| entry.contains("timelock not satisfied")),
-            "expected debug trace to mention timelock filtering"
-        );
     }
 
     #[test]

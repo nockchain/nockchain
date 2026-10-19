@@ -144,14 +144,57 @@ impl PokeTransportOutcome {
 
 pub struct NodeClient {
     client: PrivateNockAppGrpcClient,
+    operator_managed: bool,
 }
 
 impl NodeClient {
+    fn operator_managed_requested() -> bool {
+        std::env::var("NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN")
+            .map(|token| !token.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Restricted miners only watch candidates and submit proofs. An operator
+    /// must configure payout keys and enable mining on the node beforehand.
+    pub fn is_operator_managed(&self) -> bool {
+        self.operator_managed
+    }
+
+    /// Operator provisioning always uses the operator credential, even when
+    /// the restricted miner credential is present in this process's env.
+    pub async fn connect_operator<T: AsRef<str>>(address: T) -> Result<Self, NodeClientError> {
+        Ok(Self {
+            client: PrivateNockAppGrpcClient::connect(address).await?,
+            operator_managed: false,
+        })
+    }
+
+    /// Connect with a caller-scoped operator credential, independently of
+    /// ambient restricted-miner credentials used by other clients.
+    pub async fn connect_operator_with_auth_token<T: AsRef<str>>(
+        address: T,
+        auth_token: Option<&str>,
+    ) -> Result<Self, NodeClientError> {
+        Ok(Self {
+            client: PrivateNockAppGrpcClient::connect_with_auth_token(address, auth_token).await?,
+            operator_managed: false,
+        })
+    }
+
     /// Connect to a node's private gRPC service. `address` is a URL
     /// like `http://127.0.0.1:5555`.
     pub async fn connect<T: AsRef<str>>(address: T) -> Result<Self, NodeClientError> {
         let client = PrivateNockAppGrpcClient::connect(address).await?;
-        Ok(Self { client })
+        let operator_managed = Self::operator_managed_requested();
+        let client = if operator_managed {
+            client.with_miner_auth_token_from_env()?
+        } else {
+            client
+        };
+        Ok(Self {
+            client,
+            operator_managed,
+        })
     }
 
     /// Connect with a bounded handshake plus TCP and HTTP/2 keepalives. Mining
@@ -163,7 +206,16 @@ impl NodeClient {
     ) -> Result<Self, NodeClientError> {
         let client =
             PrivateNockAppGrpcClient::connect_with_timeout(address, connect_timeout).await?;
-        Ok(Self { client })
+        let operator_managed = Self::operator_managed_requested();
+        let client = if operator_managed {
+            client.with_miner_auth_token_from_env()?
+        } else {
+            client
+        };
+        Ok(Self {
+            client,
+            operator_managed,
+        })
     }
 
     /// Push the mining-reward configuration to the node's kernel.

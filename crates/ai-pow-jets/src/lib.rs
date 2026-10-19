@@ -23,12 +23,9 @@
 //! via [`init_ai_pow_verifier_setup`].
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
-// SOUNDNESS (consensus DoS): the verify jet's guarantee that a crafted `%ai-pow`
-// block can never crash the node relies on `std::panic::catch_unwind` converting an
-// attacker-induced panic (in decode or the recursion verifier) into a
-// deterministic invalid-block `NO`. Under `panic = "abort"` catch_unwind is a no-op
-// and a panic aborts the whole process — turning one crafted block into a
-// network-wide crash. Refuse to build the consensus verifier that way.
+// The consensus verifier requires unwinding so `catch_unwind` can convert decode
+// and recursion-verifier panics into deterministic invalid-block `NO` results.
+// `panic = "abort"` does not support this rejection contract.
 #[cfg(panic = "abort")]
 compile_error!(
     "ai-pow-jets requires panic=unwind: the consensus verify jet relies on \
@@ -54,7 +51,7 @@ use ai_pow_miner::certificate_noun::{
 #[global_allocator]
 static TEST_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use ai_pow_zk::proof_rules::ProofRules;
+use ai_pow_zk::proof_rules::{ProofRules, VerificationRules};
 use ai_pow_zk::recursion::AiPowCompactBatchVerifierContext;
 use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
@@ -142,11 +139,8 @@ pub struct DiskBucket {
     /// consensus parameter). Checked at boot and on every page-in.
     committed_digest: Vec<u8>,
     context_path: std::path::PathBuf,
-    /// BLAKE3 of the serialized context FILE BYTES, computed when the file was
-    /// written. Re-checked on every page-in so on-disk bit-rot (which overwhelmingly
-    /// lands in the multi-GB preprocessed tree, leaving the small stored digest fields
-    /// intact) is caught as a NON-DETERMINISTIC load fault (→ the jet `%fail`s) rather
-    /// than silently corrupting the tree and later rejecting a valid block.
+    /// BLAKE3 of the serialized context bytes, checked on every page-in.
+    /// A corrupt native context is a load failure, not a proof rejection.
     context_file_blake3: [u8; 32],
 }
 
@@ -332,7 +326,7 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
             bincode::config::standard(),
         )
     }));
-    let (setup, _) = match decoded {
+    let (setup, consumed) = match decoded {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             tracing::error!(
@@ -348,6 +342,10 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
             return None;
         }
     };
+    if consumed != raw.len() {
+        tracing::error!("ai-pow: verifier context for {:?} has trailing bytes", bucket.shape_key);
+        return None;
+    }
     // Consensus + integrity gate: the deserialized context must internally bind its
     // verifier-key digest to its metadata, FRI shape, and common data, then match the
     // committed bucket digest.
@@ -522,7 +520,7 @@ pub(crate) fn ai_pow_verify_core(
     target: [u8; 32],
     setup: &AiPowVerifierSetup,
 ) -> Result<bool, JetErr> {
-    ai_pow_verify_core_with_rules(artifact, commit, target, setup, ProofRules::Hardened)
+    ai_pow_verify_core_with_rules(artifact, commit, target, setup, VerificationRules::Hardened)
 }
 
 fn ai_pow_verify_core_with_rules(
@@ -530,10 +528,10 @@ fn ai_pow_verify_core_with_rules(
     commit: [u8; 32],
     target: [u8; 32],
     setup: &AiPowVerifierSetup,
-    rules: ProofRules,
+    rules: VerificationRules,
 ) -> Result<bool, JetErr> {
     let limits = CertificateNounLimits::default();
-    match ai_pow_miner::certificate_noun::verify_ai_pow_block_artifact_with_rules(
+    match ai_pow_miner::certificate_noun::verify_ai_pow_block_artifact_with_verification_rules(
         artifact, limits, &commit, &target, AI_POW_VERIFY_MAX_PATTERN_LEN, &setup.context,
         &setup.digest_bytes, rules,
     ) {
@@ -543,45 +541,49 @@ fn ai_pow_verify_core_with_rules(
 }
 
 /// The AI-PoW verify jet. Sample:
-/// `[rules=?(%legacy %hardened) artifact=ai-pow-artifact commit=block-commitment:page:t target=@]`
+/// `[rules=?(%legacy %hardened %consrule) artifact=ai-pow-artifact commit=block-commitment:page:t target=@]`
 /// Hoon derives `rules` from the block height. An unknown rule is a kernel/jet
 /// interface error and halts with `%fail`; it must not become a block rejection.
 /// — `commit` is the STRUCTURED commitment noun (canonicalized here via
 /// `commit_from_noun`), `target` the `merge:bignum` LE atom the Hoon arm passes.
 /// Result: loobean.
 ///
-/// **It is impossible to panic the node from this jet.** The two attacker-controlled
-/// steps — decoding the artifact and running the (large, vendored) recursion verifier
-/// on the certificate — are wrapped in `catch_unwind`; a panic on crafted input is a
-/// DETERMINISTIC invalid-block signal → `NO` (which consensus turns into a
-/// `%liar-block-id`, so the block cannot be re-spammed). Neither wrapped step mutates
-/// the interpreter stack, so catching is safe. The setup lookup distinguishes a
-/// DETERMINISTIC "no such bucket ⇒ invalid block" (`NO`) from a NON-DETERMINISTIC
-/// local fault (missing/corrupt context file, uninjected table ⇒ `%fail` via
-/// `BAIL_FAIL`, so a broken node halts rather than wrongly rejecting valid blocks).
+/// Artifact decoding and certificate verification run under `catch_unwind`;
+/// a panic in either step yields the deterministic invalid-block result `NO`.
+/// Neither wrapped step mutates the interpreter stack. A missing setup bucket
+/// also yields `NO`, while a local setup fault (missing/corrupt context file or
+/// uninjected table) yields `%fail` via `BAIL_FAIL` rather than rejecting a valid
+/// block.
 pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    // Resource failure is local, including for direct library callers. Keep
+    // preflight outside both invalid-artifact panic boundaries.
+    setup::prepare_verifier_resources().map_err(|_| BAIL_FAIL)?;
     let space = context.stack.noun_space();
     // sample = [rules artifact commit target], selected by the kernel.
     let sample = slot(subject, 6, &space)?;
-    let rules = proof_rules_from_noun(slot(sample, 2, &space)?)?;
+    let rules = verification_rules_from_noun(slot(sample, 2, &space)?)?;
     let artifact_noun = slot(sample, 6, &space)?;
     let commit_noun = slot(sample, 14, &space)?;
     let target_noun = slot(sample, 15, &space)?;
 
-    // Decode + target-parse + cap-check the ATTACKER-CONTROLLED artifact under
-    // catch_unwind. A decode/shape failure, a bad target, an over-cap height, OR a
-    // panic on crafted input are all the same DETERMINISTIC invalid-block signal → NO.
-    // None of this mutates `context.stack`, so catching a panic here is safe.
+    // Decode, target parsing, and cap checks run under `catch_unwind`.
+    // Decode/shape failures, invalid targets, over-cap heights, and panics yield NO.
+    // This closure does not mutate `context.stack`.
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let limits = CertificateNounLimits::default();
         let artifact = decode_ai_pow_pearl_merge_artifact_noun_with_rules(
-            artifact_noun, &space, limits, rules,
+            artifact_noun,
+            &space,
+            limits,
+            rules.proof_rules(),
         )
         .ok()?;
+        ai_pow_miner::certificate_noun::validate_ai_pow_block_artifact_admission(&artifact, rules)
+            .ok()?;
         // Dense and MoE artifacts share this compact certificate envelope.
         // Reject noncanonical values before paging in a verifier setup. Never
         // normalize here: Hoon already hashes the original artifact bytes.
-        if rules == ProofRules::Hardened
+        if rules.proof_rules() == ProofRules::Hardened
             && !ai_pow_compact_recursive_certificate_from_node(&artifact.certificate.certificate)
                 .ok()?
                 .has_canonical_pow_witnesses()
@@ -592,7 +594,7 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
         let mut setup_key = VerifierSetupShapeKey::from_zk_params(
             &artifact.certificate.zk_params, artifact.certificate.trace_height,
         )?;
-        setup_key.rules = rules;
+        setup_key.rules = rules.proof_rules();
         Some((artifact, target, setup_key))
     }));
     let (artifact, target, setup_key) = match decoded {
@@ -628,10 +630,11 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     }
 }
 
-fn proof_rules_from_noun(noun: Noun) -> Result<ProofRules, JetErr> {
+fn verification_rules_from_noun(noun: Noun) -> Result<VerificationRules, JetErr> {
     match noun.as_direct().map_err(|_| BAIL_FAIL)?.data() {
-        tas!(b"legacy") => Ok(ProofRules::Legacy),
-        tas!(b"hardened") => Ok(ProofRules::Hardened),
+        tas!(b"legacy") => Ok(VerificationRules::Legacy),
+        tas!(b"hardened") => Ok(VerificationRules::Hardened),
+        tas!(b"consrule") => Ok(VerificationRules::ConsensusBatch),
         _ => Err(BAIL_FAIL),
     }
 }
@@ -678,18 +681,22 @@ mod tests {
     #[test]
     fn verifier_rule_tags_reject_unknown_versions() {
         assert_eq!(
-            proof_rules_from_noun(D(tas!(b"legacy"))).unwrap(),
-            ProofRules::Legacy
+            verification_rules_from_noun(D(tas!(b"legacy"))).unwrap(),
+            VerificationRules::Legacy
         );
         assert_eq!(
-            proof_rules_from_noun(D(tas!(b"hardened"))).unwrap(),
-            ProofRules::Hardened
+            verification_rules_from_noun(D(tas!(b"hardened"))).unwrap(),
+            VerificationRules::Hardened
+        );
+        assert_eq!(
+            verification_rules_from_noun(D(tas!(b"consrule"))).unwrap(),
+            VerificationRules::ConsensusBatch
         );
         let mut stack = nockvm::mem::NockStack::new(8 << 20, 0);
         let cell = nockvm::noun::T(&mut stack, &[D(0), D(0)]);
         for unknown in [D(0), D(1), D(tas!(b"future")), cell] {
             assert!(matches!(
-                proof_rules_from_noun(unknown),
+                verification_rules_from_noun(unknown),
                 Err(JetErr::Fail(nockvm::interpreter::Error::NonDeterministic(
                     nockvm::interpreter::Mote::Fail,
                     _
@@ -821,7 +828,7 @@ mod tests {
         );
         let dir = std::env::temp_dir().join(format!("ai-pow-jets-corrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
+        let path = crate::setup::verifier_setup_descriptor_cache_path(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"this is not a valid verifier-setup cache").unwrap();
         assert!(path.exists(), "precondition: corrupt cache present");
@@ -986,9 +993,18 @@ mod jet_tests {
 
     use super::*;
     use crate::setup::{
-        build_verifier_setup_seed, prove_reference_moe_block, ReferenceBlock,
+        build_verifier_setup_descriptor, prove_reference_moe_block, ReferenceBlock,
         REFERENCE_SETUP_COMMIT,
     };
+
+    fn reference_block_descriptor(
+        block: &ReferenceBlock,
+    ) -> ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor {
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor::from_context(
+            block.run.zk_params, block.run.trace_height, &block.run.verifier_context,
+        )
+        .expect("descriptor from genuine proof context")
+    }
 
     /// Cue a jammed artifact into a fresh slab and return `(slab, root)`.
     fn cue_artifact(jammed: nockapp::Bytes) -> NounSlab {
@@ -1218,15 +1234,12 @@ mod jet_tests {
         );
     }
 
-    /// Dropping raw columns and the PCS prover tree from a boot verifier setup
-    /// leaves verification unchanged. Prove one real block, then
-    /// verify a real artifact and a wrong-commit artifact against BOTH the full proved
-    /// context (retains prover data) and the slimmed rebuilt context after a disk
-    /// serialization round trip, asserting identical outcomes and an identical
-    /// verifier-key digest. Pins that the RSS trim does not change consensus results.
+    /// Genuine proof generation and shape-only setup produce byte-identical native
+    /// verifier contexts and keys. Both accept an honest artifact after a context
+    /// serialization round trip and reject a changed block commitment.
     #[test]
     #[ignore = "real MoE compact proof (~25s); opt-in"]
-    fn slimmed_verifier_only_context_verifies_identically() {
+    fn genuine_and_shape_verifier_contexts_are_equivalent() {
         let (block, target) = target_hitting_reference_moe_block();
         let commit = block.commit;
 
@@ -1239,7 +1252,7 @@ mod jet_tests {
         .expect("build MoE artifact noun")
         .jam();
 
-        // FULL context: the freshly-proved context, which retains the raw columns.
+        // The genuine proof run's native verifier context.
         let full_digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
             &block.run.verifier_key_digest(),
         )
@@ -1248,15 +1261,16 @@ mod jet_tests {
             &block.certificate.zk_params, block.run.trace_height,
         )
         .expect("valid setup key");
+        let descriptor = reference_block_descriptor(&block);
         let full_setup = AiPowVerifierSetup {
             trace_height: setup_key.trace_height,
             sx_bound: setup_key.sx_bound,
             context: block.run.verifier_context,
             digest_bytes: full_digest.clone(),
         };
-        // SLIM context: the verify-only rebuild drops raw columns and the PCS tree.
-        let slim_setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed)
-            .expect("rebuild slimmed setup from seed");
+        // Independently derive the native context from canonical geometry.
+        let slim_setup = crate::setup::rebuild_verifier_setup_from_descriptor(descriptor)
+            .expect("derive slimmed setup from shape descriptor");
 
         assert_eq!(
             slim_setup.shape_key(),
@@ -1265,27 +1279,19 @@ mod jet_tests {
         );
         assert_eq!(
             slim_setup.digest_bytes, full_digest,
-            "verifier-key digest must be unchanged by dropping prover data",
+            "shape-only setup must preserve the genuine verifier key",
         );
 
-        // Measure serialized size independently of allocator retention/RSS noise.
         let full_ser =
             bincode::serde::encode_to_vec(&full_setup.context, bincode::config::standard())
-                .expect("serialize full context")
-                .len();
+                .expect("serialize genuine context");
         let slim_ser =
             bincode::serde::encode_to_vec(&slim_setup.context, bincode::config::standard())
-                .expect("serialize slim context")
-                .len();
-        eprintln!(
-            "context serialized: full {full_ser} B, slim {slim_ser} B (dropped {} B of \
-             prover data at 2^{})",
-            full_ser.saturating_sub(slim_ser),
-            (slim_setup.trace_height as u64).trailing_zeros(),
-        );
+                .expect("serialize shape-derived context");
+        assert_eq!(full_ser, slim_ser, "complete native verifier context bytes");
         assert!(
-            slim_ser < 64 * 1024 && slim_ser * 1000 < full_ser,
-            "verifier metadata must be small after removing the tree (full={full_ser}, slim={slim_ser})",
+            slim_ser.len() < 64 * 1024,
+            "native verifier metadata must not retain a prover tree",
         );
         let encoded = bincode::serde::encode_to_vec(&slim_setup, bincode::config::standard())
             .expect("serialize compact setup");
@@ -1364,8 +1370,10 @@ mod jet_tests {
         // Inject the setup DISK-PAGED (production path): serializes the context, but leaves
         // nothing heavy resident yet.
         let tmp = tempfile::TempDir::new().unwrap();
-        let setup_built =
-            crate::setup::rebuild_verifier_setup_from_seed(block.seed).expect("build context");
+        let setup_built = crate::setup::rebuild_verifier_setup_from_descriptor(
+            reference_block_descriptor(&block),
+        )
+        .expect("build context");
         crate::setup::install_verifier_setup_disk_from_setups(vec![setup_built], tmp.path(), 2)
             .expect("disk-paged init");
 
@@ -1414,11 +1422,9 @@ mod jet_tests {
         );
     }
 
-    /// CORRUPT-FILE FAIL-SAFE KAT (real proof, ~25s): a bit-rotten context file is
-    /// caught by its checksum at page-in and resolves to `LoadFailed` (⇒ the jet
-    /// `%fail`s — a non-deterministic local fault), NOT `Found` (which would verify
-    /// against a corrupt tree) and NOT a silent reject of a valid block. Pins the H3
-    /// fix. Sets the process-global setup; run alone.
+    /// A context file with an invalid checksum resolves to `LoadFailed` at page-in.
+    /// This is a local setup fault (`%fail`), not a setup match or invalid-block
+    /// rejection. Sets the process-global setup; run alone.
     #[test]
     #[ignore = "real MoE compact proof (~25s); corrupts a context file; run alone"]
     fn corrupt_context_file_pages_in_as_load_failed() {
@@ -1437,7 +1443,10 @@ mod jet_tests {
         };
         let block =
             prove_reference_moe_block(&params, 8, 2, 1, REFERENCE_SETUP_COMMIT).expect("prove");
-        let setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed).expect("build");
+        let setup = crate::setup::rebuild_verifier_setup_from_descriptor(
+            reference_block_descriptor(&block),
+        )
+        .expect("build");
         let setup_key = setup.shape_key();
         let digest = setup.digest_bytes.clone();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1463,66 +1472,76 @@ mod jet_tests {
         );
     }
 
-    /// DIVERGENT-SETUP FAIL-SAFE KAT: a bincode-valid context file whose
-    /// serialized setup metadata no longer matches the committed bucket is a local
-    /// setup fault at page-in. Uses the stable verifier-setup seed cache when present.
+    /// Page-in rejects changed key bytes, geometry, rules, or trailing payload,
+    /// even when the checksum matches the file that was written.
     #[test]
-    #[ignore = "rebuilds one cached verifier context; installs process-global setup; run alone"]
     fn divergent_serialized_setup_pages_in_as_load_failed() {
-        if crate::ai_pow_verifier_setup_initialized() {
-            eprintln!("skip: verifier setup already initialized in this process");
-            return;
-        }
-        let cache_dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
-        let cache_path = crate::setup::verifier_setup_seed_cache_path(&cache_dir);
-        if !cache_path.exists() {
-            eprintln!(
-                "skip: no stable verifier-setup seed cache at {}",
-                cache_path.display()
+        let params = MatmulParams {
+            m: 64,
+            k: 1024,
+            n: 64,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        for rules in [ProofRules::Legacy, ProofRules::Hardened] {
+            let mut setup = crate::setup::build_verifier_setup_with_rules(&params, 8, 2, 1, rules)
+                .expect("canonical shape context");
+            let key = setup.shape_key();
+            let committed = setup.digest_bytes.clone();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("context.bin");
+            let page = |setup: &AiPowVerifierSetup, trailing: bool| {
+                let mut bytes = bincode::serde::encode_to_vec(setup, bincode::config::standard())
+                    .expect("serialize setup");
+                if trailing {
+                    bytes.push(0x42);
+                }
+                let checksum = *blake3::hash(&bytes).as_bytes();
+                std::fs::write(&path, bytes).unwrap();
+                crate::page_in_bucket(&crate::DiskBucket::new(
+                    key,
+                    committed.clone(),
+                    path.clone(),
+                    checksum,
+                ))
+            };
+            assert!(page(&setup, false).is_some());
+            assert!(page(&setup, true).is_none(), "reject trailing bytes");
+            setup.digest_bytes[0] ^= 0xff;
+            assert!(page(&setup, false).is_none(), "reject changed key");
+            setup.digest_bytes[0] ^= 0xff;
+            setup.trace_height *= 2;
+            assert!(page(&setup, false).is_none(), "reject changed geometry");
+            setup.trace_height /= 2;
+            setup.sx_bound = !setup.sx_bound;
+            assert!(
+                page(&setup, false).is_none(),
+                "reject changed stripe binding"
             );
-            return;
+            setup.sx_bound = !setup.sx_bound;
+            let swapped = VerifierSetupShapeKey::with_rules(
+                key.trace_height,
+                key.sx_bound,
+                if rules == ProofRules::Legacy {
+                    ProofRules::Hardened
+                } else {
+                    ProofRules::Legacy
+                },
+            );
+            let bytes = bincode::serde::encode_to_vec(&setup, bincode::config::standard()).unwrap();
+            let checksum = *blake3::hash(&bytes).as_bytes();
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                crate::page_in_bucket(&crate::DiskBucket::new(swapped, committed, path, checksum,))
+                    .is_none(),
+                "reject changed rules"
+            );
         }
-        let seeds =
-            crate::setup::load_verifier_setup_seeds(&cache_path).expect("load stable setup seeds");
-        let seed = seeds
-            .into_iter()
-            .min_by_key(|seed| seed.trace_height())
-            .expect("stable setup cache contains a seed");
-        let mut setup =
-            crate::setup::rebuild_verifier_setup_from_seed(seed).expect("rebuild cached setup");
-        let setup_key = setup.shape_key();
-        let committed_digest = setup.digest_bytes.clone();
-        setup.digest_bytes[0] ^= 0xff;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ctx_path =
-            crate::setup::verifier_context_file_path(tmp.path(), setup_key, &committed_digest);
-        // The path helper names the production namespace; unlike the installer,
-        // it does not create the ai-pow subdirectory in this isolated fixture.
-        std::fs::create_dir_all(ctx_path.parent().expect("context cache directory"))
-            .expect("create context cache directory");
-        let bytes = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
-            .expect("serialize divergent setup");
-        std::fs::write(&ctx_path, &bytes).unwrap();
-        let checksum = *blake3::hash(&bytes).as_bytes();
-        let bucket = crate::DiskBucket::new(setup_key, committed_digest, ctx_path, checksum);
-        crate::init_ai_pow_verifier_setup_disk(vec![bucket], 1).expect("inject disk bucket");
-
-        assert!(
-            matches!(
-                crate::ai_pow_verifier_setup_for(setup_key),
-                crate::VerifierSetupLookup::LoadFailed
-            ),
-            "a divergent context file must page in as LoadFailed (→ %fail), never invalid-block NO",
-        );
     }
 
-    /// Run the production installer using existing seeds, building or reusing
-    /// compact context files, then resolve every versioned key with cap=2. Run in
-    /// a fresh process. Reports process RSS, including allocator-retained rebuild
-    /// memory; serialized context size is measured by the full-table gate.
+    /// Resolve every committed key with bounded residency using a complete cache.
     #[test]
     #[ignore = "builds all production contexts to disk + measures paged RSS; run alone"]
     fn install_or_build_disk_paged_boot_and_rss() {
@@ -1542,34 +1561,35 @@ mod jet_tests {
                 .unwrap_or(0)
                 / 1024
         }
-        // The first run builds v3 contexts from v2 seeds; later runs reuse them.
+        // Missing context files are deterministically reconstructed from shape.
         let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
-        let src_cache = crate::setup::verifier_setup_seed_cache_path(&dir);
+        let src_cache = crate::setup::verifier_setup_descriptor_cache_path(&dir);
         if !src_cache.exists() {
-            eprintln!("skip: no stable seed cache at {}", src_cache.display());
+            eprintln!("skip: no shape cache at {}", src_cache.display());
             return;
         }
         // Detect whether this is a build-boot or a reuse-boot (context files present).
-        let seeds = crate::setup::load_verifier_setup_seeds(&src_cache).expect("load seeds");
-        let reuse = seeds.iter().all(|s| {
+        let descriptors =
+            crate::setup::load_verifier_setup_descriptors(&src_cache).expect("load descriptors");
+        let reuse = descriptors.iter().all(|s| {
             let key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
-                .expect("valid seed key")
+                .expect("valid descriptor key")
                 .for_rules(s.rules);
             crate::setup::verifier_context_file_path(&dir, key, &s.verifier_key_digest_bytes)
                 .exists()
         });
-        let keys: Vec<_> = seeds
+        let keys: Vec<_> = descriptors
             .iter()
             .map(|s| {
                 VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
-                    .expect("valid seed key")
+                    .expect("valid descriptor key")
                     .for_rules(s.rules)
             })
             .collect();
         let expected_cap = 2usize;
-        drop(seeds);
+        drop(descriptors);
         std::env::set_var(
             crate::setup::AI_POW_VERIFIER_CACHE_CAP_ENV,
             expected_cap.to_string(),
@@ -1609,13 +1629,9 @@ mod jet_tests {
         );
     }
 
-    /// AUDIT PROBE: does DROPPING a paged-in context actually return RSS to the OS on
-    /// THIS allocator? The "cap bounds RSS" guarantee needs eviction (a `drop`) to
-    /// reclaim memory. Page the largest context in and out several times, printing RSS
-    /// each cycle: flat ⇒ the drop reclaims (guarantee holds even on the system
-    /// allocator); growing ⇒ the allocator retains freed memory and the guarantee
-    /// relies on jemalloc's background decay (production) rather than the drop alone.
-    /// Needs a built 2^19 context file (from a prior boot/RSS run); skips otherwise.
+    /// Diagnostic: record resident memory during repeated context page-in and
+    /// eviction under the active allocator.
+    /// Requires a built 2^19 context file; skips otherwise.
     #[test]
     #[ignore = "pages a big context in/out repeatedly to check that eviction reclaims RSS; opt-in"]
     fn eviction_reclaims_rss_probe() {
@@ -1634,16 +1650,17 @@ mod jet_tests {
         let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
-        let cache = crate::setup::verifier_setup_seed_cache_path(&dir);
+        let cache = crate::setup::verifier_setup_descriptor_cache_path(&dir);
         if !cache.exists() {
-            eprintln!("skip: no stable seed cache");
+            eprintln!("skip: no stable shape cache");
             return;
         }
-        let mut seeds = crate::setup::load_verifier_setup_seeds(&cache).expect("load seeds");
-        seeds.sort_by_key(|s| s.trace_height());
-        let big = seeds.pop().expect("a seed");
+        let mut descriptors =
+            crate::setup::load_verifier_setup_descriptors(&cache).expect("load descriptors");
+        descriptors.sort_by_key(|s| s.trace_height());
+        let big = descriptors.pop().expect("a descriptor");
         let big_key = VerifierSetupShapeKey::from_zk_params(&big.zk_params, big.trace_height())
-            .expect("valid seed key")
+            .expect("valid descriptor key")
             .for_rules(big.rules);
         let ctx_path =
             crate::setup::verifier_context_file_path(&dir, big_key, &big.verifier_key_digest_bytes);
@@ -1683,31 +1700,28 @@ mod jet_tests {
         );
     }
 
-    /// LAZY BOOT DIGEST CHECK (fast, no proving; needs the generated seed cache): the
-    /// real production seed cache's cached per-bucket digests hash to the committed v1
-    /// constant via the seed-only path — i.e. the lazy boot check ACCEPTS a valid
-    /// versioned cache without rebuilding, mirroring the rebuilt-table digest check.
-    /// Skips if the cache is absent.
+    /// A complete shape cache must match both committed table fingerprints.
     #[test]
-    #[ignore = "needs the generated seed cache (a prior run); validates the lazy boot digest check"]
-    fn stable_cache_seeds_pass_lazy_boot_digest_check() {
+    #[ignore = "requires a generated production shape cache"]
+    fn stable_shape_cache_matches_committed_table_fingerprints() {
         let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
-        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
+        let path = crate::setup::verifier_setup_descriptor_cache_path(&dir);
         if !path.exists() {
-            eprintln!("skip: no stable seed cache at {}", path.display());
+            eprintln!("skip: no stable shape cache at {}", path.display());
             return;
         }
-        let seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
+        let descriptors =
+            crate::setup::load_verifier_setup_descriptors(&path).expect("load descriptors");
         assert_eq!(
-            setup_seed_keys(&seeds),
-            production_setup_seed_keys(),
+            setup_descriptor_keys(&descriptors),
+            production_setup_descriptor_keys(),
             "full production versioned shape-key cache",
         );
-        crate::table_digest::verify_verifier_setup_seed_table_digest(&seeds)
-            .expect("stable-cache seeds must hash to the committed v1 digest (no rebuild)");
-        eprintln!("stable cache seeds pass the lazy boot digest check");
+        crate::table_digest::verify_verifier_setup_descriptor_table_digest(&descriptors)
+            .expect("stable shape cache must match both committed fingerprints");
+        eprintln!("stable shape cache matches both committed table fingerprints");
     }
 
     /// KAT (real proving, ~25s): the ACCEPTANCE path with the block commitment
@@ -1824,29 +1838,22 @@ mod jet_tests {
         );
     }
 
-    /// KAT (real proving + rebuild, ~30s): the boot-setup SEED cache path — the
-    /// C4 linchpin. Prove a real MoE block, serialize its SMALL rebuild seed,
-    /// deserialize it, and rebuild the FULL verifier setup from it WITHOUT proving.
-    /// The real block must verify through the jet CORE against the REBUILT
-    /// (cached-seed) setup exactly as against the freshly-proved context, and a
-    /// wrong commit must still be rejected. Also asserts the serialized seed is
-    /// small (< 16 MiB) — the whole point of caching the seed, not the ~866 MB
-    /// context. This proves a boot node can cache seeds and rebuild working setups.
+    /// A shape-only cache reconstructs the key used by a genuine certificate.
     #[test]
     #[ignore = "real MoE compact proof + rebuild (~30s); opt-in"]
-    fn moe_verifier_setup_seed_roundtrip_rebuilds_working_setup() {
-        use crate::setup::rebuild_verifier_setup_from_seed;
+    fn moe_verifier_setup_descriptor_roundtrip_rebuilds_working_setup() {
+        use crate::setup::rebuild_verifier_setup_from_descriptor;
 
         let (block, target) = target_hitting_reference_moe_block();
         let commit = block.commit;
 
-        // Serialize the SMALL seed; assert it is small (vs the ~866 MB context).
-        let seed_bytes = bincode::serde::encode_to_vec(&block.seed, bincode::config::standard())
-            .expect("serialize verifier-setup seed");
+        let descriptor = reference_block_descriptor(&block);
+        let descriptor_bytes =
+            bincode::serde::encode_to_vec(&descriptor, bincode::config::standard())
+                .expect("serialize shape descriptor");
         assert!(
-            seed_bytes.len() < 16 * 1024 * 1024,
-            "cached seed must be small (< 16 MiB); got {} bytes",
-            seed_bytes.len(),
+            descriptor_bytes.len() < 256,
+            "cache must contain geometry, not proofs"
         );
 
         // Build the block artifact noun (uses the freshly-proved cert; unchanged).
@@ -1859,11 +1866,14 @@ mod jet_tests {
         .expect("build MoE artifact noun")
         .jam();
 
-        // BOOT path: deserialize the seed and REBUILD the setup (no proving).
-        let (seed2, _): (ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed, _) =
-            bincode::serde::decode_from_slice(&seed_bytes, bincode::config::standard())
-                .expect("deserialize verifier-setup seed");
-        let setup = rebuild_verifier_setup_from_seed(seed2).expect("rebuild setup from seed");
+        let (descriptor2, consumed): (
+            ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor,
+            _,
+        ) = bincode::serde::decode_from_slice(&descriptor_bytes, bincode::config::standard())
+            .expect("deserialize shape descriptor");
+        assert_eq!(consumed, descriptor_bytes.len());
+        let setup = rebuild_verifier_setup_from_descriptor(descriptor2)
+            .expect("derive context from shape descriptor");
         assert_eq!(
             setup.trace_height, block.run.trace_height,
             "rebuilt setup trace height matches the proved cert",
@@ -1889,7 +1899,7 @@ mod jet_tests {
                 ai_pow_verify_core(&artifact, commit, target, &setup),
                 Ok(true)
             ),
-            "real MoE block must verify against the REBUILT (cached-seed) setup",
+            "real MoE block must verify against the shape-derived setup",
         );
         assert!(
             matches!(
@@ -1899,17 +1909,17 @@ mod jet_tests {
             "wrong block commitment must still be rejected against the rebuilt setup",
         );
 
-        // FILE cache path (C4b): save the seed to a data-dir-style cache file, load
-        // + rebuild the TABLE from disk, and verify the SAME block against the
-        // disk-loaded setup — the exact boot flow (cache in data dir → load →
-        // rebuild → verify), end to end through a real file.
+        // Round-trip the same shape descriptor through the disk envelope.
         let tmp_data_dir =
-            std::env::temp_dir().join(format!("ai-pow-jets-seedcache-{}", std::process::id()));
-        let cache_path = crate::setup::verifier_setup_seed_cache_path(&tmp_data_dir);
-        crate::setup::save_verifier_setup_seeds(&cache_path, std::slice::from_ref(&block.seed))
-            .expect("save seed cache to data-dir file");
+            std::env::temp_dir().join(format!("ai-pow-jets-shapecache-{}", std::process::id()));
+        let cache_path = crate::setup::verifier_setup_descriptor_cache_path(&tmp_data_dir);
+        crate::setup::save_verifier_setup_descriptors(
+            &cache_path,
+            std::slice::from_ref(&descriptor),
+        )
+        .expect("save descriptor cache");
         let table = crate::setup::load_verifier_setup_table(&cache_path)
-            .expect("load + rebuild seed table");
+            .expect("load and derive shape table");
         let _ = std::fs::remove_dir_all(&tmp_data_dir);
         assert_eq!(table.len(), 1, "one-bucket table loaded from disk");
         assert_eq!(
@@ -1937,15 +1947,8 @@ mod jet_tests {
         );
     }
 
-    /// KAT (real proving, ~40s): the boot GENERATION path end to end for one
-    /// bucket. Take the cheapest production bucket shape, `build_and_cache` it
-    /// (prove + write the seed cache to a data-dir file), then `load_verifier_setup_table`
-    /// (load + rebuild, no proving) and confirm the rebuilt setup lands at exactly
-    /// the height `production_verifier_setup_buckets` predicted (matrix-free). This
-    /// is what a fresh node does on first boot when it has no cache. Does NOT touch
-    /// the global setup OnceCell (so it can't perturb the cheap boot-installer tests).
+    /// Derivation and shape-cache round-trip preserve each rule's native geometry.
     #[test]
-    #[ignore = "real compact proofs + generate/cache/load (~40s); opt-in"]
     fn boot_generate_and_cache_one_bucket_roundtrips() {
         let buckets = crate::setup::production_verifier_setup_buckets();
         let shape = *buckets.first().expect("at least one production bucket");
@@ -1964,10 +1967,10 @@ mod jet_tests {
 
         let tmp = std::env::temp_dir().join(format!("ai-pow-genboot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let path = crate::setup::verifier_setup_seed_cache_path(&tmp);
+        let path = crate::setup::verifier_setup_descriptor_cache_path(&tmp);
 
-        // Generate (prove) + cache the one-bucket table to the data-dir file.
-        crate::setup::build_and_cache_verifier_setup_seeds(&path, &[shape])
+        // Derive both rule versions of one canonical geometry.
+        crate::setup::build_and_cache_verifier_setup_descriptors(&path, &[shape])
             .expect("generate + cache one bucket");
         assert!(
             path.exists(),
@@ -1979,12 +1982,62 @@ mod jet_tests {
         *corrupt_bytes.last_mut().expect("nonempty cache") ^= 0x01;
         std::fs::write(&path, corrupt_bytes).expect("corrupt cache");
         assert!(
-            crate::setup::load_verifier_setup_seeds(&path).is_err(),
-            "the envelope must reject a changed payload before seed decoding",
+            crate::setup::load_verifier_setup_descriptors(&path).is_err(),
+            "the envelope must reject a changed payload before descriptor decoding",
         );
-        std::fs::write(&path, cached_bytes).expect("restore checksummed cache");
+        let mut incompatible = cached_bytes.clone();
+        incompatible[..8].copy_from_slice(b"NCVPSEED");
+        std::fs::write(&path, incompatible).unwrap();
+        assert!(crate::setup::load_verifier_setup_descriptors(&path).is_err());
+        let mut incompatible = cached_bytes.clone();
+        incompatible[8..12].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&path, incompatible).unwrap();
+        assert!(crate::setup::load_verifier_setup_descriptors(&path).is_err());
+        std::fs::write(&path, &cached_bytes).expect("restore checksummed cache");
+        let mut descriptors = crate::setup::load_verifier_setup_descriptors(&path).unwrap();
+        descriptors[0].verifier_key_digest_bytes[0] ^= 1;
+        let changed = descriptors.remove(0);
+        assert!(
+            changed.derive_context().is_err(),
+            "reject a noncanonical cached key"
+        );
+        let original_limb: [u8; 8] = descriptors[0].verifier_key_digest_bytes[..8]
+            .try_into()
+            .unwrap();
+        descriptors[0].verifier_key_digest_bytes[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        crate::setup::save_verifier_setup_descriptors(&path, &descriptors).unwrap();
+        assert!(
+            crate::setup::load_verifier_setup_descriptors(&path).is_err(),
+            "reject noncanonical field limbs"
+        );
+        descriptors[0].verifier_key_digest_bytes[..8].copy_from_slice(&original_limb);
+        let original_height = descriptors[0].trace_height;
+        descriptors[0].trace_height = 1 << 20;
+        crate::setup::save_verifier_setup_descriptors(&path, &descriptors).unwrap();
+        assert!(
+            crate::setup::load_verifier_setup_descriptors(&path).is_err(),
+            "reject unsupported trace degrees"
+        );
+        descriptors[0].trace_height = original_height;
+        let original_params = descriptors[0].zk_params;
+        descriptors[0].zk_params.m = 1 << 30;
+        descriptors[0].zk_params.n = 1 << 30;
+        descriptors[0].zk_params.tile = 1 << 30;
+        crate::setup::save_verifier_setup_descriptors(&path, &descriptors).unwrap();
+        assert!(
+            crate::setup::load_verifier_setup_descriptors(&path).is_err(),
+            "reject overflowing schedule geometry"
+        );
+        descriptors[0].zk_params = original_params;
+        descriptors[0].zk_params.noise_rank = 0;
+        crate::setup::save_verifier_setup_descriptors(&path, &descriptors).unwrap();
+        assert!(
+            crate::setup::load_verifier_setup_descriptors(&path).is_err(),
+            "reject invalid cached geometry"
+        );
+        std::fs::write(&path, cached_bytes).expect("restore valid descriptors");
 
-        // Load + rebuild (no proving) — the fast subsequent-boot path.
+        // Reconstruct from the decoded shape descriptors.
         let table = crate::setup::load_verifier_setup_table(&path).expect("load + rebuild table");
         let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(table.len(), 2, "both rule versions of one shape");
@@ -1994,28 +2047,28 @@ mod jet_tests {
         );
     }
 
-    /// KAT (two real proofs, ~80s): canonical setup generation has a deterministic
-    /// serialized seed, not merely a deterministic verifier-key digest.
+    /// Repeated canonical derivation yields identical shape-cache bytes.
     #[test]
-    #[ignore = "two real compact proofs (~80s); opt-in"]
-    fn verifier_setup_seed_bytes_are_deterministic() {
+    fn verifier_setup_descriptor_bytes_are_deterministic() {
         let buckets = crate::setup::production_verifier_setup_buckets();
         let shape = *buckets.first().expect("at least one production bucket");
-        let build_seed = || {
+        let build_descriptor = || {
             if shape.dense {
-                crate::setup::build_verifier_setup_seed_dense(&shape.params)
+                crate::setup::build_verifier_setup_descriptor_dense(&shape.params)
             } else {
-                build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
+                build_verifier_setup_descriptor(&shape.params, shape.hw, shape.e, shape.top_k)
             }
         };
-        let first = build_seed().expect("first canonical seed");
-        let second = build_seed().expect("second canonical seed");
-
+        let first = build_descriptor().expect("first canonical descriptor");
+        let second = build_descriptor().expect("second canonical descriptor");
         let first_bytes = bincode::serde::encode_to_vec(&first, bincode::config::standard())
-            .expect("serialize first canonical seed");
+            .expect("serialize first descriptor");
         let second_bytes = bincode::serde::encode_to_vec(&second, bincode::config::standard())
-            .expect("serialize second canonical seed");
-        assert_eq!(first_bytes, second_bytes, "canonical setup seed bytes");
+            .expect("serialize second descriptor");
+        assert_eq!(
+            first_bytes, second_bytes,
+            "canonical shape descriptor bytes"
+        );
     }
 
     /// Diagnostic: print every production bucket shape (cheap, no proving).
@@ -2050,15 +2103,8 @@ mod jet_tests {
         }
     }
 
-    /// C4 CLOSER (generates the FULL production table; ~6 min): consensus caps the
-    /// accept-band at 2^19 (`AI_POW_MAX_TRACE_HEIGHT`), so the table is exactly the
-    /// production shape keys across the feasible 2^13..2^19 trace-height band. Proves
-    /// one canonical block per shape, logs each seed's trace height + serialized size
-    /// (the L0 program grows with trace height), round-trips the whole table through
-    /// a data-dir cache file, rebuilds them (no proving), and asserts coverage of the
-    /// capped acceptance band. This is exactly what a fresh node does on first boot.
+    /// Production setup derives all 28 native keys and preserves both fingerprints.
     #[test]
-    #[ignore = "generates the full production shape-key table 2^13..2^19; opt-in — closes C4"]
     fn boot_generate_full_production_table() {
         use crate::setup::*;
         use crate::table_digest::*;
@@ -2069,62 +2115,59 @@ mod jet_tests {
             .unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("ai-pow-fulltable-{}", std::process::id()))
             });
-        let path = verifier_setup_seed_cache_path(&dir);
-        // Optional retained checkpoints make the expensive release gate resumable.
-        let mut seeds = if path.exists() {
-            load_verifier_setup_seeds(&path).expect("read generation checkpoint")
-        } else {
-            Vec::new()
-        };
-        for (i, shape) in buckets.iter().enumerate() {
-            for rules in [ProofRules::Legacy, ProofRules::Hardened] {
-                let index = i * 2 + usize::from(rules == ProofRules::Hardened);
-                if index < seeds.len() {
-                    continue;
-                }
-                let seed = if shape.dense {
-                    build_verifier_setup_seed_dense_with_rules(&shape.params, rules)
-                } else {
-                    build_verifier_setup_seed_with_rules(
-                        &shape.params, shape.hw, shape.e, shape.top_k, rules,
-                    )
-                }
-                .unwrap_or_else(|e| panic!("bucket {i} {rules:?}: {e}"));
-                eprintln!(
-                    "generated bucket {i} {rules:?}: 2^{} key={:?}",
-                    seed.trace_height().trailing_zeros(),
-                    seed.verifier_key_digest_bytes
-                );
-                seeds.push(seed);
-                save_verifier_setup_seeds(&path, &seeds).expect("save generation checkpoint");
-            }
-        }
-        let seeds = load_verifier_setup_seeds(&path).expect("round-trip complete seed table");
-        assert_eq!(seeds.len(), 28);
+        let path = verifier_setup_descriptor_cache_path(&dir);
+        build_and_cache_verifier_setup_descriptors(&path, &buckets).expect("production setup");
+        let mut descriptors =
+            load_verifier_setup_descriptors(&path).expect("round-trip shape table");
+        assert_eq!(descriptors.len(), 28);
         assert_eq!(
-            legacy_verifier_setup_seed_table_digest(&seeds),
+            legacy_verifier_setup_descriptor_table_digest(&descriptors)
+                .expect("historical fingerprint"),
             AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST,
-            "all historical verifier keys must retain their original consensus digest"
         );
-        let digest = verifier_setup_seed_table_digest(&seeds).expect("versioned table fingerprint");
-        eprintln!("V1 VERIFIER-SETUP TABLE DIGEST = {}", hex32(&digest));
-        eprintln!("pin: {:?}", digest);
-        // Rebuild sequentially to limit temporary prover working memory.
+        assert_eq!(
+            verify_verifier_setup_descriptor_table_digest(&descriptors).expect("both fingerprints"),
+            AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST,
+        );
+        let original_m = descriptors[0].zk_params.m;
+        descriptors[0].zk_params.m += 1;
+        assert!(
+            verify_verifier_setup_descriptor_table_digest(&descriptors).is_err(),
+            "cached key digests cannot authorize noncanonical production parameters",
+        );
+        descriptors[0].zk_params.m = original_m;
         let mut keys = std::collections::BTreeSet::new();
         let mut context_bytes = 0usize;
-        for seed in seeds {
-            let expected = seed.verifier_key_digest_bytes.clone();
-            let setup = rebuild_verifier_setup_from_seed(seed).expect("rebuild versioned seed");
-            let rebuilt = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-                &setup
-                    .context
-                    .validate_setup_binding()
-                    .expect("rebuilt setup binding"),
+        let mut native_fingerprints = Vec::with_capacity(28);
+        for descriptor in descriptors {
+            let key = VerifierSetupShapeKey::from_zk_params(
+                &descriptor.zk_params,
+                descriptor.trace_height(),
+            )
+            .unwrap()
+            .for_rules(descriptor.rules);
+            let context_path =
+                verifier_context_file_path(&dir, key, &descriptor.verifier_key_digest_bytes);
+            let checksum = context_file_checksum(&context_path).expect("native file checksum");
+            let bucket = DiskBucket::new(
+                key, descriptor.verifier_key_digest_bytes, context_path, checksum,
             );
-            assert_eq!(expected, rebuilt);
+            let setup = crate::page_in_bucket(&bucket).expect("native page-in");
+            let binding = setup
+                .context
+                .validate_setup_binding()
+                .expect("native context binding");
+            assert_eq!(
+                bucket.committed_digest,
+                ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(&binding),
+            );
+            native_fingerprints.push((
+                setup.shape_key(),
+                ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(&binding),
+            ));
             assert!(keys.insert(setup.shape_key()), "duplicate versioned shape");
             let encoded = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
-                .expect("serialize rebuilt setup");
+                .expect("serialize native setup");
             assert!(
                 encoded.len() < 64 * 1024,
                 "prover tree must not be retained"
@@ -2132,16 +2175,16 @@ mod jet_tests {
             context_bytes += encoded.len();
             let (decoded, used): (AiPowVerifierSetup, usize) =
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
-                    .expect("deserialize rebuilt setup");
+                    .expect("deserialize native setup");
             assert_eq!(used, encoded.len());
-            assert_eq!(decoded.shape_key(), setup.shape_key());
-            assert_eq!(
-                decoded.context.validate_setup_binding().unwrap(),
-                setup.context.validate_setup_binding().unwrap(),
-            );
-            eprintln!("rebuilt {:?}", setup.shape_key());
+            assert_eq!(decoded.shape_key(), key);
+            assert_eq!(decoded.context.validate_setup_binding().unwrap(), binding);
+            eprintln!("NATIVE KEY {key:?}: {:?}", setup.digest_bytes);
         }
-        eprintln!("ALL 28 VERIFIER CONTEXTS: {context_bytes} serialized bytes");
+        assert_eq!(
+            verify_production_fingerprints(&native_fingerprints).expect("all native fingerprints"),
+            AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST,
+        );
         for rules in [ProofRules::Legacy, ProofRules::Hardened] {
             for log2 in 13..=19 {
                 for sx in [false, true] {
@@ -2153,13 +2196,10 @@ mod jet_tests {
                 }
             }
         }
-        assert_eq!(
-            digest, AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST,
-            "pin the measured v1 table before release"
-        );
+        eprintln!("ALL 28 VERIFIER CONTEXTS: {context_bytes} serialized bytes");
     }
 
-    fn production_setup_seed_keys() -> std::collections::BTreeSet<VerifierSetupShapeKey> {
+    fn production_setup_descriptor_keys() -> std::collections::BTreeSet<VerifierSetupShapeKey> {
         crate::setup::production_verifier_setup_buckets()
             .iter()
             .flat_map(|bucket| {
@@ -2193,40 +2233,45 @@ mod jet_tests {
             .collect()
     }
 
-    fn setup_seed_keys(
-        seeds: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed],
+    fn setup_descriptor_keys(
+        descriptors: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor],
     ) -> std::collections::BTreeSet<VerifierSetupShapeKey> {
-        seeds
+        descriptors
             .iter()
-            .map(|seed| {
-                VerifierSetupShapeKey::from_zk_params(&seed.zk_params, seed.trace_height())
-                    .expect("cached setup seed has a valid shape key")
-                    .for_rules(seed.rules)
+            .map(|descriptor| {
+                VerifierSetupShapeKey::from_zk_params(
+                    &descriptor.zk_params,
+                    descriptor.trace_height(),
+                )
+                .expect("cached setup descriptor has a valid shape key")
+                .for_rules(descriptor.rules)
             })
             .collect()
     }
 
-    fn load_stable_production_setup_seeds(
+    fn load_stable_production_setup_descriptors(
         path: &std::path::Path,
-    ) -> Vec<ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed> {
-        let expected = production_setup_seed_keys();
+    ) -> Vec<ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor> {
+        let expected = production_setup_descriptor_keys();
         let buckets = crate::setup::production_verifier_setup_buckets();
         if path.exists() {
-            match crate::setup::load_verifier_setup_seeds(path) {
-                Ok(seeds) => {
-                    let actual = setup_seed_keys(&seeds);
+            match crate::setup::load_verifier_setup_descriptors(path) {
+                Ok(descriptors) => {
+                    let actual = setup_descriptor_keys(&descriptors);
                     if actual == expected {
-                        match crate::table_digest::verify_verifier_setup_seed_table_digest(&seeds) {
-                            Ok(_) => return seeds,
+                        match crate::table_digest::verify_verifier_setup_descriptor_table_digest(
+                            &descriptors,
+                        ) {
+                            Ok(_) => return descriptors,
                             Err(e) => eprintln!(
-                                "stable setup seed cache digest does not match production ({e}); \
+                                "shape cache digest does not match production ({e}); \
                                  regenerating {}",
                                 path.display(),
                             ),
                         }
                     } else {
                         eprintln!(
-                            "stable setup seed cache shape keys do not match production; \
+                            "shape cache keys do not match production; \
                              cache={actual:?} production={expected:?}; regenerating {}",
                             path.display(),
                         );
@@ -2234,34 +2279,34 @@ mod jet_tests {
                 }
                 Err(e) => {
                     eprintln!(
-                        "stable setup seed cache at {} is unreadable ({e}); regenerating",
+                        "shape cache at {} is unreadable ({e}); regenerating",
                         path.display(),
                     );
                 }
             }
-            let _ = std::fs::remove_file(path);
         }
         eprintln!(
-            "generating current production setup seed cache at {} ({} buckets)",
+            "deriving production shape cache at {} ({} buckets)",
             path.display(),
             buckets.len(),
         );
-        crate::setup::build_and_cache_verifier_setup_seeds(path, &buckets)
-            .expect("generate current production setup seed cache");
-        let seeds = crate::setup::load_verifier_setup_seeds(path).expect("load generated seeds");
+        crate::setup::build_and_cache_verifier_setup_descriptors(path, &buckets)
+            .expect("derive production shape cache");
+        let descriptors =
+            crate::setup::load_verifier_setup_descriptors(path).expect("load descriptors");
         assert_eq!(
-            setup_seed_keys(&seeds),
+            setup_descriptor_keys(&descriptors),
             expected,
             "generated stable setup cache must match current production shape keys",
         );
-        seeds
+        descriptors
     }
 
     /// RSS + rebuild-latency MEASUREMENT for the boot verifier-setup table.
     ///
     /// Reports (a) the resident memory each rebuilt bucket context costs and the
     /// total standing RSS of the production shape-key table, and (b) the wall-clock
-    /// to rebuild each bucket from its cached seed — i.e. the per-height latency an
+    /// to rebuild each bucket from its cached descriptor — the per-height latency an
     /// on-demand (rebuild-per-verify) design would pay. The stable measurement cache
     /// is regenerated when its shape-key set is not the current production set. Run with:
     ///   cargo test -p ai-pow-jets --lib measure_verifier_setup_table_rss -- --ignored --nocapture
@@ -2287,23 +2332,24 @@ mod jet_tests {
         let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
-        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
-        let seeds = load_stable_production_setup_seeds(&path);
+        let path = crate::setup::verifier_setup_descriptor_cache_path(&dir);
+        let descriptors = load_stable_production_setup_descriptors(&path);
         let cache_mb =
             std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
         let base = rss_mb();
         eprintln!(
-            "cache {cache_mb:.1} MiB on disk; baseline RSS after loading seeds = {base} MB; \
+            "cache {cache_mb:.1} MiB on disk; baseline RSS after loading descriptors = {base} MB; \
              rebuilding {} buckets:",
-            seeds.len(),
+            descriptors.len(),
         );
         let mut table = Vec::new();
         let mut prev = base;
         let mut total_rebuild_ms = 0u128;
-        for seed in seeds {
-            let h = (seed.trace_height() as u64).trailing_zeros();
+        for descriptor in descriptors {
+            let h = (descriptor.trace_height() as u64).trailing_zeros();
             let t = Instant::now();
-            let setup = crate::setup::rebuild_verifier_setup_from_seed(seed).expect("rebuild");
+            let setup =
+                crate::setup::rebuild_verifier_setup_from_descriptor(descriptor).expect("rebuild");
             let ms = t.elapsed().as_millis();
             total_rebuild_ms += ms;
             table.push(setup);
@@ -2326,7 +2372,8 @@ mod jet_tests {
         // columns). Re-verify against the pinned constant on the slimmed table.
         let table_keys: std::collections::BTreeSet<_> =
             table.iter().map(|setup| setup.shape_key()).collect();
-        if table_keys == production_setup_seed_keys() && crate::table_digest::v1_digest_is_pinned()
+        if table_keys == production_setup_descriptor_keys()
+            && crate::table_digest::v1_digest_is_pinned()
         {
             let digest =
                 crate::table_digest::verifier_setup_table_digest(&table).expect("table digest");
@@ -2352,14 +2399,14 @@ mod jet_tests {
         let dir = std::env::var_os("AI_POW_SETUP_GENERATION_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("aipow-rss-cache"));
-        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
-        let mut seeds = load_stable_production_setup_seeds(&path);
-        seeds.sort_by_key(|s| s.trace_height());
-        let biggest = seeds.pop().expect("at least one seed");
+        let path = crate::setup::verifier_setup_descriptor_cache_path(&dir);
+        let mut descriptors = load_stable_production_setup_descriptors(&path);
+        descriptors.sort_by_key(|s| s.trace_height());
+        let biggest = descriptors.pop().expect("at least one seed");
         let h = (biggest.trace_height() as u64).trailing_zeros();
 
         let t = Instant::now();
-        let setup = crate::setup::rebuild_verifier_setup_from_seed(biggest).expect("rebuild");
+        let setup = crate::setup::rebuild_verifier_setup_from_descriptor(biggest).expect("rebuild");
         eprintln!(
             "REBUILD 2^{h}: {} ms (the latency we must AVOID on the verify path)",
             t.elapsed().as_millis()

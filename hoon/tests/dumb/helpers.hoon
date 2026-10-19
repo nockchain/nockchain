@@ -124,10 +124,9 @@
     check-pow-flag  %.n
     max-future-timestamp  (bex 32)
   ==
-::  provable variants for KERNEL integration tests (mempool/pending): on
-::  this branch the kernel's +check-pow / +check-genesis do REAL STARK
-::  verification (the check-pow-flag bypass was removed from consensus),
-::  so blocks poked via %heard-block must carry a real, verifiable proof.
+::  Provable variants for kernel integration tests (mempool/pending).
+::  The kernel's +check-pow / +check-genesis perform STARK verification,
+::  so blocks submitted via %heard-block must carry a verifiable proof.
 ::  These variants set the difficulty target to max (any proof clears
 ::  +check-target, so no nonce search is required) and pow-len=1 (proving
 ::  a 1-item STARK is ~2s vs ~23s at the mainnet len=64), keeping the
@@ -269,19 +268,16 @@
       puzzle-asert-states=%hmap
   ==
 ::
-::  +mock-pow: a minimal, well-typed version-%0 ZK proof artifact used as
-::  the pow for library-level (non-kernel) test pages. On this branch the
-::  `check-pow-flag` bypass was removed from consensus, so every block a
-::  test validates via +validate-page-without-txs must carry a proof (the
-::  arm does `(need ~(pow ...))`). That arm's only pow gate is
-::  `check-target` — a difficulty check — NOT a full STARK verification
-::  (real STARK verify lives in the KERNEL's +check-pow, not the lib).
+::  +mock-pow: a minimal, well-typed version-%0 ZK proof artifact for
+::  library-level test pages. +validate-page-without-txs requires a proof
+::  and checks its target; full STARK verification belongs to the kernel's
+::  +check-pow path.
 ::  proof-to-pow of this empty-objects %0 proof is a fixed tip5 hash that
 ::  is <= the default test genesis-target, so it passes check-target at
 ::  the standard test difficulty without any target override. All test
 ::  blocks sit far below proof-version-1-start (6.750), so %0 is the
-::  height-correct version. This does NOT weaken any real check: the
-::  kernel pow path (real verify:nv) is untouched and still rejects it.
+::  height-correct version. The kernel's +check-pow path performs full
+::  STARK verification and rejects this mock artifact.
 ++  mock-pow  ^-  (unit proof)  `[%0 objects=~ hashes=~ read-index=0]
 ::
 ::  +prove-page: stamp a page with a REAL, verifiable ZK proof for the
@@ -1217,14 +1213,13 @@
   ::  the heaviest chain.
   ++  der  ~+  ;;(derived-state d.internal.outer.nockchain)
   ::
-  ::  +strand-tx-on-block: put a tx back exactly the way the OLD kernel left it
-  ::  -- still held in raw-txs, still claimed by .bid, absent from excluded-txs.
+  ::  +strand-tx-on-block: construct a synthetic transaction fixture held in
+  ::  raw-txs, claimed by the supplied block in blocks-needed-by, and absent
+  ::  from excluded-txs.
   ::
-  ::    Reproduces the pre-fix stranded state, which the current kernel will no
-  ::    longer produce on its own (+release-orphaned-branch frees the tx at reorg
-  ::    time). Note the result still satisfies +apt: the tx IS in exactly one of
-  ::    blocks-needed-by / excluded-txs. Nothing is structurally broken -- the
-  ::    claim is simply never released -- which is why the bug went unnoticed.
+  ::    This state satisfies +apt: the transaction belongs to exactly one of
+  ::    blocks-needed-by / excluded-txs. Repair coverage checks that a claim
+  ::    on an orphaned block is released.
   ++  strand-tx-on-block
     |=  [=tx-id:t =block-id:t]
     ^-  consensus-state

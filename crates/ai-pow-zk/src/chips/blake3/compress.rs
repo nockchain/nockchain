@@ -328,12 +328,8 @@ mod tests {
         assert_eq!(t.flags, 0);
     }
 
-    // Note: a `matches_m10_1b_vendored_chip` test existed previously
-    // to cross-check this Pearl-port scalar BLAKE3 against the
-    // legacy M10.1b vendored chip. With the legacy stacks retired
-    // the chip is gone; the `matches_blake3_crate_keyed` test below
-    // is now the canonical KAT — it cross-checks against the
-    // upstream `blake3` crate, which is the same source of truth.
+    // The keyed-mode known-answer test cross-checks scalar compression against
+    // the upstream `blake3` crate.
 
     /// Cross-check against the `blake3` crate itself in keyed mode.
     /// This anchors the merge-mining compat guarantee — an honest

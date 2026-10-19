@@ -3,18 +3,20 @@
 ::    hand-computed consensus flows for h-backed state.
 ::
 /=  dcon  /apps/dumbnet/lib/consensus
+/=  dder  /apps/dumbnet/lib/derived
 /=  dmin  /apps/dumbnet/lib/miner
 /=  dumb  /apps/dumbnet/inner
 /=  helpers  /tests/dumb/helpers
+/=  fixtures  /tests/dumb/mod/unit/consensus
 /=  tx-engine  /common/tx-engine
 /=  *  /apps/dumbnet/lib/types
 /=  *  /common/h-zoon
+/=  *  /common/zeke
 /=  *  /common/test
 ::
 |_  constants=_bc-no-timelock:helpers
 +*  t  ~(. tx-engine constants)
     h  ~(. helpers constants)
-    pre-ai-constants  |=(bc=blockchain-constants:t `blockchain-constants-v1-pre-ai`(snip-pre-ai-constants bc))
 ::
 ++  snip-pre-ai-constants
   |=  bc=blockchain-constants:t
@@ -46,8 +48,37 @@
       anchor-min-timestamp.zk-asert.bc
   ==
 ::
+++  pre-ai-state
+  |=  current=kernel-state
+  ^-  kernel-state-10
+  =/  con=consensus-state-10
+    %*  .  *consensus-state-10
+      blocks-needed-by             blocks-needed-by.c.current
+      excluded-txs                 excluded-txs.c.current
+      spent-by                     spent-by.c.current
+      pending-blocks               pending-blocks.c.current
+      balance                      balance.c.current
+      txs                          txs.c.current
+      raw-txs                      raw-txs.c.current
+      blocks                       blocks.c.current
+      heaviest-block               heaviest-block.c.current
+      min-timestamps               min-timestamps.c.current
+      asert-anchor-min-timestamps   asert-anchor-min-timestamps.c.current
+      epoch-start                  epoch-start.c.current
+      targets                      targets.c.current
+      btc-data                     btc-data.c.current
+      genesis-seal                 genesis-seal.c.current
+    ==
+  :*  %10
+      c=con
+      a=a.current
+      m=m.current
+      d=[highest-block-height.d.current heaviest-chain.d.current]
+      constants=(snip-pre-ai-constants constants.current)
+  ==
+::
 ++  test-zoe-proof-version-3-activation-boundary
-  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
   %+  expect-eq
     !>(~[%0 %2 %3 %3])
   !>  :~  (height-to-proof-version:con 0)
@@ -57,7 +88,7 @@
       ==
 ::
 ++  test-zoe-proof-version-gate-includes-genesis
-  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
   =/  base=proof:t  *proof:t
   =/  v0=proof:t  [%0 objects.base hashes.base read-index.base]
   =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
@@ -69,83 +100,31 @@
       ==
 :::
 ++  test-zoe-and-logos-proof-discriminators-coexist
-  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
   %+  expect-eq
     !>([%.y %.y %.n])
-  !>  :*  (~(proof-version-valid-at-height dcon con der constants) %3 proof-version-3-start:dcon)
-            (~(proof-version-valid-at-height dcon con der constants) %4 proof-version-3-start:dcon)
-            (~(proof-version-valid-at-height dcon con der constants) %4 (dec ai-pow-activation-height.constants))
-        ==
-::
-++  test-zoe-load-audit-rejects-genesis-version-retag-despite-legacy-id
-  =/  con  ~(. dcon initial-consensus-state:h constants)
-  =/  base=proof:t  *proof:t
-  =/  v0=proof:t  [%0 objects.base hashes.base read-index.base]
-  =/  v1=proof:t  [%1 objects.base hashes.base read-index.base]
-  =/  template=page:v1:t  *page:v1:t
-  =/  page-v0=page:v1:t  template(pow (some v0))
-  =/  valid-v0=page:v1:t
-    page-v0(digest (compute-digest:page:t page-v0))
-  =/  retagged=page:v1:t  valid-v0(pow (some v1))
-  =/  indexed-proof=proof:t  v0(read-index 1)
-  =/  indexed=page:v1:t  valid-v0(pow (some indexed-proof))
-  =/  cached-proof=proof:t  v0(hashes ~[*noun-digest:tip5:z])
-  =/  cached=page:v1:t  valid-v0(pow (some cached-proof))
-  %+  expect-eq
-    !>([%.y %.n %.y %.n %.n %.n])
-  !>  :*  (check-digest:page:t retagged)
-          (proof-version-valid:con [0 v1])
-          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) valid-v0])
-          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) retagged])
-          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) indexed])
-          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) cached])
+  !>  :*  (proof-version-valid-at-height:con %3 proof-version-3-start:dcon)
+          (proof-version-valid-at-height:con %4 ai-pow-activation-height.constants)
+          (proof-version-valid-at-height:con %4 (dec ai-pow-activation-height.constants))
       ==
 ::
-++  test-zoe-load-resets-malformed-realnet-genesis
-  =/  con  ~(. dcon initial-consensus-state:h constants)
-  =/  canonical=block-id:t  (~(got z-by checkpointed-digests:con) 0)
-  =/  boot-btc-data=(unit (unit btc-hash:t))  ``*btc-hash:t
-  =/  realnet-seal=genesis-seal:t  `[0 realnet-genesis-msg]
-  =/  base=proof:t  *proof:t
-  =/  v1=proof:t  [%1 objects.base hashes.base read-index.base]
-  =/  malformed=page:v1:t
-    %*  .  *page:v1:t
-      digest  canonical
-      pow     (some v1)
-    ==
-  =/  bad-consensus=consensus-state
-    %*  .  *consensus-state
-      blocks
-        (~(put h-by *(h-map block-id:t local-page:t)) canonical (to-local-page:page:t malformed))
-      heaviest-block  `canonical
-      btc-data        boot-btc-data
-      genesis-seal    realnet-seal
-    ==
-  =/  bad-derived=derived-state
-    %*  .  *derived-state
-      highest-block-height  `0
-      heaviest-chain
-        (~(put z-by *(z-map page-number:t block-id:t)) 0 canonical)
-    ==
-  =/  post-born-admin=admin-state  *admin-state
-  =.  post-born-admin  post-born-admin(init %.n)
-  =/  bad-state=kernel-state
-    %*  .  *kernel-state
-      c          bad-consensus
-      a          post-born-admin
-      d          bad-derived
-      constants  constants
-    ==
-  =/  loaded=kernel-state  (load:inner:dumb bad-state)
-  %+  expect-eq
-    !>([%11 %.y 0 %.n %.y %.y])
-  !>  :*  -.loaded
-          ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          init.a.loaded
-          =(boot-btc-data btc-data.c.loaded)
-          =(realnet-seal genesis-seal.c.loaded)
-      ==
+++  test-checkpoint-load-discards-prepolicy-pending-header
+  =/  state=kernel-state  complete-fakenet-genesis-state
+  =/  pending=page:v1:t  *page:v1:t
+  =.  pending
+    pending(height 140.000, tx-ids (~(put z-in *(z-set tx-id:t)) *tx-id:t))
+  =.  pending  pending(digest (compute-digest:page:t pending))
+  =^  missing=(list tx-id:t)  c.state
+    (~(add-pending-block dcon c.state d.state constants.state) pending)
+  =/  loaded=kernel-state  (load:inner:dumb state)
+  ;:  weld
+    (expect-eq !>(1) !>((lent missing)))
+    (expect-eq !>(1) !>(~(wyt h-by pending-blocks.c.state)))
+    (expect-eq !>(0) !>(~(wyt h-by pending-blocks.c.loaded)))
+    (expect-eq !>(0) !>(~(wyt h-by blocks-needed-by.c.loaded)))
+    (expect-eq !>(blocks.c.state) !>(blocks.c.loaded))
+    (expect-eq !>(heaviest-block.c.state) !>(heaviest-block.c.loaded))
+  ==
 ::
 ++  test-zoe-load-preserves-born-realnet-waiting-for-genesis
   =/  boot-btc-data=(unit (unit btc-hash:t))  ``*btc-hash:t
@@ -173,8 +152,8 @@
           ~(wyt h-by blocks.c.loaded)
       ==
 ::
-++  test-zoe-load-resets-partially-stored-genesis
-  =/  con  ~(. dcon initial-consensus-state:h constants)
+++  test-zoe-load-rejects-partially-stored-genesis
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
   =/  canonical=block-id:t  (~(got z-by checkpointed-digests:con) 0)
   =/  boot-btc-data=(unit (unit btc-hash:t))  ``*btc-hash:t
   =/  realnet-seal=genesis-seal:t  `[0 realnet-genesis-msg]
@@ -191,14 +170,76 @@
       c          partial-consensus
       constants  constants
     ==
-  =/  loaded=kernel-state  (load:inner:dumb partial-state)
-  %+  expect-eq
-    !>([%.y 0 %.y %.y])
-  !>  :*  ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          =(boot-btc-data btc-data.c.loaded)
-          =(realnet-seal genesis-seal.c.loaded)
-      ==
+  %+  expect-fail
+    |.((load:inner:dumb partial-state))
+  ~
+::
+++  complete-fakenet-genesis-state
+  =/  con=consensus-state  initial-consensus-state:h
+  =/  d=derived-state
+    (~(update dder *derived-state constants) con default-genesis-page:h)
+  %*  .  *kernel-state
+    c          con
+    d          d
+    constants  constants(check-pow-flag %.n)
+  ==
+::
+++  extend-fakenet-chain
+  |=  [k=kernel-state page-pow=(unit proof:t)]
+  ^-  kernel-state
+  =/  con  ~(. dcon c.k d.k constants.k)
+  =/  parent=page:t
+    (to-page:local-page:t (~(got h-by blocks.c.k) (need heaviest-block.c.k)))
+  =/  pag=page:t  (make-empty-page:h parent)
+  =/  height=page-number:t  ~(height get:page:t pag)
+  =/  target=bignum:bignum:t
+    ?:  (post-asert-activation:t height)
+      (compute-target-zk-asert:con height ~(digest get:page:t parent))
+    (~(got h-by targets.c.k) ~(digest get:page:t parent))
+  =.  pag
+    ?^  -.pag
+      pag(target target, pow ?:(?=(~ page-pow) ~ mock-pow:h))
+    pag(target target, pow page-pow)
+  =/  work=bignum:bignum:t
+    %-  chunk:bignum:t
+    (add (merge:bignum:t ~(accumulated-work get:page:t parent)) (merge:bignum:t (block-compute-work:con pag)))
+  =.  pag
+    ?^  -.pag  pag(accumulated-work work)
+    pag(accumulated-work work)
+  =/  digest=block-id:t  (compute-digest:page:t pag)
+  =.  pag
+    ?^  -.pag  pag(digest digest)
+    pag(digest digest)
+  =/  r=(reason tx-acc:t)  (validate-page-with-txs:con pag)
+  ~|  [%fakenet-chain-validation-failed height r]
+  ?>  ?=(%.y -.r)
+  =.  c.k  (accept-page:con pag +.r *@da)
+  =.  c.k  (~(update-heaviest dcon c.k d.k constants.k) pag)
+  =.  d.k  (~(update dder d.k constants.k) c.k pag)
+  k
+::
+++  complete-zoe-boundary-states
+  ~+
+  ^-  [before=kernel-state after=kernel-state]
+  =/  k=kernel-state  complete-fakenet-genesis-state
+  =/  base=proof:t  *proof:t
+  |-
+  =/  height=page-number:t
+    +(~(get-cur-height dcon c.k d.k constants.k))
+  =/  version=proof-version:sp
+    (~(height-to-proof-version dcon c.k d.k constants.k) height)
+  ?>  ?=(?(%0 %1 %2 %3) version)
+  =/  prf=proof:t
+    ?-  version
+      %0  [%0 objects.base hashes.base read-index.base]
+      %1  [%1 objects.base hashes.base read-index.base]
+      %2  [%2 objects.base hashes.base read-index.base]
+      %3  [%3 objects.base hashes.base read-index.base]
+    ==
+  =/  next=kernel-state  (extend-fakenet-chain k `prf)
+  ?:  =(height proof-version-3-start:dcon)
+    [k next]
+  $(k next)
 ::
 ++  fakenet-tip-state-at
   |=  [tip-height=page-number:t page-pow=(unit proof:t)]
@@ -237,62 +278,26 @@
   |=  page-pow=(unit proof:t)
   (fakenet-tip-state-at proof-version-3-start:dcon page-pow)
 ::
-++  test-zoe-load-resets-postactivation-v2-fakenet-tip
-  =/  base=proof:t  *proof:t
-  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
-  =/  stale-state=kernel-state  (zoe-fakenet-tip-state `stale-v2)
-  =/  loaded=kernel-state  (load:inner:dumb stale-state)
-  %+  expect-eq
-    !>([%.y 0 %.y])
-  !>  :*  ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          =(genesis-seal.c.stale-state genesis-seal.c.loaded)
-      ==
-::
 ++  test-zoe-load-preserves-postactivation-v3-fakenet-tip
-  =/  base=proof:t  *proof:t
-  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
-  =/  valid-state=kernel-state  (zoe-fakenet-tip-state `v3)
+  =/  states=[before=kernel-state after=kernel-state]
+    complete-zoe-boundary-states
+  =/  valid-state=kernel-state  after.states
   =/  loaded=kernel-state  (load:inner:dumb valid-state)
   %+  expect-eq
-    !>([%.y 1 %.y])
-  !>  :*  ?=(^ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
+    !>([%.y %.y %.y %.y])
+  !>  :*  =(heaviest-block.c.valid-state heaviest-block.c.loaded)
+          =(~(wyt h-by blocks.c.valid-state) ~(wyt h-by blocks.c.loaded))
+          =(balance.c.valid-state balance.c.loaded)
           =(genesis-seal.c.valid-state genesis-seal.c.loaded)
-      ==
-::
-++  test-zoe-state-11-rejects-pre-zoe-proofless-postactivation-state
-  =/  current=kernel-state  (zoe-fakenet-tip-state ~)
-  =/  legacy=kernel-state-10
-    :*  %10
-        c=c.current
-        a=a.current
-        m=m.current
-        d=d.current
-        constants=pre-ai-constants
-    ==
-  =/  loaded=kernel-state  (load:inner:dumb legacy)
-  %+  expect-eq
-    !>([%11 %.y 0 %.y])
-  !>  :*  -.loaded
-          ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
 ++  test-zoe-state-11-preserves-preactivation-chain-and-rebuilds-mining-work
   =/  base=proof:t  *proof:t
-  =/  v2=proof:t  [%2 objects.base hashes.base read-index.base]
   =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
-  =/  current=kernel-state
-    (fakenet-tip-state-at (dec proof-version-3-start:dcon) `v2)
+  =/  states=[before=kernel-state after=kernel-state]
+    complete-zoe-boundary-states
+  =/  current=kernel-state  before.states
   =/  tip-id=block-id:t  (need heaviest-block.c.current)
-  =.  min-timestamps.c.current
-    (~(put h-by min-timestamps.c.current) tip-id 1)
-  =/  timestamp-map=(h-map block-id:t @)
-    (~(put h-by *(h-map block-id:t @)) tip-id 1)
-  =.  asert-anchor-min-timestamps.c.current
-    (~(put by asert-anchor-min-timestamps.c.current) %zk timestamp-map)
   =/  pending=page:v1:t
     %*  .  *page:v1:t
       height  proof-version-3-start:dcon
@@ -312,26 +317,21 @@
       shares          (~(put z-by *(z-map hash:t @)) *hash:t 1)
       candidate-block  pending
     ==
-  =/  legacy=kernel-state-10
-    :*  %10
-        c=c.current
-        a=a.current
-        m=m.current
-        d=d.current
-        constants=pre-ai-constants
-    ==
+  =/  legacy=kernel-state-10  (pre-ai-state current)
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   ::  The Zoe anchor carries the height-112500 target forward rather than
   ::  restoring 2^291, so the rebuilt candidate is built against that target.
   ::  Derive it from the same helper consensus uses instead of restating the
   ::  literal, so the assertion tracks the schedule.
-  =/  zcon  ~(. dcon c.current constants.current)
-  =/  expected-anchor-target=@  (asert-target-for-rate:zcon 3.000.000)
+  =/  zcon  ~(. dcon c.current d.current constants.current)
+  =/  expected-anchor-target=@
+    (asert-target-for-rate:zcon 3.000.000 ideal-block-time.zk-asert.constants.current)
   %+  expect-eq
-    !>  [%11 %.y 1 0 %.y proof-version-3-start:dcon %.y %.y %.y]
-  !>  :*  -.loaded
+    !>  [%.y %.y %.y 0 %.y proof-version-3-start:dcon %.y %.y %.y]
+  !>  :*
           =(heaviest-block.c.current heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
+          =(~(wyt h-by blocks.c.current) ~(wyt h-by blocks.c.loaded))
+          =(balance.c.current balance.c.loaded)
           ~(wyt h-by pending-blocks.c.loaded)
           !=(*page:t candidate-block.m.loaded)
           ~(height get:page:t candidate-block.m.loaded)
@@ -340,7 +340,7 @@
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-11-resets-cache-starved-state-9-late-upgrade
+++  test-zoe-state-11-rejects-cache-starved-state-9-late-upgrade
   =/  current=kernel-state  (fakenet-tip-state-at 112.500 ~)
   =/  legacy-c=consensus-state-9
     %*  .  *consensus-state-9
@@ -364,44 +364,37 @@
         c=legacy-c
         a=a.current
         m=m.current
-        d=d.current
+        d=[highest-block-height.d.current heaviest-chain.d.current]
         constants=constants.current
     ==
-  =/  loaded=kernel-state  (load:inner:dumb legacy)
-  %+  expect-eq
-    !>  [%11 %.y 0 %.y]
-  !>  :*  -.loaded
-          ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          =(genesis-seal.c.current genesis-seal.c.loaded)
-      ==
+  %+  expect-fail
+    |.((load:inner:dumb legacy))
+  `"Version-10 state cannot be migrated safely"
 ::
-++  test-zoe-state-11-rejects-side-only-dynamic-cache
-  =/  current=kernel-state  (fakenet-tip-state-at 112.500 ~)
-  =/  tip-id=block-id:t  (need heaviest-block.c.current)
-  =.  min-timestamps.c.current
-    (~(put h-by min-timestamps.c.current) tip-id 1)
-  =/  side-id=block-id:t  *block-id:t
-  =/  side-only=(h-map block-id:t @)
-    (~(put h-by *(h-map block-id:t @)) side-id 1)
-  =.  asert-anchor-min-timestamps.c.current
-    (~(put by asert-anchor-min-timestamps.c.current) %zk side-only)
-  =/  legacy=kernel-state-10
-    :*  %10
-        c=c.current
-        a=a.current
-        m=m.current
-        d=d.current
-        constants=pre-ai-constants
-    ==
+++  test-state-10-load-reconstructs-accepted-puzzle-metadata
+  =/  f  ~(. fixtures *blockchain-constants:t)
+  =/  current=kernel-state  (consensus-batch-load-state:f %.y 123.456)
+  =.  current  (hardened-load-extend:f current %.y)
+  =.  current  (hardened-load-extend:f current %.n)
+  =/  legacy=kernel-state-10  (pre-ai-state current)
+  =.  asert-anchor-min-timestamps.c.legacy
+    *(map @tas (h-map block-id:t @))
   =/  loaded=kernel-state  (load:inner:dumb legacy)
-  %+  expect-eq
-    !>([%11 %.y 0 %.y])
-  !>  :*  -.loaded
-          ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          =(genesis-seal.c.current genesis-seal.c.loaded)
-      ==
+  =/  ai-id=block-id:t  (~(got z-by heaviest-chain.d.loaded) 170.000)
+  =/  zk-id=block-id:t  (need heaviest-block.c.loaded)
+  =/  con  ~(. dcon c.loaded d.loaded constants.loaded)
+  ;:  weld
+    (expect-eq !>(%12) !>(-.loaded))
+    (expect-eq !>(blocks.c.current) !>(blocks.c.loaded))
+    (expect-eq !>(heaviest-block.c.current) !>(heaviest-block.c.loaded))
+    (expect-eq !>(heaviest-chain.d.current) !>(heaviest-chain.d.loaded))
+    (expect-eq !>(puzzle-asert-states.d.current) !>(puzzle-asert-states.d.loaded))
+    (expect-eq !>((hardened-next-targets:f current)) !>((hardened-next-targets:f loaded)))
+    (expect-eq !>([%4 %5]) !>([(~(got h-by block-versions.c.loaded) ai-id) (~(got h-by block-versions.c.loaded) zk-id)]))
+    (expect-eq !>([123.456 123.456]) !>([(get-asert-anchor-min-timestamp:con %zk 169.999 zk-id) (get-asert-anchor-min-timestamp:con %ai 169.999 zk-id)]))
+    (expect-eq !>(%.y) !>(check-pow-flag.constants.loaded))
+    (expect-eq !>(loaded) !>((load:inner:dumb loaded)))
+  ==
 ::
 ++  test-zoe-state-11-rejects-missing-canonical-min-timestamp
   =/  current=kernel-state  (fakenet-tip-state-at 112.500 ~)
@@ -410,22 +403,10 @@
     (~(put h-by *(h-map block-id:t @)) tip-id 1)
   =.  asert-anchor-min-timestamps.c.current
     (~(put by asert-anchor-min-timestamps.c.current) %zk exact-cache)
-  =/  legacy=kernel-state-10
-    :*  %10
-        c=c.current
-        a=a.current
-        m=m.current
-        d=d.current
-        constants=pre-ai-constants
-    ==
-  =/  loaded=kernel-state  (load:inner:dumb legacy)
-  %+  expect-eq
-    !>([%11 %.y 0 %.y])
-  !>  :*  -.loaded
-          ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          =(genesis-seal.c.current genesis-seal.c.loaded)
-      ==
+  =/  legacy=kernel-state-10  (pre-ai-state current)
+  %+  expect-fail
+    |.((load:inner:dumb legacy))
+  `"Version-10 state cannot be migrated safely"
 ::
 ++  test-zoe-state-11-deletes-preactivation-v3-side-work-before-events
   =/  base=proof:t  *proof:t
@@ -445,93 +426,31 @@
   =.  blocks.c.current
     (~(put h-by blocks.c.current) side-id (to-local-page:page:t side-page))
   =.  highest-block-height.d.current  `proof-version-3-start:dcon
-  =/  legacy=kernel-state-10
-    :*  %10
-        c=c.current
-        a=a.current
-        m=m.current
-        d=d.current
-        constants=pre-ai-constants
-    ==
+  =/  legacy=kernel-state-10  (pre-ai-state current)
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>([%11 %.y 1 %.n %.y])
-  !>  :*  -.loaded
+    !>([%.y 1 %.n %.y])
+  !>  :*
           =(heaviest-block.c.current heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
           (~(has h-by blocks.c.loaded) side-id)
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-11-migration-rejects-mixed-canonical-suffix
-  =/  base=proof:t  *proof:t
-  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
-  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
-  =/  mixed=kernel-state  (zoe-fakenet-tip-state `v3)
-  =/  activation-id=block-id:t  (need heaviest-block.c.mixed)
-  =/  stale-page=page:v1:t
-    %*  .  *page:v1:t
-      height  +(proof-version-3-start:dcon)
-      parent  activation-id
-      pow     (some stale-v2)
-    ==
-  =.  stale-page  stale-page(digest (compute-digest:page:t stale-page))
-  =/  stale-id=block-id:t  ~(digest get:page:t stale-page)
-  =/  tip-page=page:v1:t
-    %*  .  *page:v1:t
-      height  +(+(proof-version-3-start:dcon))
-      parent  stale-id
-      pow     (some v3)
-    ==
-  =.  tip-page  tip-page(digest (compute-digest:page:t tip-page))
-  =/  tip-id=block-id:t  ~(digest get:page:t tip-page)
-  =.  blocks.c.mixed
-    %+  ~(put h-by blocks.c.mixed)
-      stale-id
-    (to-local-page:page:t stale-page)
-  =.  blocks.c.mixed
-    %+  ~(put h-by blocks.c.mixed)
-      tip-id
-    (to-local-page:page:t tip-page)
-  =.  heaviest-block.c.mixed  `tip-id
-  =.  heaviest-chain.d.mixed
-    %+  ~(put z-by heaviest-chain.d.mixed)
-      +(proof-version-3-start:dcon)
-    stale-id
-  =.  heaviest-chain.d.mixed
-    %+  ~(put z-by heaviest-chain.d.mixed)
-      +(+(proof-version-3-start:dcon))
-    tip-id
-  =.  highest-block-height.d.mixed  `+(+(proof-version-3-start:dcon))
-  =/  legacy=kernel-state-10
-    :*  %10
-        c=c.mixed
-        a=a.mixed
-        m=m.mixed
-        d=d.mixed
-        constants=(snip-pre-ai-constants constants.mixed)
-    ==
-  =/  loaded=kernel-state  (load:inner:dumb legacy)
-  %+  expect-eq
-    !>([%11 %.y 0 %.y])
-  !>  :*  -.loaded
-          ?=(~ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
-          =(genesis-seal.c.mixed genesis-seal.c.loaded)
-      ==
-::
 ++  test-zoe-load-preserves-proofless-check-disabled-fakenet-tip
-  =/  valid-state=kernel-state  (zoe-fakenet-tip-state ~)
+  =/  valid-state=kernel-state
+    (extend-fakenet-chain complete-fakenet-genesis-state ~)
   =/  loaded=kernel-state  (load:inner:dumb valid-state)
   %+  expect-eq
-    !>([%.y 1 %.y])
-  !>  :*  ?=(^ heaviest-block.c.loaded)
-          ~(wyt h-by blocks.c.loaded)
+    !>([%.y %.y %.y %.y])
+  !>  :*  =(heaviest-block.c.valid-state heaviest-block.c.loaded)
+          =(~(wyt h-by blocks.c.valid-state) ~(wyt h-by blocks.c.loaded))
+          =(balance.c.valid-state balance.c.loaded)
           =(genesis-seal.c.valid-state genesis-seal.c.loaded)
       ==
 ::
 ++  test-zoe-realnet-genesis-checkpoint-is-enforced
-  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
   =/  canonical=hash:t  (~(got z-by checkpointed-digests:con) 0)
   =/  realnet-seal=genesis-seal:t  `[0 realnet-genesis-msg]
   =/  fakenet-seal=genesis-seal:t  `[0 *hash:t]
@@ -542,8 +461,184 @@
           (checkpoint-digest-valid:con [0 *hash:t fakenet-seal])
       ==
 ::
+::  These identity vectors are independent of the generated checkpoint tree.
+++  check-legacy-checkpoint-vector
+  |=  [height=page-number:t encoded=@t]
+  ^-  tang
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
+  =/  canonical=hash:t  (from-b58:hash:t encoded)
+  =/  realnet=genesis-seal:t  `[0 realnet-genesis-msg]
+  =/  fakenet=genesis-seal:t  `[0 *hash:t]
+  ;:  weld
+    (expect-eq !>(`canonical) !>((checkpoint-digest:con height)))
+    %+  expect-eq  !>([%.y %.n %.y %.n])
+    !>  :*  (checkpoint-digest-valid:con height canonical realnet)
+            (checkpoint-digest-valid:con height *hash:t realnet)
+            (checkpoint-digest-valid:con height *hash:t fakenet)
+            (checkpoint-digest-valid:con height canonical ~)
+        ==
+  ==
+::
+++  test-checkpoint-legacy-start
+  (check-legacy-checkpoint-vector 126.000 '38yLHeX4zRSaCWxB7QGmrnJUSVUsJRyNk1h5rhmoZ2XPPvGaSsK3NJy')
+::
+++  test-checkpoint-legacy-interior
+  (check-legacy-checkpoint-vector 140.000 '48dEtWLddEnUm6p9dGJRVTmDjwQgxusPKeEQvoHeG5HfaJ4MatzXtXW')
+::
+++  test-checkpoint-legacy-end
+  (check-legacy-checkpoint-vector 154.499 '6LYLt1haP91TEXJ5vXdnTiPAiv6CbPnSPP8pXxjWAvDu3XsGVrij2Nn')
+::
+++  test-checkpoint-legacy-outside-boundaries
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
+  =/  realnet=genesis-seal:t  `[0 realnet-genesis-msg]
+  %+  expect-eq  !>([~ ~ %.y %.y %.n %.n])
+  !>  :*  (checkpoint-digest:con 125.999)
+          (checkpoint-digest:con 154.500)
+          (checkpoint-digest-valid:con 125.999 *hash:t realnet)
+          (checkpoint-digest-valid:con 154.500 *hash:t realnet)
+          (checkpoint-digest-valid:con 125.999 *hash:t ~)
+          (checkpoint-digest-valid:con 154.500 *hash:t ~)
+      ==
+::
+::  Self-consistent candidate headers use a synthetic accepted parent, not a
+::  fabricated canonical identity. The current tip is taller but has less work;
+::  checkpoint rejection must precede both pending insertion and fork choice.
+++  check-legacy-checkpoint-admission
+  |=  [height=page-number:t ai=?]
+  ^-  tang
+  (check-legacy-checkpoint-admission-with-map height ai %.n)
+::
+::  Missing-entry cases mutate only the direct validator's inherited map.
+::  Kernel pokes below use the unchanged imported map and run only for the
+::  ordinary canonical-pin cases.
+++  check-legacy-checkpoint-admission-with-map
+  |=  [height=page-number:t ai=? missing=?]
+  ^-  tang
+  =/  bc=blockchain-constants:t
+    %*  .  constants
+      v1-phase          1
+      ai-pow-activation-height  1
+      phase.zk-asert    200.000
+      max-target-atom   max-tip5-atom:tip5
+    ==
+  =/  ht  ~(. helpers bc)
+  =/  mt  ~(. tx-engine bc)
+  =/  target-atom=@
+    ?:(ai max-ai-target-atom:mt max-tip5-atom:tip5)
+  =/  parent=page:v1:t
+    %*  .  *page:v1:t
+      height            (dec height)
+      target            (chunk:bignum:t target-atom)
+      accumulated-work  (chunk:bignum:t 100)
+    ==
+  =.  parent  parent(digest (compute-digest:page:mt parent))
+  =/  best=page:v1:t
+    %*  .  *page:v1:t
+      height            (add height 5)
+      accumulated-work  (chunk:bignum:t 1)
+    ==
+  =.  best  best(digest (compute-digest:page:mt best))
+  =/  state=kernel-state
+    %*  .  *kernel-state
+      c
+        %*  .  *consensus-state
+          blocks
+            %-  ~(gas h-by *(h-map block-id:t local-page:t))
+            :~  [digest.parent (to-local-page:page:t parent)]
+                [digest.best (to-local-page:page:t best)]
+            ==
+          heaviest-block  `digest.best
+          genesis-seal    `[0 realnet-genesis-msg]
+          targets
+            (~(put h-by *(h-map block-id:t bignum:bignum:t)) digest.parent target.parent)
+          min-timestamps
+            (~(put h-by *(h-map block-id:t @)) digest.parent 0)
+        ==
+      d
+        %*  .  *derived-state
+          highest-block-height  `height.best
+        ==
+      constants  bc
+    ==
+  =.  init.a.state  %.n
+  =/  con  ~(. dcon c.state d.state bc)
+  =.  con
+    ?:  missing
+      con(legacy-checkpoints (~(del z-by legacy-checkpoints:con) height))
+    con
+  =/  pag=page:t  (make-empty-page:ht parent)
+  ?>  ?=(@ -.pag)
+  =/  base=proof:t  *proof:t
+  =/  version  (height-to-proof-version:con height)
+  =.  pag
+    pag(pow `?:(ai (sample-ai-pow-artifact:ht 4) [version objects.base hashes.base read-index.base]))
+  =.  accumulated-work.pag
+    %-  chunk:bignum:t
+    %+  add  (merge:bignum:t accumulated-work.parent)
+    (merge:bignum:t (block-compute-work:con pag))
+  ::  If admitted, this unknown transaction would force pending mutation.
+  =.  tx-ids.pag  (~(put z-in *(z-set tx-id:t)) *tx-id:t)
+  =.  digest.pag  (compute-digest:page:mt pag)
+  =/  validation
+    (validate-page-without-txs:con pag timestamp.pag)
+  =/  fakenet=consensus-state  c.state(genesis-seal `[0 *hash:t])
+  =/  without-realnet-pin
+    (~(validate-page-without-txs con fakenet d.state bc) pag timestamp.pag)
+  =/  direct-checks=tang
+    ;:  weld
+      (expect-eq !>(%.y) !>((check-digest:page:mt pag)))
+      (expect-eq !>(%.y) !>((compare-heaviness:page:mt pag (to-local-page:page:t best))))
+      (expect-eq !>([%.n %checkpoint-match-failed]) !>(validation))
+      (expect-eq !>([%.y ~]) !>(without-realnet-pin))
+    ==
+  ?:  missing
+    %+  weld  direct-checks
+    (expect-eq !>(~) !>((~(get z-by legacy-checkpoints:con) height)))
+  =/  submission=[wir=path eny=@ our=@ux now=@da dat=*]
+    [libp2p-gossip-wire:h 0 0x0 ~2026.1.1 [%fact %0 %heard-block pag]]
+  =/  rejected=kernel-state  state
+  =^  effects=(list effect)  rejected
+    (~(poke inner:dumb state) submission)
+  =/  checkpoint-rejected=?
+    %+  lien  effects
+    |=  eff=effect
+    ?&  ?=([%liar-block-id *] eff)
+        =(digest.pag p.eff)
+        =(%checkpoint-match-failed cause.eff)
+    ==
+  ;:  weld
+    direct-checks
+    (expect-eq !>(%.y) !>(checkpoint-rejected))
+    (expect-eq !>(c.state) !>(c.rejected))
+    (expect-eq !>(d.state) !>(d.rejected))
+  ==
+::
+++  test-checkpoint-legacy-admission-start-shorter-heavier
+  (check-legacy-checkpoint-admission 126.000 %.n)
+::
+++  test-checkpoint-legacy-admission-interior-shorter-heavier
+  (check-legacy-checkpoint-admission 140.000 %.n)
+::
+++  test-checkpoint-legacy-admission-end-shorter-heavier
+  (check-legacy-checkpoint-admission 154.499 %.n)
+::
+++  test-checkpoint-legacy-admission-ai-start-shorter-heavier
+  (check-legacy-checkpoint-admission 126.000 %.y)
+::
+++  test-checkpoint-legacy-admission-ai-interior-shorter-heavier
+  (check-legacy-checkpoint-admission 140.000 %.y)
+::
+++  test-checkpoint-legacy-admission-ai-end-shorter-heavier
+  (check-legacy-checkpoint-admission 154.499 %.y)
+::
+++  test-checkpoint-legacy-missing-start-admission
+  (check-legacy-checkpoint-admission-with-map 126.000 %.n %.y)
+::
+++  test-checkpoint-legacy-missing-end-ai-admission
+  (check-legacy-checkpoint-admission-with-map 154.499 %.y %.y)
+::
 ++  test-zoe-pending-page-rechecks-version-after-upgrade
-  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  con  ~(. dcon initial-consensus-state:h der constants)
   =/  base=proof:t  *proof:t
   =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
   =/  pag=page:v1:t
@@ -599,8 +694,17 @@
     |.((pok:h [%fact %0 %heard-block v1-page] chain))
   ~
 ::
-++  test-zoe-genesis-intake-accepts-proofless-fakenet-test-page
+++  test-zoe-genesis-intake-accepts-check-disabled-fakenet-test-page
   =/  base-page=page:t  default-genesis-page:h
+  =.  base-page
+    ?^  -.base-page
+      base-page(pow mock-pow:h)
+    base-page(pow mock-pow:h)
+  =/  digest=block-id:t  (compute-digest:page:t base-page)
+  =.  base-page
+    ?^  -.base-page
+      base-page(digest digest)
+    base-page(digest digest)
   =/  chain=_nockchain:h  (zoe-genesis-chain %.n)
   =^  effects=(list effect:h)  chain
     (pok:h [%fact %0 %heard-block base-page] chain)
@@ -714,9 +818,12 @@
       btc-data          btc-data.con8
       genesis-seal      genesis-seal.con8
     ==
+  =/  d=derived-state  (~(update dder *derived-state constants) con8 pag)
   =/  k8=kernel-state-8
     %*  .  *kernel-state-8
       c  legacy-c
+      d  [highest-block-height.d heaviest-chain.d]
+      constants  constants
     ==
   =/  current=kernel-state  (load:inner:dumb k8)
   =/  upgraded=consensus-state  c.current
@@ -724,17 +831,13 @@
   =/  upgraded-block=local-page:t  (~(got h-by blocks.upgraded) bid)
   =/  original-block=local-page:t  (~(got h-by blocks.con8) bid)
   %+  expect-eq
-    !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%11 -.current)
-          (consensus-h-apt upgraded)
+    !>([%.y %.y %.y %.y %.y %.y %.y])
+  !>  :*  (consensus-h-apt upgraded)
           =((hz-molt blocks.upgraded) (hz-molt blocks.con8))
           =((hz-milt balance.upgraded) (hz-milt balance.con8))
           =((hz-milt txs.upgraded) (hz-milt txs.con8))
           =((hz-molt min-timestamps.upgraded) (hz-molt min-timestamps.con8))
           =((hz-molt targets.upgraded) (hz-molt targets.con8))
-          =(*(map @tas (h-map block-id:t @)) asert-anchor-min-timestamps.upgraded)
-          =(*(h-map block-id:t proof-version:sp) block-versions.upgraded)
-          =(*(h-map block-id:t puzzle-asert-state:dk) puzzle-asert-states.d.current)
           =(upgraded-block original-block)
       ==
 ::
@@ -768,32 +871,34 @@
       btc-data          btc-data.con
       genesis-seal      genesis-seal.con
     ==
+  =/  d=derived-state  (~(update dder *derived-state constants) con cb-b)
   =/  k8=kernel-state-8
     %*  .  *kernel-state-8
       c  legacy-c
+      d  [highest-block-height.d heaviest-chain.d]
+      constants  constants
     ==
   =/  current=kernel-state  (load:inner:dumb k8)
   =/  up=consensus-state  c.current
   %+  expect-eq
-    !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%11 -.current)
-          =(~[needed-id] missing)
+    !>  %.y
+  !>  ?&  =(~[needed-id] missing)
           =(~[pending-id] ready)
           =(~ extra-ready)
           (consensus-h-apt up)
-          =((hz-jult blocks-needed-by.up) (hz-jult blocks-needed-by.con))
-          =((hz-silt excluded-txs.up) (hz-silt excluded-txs.con))
+          ?!((~(has h-by blocks-needed-by.up) needed-id))
+          (~(has h-in excluded-txs.up) needed-id)
+          (~(has h-in excluded-txs.up) extra-id)
           =((hz-jult spent-by.up) (hz-jult spent-by.con))
-          =((hz-molt pending-blocks.up) (hz-molt pending-blocks.con))
+          =(0 ~(wyt h-by pending-blocks.up))
           =((hz-milt balance.up) (hz-milt balance.con))
           =((hz-milt txs.up) (hz-milt txs.con))
           =((hz-molt raw-txs.up) (hz-molt raw-txs.con))
           =((hz-molt blocks.up) (hz-molt blocks.con))
-          (~(has h-by pending-blocks.up) pending-id)
-          (~(has h-in excluded-txs.up) extra-id)
+          (~(has h-by raw-txs.up) needed-id)
       ==
 ::
-++  test-kernel-state-8-upgrade-keeps-shared-pending-fanout
+++  test-kernel-state-8-upgrade-releases-shared-pending-fanout
   =/  con=consensus-state  initial-consensus-state:h
   =^  cb-page=page:t  con  (add-n-pages:h 1 con default-retain:h)
   =/  raw-needed=raw-tx:t  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h cb-page)
@@ -824,9 +929,12 @@
       btc-data          btc-data.con
       genesis-seal      genesis-seal.con
     ==
+  =/  d=derived-state  (~(update dder *derived-state constants) con cb-page)
   =/  k8=kernel-state-8
     %*  .  *kernel-state-8
       c  legacy-c
+      d  [highest-block-height.d heaviest-chain.d]
+      constants  constants
     ==
   =/  current=kernel-state  (load:inner:dumb k8)
   =/  up=consensus-state  c.current
@@ -834,28 +942,17 @@
     ?&  =(~[needed-id] missing-a)
         =(~[needed-id] missing-b)
         =(~ extra-ready)
-        (~(has h-by pending-blocks.up) bid-a)
-        (~(has h-by pending-blocks.up) bid-b)
-        (~(has h-ju blocks-needed-by.up) needed-id bid-a)
-        (~(has h-ju blocks-needed-by.up) needed-id bid-b)
+        ?!((~(has h-by pending-blocks.up) bid-a))
+        ?!((~(has h-by pending-blocks.up) bid-b))
+        ?!((~(has h-by blocks-needed-by.up) needed-id))
         (~(has h-by raw-txs.up) extra-id)
         (~(has h-in excluded-txs.up) extra-id)
         ?!((~(has h-in excluded-txs.up) needed-id))
         (consensus-h-apt up)
     ==
-  =.  up  (~(reject-pending-block dcon up der constants) bid-a)
-  =/  after-one-reject-ok=?
-    ?&  ?!((~(has h-by pending-blocks.up) bid-a))
-        (~(has h-by pending-blocks.up) bid-b)
-        ?!((~(has h-ju blocks-needed-by.up) needed-id bid-a))
-        (~(has h-ju blocks-needed-by.up) needed-id bid-b)
-        ?!((~(has h-in excluded-txs.up) needed-id))
-        (~(has h-in excluded-txs.up) extra-id)
-        (consensus-h-apt up)
-    ==
   %+  expect-eq
-    !>([%.y %.y %.y])
-  !>  [=(%11 -.current) upgraded-ok after-one-reject-ok]
+    !>  %.y
+  !>  upgraded-ok
 ::
 ++  test-consensus-add-raw-tx-h-index-flow
   =/  con=consensus-state  initial-consensus-state:h
@@ -1060,6 +1157,83 @@
           (~(has h-in excluded-txs.repaired) tid)
           (consensus-h-apt repaired)
       ==
+::
+++  balance-kernel-peeks
+  |=  [con=consensus-state bid=block-id:t]
+  ^-  (list (unit (unit *)))
+  =/  k=kernel-state
+    %*  .  *kernel-state
+      c  con
+    ==
+  =/  kern  ~(. inner:dumb k)
+  =/  bid-b58=@t  (to-b58:hash:t bid)
+  =/  first-name=@t
+    (to-b58:hash:t ~(first-name get:nnote:t make-default-coinbase:h))
+  =/  pubkey=@t  (to-b58:schnorr-pubkey:t default-a-pt-1:h)
+  :~  (peek:kern [%balance bid-b58 ~])
+      (peek:kern [%h-balance bid-b58 ~])
+      (peek:kern [%current-balance ~])
+      (peek:kern [%h-current-balance ~])
+      (peek:kern [%balance-by-first-name first-name ~])
+      (peek:kern [%balance-by-pubkey pubkey ~])
+  ==
+::
+++  test-kernel-peek-known-empty-genesis-balances
+  =/  con=consensus-state  initial-consensus-state:h
+  =/  bid=block-id:t  default-genesis-id:h
+  ?>  ?!((~(has h-by balance.con) bid))
+  =/  empty-z=(z-map nname:t nnote:t)  *(z-map nname:t nnote:t)
+  =/  empty-h=(h-map nname:t nnote:t)  *(h-map nname:t nnote:t)
+  =/  snapshot=[page-number:t block-id:t (z-map nname:t nnote:t)]
+    [0 bid empty-z]
+  %+  expect-eq
+    !>(~[``empty-z ``empty-h ``empty-z ``empty-h ``snapshot ``snapshot])
+  !>((balance-kernel-peeks con bid))
+::
+++  test-kernel-peek-no-chain-balances-absent
+  %+  expect-eq
+    !>(~[[~ ~] [~ ~] [~ ~] [~ ~] [~ ~] [~ ~]])
+  !>((balance-kernel-peeks *consensus-state default-genesis-id:h))
+::
+++  test-kernel-peek-unknown-block-balances-absent
+  =/  con=consensus-state  initial-consensus-state:h
+  =/  unknown=page:t  (make-empty-page:h default-genesis-page:h)
+  =/  bid=block-id:t  ~(digest get:page:t unknown)
+  ?>  ?!((~(has h-by blocks.con) bid))
+  =/  results  (balance-kernel-peeks con bid)
+  %+  expect-eq
+    !>(~[[~ ~] [~ ~]])
+  !>((scag 2 results))
+::
+++  test-kernel-peek-historical-empty-genesis-balances
+  =/  con=consensus-state  initial-consensus-state:h
+  =^  pag=page:t  con  (add-n-pages:h 1 con default-retain:h)
+  =/  bid=block-id:t  default-genesis-id:h
+  =/  results  (balance-kernel-peeks con bid)
+  =/  empty-z=(z-map nname:t nnote:t)  *(z-map nname:t nnote:t)
+  =/  empty-h=(h-map nname:t nnote:t)  *(h-map nname:t nnote:t)
+  %+  expect-eq
+    !>(~[``empty-z ``empty-h])
+  !>((scag 2 results))
+::
+++  test-kernel-peek-missing-non-genesis-balances-absent
+  =/  con=consensus-state  initial-consensus-state:h
+  =^  pag=page:t  con  (add-n-pages:h 1 con default-retain:h)
+  =/  bid=block-id:t  ~(digest get:page:t pag)
+  ?>  (~(has h-by balance.con) bid)
+  =.  balance.con  (~(del h-by balance.con) bid)
+  %+  expect-eq
+    !>(~[[~ ~] [~ ~] [~ ~] [~ ~] [~ ~] [~ ~]])
+  !>((balance-kernel-peeks con bid))
+::
+++  test-get-cur-balance-missing-non-genesis-fails
+  =/  con=consensus-state  initial-consensus-state:h
+  =^  pag=page:t  con  (add-n-pages:h 1 con default-retain:h)
+  =/  bid=block-id:t  ~(digest get:page:t pag)
+  =.  balance.con  (~(del h-by balance.con) bid)
+  %+  expect-fail
+    |.(~(get-cur-balance dcon con der constants))
+  ~
 ::
 ++  test-kernel-peek-legacy-and-native-h-scries-agree
   =/  con=consensus-state  initial-consensus-state:h

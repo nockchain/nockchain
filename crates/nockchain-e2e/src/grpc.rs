@@ -3,14 +3,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
+use nockapp::nockapp::wire::WireRepr;
 use nockapp::noun::slab::NounSlab;
-use nockapp::noun::AtomExt;
 use nockapp::utils::make_tas;
+use nockapp_grpc::error::NockAppGrpcError;
+use nockapp_grpc::private_nockapp::client::{PokeResponseResult, PrivateNockAppGrpcClient};
 use nockapp_grpc_proto::pb::common::v1::{
-    wire_tag, Base58Hash, Hash as PbHash, PageRequest, Wire, WireTag,
+    Base58Hash, ErrorCode, Hash as PbHash, PageRequest, Wire,
 };
-use nockapp_grpc_proto::pb::private::v1::nock_app_service_client::NockAppServiceClient;
-use nockapp_grpc_proto::pb::private::v1::{peek_response, poke_response, PeekRequest, PokeRequest};
 use nockapp_grpc_proto::pb::public::v2::nockchain_block_service_client::NockchainBlockServiceClient;
 use nockapp_grpc_proto::pb::public::v2::nockchain_metrics_service_client::NockchainMetricsServiceClient;
 use nockapp_grpc_proto::pb::public::v2::nockchain_service_client::NockchainServiceClient;
@@ -23,11 +23,114 @@ use nockapp_grpc_proto::pb::public::v2::{
     GetTransactionDetailsRequest, TransactionAcceptedRequest, TransactionDetails,
     WalletSendTransactionRequest,
 };
+use nockchain_mining_common::{MiningKeyConfig, MiningPkhConfig, NodeClient, NodeClientError};
 use nockchain_types::tx_engine::common::{BlockHeight, Hash, Page};
-use nockvm::noun::{Atom, NounAllocator, D, NO, SIG, T, YES};
+use nockvm::noun::{NounAllocator, SIG, T};
 use noun_serde::NounDecode;
 use tokio::time::{sleep, timeout as tokio_timeout};
 use tonic::Request;
+
+/// Thread-safe private-RPC failures exposed by the E2E controller. SDK errors
+/// can own local noun allocations; convert them here, never change their
+/// Send/Sync contracts or confuse malformed requests with a kernel NACK.
+#[derive(Debug)]
+pub enum PrivateRpcError {
+    Transport(tonic::transport::Error),
+    Status(tonic::Status),
+    Client(tonic::Status),
+    KernelRejected { code: i32, message: String },
+    PokeResponse { code: i32, message: String },
+    PokeDeadlineBeforeSend,
+    PokeAckTimedOut,
+    PokeAckCancelled,
+    CandidateDecode(String),
+    TimedOut { label: String, duration: Duration },
+}
+
+impl PrivateRpcError {
+    fn poke_rejected(code: i32, message: String) -> Self {
+        if code == ErrorCode::PokeFailed as i32 {
+            Self::KernelRejected { code, message }
+        } else {
+            Self::PokeResponse { code, message }
+        }
+    }
+}
+
+impl From<NockAppGrpcError> for PrivateRpcError {
+    fn from(error: NockAppGrpcError) -> Self {
+        match error {
+            NockAppGrpcError::Transport(error) => Self::Transport(error),
+            NockAppGrpcError::Status(status) => Self::Status(status),
+            // Preserve the SDK's defined status conversion for local failures.
+            error => Self::Client(error.into()),
+        }
+    }
+}
+
+impl From<NodeClientError> for PrivateRpcError {
+    fn from(error: NodeClientError) -> Self {
+        match error {
+            NodeClientError::Grpc(error) => error.into(),
+            NodeClientError::PokeRejected { code, message } => Self::poke_rejected(code, message),
+            NodeClientError::PokeDeadlineBeforeSend => Self::PokeDeadlineBeforeSend,
+            NodeClientError::PokeAckTimedOut => Self::PokeAckTimedOut,
+            NodeClientError::PokeAckCancelled => Self::PokeAckCancelled,
+            NodeClientError::Decode(error) => Self::CandidateDecode(error.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for PrivateRpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "gRPC transport error: {error}"),
+            Self::Status(status) => write!(formatter, "gRPC status error: {status}"),
+            Self::Client(status) => write!(formatter, "private RPC client error: {status}"),
+            Self::KernelRejected { code, message } => {
+                write!(
+                    formatter,
+                    "kernel rejected poke: code={code} message={message}"
+                )
+            }
+            Self::PokeResponse { code, message } => {
+                write!(
+                    formatter,
+                    "private RPC rejected request: code={code} message={message}"
+                )
+            }
+            Self::PokeDeadlineBeforeSend => {
+                formatter.write_str("poke deadline expired before send")
+            }
+            Self::PokeAckTimedOut => {
+                formatter.write_str("poke acknowledgement not observed before deadline")
+            }
+            Self::PokeAckCancelled => {
+                formatter.write_str("poke acknowledgement not observed before shutdown")
+            }
+            Self::CandidateDecode(message) => {
+                write!(formatter, "decoding candidate effect: {message}")
+            }
+            Self::TimedOut { label, duration } => {
+                write!(
+                    formatter,
+                    "{label} timed out after {}ms",
+                    duration.as_millis()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PrivateRpcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::Status(status) | Self::Client(status) => Some(status),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HeadInfo {
@@ -68,12 +171,6 @@ const DEFAULT_V0_MINING_KEY: &str =
     "2cPnE4Z9RevhTv9is9Hmc1amFubEFbUxzCV2Fxb9GxevJstV5VG92oYt6Sai3d3NjLFcsuVXSLx9hikMbD1agv9M267TVw3hV9MCpMfEnGo5LYtjJ7jPyHg8SERPjJRCWTgZ";
 const DEFAULT_GRPC_CONNECT_TIMEOUT_MS: u64 = 1_000;
 const DEFAULT_GRPC_REQUEST_TIMEOUT_MS: u64 = 2_000;
-
-fn wire_tag_text(value: &str) -> WireTag {
-    WireTag {
-        value: Some(wire_tag::Value::Text(value.to_string())),
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxLocation {
@@ -261,21 +358,23 @@ async fn wait_for_seed_catch_up_with_timeouts(
 
 pub async fn wait_for_height_private(
     addr: &str,
+    auth_token: Option<&str>,
     height: u64,
     timeout: Duration,
 ) -> Result<PrivateHeadInfo> {
-    wait_for_height_private_with_timeouts(addr, height, timeout, grpc_timeouts()).await
+    wait_for_height_private_with_timeouts(addr, auth_token, height, timeout, grpc_timeouts()).await
 }
 
 async fn wait_for_height_private_with_timeouts(
     addr: &str,
+    auth_token: Option<&str>,
     height: u64,
     timeout: Duration,
     timeouts: GrpcTimeouts,
 ) -> Result<PrivateHeadInfo> {
     let deadline = Instant::now() + timeout;
     loop {
-        match fetch_heaviest_private_with_timeouts(addr, timeouts).await {
+        match fetch_heaviest_private_with_timeouts(addr, auth_token, timeouts).await {
             Ok(head) => {
                 if head.height >= height {
                     return Ok(head);
@@ -383,20 +482,24 @@ async fn fetch_head_with_timeouts(addr: &str, timeouts: GrpcTimeouts) -> Result<
     }
 }
 
-pub async fn fetch_heaviest_height_private(addr: &str) -> Result<u64> {
-    let head = fetch_heaviest_private(addr).await?;
+pub async fn fetch_heaviest_height_private(addr: &str, auth_token: Option<&str>) -> Result<u64> {
+    let head = fetch_heaviest_private(addr, auth_token).await?;
     Ok(head.height)
 }
 
-pub async fn fetch_heaviest_private(addr: &str) -> Result<PrivateHeadInfo> {
-    fetch_heaviest_private_with_timeouts(addr, grpc_timeouts()).await
+pub async fn fetch_heaviest_private(
+    addr: &str,
+    auth_token: Option<&str>,
+) -> Result<PrivateHeadInfo> {
+    fetch_heaviest_private_with_timeouts(addr, auth_token, grpc_timeouts()).await
 }
 
 async fn fetch_heaviest_private_with_timeouts(
     addr: &str,
+    auth_token: Option<&str>,
     timeouts: GrpcTimeouts,
 ) -> Result<PrivateHeadInfo> {
-    let mut client = connect_private_client(addr, timeouts).await?;
+    let mut client = connect_private_client(addr, auth_token, timeouts).await?;
 
     let chain_path = encode_heaviest_chain_path()?;
     let chain_data = peek_path(&mut client, chain_path, "heaviest-chain", addr, timeouts).await?;
@@ -422,31 +525,17 @@ async fn fetch_heaviest_private_with_timeouts(
     })
 }
 
-pub async fn fetch_constants_private(addr: &str) -> Result<Vec<u8>> {
+pub async fn fetch_constants_private(addr: &str, auth_token: Option<&str>) -> Result<Vec<u8>> {
     let timeouts = grpc_timeouts();
-    let mut client = connect_private_client(addr, timeouts).await?;
-
-    let path_bytes = encode_constants_path()?;
-    let request = PeekRequest {
-        pid: 0,
-        path: path_bytes,
-    };
-
-    let response = run_grpc_op(
-        format!("peek constants at {}", addr),
-        timeouts.request,
-        client.peek(request),
+    let mut client = connect_private_client(addr, auth_token, timeouts).await?;
+    peek_path(
+        &mut client,
+        encode_constants_path()?,
+        "constants",
+        addr,
+        timeouts,
     )
-    .await?
-    .into_inner();
-
-    match response.result {
-        Some(peek_response::Result::Data(data)) => Ok(data),
-        Some(peek_response::Result::Error(err)) => Err(anyhow!(
-            "peek constants error: code={:?} message={}", err.code, err.message
-        )),
-        None => Err(anyhow!("peek constants returned no result")),
-    }
+    .await
 }
 
 pub async fn submit_raw_tx(
@@ -623,84 +712,99 @@ pub async fn wait_for_tx_in_block(
     }
 }
 
-pub async fn poke_private(addr: &str, payload: Vec<u8>) -> Result<()> {
+pub async fn poke_private(addr: &str, auth_token: Option<&str>, payload: Vec<u8>) -> Result<()> {
+    let timeouts = grpc_timeouts();
+    let mut client = connect_private_client(addr, auth_token, timeouts).await?;
     let wire = Wire {
         source: "grpc".to_string(),
         version: 1,
         tags: vec![],
     };
-    poke_private_with_wire(addr, wire, payload).await
-}
-
-async fn poke_private_with_wire(addr: &str, wire: Wire, payload: Vec<u8>) -> Result<()> {
-    let timeouts = grpc_timeouts();
-    let mut client = connect_private_client(addr, timeouts).await?;
-
-    let request = PokeRequest {
-        pid: 0,
-        wire: Some(wire),
-        payload,
-    };
-    let response = run_grpc_op(
-        format!("poke at {}", addr),
-        timeouts.request,
-        client.poke(request),
-    )
-    .await?
-    .into_inner();
-
-    match response.result {
-        Some(poke_response::Result::Acknowledged(true)) => Ok(()),
-        Some(poke_response::Result::Acknowledged(false)) => Err(anyhow!("poke not acknowledged")),
-        Some(poke_response::Result::Error(err)) => Err(anyhow!(
-            "poke error: code={:?} message={}", err.code, err.message
-        )),
-        None => Err(anyhow!("poke returned no result")),
+    let response = run_grpc_op(format!("poke at {}", addr), timeouts.request, async {
+        client
+            .poke_response(0, wire, payload)
+            .await
+            .map_err(PrivateRpcError::from)
+    })
+    .await?;
+    match response {
+        PokeResponseResult::Acknowledged(true) => Ok(()),
+        PokeResponseResult::Acknowledged(false) => Err(PrivateRpcError::poke_rejected(
+            ErrorCode::PokeFailed as i32,
+            "kernel did not acknowledge poke".to_string(),
+        )
+        .into()),
+        PokeResponseResult::Error(error) => {
+            Err(PrivateRpcError::poke_rejected(error.code, error.message).into())
+        }
     }
 }
 
-pub async fn set_mining_pkh_live(addr: &str, pkh: &str) -> Result<()> {
-    let mut slab: NounSlab = NounSlab::new();
-    let command = make_tas(&mut slab, "command").as_noun();
-    let set_mining_key = make_tas(&mut slab, "set-mining-key-advanced").as_noun();
-
-    let mut keys_noun = D(0);
-    let key_atom = Atom::from_value(&mut slab, DEFAULT_V0_MINING_KEY)
-        .map_err(|_| anyhow!("failed to create default mining key atom"))?;
-    keys_noun = T(&mut slab, &[key_atom.as_noun(), keys_noun]);
-    let v0_tuple = T(&mut slab, &[D(1), D(1), keys_noun]);
-    let v0_list = T(&mut slab, &[v0_tuple, D(0)]);
-
-    let pkh_atom = Atom::from_value(&mut slab, pkh)
-        .map_err(|_| anyhow!("failed to create mining pkh atom"))?;
-    let v1_tuple = T(&mut slab, &[D(1), pkh_atom.as_noun()]);
-    let v1_list = T(&mut slab, &[v1_tuple, D(0)]);
-
-    let poke_noun = T(&mut slab, &[command, set_mining_key, v0_list, v1_list]);
-    slab.set_root(poke_noun);
-
-    let wire = Wire {
-        source: "miner".to_string(),
-        version: 1,
-        tags: vec![wire_tag_text("setpubkey")],
-    };
-    poke_private_with_wire(addr, wire, slab.jam().to_vec()).await
+async fn connect_mining_operator(addr: &str, auth_token: Option<&str>) -> Result<NodeClient> {
+    run_grpc_op(
+        format!("connect to private gRPC at {}", addr),
+        grpc_timeouts().connect,
+        async {
+            NodeClient::connect_operator_with_auth_token(format!("http://{}", addr), auth_token)
+                .await
+                .map_err(PrivateRpcError::from)
+        },
+    )
+    .await
 }
 
-pub async fn set_mining_enabled(addr: &str, enable: bool) -> Result<()> {
-    let mut slab: NounSlab = NounSlab::new();
-    let command = make_tas(&mut slab, "command").as_noun();
-    let enable_mining = make_tas(&mut slab, "enable-mining").as_noun();
-    let flag = if enable { YES } else { NO };
-    let poke_noun = T(&mut slab, &[command, enable_mining, flag]);
-    slab.set_root(poke_noun);
+pub(crate) async fn configure_mining_payout(
+    addr: &str,
+    auth_token: Option<&str>,
+    pkh: &str,
+) -> Result<()> {
+    let mut client = connect_mining_operator(addr, auth_token).await?;
+    // Preserve both reward eras; the standalone miner's v1-only update leaves
+    // the existing v0 share map intact.
+    run_grpc_op(
+        format!("configure mining payout at {}", addr),
+        grpc_timeouts().request,
+        async {
+            client
+                .set_mining_key(
+                    WireRepr::new("zk-pow-miner", 1, vec!["setpubkey".into()]),
+                    vec![MiningKeyConfig {
+                        share: 1,
+                        m: 1,
+                        keys: vec![DEFAULT_V0_MINING_KEY.to_string()],
+                    }],
+                    vec![MiningPkhConfig {
+                        share: 1,
+                        pkh: pkh.to_string(),
+                    }],
+                )
+                .await
+                .map_err(PrivateRpcError::from)
+        },
+    )
+    .await
+}
 
-    let wire = Wire {
-        source: "miner".to_string(),
-        version: 1,
-        tags: vec![wire_tag_text("enable")],
-    };
-    poke_private_with_wire(addr, wire, slab.jam().to_vec()).await
+pub(crate) async fn set_mining_enabled(
+    addr: &str,
+    auth_token: Option<&str>,
+    enabled: bool,
+) -> Result<()> {
+    let mut client = connect_mining_operator(addr, auth_token).await?;
+    run_grpc_op(
+        format!("set mining enabled at {}", addr),
+        grpc_timeouts().request,
+        async {
+            client
+                .enable_mining(
+                    WireRepr::new("zk-pow-miner", 1, vec!["enable".into()]),
+                    enabled,
+                )
+                .await
+                .map_err(PrivateRpcError::from)
+        },
+    )
+    .await
 }
 
 fn encode_heaviest_chain_path() -> Result<Vec<u8>> {
@@ -747,28 +851,18 @@ fn encode_constants_path() -> Result<Vec<u8>> {
 }
 
 async fn peek_path(
-    client: &mut NockAppServiceClient<tonic::transport::Channel>,
+    client: &mut PrivateNockAppGrpcClient,
     path: Vec<u8>,
     label: &str,
     addr: &str,
     timeouts: GrpcTimeouts,
 ) -> Result<Vec<u8>> {
-    let request = PeekRequest { pid: 0, path };
-    let response = run_grpc_op(
+    run_grpc_op(
         format!("peek {} at {}", label, addr),
         timeouts.request,
-        client.peek(request),
+        async { client.peek(0, path).await.map_err(PrivateRpcError::from) },
     )
-    .await?
-    .into_inner();
-
-    match response.result {
-        Some(peek_response::Result::Data(data)) => Ok(data),
-        Some(peek_response::Result::Error(err)) => Err(anyhow!(
-            "peek {} error: code={:?} message={}", label, err.code, err.message
-        )),
-        None => Err(anyhow!("peek {} returned no result", label)),
-    }
+    .await
 }
 
 #[derive(Clone, Copy)]
@@ -810,12 +904,20 @@ async fn connect_block_client(
 
 async fn connect_private_client(
     addr: &str,
+    auth_token: Option<&str>,
     timeouts: GrpcTimeouts,
-) -> Result<NockAppServiceClient<tonic::transport::Channel>> {
+) -> Result<PrivateNockAppGrpcClient> {
     run_grpc_op(
         format!("connect to private gRPC at {}", addr),
         timeouts.connect,
-        NockAppServiceClient::connect(format!("http://{}", addr)),
+        async {
+            PrivateNockAppGrpcClient::connect_with_auth_token(
+                format!("http://{}", addr),
+                auth_token,
+            )
+            .await
+            .map_err(PrivateRpcError::from)
+        },
     )
     .await
 }
@@ -894,11 +996,11 @@ where
     match tokio_timeout(timeout_duration, future).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(anyhow::Error::new(err)).context(label),
-        Err(_) => Err(anyhow!(
-            "{} timed out after {}ms",
+        Err(_) => Err(PrivateRpcError::TimedOut {
             label,
-            timeout_duration.as_millis()
-        )),
+            duration: timeout_duration,
+        }
+        .into()),
     }
 }
 

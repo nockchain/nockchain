@@ -19,11 +19,17 @@ pub struct UpgradeTestConfig {
     pub mining_pkh: Option<String>,
     pub update_candidate_interval_secs: Option<u64>,
     pub nockchain_bin: PathBuf,
+    pub miner_bin: PathBuf,
     pub work_dir: PathBuf,
 }
 
 impl UpgradeTestConfig {
-    pub fn new(activation_height: u64, nockchain_bin: PathBuf, work_dir: PathBuf) -> Self {
+    pub fn new(
+        activation_height: u64,
+        nockchain_bin: PathBuf,
+        miner_bin: PathBuf,
+        work_dir: PathBuf,
+    ) -> Self {
         Self {
             activation_height,
             v1_phase: 1,
@@ -35,6 +41,7 @@ impl UpgradeTestConfig {
             mining_pkh: None,
             update_candidate_interval_secs: None,
             nockchain_bin,
+            miner_bin,
             work_dir,
         }
     }
@@ -60,6 +67,9 @@ impl NockchainCluster {
             fakenet: true,
             mine: config.mining_pkh.is_some(),
             mining_pkh: config.mining_pkh.clone(),
+            mining_threads: 1,
+            miner_binary: Some(config.miner_bin.clone()),
+            miner_image: None,
             peers: Vec::new(),
             peer_from: Vec::new(),
             restart_peer_from: Vec::new(),
@@ -83,6 +93,7 @@ impl NockchainCluster {
             &[spec],
             &config.work_dir,
             Some(config.nockchain_bin),
+            Some(config.miner_bin),
             config.base_grpc_port,
             config.base_private_grpc_port,
             config.base_p2p_port,
@@ -139,6 +150,12 @@ impl NockchainCluster {
         self.node_manager.disable_mining(&self.node_id).await
     }
 
+    pub async fn set_mining_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.node_manager
+            .set_mining_enabled(&self.node_id, enabled)
+            .await
+    }
+
     pub fn grpc_public_addr(&self) -> Result<&str> {
         self.node_manager.grpc_public_addr(&self.node_id)
     }
@@ -165,6 +182,10 @@ impl NockchainCluster {
             wallet_dir,
             private_port,
             fakenet,
+            operator_token: self
+                .node_manager
+                .operator_token(&self.node_id)?
+                .map(str::to_owned),
             fakenet_v1_phase: self.fakenet_v1_phase,
             fakenet_bythos_phase: self.fakenet_bythos_phase,
         })
@@ -176,6 +197,7 @@ pub struct WalletClient {
     wallet_dir: PathBuf,
     private_port: u16,
     fakenet: bool,
+    operator_token: Option<String>,
     fakenet_v1_phase: Option<u64>,
     fakenet_bythos_phase: Option<u64>,
 }
@@ -203,6 +225,11 @@ impl WalletClient {
             .arg("private")
             .arg("--private-grpc-server-port")
             .arg(self.private_port.to_string());
+        if let Some(token) = &self.operator_token {
+            cmd.env("NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN", token);
+        } else {
+            cmd.env_remove("NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN");
+        }
         if self.fakenet {
             cmd.arg("--fakenet");
             if let Some(phase) = self.fakenet_v1_phase {

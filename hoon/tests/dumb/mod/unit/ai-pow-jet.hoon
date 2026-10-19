@@ -133,6 +133,22 @@
     (expect-eq !>(%legacy) !>((ai-pow-proof-rules:page:t 154.499)))
   ==
 ::
+++  test-ai-pow-consensus-batch-jet-fires
+  ^-  tang
+  =/  result=?  (ai-pow-verify:mine %consrule [%ai-pow 0 0] 0 0)
+  (expect-eq !>(%.n) !>(result))
+::
+++  test-ai-pow-consensus-batch-activation-and-backtracking
+  ^-  tang
+  ;:  weld
+    (expect-eq !>(%legacy) !>((ai-pow-proof-rules:page:t 154.499)))
+    (expect-eq !>(%hardened) !>((ai-pow-proof-rules:page:t 154.500)))
+    (expect-eq !>(%hardened) !>((ai-pow-proof-rules:page:t 169.999)))
+    (expect-eq !>(%consrule) !>((ai-pow-proof-rules:page:t 170.000)))
+    (expect-eq !>(%consrule) !>((ai-pow-proof-rules:page:t 170.001)))
+    (expect-eq !>(%hardened) !>((ai-pow-proof-rules:page:t 169.999)))
+  ==
+::
 ++  test-ai-pow-canonical-witnesses-activation
   ^-  tang
   ;:  weld

@@ -17,10 +17,9 @@ mod tests {
     }
 
     #[test]
-    fn grpc_wire_source_is_owned_not_leaked() {
-        // GHSA-h4f8-7h38-9jr2: the client-supplied wire source is owned by
-        // the WireRepr and freed with it — the previous per-request
-        // `Box::leak` let any client permanently claim node memory.
+    fn grpc_wire_source_has_owned_lifetime() {
+        // Converted wire sources are owned by the WireRepr and released with
+        // it; driver-created wires may still borrow static source literals.
         use nockapp::wire::WireRepr;
 
         use crate::pb::common::v1::wire_tag::Value;
@@ -134,7 +133,8 @@ mod tests {
         });
 
         // ── 3. Spawn the server on the discovered port.
-        let server = PrivateNockAppGrpcServer::new(handle);
+        // No bearer tokens in this test: opt out of private gRPC auth explicitly.
+        let server = PrivateNockAppGrpcServer::new(handle).with_allow_unauthenticated(true);
         let server_handle = tokio::spawn(async move { server.serve(addr).await });
 
         // Give the server a tiny moment to come up.
@@ -343,7 +343,8 @@ mod tests {
         let _action_drainer =
             tokio::spawn(async move { while action_rx.recv().await.is_some() {} });
 
-        let server = PrivateNockAppGrpcServer::new(handle);
+        // No bearer tokens in this test: opt out of private gRPC auth explicitly.
+        let server = PrivateNockAppGrpcServer::new(handle).with_allow_unauthenticated(true);
         let server_handle = tokio::spawn(async move { server.serve(addr).await });
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -445,7 +446,8 @@ mod tests {
             }
         });
 
-        let server = PrivateNockAppGrpcServer::new(handle);
+        // No bearer tokens in this test: opt out of private gRPC auth explicitly.
+        let server = PrivateNockAppGrpcServer::new(handle).with_allow_unauthenticated(true);
         let server_handle = tokio::spawn(async move { server.serve(addr).await });
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -477,5 +479,327 @@ mod tests {
         action_handler.await.expect("action handler");
         server_handle.abort();
         let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn miner_credential_is_restricted_over_real_grpc() {
+        use std::net::{SocketAddr, TcpListener};
+        use std::sync::{Arc, LazyLock};
+        use std::time::Duration;
+
+        use nockapp::driver::{IOAction, NockAppHandle, PokeResult};
+        use nockapp::noun::slab::NounSlab;
+        use nockapp::noun::AtomExt;
+        use nockapp::NockAppExit;
+        use nockvm::noun::{Atom, D, T};
+        use nockvm_macros::tas;
+        use tokio::sync::{broadcast, mpsc, Mutex};
+        use tonic::{Code, Request};
+
+        use crate::pb::common::v1::{wire_tag, Wire, WireTag};
+        use crate::pb::private::v1::nock_app_service_client::NockAppServiceClient;
+        use crate::pb::private::v1::{
+            poke_response, PeekRequest, PokeRequest, WatchEffectsRequest,
+        };
+        use crate::services::private_nockapp::server::{
+            PrivateGrpcServerConfig, PrivateNockAppGrpcServer,
+        };
+
+        fn with_token<T>(body: T, token: &str) -> Request<T> {
+            let mut request = Request::new(body);
+            request.metadata_mut().insert(
+                "x-nockchain-private-token",
+                token.parse().expect("metadata token"),
+            );
+            request
+        }
+
+        static METRICS: LazyLock<Arc<nockapp::nockapp::metrics::NockAppMetrics>> =
+            LazyLock::new(|| {
+                Arc::new(
+                    nockapp::nockapp::metrics::NockAppMetrics::register(
+                        gnort::global_metrics_registry(),
+                    )
+                    .expect("register metrics"),
+                )
+            });
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr: SocketAddr = listener.local_addr().expect("local address");
+        drop(listener);
+        let (action_tx, mut action_rx) = mpsc::channel::<IOAction>(4);
+        let (effect_tx, effect_rx) = broadcast::channel::<NounSlab>(4);
+        let (exit, _exit_rx) = NockAppExit::new();
+        let handle = NockAppHandle {
+            io_sender: action_tx,
+            effect_sender: Arc::new(effect_tx),
+            effect_receiver: Mutex::new(effect_rx),
+            metrics: METRICS.clone(),
+            exit,
+        };
+        let operator = "0123456789abcdef0123456789abcdef";
+        let miner = "abcdef0123456789abcdef0123456789";
+        let config = PrivateGrpcServerConfig::new(
+            addr,
+            Some(operator.to_string()),
+            Some(miner.to_string()),
+            false,
+        )
+        .expect("validated role configuration");
+        let server = PrivateNockAppGrpcServer::new(handle).with_config(config);
+        let server_handle = tokio::spawn(async move { server.serve(addr).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client = NockAppServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect to private gRPC");
+        let no_token = client
+            .peek(Request::new(PeekRequest {
+                pid: 1,
+                path: vec![],
+            }))
+            .await
+            .expect_err("missing token must be rejected");
+        assert_eq!(no_token.code(), Code::Unauthenticated);
+
+        let peek = client
+            .peek(with_token(
+                PeekRequest {
+                    pid: 1,
+                    path: vec![],
+                },
+                miner,
+            ))
+            .await
+            .expect_err("miner cannot Peek");
+        assert_eq!(peek.code(), Code::PermissionDenied);
+        let watch = client
+            .watch_effects(with_token(
+                WatchEffectsRequest {
+                    pid: 1,
+                    head_filter: vec![],
+                },
+                miner,
+            ))
+            .await
+            .expect_err("miner cannot watch unfiltered effects");
+        assert_eq!(watch.code(), Code::PermissionDenied);
+        let poke = client
+            .poke(with_token(
+                PokeRequest {
+                    pid: 1,
+                    wire: Some(Wire {
+                        source: "grpc".to_string(),
+                        version: 1,
+                        tags: vec![],
+                    }),
+                    payload: vec![],
+                },
+                miner,
+            ))
+            .await
+            .expect_err("miner cannot Poke an arbitrary wire");
+        assert_eq!(poke.code(), Code::PermissionDenied);
+
+        let allowed = client
+            .watch_effects(with_token(
+                WatchEffectsRequest {
+                    pid: 1,
+                    head_filter: vec![b"mine-ai".to_vec()],
+                },
+                miner,
+            ))
+            .await
+            .expect("miner may watch AI mining candidates");
+        drop(allowed);
+        let allowed_zk = client
+            .watch_effects(with_token(
+                WatchEffectsRequest {
+                    pid: 1,
+                    head_filter: vec![b"mine-zk".to_vec()],
+                },
+                miner,
+            ))
+            .await
+            .expect("miner may watch ZK mining candidates");
+        drop(allowed_zk);
+        assert!(
+            action_rx.try_recv().is_err(),
+            "denied calls reached the kernel"
+        );
+
+        let action_handler = tokio::spawn(async move {
+            for expected_source in ["ai-pow-miner", "zk-pow-miner"] {
+                match action_rx
+                    .recv()
+                    .await
+                    .expect("allowed mined proof should reach node")
+                {
+                    IOAction::Poke {
+                        wire, ack_channel, ..
+                    } => {
+                        assert_eq!(wire.source.as_ref(), expected_source);
+                        ack_channel.send(PokeResult::Ack).expect("ack mined proof");
+                    }
+                    IOAction::Peek { .. } => panic!("miner must never Peek"),
+                }
+            }
+        });
+        for (source, kind) in [("ai-pow-miner", "ai-pow"), ("zk-pow-miner", "dumb-zkpow")] {
+            let mut slab: NounSlab<nockapp::noun::slab::NockJammer> = NounSlab::new();
+            let kind = <Atom as AtomExt>::from_value(&mut slab, kind)
+                .expect("mined kind atom")
+                .as_noun();
+            let command = T(
+                &mut slab,
+                &[D(tas!(b"command")), D(tas!(b"pow")), kind, D(0)],
+            );
+            slab.set_root(command);
+            let response = client
+                .poke(with_token(
+                    PokeRequest {
+                        pid: 1,
+                        wire: Some(Wire {
+                            source: source.to_string(),
+                            version: 1,
+                            tags: vec![WireTag {
+                                value: Some(wire_tag::Value::Text("mined".to_string())),
+                            }],
+                        }),
+                        payload: slab.jam().to_vec(),
+                    },
+                    miner,
+                ))
+                .await
+                .expect("restricted miner proof should reach node");
+            assert!(matches!(
+                response.into_inner().result,
+                Some(poke_response::Result::Acknowledged(true))
+            ));
+        }
+        action_handler.await.expect("proof action handler");
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn private_server_without_operator_token_requires_explicit_opt_out() {
+        use std::net::{SocketAddr, TcpListener};
+        use std::sync::{Arc, LazyLock};
+        use std::time::Duration;
+
+        use nockapp::driver::{IOAction, NockAppHandle};
+        use nockapp::noun::slab::NounSlab;
+        use nockapp::NockAppExit;
+        use tokio::sync::{broadcast, mpsc, Mutex};
+        use tonic::{Code, Request};
+
+        use crate::pb::private::v1::nock_app_service_client::NockAppServiceClient;
+        use crate::pb::private::v1::WatchEffectsRequest;
+        use crate::services::private_nockapp::server::{
+            PrivateGrpcServerConfig, PrivateNockAppGrpcServer,
+        };
+
+        static METRICS: LazyLock<Arc<nockapp::nockapp::metrics::NockAppMetrics>> =
+            LazyLock::new(|| {
+                Arc::new(
+                    nockapp::nockapp::metrics::NockAppMetrics::register(
+                        gnort::global_metrics_registry(),
+                    )
+                    .expect("register metrics"),
+                )
+            });
+
+        fn make_handle() -> (NockAppHandle, mpsc::Receiver<IOAction>) {
+            let (action_tx, action_rx) = mpsc::channel::<IOAction>(4);
+            let (effect_tx, effect_rx) = broadcast::channel::<NounSlab>(4);
+            let (exit, _exit_rx) = NockAppExit::new();
+            let handle = NockAppHandle {
+                io_sender: action_tx,
+                effect_sender: Arc::new(effect_tx),
+                effect_receiver: Mutex::new(effect_rx),
+                metrics: METRICS.clone(),
+                exit,
+            };
+            (handle, action_rx)
+        }
+
+        fn free_loopback_addr() -> SocketAddr {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+            let addr = listener.local_addr().expect("local address");
+            drop(listener);
+            addr
+        }
+
+        // 1. No tokens and no opt-out: `serve` refuses before binding.
+        let (handle, _action_rx) = make_handle();
+        let addr = free_loopback_addr();
+        let err = PrivateNockAppGrpcServer::new(handle)
+            .serve(addr)
+            .await
+            .expect_err("tokenless private server must not start without the opt-out");
+        let message = err.to_string();
+        assert!(
+            message.contains("NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN"),
+            "{message}"
+        );
+        assert!(
+            message.contains("--allow-unauthenticated-private-grpc"),
+            "{message}"
+        );
+        assert!(
+            TcpListener::bind(addr).is_ok(),
+            "refused server must not hold the listener"
+        );
+
+        // 2. No tokens with the explicit opt-out: the server starts and a
+        //    tokenless caller is served.
+        let (handle, _action_rx_open) = make_handle();
+        let addr = free_loopback_addr();
+        let config = PrivateGrpcServerConfig::new(addr, None, None, true)
+            .expect("explicit loopback development opt-out");
+        let server = PrivateNockAppGrpcServer::new(handle).with_config(config);
+        let open_server = tokio::spawn(async move { server.serve(addr).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut client = NockAppServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect to opted-out private gRPC");
+        let stream = client
+            .watch_effects(Request::new(WatchEffectsRequest {
+                pid: 1,
+                head_filter: vec![],
+            }))
+            .await
+            .expect("opted-out server serves a tokenless caller");
+        drop(stream);
+        open_server.abort();
+        let _ = open_server.await;
+
+        // 3. An operator token with the opt-out set: the token still applies.
+        let (handle, _action_rx_token) = make_handle();
+        let addr = free_loopback_addr();
+        let config = PrivateGrpcServerConfig::new(
+            addr,
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
+            true,
+        )
+        .expect("token configuration remains authenticated with opt-out");
+        let server = PrivateNockAppGrpcServer::new(handle).with_config(config);
+        let token_server = tokio::spawn(async move { server.serve(addr).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut client = NockAppServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect to token-protected private gRPC");
+        let denied = client
+            .watch_effects(Request::new(WatchEffectsRequest {
+                pid: 1,
+                head_filter: vec![],
+            }))
+            .await
+            .expect_err("opt-out must not bypass a configured operator token");
+        assert_eq!(denied.code(), Code::Unauthenticated);
+        token_server.abort();
+        let _ = token_server.await;
     }
 }

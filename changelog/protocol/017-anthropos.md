@@ -227,6 +227,107 @@ under the old rules; upgrading after crossing the boundary requires coordinated
 recovery rather than assuming the upgrade rewrites chain state. Do not roll back
 to a pre-reset binary after accepting the new regime.
 
+### Subsequent reset at height 170,000
+
+At candidate height 170,000, both ASERT lanes re-anchor once to the
+branch-local median-time-past of predecessor 169,999. Both per-puzzle virtual
+counts and last-puzzle heads reset once at this boundary; subsequent blocks
+advance their own lane normally. Each competing branch uses its own
+predecessor's MTP.
+
+The ZK aggregate reference capacity becomes **100 billion Tip5 hashes/s**.
+The AI aggregate reference capacity doubles from **10 to 20 ExaMAC/s**.
+The previous height-154,500 ZK reference remains **56 billion Tip5 hashes/s**
+(2,000 GPUs at 28 MH/s); its historical anchor is preserved.
+
+```text
+ZK throughput = 100,000,000,000 hashes/s
+AI throughput = 20,000,000,000,000,000,000 MAC/s
+
+ZK target = floor((p^5 - 1) / (100,000,000,000 * 500))
+          = 42719740668685878041659396662871708109802309623250884640656221042408328349345316800
+AI target = floor(2^256 / (20,000,000,000,000,000,000 * 214))
+          = 27054226457316868089619389020721473797492987071411346738
+```
+
+The AI/ZK ideal intervals remain 214/500 seconds, the ASERT half-life remains
+43,200 seconds, and target ceilings remain unchanged. The cross-puzzle work
+conversion remains 14,285,714 MAC per Tip5 hash. Historical targets and
+accumulated chainwork are not recomputed or repriced.
+
+Candidate height also selects updated native AI-PoW admission at 170,000.
+The new verification policy aliases the existing Hardened proof program and
+trusted setup: it does not change the AIR, proof encoding, AI `%4` or ZK `%5`
+artifact discriminators, or miner wire format. Historical proof-rule selection
+at 126,000, 147,500, and 154,500 remains unchanged, including on replay and
+backward reorgs. Below 170,000 use the historical candidate-height policy;
+at and above 170,000 use the new native policy.
+
+Deploy matching kernel, Rust verifier, node, both miners, and wallet artifacts
+before parent height 169,999. Retain matching setup caches and historical
+setups; no manual cache clearing is required. See the
+[coordinated operator guidance](../../docs/AI_POW_CUTOVER.md) for deployment,
+transaction validation, and recovery requirements. Updated transaction
+validation applies immediately at every spending height. Fund-recovery maturity
+uses the shared configured phase height (production **170,000**): the spending
+candidate height selects the rule. Below activation, recovery retains its
+previous maturity behavior; at or above activation, it additionally requires
+the configured coinbase minimum age, inclusively `now >= origin + minimum`
+(production **100**). The origin is taken from the authenticated balance input,
+not supplied by the witness. The production-target requirement and 3-of-4
+signatures are unchanged. Moving back below activation restores the previous
+recovery age policy. Block validation uses the block candidate height;
+wallet and mempool validation use the next-candidate height. Configured
+constants are honored, and ordinary note behavior is unchanged. Installing
+updated software does not automatically rewrite stored accepted state.
+
+### Immediate canonical-history policy
+
+Realnet incoming-block admission enforces canonical block IDs at **every height
+126,000–154,499 inclusive**, for all proof kinds, through the existing checkpoint
+machinery alongside existing sparse checkpoints. A missing dense entry within
+this required interval rejects incoming realnet blocks; sparse checkpoints
+cannot substitute for a missing dense entry. Outside the interval, existing
+configured checkpoints remain enforced and otherwise unpinned heights remain
+allowed. A non-realnet genesis seal exempts fakenets; a missing genesis seal
+still rejects admission. This historical finality policy applies immediately
+on upgrade, independently of the future 170,000 boundary.
+Deploy matching canonical pins across validating nodes.
+
+The root in `hoon/dat/legacy-ai-checkpoints.hoon` imports 29 generated bounded
+literal chunks: 28 of 1,000 rows and a final 500 rows, covering heights
+126,000–154,499. The chunks disable source-debug wrappers around inert literals.
+The root concatenates the chunks once, uses one shared typed `from-b58` decoder
+gate, and constructs the map with one z-map `gas`. There are no per-row decoder
+expressions or `^~` constant folding of the entire map. The root is imported
+outside the state-parameterized consensus core; block checks reuse the map
+without per-block construction or a chain-history startup walk.
+
+Release `hoonc` registers the existing production `zkvm-jetpack` hot state used
+for base58, Tip5, and z-map ordering/hash evaluation. Exact dispatch remains
+unchanged, and unmatched batteries fall back to evaluation. Build a kernel
+directly with:
+
+```sh
+make assets/dumb.jam
+```
+
+Standard Hoon targets use this checkout's `target/release/hoonc` by default.
+Make runs Cargo's build/freshness check once per invocation before invoking
+the default compiler, without installing it globally or clearing compiler
+data/PMA caches. The normal `make build-hoon` path uses the same compiler.
+An explicit override, such as `make assets/dumb.jam HOONC=/path/to/hoonc`,
+uses that command/path as-is and skips the automatic local compiler build.
+
+`scripts/generate-legacy-ai-checkpoints.py` records CSV provenance from
+[nockscan](https://nockscan.com/api) and validates complete coverage, base58
+digests, parent links, and the fixed normalized source SHA-256 checksum
+`c91f068b83e41fc37982704e0151cb21f25e8c11995d9ca9d02fb30f8a8fa426`.
+Normalization is `height TAB b58hash TAB b58parent LF` for each row.
+
+The checkpoint policy does not rewind or rewrite accepted history. Legacy
+circuits, keys, and historical proof rules remain intact.
+
 ## Activation
 
 - **Height**: `147500`

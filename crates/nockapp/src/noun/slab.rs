@@ -135,12 +135,16 @@ impl Region {
         self.allocation_stop = std::ptr::null_mut();
     }
 
+    #[inline]
+    unsafe fn has_capacity(&self, words: usize) -> bool {
+        !self.allocation_start.is_null()
+            && words <= self.allocation_stop.offset_from(self.allocation_start) as usize
+    }
+
     /// Ensure the active block has room for `words` 8-byte words, growing with a
     /// fresh geometrically-larger block if not.
     unsafe fn ensure(&mut self, words: usize) {
-        if self.allocation_start.is_null()
-            || self.allocation_start.add(words) > self.allocation_stop
-        {
+        if !self.has_capacity(words) {
             let next_idx = std::cmp::max(self.slabs.len(), min_idx_for_size(words));
             self.slabs
                 .resize(next_idx + 1, (std::ptr::null_mut(), Layout::new::<u8>()));
@@ -1528,6 +1532,34 @@ mod tests {
     use super::*;
     use crate::AtomExt;
 
+    #[test]
+    fn region_capacity_boundaries() {
+        let mut backing = [0u64; 8];
+        let base = backing.as_mut_ptr();
+        // This region borrows the backing slice and owns no blocks to free.
+        let mut region = Region {
+            slabs: Vec::new(),
+            allocation_start: unsafe { base.add(3) },
+            allocation_stop: unsafe { base.add(backing.len()) },
+        };
+        unsafe {
+            assert!(region.has_capacity(0));
+            assert!(region.has_capacity(4));
+            assert!(region.has_capacity(5));
+            assert!(!region.has_capacity(6));
+            assert!(!region.has_capacity(usize::MAX));
+
+            region.allocation_start = region.allocation_stop;
+            assert!(region.has_capacity(0));
+            assert!(!region.has_capacity(1));
+
+            let empty = Region::empty();
+            assert!(!empty.has_capacity(0));
+            assert!(!empty.has_capacity(1));
+            assert!(!empty.has_capacity(usize::MAX));
+        }
+    }
+
     fn assert_set_root_rejects(root: Noun) {
         let mut slab: NounSlab = NounSlab::new();
         let res = catch_unwind(AssertUnwindSafe(|| slab.set_root(root)));
@@ -1788,11 +1820,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "deep chain is slow under miri")]
     fn modify_survives_deep_chain_on_worker_stack() {
-        // GHSA-rjxr-hc76-2wr4 / GHSA-f5w5-qf25-833g: a jammed
-        // right-leaning chain (~45 KB for 60,000 cells) cued and re-rooted
-        // through `modify` must not overflow the worker thread's stack.
-        // `cue_into` was always iterative; the crash was the rehome
-        // recursion inside `modify`.
+        // A jammed right-leaning chain of 60,000 cells, cued and re-rooted
+        // through `modify`, must fit within the worker thread's stack.
         let (jammed, depth): (std::sync::Arc<Vec<u8>>, usize) = {
             let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
             let depth = 60_000usize;

@@ -24,8 +24,7 @@ use tokio::time::{sleep, Instant};
 use tracing::info;
 
 use crate::grpc::{
-    poke_private, set_mining_enabled, submit_raw_tx, transaction_accepted, wait_for_tx_in_block,
-    SubmitTxOutcome,
+    poke_private, submit_raw_tx, transaction_accepted, wait_for_tx_in_block, SubmitTxOutcome,
 };
 use crate::node::{NodeManager, NodeMode};
 use crate::report::Report;
@@ -33,6 +32,7 @@ use crate::report::Report;
 pub struct RunOptions {
     pub scenario_path: PathBuf,
     pub nockchain_bin: Option<PathBuf>,
+    pub miner_bin: Option<PathBuf>,
     pub wallet_bin: Option<PathBuf>,
     pub work_dir: PathBuf,
     pub base_grpc_port: u16,
@@ -40,6 +40,8 @@ pub struct RunOptions {
     pub base_p2p_port: u16,
     pub docker: bool,
     pub docker_image: Option<String>,
+    pub docker_miner_image: Option<String>,
+    pub docker_miner_bin: Option<PathBuf>,
     pub keep_artifacts: bool,
 }
 
@@ -190,6 +192,12 @@ fn expand_node_env(node: &mut nockchain_testkit::scenario::NodeSpec) -> Result<(
         let expanded = expand_env_vars(&binary.to_string_lossy())?;
         *binary = PathBuf::from(expanded);
     }
+    if let Some(binary) = node.miner_binary.as_mut() {
+        *binary = PathBuf::from(expand_env_vars(&binary.to_string_lossy())?);
+    }
+    if let Some(image) = node.miner_image.as_mut() {
+        *image = expand_env_vars(image)?;
+    }
     if let Some(data_dir) = node.data_dir.as_mut() {
         let expanded = expand_env_vars(&data_dir.to_string_lossy())?;
         *data_dir = PathBuf::from(expanded);
@@ -209,7 +217,18 @@ async fn run_inner(
             .clone()
             .unwrap_or_else(|| "nockchain-e2e:latest".to_string());
         let network = docker_network_name(run_dir);
-        NodeMode::Docker { image, network }
+        NodeMode::Docker {
+            image,
+            network,
+            miner_image: options
+                .docker_miner_image
+                .clone()
+                .unwrap_or_else(|| "zk-pow-miner-e2e:latest".to_string()),
+            miner_binary: options
+                .docker_miner_bin
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/usr/local/bin/zk-pow-mine")),
+        }
     } else {
         NodeMode::Process
     };
@@ -218,6 +237,7 @@ async fn run_inner(
         &scenario.nodes,
         run_dir,
         options.nockchain_bin.clone(),
+        options.miner_bin.clone(),
         options.base_grpc_port,
         options.base_private_grpc_port,
         options.base_p2p_port,
@@ -249,7 +269,10 @@ async fn run_inner(
 
     match (result, shutdown) {
         (Ok(()), Ok(())) => Ok(()),
-        (Err(err), _) => Err(err),
+        (Err(err), Err(shutdown)) => {
+            Err(err.context(format!("shutdown also failed: {shutdown:#}")))
+        }
+        (Err(err), Ok(())) => Err(err),
         (Ok(()), Err(err)) => Err(err),
     }
 }
@@ -267,6 +290,7 @@ async fn run_steps(
     for (step_index, action) in scenario.steps.iter().enumerate() {
         let timer = StepTimer::start();
         let action_name = step_action_name(action);
+        node_manager.ensure_running().await?;
         match action {
             Action::StartNodes { ids } => {
                 info!("starting nodes: {:?}", ids);
@@ -375,7 +399,9 @@ async fn run_steps(
                 }
             }
             Action::Sleep { millis } => {
-                sleep(Duration::from_millis(*millis)).await;
+                node_manager
+                    .wait_for_duration(Duration::from_millis(*millis))
+                    .await?;
             }
             Action::SubmitTx {
                 node,
@@ -408,7 +434,7 @@ async fn run_steps(
                 let fixture_path = resolve_fixture_path(&options.scenario_path, fixture);
                 let payload = build_heard_block_payload(&fixture_path)?;
                 let addr = node_manager.grpc_private_addr(node)?;
-                poke_private(addr, payload).await?;
+                poke_private(addr, node_manager.operator_token(node)?, payload).await?;
             }
             Action::SetMiningPkh { node, value } => {
                 let value = expand_vars(value, state)?;
@@ -418,8 +444,7 @@ async fn run_steps(
                 node_manager.disable_mining(node).await?;
             }
             Action::SetMiningEnabled { node, enabled } => {
-                let addr = node_manager.grpc_private_addr(node)?;
-                set_mining_enabled(addr, *enabled).await?;
+                node_manager.set_mining_enabled(node, *enabled).await?;
             }
             Action::SetNodeEnv { node, key, value } => {
                 let key = expand_vars(key, state)?;
@@ -433,8 +458,14 @@ async fn run_steps(
                 let binary = resolve_binary_override(scenario, options, version)?;
                 node_manager.upgrade_node(node, binary).await?;
             }
+            Action::UpgradeMiner { node, version } => {
+                let binary = resolve_miner_override(scenario, options, version)?;
+                node_manager.upgrade_miner(node, binary).await?;
+            }
             Action::Tick { millis } => {
-                sleep(Duration::from_millis(*millis)).await;
+                node_manager
+                    .wait_for_duration(Duration::from_millis(*millis))
+                    .await?;
             }
             Action::Wallet {
                 wallet,
@@ -521,6 +552,7 @@ async fn run_steps(
                 .await?;
             }
         }
+        node_manager.ensure_running().await?;
         report.record_step(step_index, &action_name, timer.elapsed_ms(), true);
     }
 
@@ -644,6 +676,7 @@ fn step_action_name(action: &Action) -> String {
         Action::SetNodeEnv { node, key, .. } => format!("set_node_env:{node}:{key}"),
         Action::Partition { groups } => format!("partition:{} groups", groups.len()),
         Action::Upgrade { node, version } => format!("upgrade:{node}:{version}"),
+        Action::UpgradeMiner { node, version } => format!("upgrade_miner:{node}:{version}"),
         Action::Tick { millis } => format!("tick:{millis}ms"),
         Action::Wallet {
             wallet, command, ..
@@ -903,18 +936,47 @@ fn resolve_binary_override(
         let expanded = expand_env_vars(&path.to_string_lossy())?;
         return Ok(PathBuf::from(expanded));
     }
-    if options.docker && version == "current" {
-        if let Some(image) = &options.docker_image {
-            return Ok(PathBuf::from(image));
-        }
-    }
     if version == "current" {
-        if let Some(path) = &options.nockchain_bin {
-            return Ok(path.clone());
+        if options.docker {
+            return Ok(PathBuf::from(
+                options
+                    .docker_image
+                    .as_deref()
+                    .unwrap_or("nockchain-e2e:latest"),
+            ));
         }
+        return Ok(options
+            .nockchain_bin
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("target/release/nockchain")));
     }
     let expanded = expand_env_vars(version)?;
     Ok(PathBuf::from(expanded))
+}
+
+fn resolve_miner_override(
+    scenario: &Scenario,
+    options: &RunOptions,
+    version: &str,
+) -> Result<PathBuf> {
+    if let Some(path) = scenario.miner_binaries.get(version) {
+        return Ok(PathBuf::from(expand_env_vars(&path.to_string_lossy())?));
+    }
+    if version == "current" {
+        if options.docker {
+            return Ok(PathBuf::from(
+                options
+                    .docker_miner_image
+                    .as_deref()
+                    .unwrap_or("zk-pow-miner-e2e:latest"),
+            ));
+        }
+        return Ok(options
+            .miner_bin
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("target/release/zk-pow-mine")));
+    }
+    Ok(PathBuf::from(expand_env_vars(version)?))
 }
 
 fn resolve_fixture_path(scenario_path: &Path, fixture: &str) -> PathBuf {
@@ -1730,6 +1792,11 @@ async fn run_wallet_command(
         .arg("private")
         .arg("--private-grpc-server-port")
         .arg(port.to_string());
+    if let Some(token) = node_manager.operator_token(node)? {
+        cmd.env("NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN", token);
+    } else {
+        cmd.env_remove("NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN");
+    }
     if is_fakenet {
         cmd.arg("--fakenet");
         if let Some(phase) = fakenet_v1_phase {
@@ -1882,6 +1949,9 @@ mod tests {
             fakenet: true,
             mine: false,
             mining_pkh: None,
+            mining_threads: 1,
+            miner_binary: None,
+            miner_image: None,
             peers: Vec::new(),
             peer_from: Vec::new(),
             restart_peer_from: Vec::new(),
@@ -2064,6 +2134,7 @@ mod tests {
         let options = crate::runner::RunOptions {
             scenario_path: PathBuf::from("scenario.yaml"),
             nockchain_bin: Some(PathBuf::from("bazel-bin/open/crates/nockchain/nockchain")),
+            miner_bin: Some(PathBuf::from("target/release/zk-pow-mine")),
             wallet_bin: Some(PathBuf::from(
                 "bazel-bin/open/crates/nockchain-wallet/nockchain-wallet",
             )),
@@ -2073,6 +2144,8 @@ mod tests {
             base_p2p_port: 4100,
             docker: false,
             docker_image: None,
+            docker_miner_image: None,
+            docker_miner_bin: None,
             keep_artifacts: false,
         };
 
@@ -2104,6 +2177,7 @@ mod tests {
         let second_options = crate::runner::RunOptions {
             scenario_path: PathBuf::from("scenario.yaml"),
             nockchain_bin: Some(PathBuf::from("other/nockchain")),
+            miner_bin: Some(PathBuf::from("target/release/zk-pow-mine")),
             wallet_bin: Some(PathBuf::from("other/nockchain-wallet")),
             work_dir: PathBuf::from("target/nockchain-e2e"),
             base_grpc_port: 6100,
@@ -2111,6 +2185,8 @@ mod tests {
             base_p2p_port: 4100,
             docker: false,
             docker_image: None,
+            docker_miner_image: None,
+            docker_miner_bin: None,
             keep_artifacts: false,
         };
         crate::runner::seed_binary_env_vars(&second_options).expect("preserve binary env");

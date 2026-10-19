@@ -63,12 +63,8 @@ const GOSSIP_BUCKET_REFILL_PER_SECOND: u32 = 2;
 // retain almost all request reduction from 128-item batches with much lower
 // tail delay under the current 10 ms coalescing window.
 const GEN2_BATCH_MAX_ITEMS: usize = 64;
-// 10 MB caps, validated by the LAX1 stacked canary. The full chain-history
-// sweep (44 188 blocks) put the max observed individual raw-tx at 1.2 MiB and
-// the max block-plus-txs bundle at 1.34 MiB, so 10 MB is generous headroom for
-// tuned catch-up. The CBOR codec request/response maximum tracks
-// `gen2_batch_max_bytes` at runtime (see behaviour.rs), so the three move
-// together.
+// Transport and per-item byte limits bound encoded messages; the CBOR
+// request/response maximum follows `gen2_batch_max_bytes` at runtime.
 const GEN2_BATCH_MAX_BYTES: usize = 10_000_000;
 const GEN2_ITEM_MAX_BYTES: usize = 10_000_000;
 const GEN2_BLOCK_BATCH_MAX_RESPONSE_BYTES: usize = 10_000_000;
@@ -92,11 +88,10 @@ const PREFETCH_WINDOW_INITIAL: u8 = 16;
 // requester ask past the expected fit point without accepting an oversized
 // response.
 const PREFETCH_WINDOW_MAX: u8 = 128;
-// Kernel-requested height gap above the current frontier before range
-// prefetch is eligible.
+// Inclusive catch-up depth from kernel demand, or a retained future gossip
+// hint on demand at the current frontier, before range prefetch is eligible.
 const PREFETCH_KERNEL_DEMAND_THRESHOLD: u64 = 8;
-// Cap on simultaneously-inflight prefetches per peer. LAX1-tuned to 4 to keep
-// the catch-up pipeline full while bounding per-peer prefetch load.
+// Bounds simultaneously in-flight prefetch requests per peer.
 const PREFETCH_MAX_INFLIGHT_PER_PEER: u8 = 4;
 // Failure budget per height before declaring it "stuck". Eight attempts
 // covers short peer gaps during aggressive prefetch without making one
@@ -281,9 +276,9 @@ pub struct LibP2PConfig {
     #[serde(default = "default_gen2_swarm_action_queue_capacity")]
     pub gen2_swarm_action_queue_capacity: usize,
 
-    /// Enable kernel-demanded block range prefetch. When `true`, a sufficiently
-    /// deep kernel `%request %block %by-height` can issue a `BlockRangeWithTxs`
-    /// request alongside the normal singleton request.
+    /// Enable kernel-demanded block range prefetch. A sufficiently deep kernel
+    /// `%request %block %by-height`, or frontier demand with a retained future
+    /// gossip hint, can issue `BlockRangeWithTxs` alongside the normal singleton.
     #[serde(default = "default_prefetch_enabled")]
     pub prefetch_enabled: bool,
 
@@ -297,8 +292,9 @@ pub struct LibP2PConfig {
     #[serde(default = "default_prefetch_window_max")]
     pub prefetch_window_max: u8,
 
-    /// Kernel-demanded height gap above the current frontier before range
-    /// prefetch is eligible.
+    /// Inclusive catch-up depth required for range prefetch. At the current
+    /// frontier only, retained future gossip may supply an unvalidated depth
+    /// hint; issuance and block validation still require kernel demand.
     #[serde(default = "default_prefetch_kernel_demand_threshold")]
     pub prefetch_kernel_demand_threshold: u64,
 
@@ -352,6 +348,11 @@ pub struct LibP2PConfig {
     /// Timeout for low-priority peeks.
     #[serde(default = "default_low_priority_peek_timeout_secs")]
     pub low_priority_peek_timeout_secs: u64,
+
+    /// Kernel-tip reconciliation interval. Zero disables periodic checks, not
+    /// effect-lag recovery or its delayed retries after unavailable peeks.
+    #[serde(default = "default_frontier_reconcile_interval_secs")]
+    pub frontier_reconcile_interval_secs: u64,
 
     /// Number of failed pings before closing connection
     #[serde(default = "default_failed_pings_before_close")]
@@ -559,6 +560,10 @@ fn default_low_priority_peek_timeout_secs() -> u64 {
     LOW_PRIORITY_PEEK_TIMEOUT_SECS
 }
 
+fn default_frontier_reconcile_interval_secs() -> u64 {
+    30
+}
+
 fn default_failed_pings_before_close() -> u64 {
     FAILED_PINGS_BEFORE_CLOSE // Number of failed pings before closing connection
 }
@@ -655,6 +660,7 @@ impl Default for LibP2PConfig {
             elders_debounce_reset_secs: default_elders_debounce_reset_secs(),
             seen_tx_clear_interval: default_seen_tx_clear_interval(),
             low_priority_peek_timeout_secs: default_low_priority_peek_timeout_secs(),
+            frontier_reconcile_interval_secs: default_frontier_reconcile_interval_secs(),
             failed_pings_before_close: default_failed_pings_before_close(),
             ip_hygiene_enabled: default_ip_hygiene_enabled(),
             address_cooldown_secs: default_address_cooldown_secs(),

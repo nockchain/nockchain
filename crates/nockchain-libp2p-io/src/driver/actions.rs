@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use libp2p::peer_store::Store;
@@ -8,7 +9,7 @@ use nockapp::NockAppError;
 use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Duration;
-use tracing::{error, trace, warn};
+use tracing::{error, trace, warn, Instrument};
 
 use crate::behaviour::NockchainBehaviour;
 use crate::driver::gen2;
@@ -23,7 +24,7 @@ use crate::traffic_cop;
 #[derive(Debug)]
 pub(crate) enum SwarmAction {
     SendResponse {
-        channel: ResponseChannel<NockchainResponse>,
+        channel: ResponseChannel<crate::behaviour::TransportResponse>,
         response: NockchainResponse,
     },
     FlushDeferredHeardBlocks,
@@ -39,6 +40,7 @@ pub(crate) enum SwarmAction {
     SendGossip {
         peer_id: PeerId,
         message: ByteBuf,
+        span: tracing::Span,
     },
     RetryRequests {
         requests: Vec<OutboundRequestContext>,
@@ -77,8 +79,8 @@ impl SwarmActionDispatcher<'_> {
 pub(super) async fn process_swarm_action(
     swarm_action: SwarmAction,
     swarm: &mut Swarm<NockchainBehaviour>,
-    buffered_swarm_actions: &mut VecDeque<SwarmAction>,
     swarm_tx: &mpsc::Sender<SwarmAction>,
+    deferred_flush_running: &Arc<AtomicBool>,
     join_set: &mut TrackedJoinSet<Result<(), NockAppError>>,
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &Arc<NockchainP2PMetrics>,
@@ -109,10 +111,15 @@ pub(super) async fn process_swarm_action(
             )
             .await
         }
-        SwarmAction::SendGossip { peer_id, message } => {
+        SwarmAction::SendGossip {
+            peer_id,
+            message,
+            span,
+        } => {
             gen2::process_send_gossip_action(
                 peer_id, message, swarm, driver_state, metrics, equix_builder,
             )
+            .instrument(span)
             .await
         }
         SwarmAction::RetryRequests { requests, delay } => {
@@ -120,17 +127,50 @@ pub(super) async fn process_swarm_action(
             Ok(())
         }
         SwarmAction::FlushDeferredHeardBlocks => {
-            gen2::process_flush_deferred_heard_blocks_action(
-                buffered_swarm_actions, traffic_cop, metrics, driver_state,
-            )
-            .await
+            if deferred_flush_running.swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
+            let running = Arc::clone(deferred_flush_running);
+            let tx = swarm_tx.clone();
+            let traffic = traffic_cop.clone();
+            let metrics = Arc::clone(metrics);
+            let state = Arc::clone(driver_state);
+            let mut recovery =
+                gen2::DeferredFlushRecovery::new(Arc::clone(&state), tx.clone(), Some(running));
+            join_set.spawn("deferred_flush".to_string(), async move {
+                let result = async {
+                    loop {
+                        let mut actions = SwarmActionDispatcher::Channel(&tx);
+                        if gen2::flush_ready_deferred_heard_blocks_with_dispatcher(
+                            &traffic, &metrics, &state, &mut actions, &mut recovery,
+                        )
+                        .await?
+                            == 0
+                        {
+                            break;
+                        }
+                    }
+                    Ok(())
+                }
+                .await;
+                let ready_remaining = recovery.finish().await?;
+                if let Err(err) = result.as_ref() {
+                    error!(
+                        error = %err,
+                        ready_remaining,
+                        "Deferred heard-block flush worker failed"
+                    );
+                }
+                result
+            });
+            Ok(())
         }
         SwarmAction::SendResponse { channel, response } => {
             trace!("SAction: SendResponse");
-            let _ = swarm
-                .behaviour_mut()
-                .request_response
-                .send_response(channel, response);
+            let _ = swarm.behaviour_mut().request_response.send_response(
+                channel,
+                crate::behaviour::TransportResponse::outgoing(response),
+            );
             Ok(())
         }
         SwarmAction::BlockPeer { peer_id } => {

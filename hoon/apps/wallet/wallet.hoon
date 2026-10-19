@@ -184,6 +184,12 @@
       [%blockchain-constants ~]
     ``bc.state
     ::
+      [%fund-spend-policy height=@ta ~]
+    =/  maybe-height  (rush height.pole dim:ag)
+    ?~  maybe-height  ~
+    =/  candidate-height=@ud  u.maybe-height
+    ``[candidate-height protocol-fund-address:t fund-note-firstname:t (fund-minimum-at:t candidate-height)]
+    ::
       [%state ~]
     ``state
     ::
@@ -343,6 +349,7 @@
         %show                  (show:utils state path.cause)
         %keygen                (do-keygen cause)
         %derive-child          (do-derive-child cause)
+        %recover-child         (do-recover-child cause)
         %list-notes            (do-list-notes cause)
         %list-notes-by-address  (do-list-notes-by-address cause)
         %list-notes-by-address-csv  (do-list-notes-by-address-csv cause)
@@ -358,6 +365,7 @@
         %verify-hash           (do-verify-hash cause)
         %import-keys           (do-import-keys cause)
         %import-extended       (do-import-extended cause)
+        %import-extended-checked  (do-import-extended-checked cause)
         %watch-address         (do-watch-address cause)
         ::%watch-first-name      (do-watch-first-name cause)
         %watch-address-multisig  (do-watch-address-multisig cause)
@@ -638,12 +646,33 @@
         [%exit 0]
     ==
   ::
+  ::  File-based extended import must report parsing/credential failures,
+  ::  rather than allowing the outer crash consumer to report success.
+  ++  do-import-extended-checked
+    |=  =cause:wt
+    ?>  ?=(%import-extended-checked -.cause)
+    =/  result  (mule |.((do-import-extended cause)))
+    ?-  -.result
+      %.y  p.result
+      %.n
+        :_  state
+        ~[[%markdown '## Extended key import rejected: invalid key material; wallet unchanged.'] [%exit 1]]
+    ==
+  ::
   ++  do-import-extended
     |=  =cause:wt
-    ?>  ?=(%import-extended -.cause)
+    ?>  ?=(?(%import-extended %import-extended-checked) -.cause)
     ::  log only non-secret metadata (key type, protocol version, depth, public
     ::  fingerprint), never the raw extended key.
     =/  core  (from-extended-key:s10 extended-key.cause)
+    =/  valid-material=?
+      ?.  ?=(%import-extended-checked -.cause)
+        %.y
+      ?&  !inf.pub:core
+          (lth prv:core n:core)
+          (based:schnorr-pubkey:transact pub:core)
+      ==
+    ?>  valid-material
     =/  is-private=?  !=(0 prv:core)
     %-  (debug "import-extended: type={<?:(is-private %prv %pub)>} v={<protocol-version:core>} dep={<dep:core>} pub={<(en:base58:wrap public-key:core)>}")
     =/  key-type=?(%pub %prv)  ?:(is-private %prv %pub)
@@ -666,11 +695,17 @@
       ?:  is-private
         (crip "imported-private-{<(end [3 4] public-key:core)>}")
       (crip "imported-public-{<(end [3 4] public-key:core)>}")
-    ::  if this is a master key (no parent), set as master
+    ::  A root import may add a master, but must not silently switch an
+    ::  existing wallet's active tree. Switching uses the explicit command.
     ?:  =(0 dep:core)
+      =/  previous-master=(unit coil:wt)  active-master.state
       =.  active-master.state  (some public-coil)
       =.  keys.state  (key:put:v imported-coil ~ `key-label)
       =.  keys.state  (key:put:v public-coil ~ `key-label)
+      =.  active-master.state
+        ?~  previous-master
+          (some public-coil)
+        previous-master
       =/  extended-type=tape  ?:(is-private "private" "public")
       :_  state
       :~  :-  %markdown
@@ -680,7 +715,7 @@
 
           - Imported Extended Key: {(trip extended-key.cause)}
           - Assigned Label: {(trip key-label)}
-          - Set as active master key
+          - {?~(previous-master "Set as active master key" "Active master key unchanged")}
           """
           [%exit 0]
       ==
@@ -699,7 +734,7 @@
       ==
     =/  master-pubkey-coil=coil:wt  (public:active:wt active-master.state)
     =/  expected-children=(set coil:wt)
-      (derive-child:v ind:core)
+      +:(derive-child:v ind:core)
     =/  imported-pubkey=@  public-key:core
     ::  find the public key coil from the derived children set
     =/  expected-pubkey-coil=(unit coil:wt)
@@ -916,8 +951,8 @@
       ==
     =+  data=data:*blockchain-constants:transact
     =/  valid=(reason:dumb ~)
-      %-  validate-with-context:spends:transact
-      [(zh-molt:hz notes.balance.state) signed-spends height.balance.state max-size.data bythos-phase.bc.state]
+      %-  validate-with-context:spends:t
+      [(zh-molt:hz notes.balance.state) signed-spends +(height.balance.state) max-size.data bythos-phase.bc.state]
     ?-    -.valid
         %.y
       =/  nock-cause=$>(%fact cause:dumb)
@@ -1837,28 +1872,71 @@
         [%exit 0]
     ==
   ::
+  ::  Verify retained child material before deriving or writing any keys.
+  ::  The index is supplied independently; ancestry in the input is not used.
+  ++  do-recover-child
+    |=  =cause:wt
+    ?>  ?=(%recover-child -.cause)
+    ?:  (gte i.cause (bex 31))
+      child-recovery-failed
+    ?~  active-master.state
+      child-recovery-failed
+    ?:  &(hardened.cause !~(master has:v %prv))
+      child-recovery-failed
+    =/  result  (mule |.((do-derive-child cause)))
+    ?-  -.result
+      %.y  p.result
+      %.n  child-recovery-failed
+    ==
+  ::
+  ++  child-recovery-failed
+    ^-  [(list effect:wt) state:wt]
+    :_  state
+    ~[[%markdown '## Child recovery rejected: key material does not match the active parent and supplied index; wallet unchanged.'] [%exit 1]]
+  ::
   ::  derives child keys of current master key
   ::  at index `i`. this will overwrite existing paths if
   ::  the master key changes
   ++  do-derive-child
     |=  =cause:wt
-    ?>  ?=(%derive-child -.cause)
+    ?>  ?=(?(%derive-child %recover-child) -.cause)
     =/  index
       ?:  hardened.cause
         (add i.cause (bex 31))
       i.cause
-    =/  derived-keys=(set coil:wt)  (derive-child:v index)
+    ::  The returned core and stored coils share key material and protocol version.
+    ::  The core additionally retains depth, index, and parent fingerprint.
+    =/  [child-core=_(from-private:s10 *keyc:s10) derived-keys=(set coil:wt)]
+      (derive-child:v index)
+    =/  material-matches=?
+      ?.  ?=(%recover-child -.cause)
+        %.y
+      =/  retained  (from-extended-key:s10 extended-key.cause)
+      ?&  =(public-key:retained public-key:child-core)
+          =(chain-code:retained chain-code:child-core)
+          =(protocol-version:retained protocol-version:child-core)
+          |(=(0 prv:retained) =(prv:retained prv:child-core))
+      ==
+    ?.  material-matches
+      child-recovery-failed
+    =/  label=(unit @tas)
+      ?:  ?=(%derive-child -.cause)
+        label.cause
+      ~
     =.  keys.state
       %-  ~(rep in derived-keys)
       |=  [=coil:wt keys=_keys.state]
       =.  keys.state  keys
-      (key:put:v coil `index label.cause)
+      (key:put:v coil `index label)
     =/  key-text=tape
       %-  zing
       %+  turn  ~(tap in derived-keys)
       |=  =coil:wt
       =/  version=@  -.coil
-      =/  ext-key=@t  (extended-key:coil:wt coil)
+      =/  ext-key=@t
+        ?:  ?=(%prv -.key.coil)
+          extended-private-key:child-core
+        extended-public-key:child-core
       =/  address=@t
         ?:  ?=(%prv -.key.coil)
           'N/A (private key)'

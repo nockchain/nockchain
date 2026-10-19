@@ -16,11 +16,11 @@ If protocol guidance conflicts with workflow or crate docs, this page and the li
 
 ## Current Release Track
 
-- Follow-up dual-ASERT reset at height `154500`: [subsequent reset specification](./changelog/protocol/017-anthropos.md#subsequent-reset-at-height-154500). Both lanes re-anchor to predecessor `154499`; deploy updated nodes and miners before activation.
+- Current coordinated upgrade at candidate height `170000`: [subsequent reset and native AI-PoW admission specification](./changelog/protocol/017-anthropos.md#subsequent-reset-at-height-170000). Both ASERT lanes re-anchor once to branch-local predecessor `169999` MTP; deploy matching artifacts before that parent height. Updated transaction validation applies immediately at all spending heights, independently of the height-gated rules.
 - Proposed ZK-PoW `%5` and 70/30 puzzle allocation: [`017-anthropos.md`](./changelog/protocol/017-anthropos.md), version `0.1.17`, activation height `147500`, target unset.
 - Most recently activated dual proof-of-work upgrade: [`016-logos.md`](./changelog/protocol/016-logos.md), version `0.1.16`, activation height `126000`.
 - Pearl merge-mining clarification in Logos: transaction-bearing Pearl blocks admit coinbase Merkle paths of up to 32 siblings; see its transaction commitment and compatibility sections before rollout.
-- Coordinated node, miner, wallet, and bridge upgrade at height `154500`: [operator guidance](./docs/AI_POW_CUTOVER.md). See [Logos compatibility](./changelog/protocol/016-logos.md#backward-compatibility) for the height-selected AI-PoW rules.
+- Coordinated node, kernel, Rust verifier, miner, and wallet deployment: [operator guidance](./docs/AI_POW_CUTOVER.md), including setup retention, recovery, and restricted mining access. Existing bridge withdrawals remain disabled.
 - Proposed emergency proof/ASERT activation: [`015-zoe.md`](./changelog/protocol/015-zoe.md), version `0.1.15`, activation height `119400`, target `2026-08-06`.
 - Next scheduled activation: [`013-nous.md`](./changelog/protocol/013-nous.md), version `1.0.0`, target `2026-Q2`, rollout-gated (non-consensus, `activation_height = 0`).
 

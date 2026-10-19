@@ -149,9 +149,8 @@ pub mod cli;
 #[cfg(all(feature = "node", feature = "gpu"))]
 pub mod gpu;
 
-/// Test-only synthetic nockchain targets sized so the factor-adjusted
-/// product fits the 256-bit band: fixtures previously used `[0xff; 32]`,
-/// which the fail-closed adjusted-target multiply rejects as over-band.
+/// Test-only synthetic nockchain targets whose factor-adjusted product fits the
+/// 256-bit band.
 #[cfg(test)]
 pub(crate) fn easy_nock_target() -> [u8; 32] {
     // 2^240 − 1: fits fixture factors up to 2^16 (the standard

@@ -28,6 +28,44 @@ pub enum PokeResult {
     Nack,
 }
 
+/// The exact native poke result, before acknowledgement and effect broadcasting.
+pub type NativeOwnPokeResult = crate::Result<NounSlab>;
+
+/// An opt-in, one-shot observer of a native kernel round trip.
+///
+/// The interval includes the Serf queue, not just execution or commit time.
+/// The callback borrows this poke's own result before its effects are consumed.
+pub struct NativePokeObserver {
+    clock: fn() -> u64,
+    callback: Box<dyn FnOnce(u64, u64, &NativeOwnPokeResult) + Send>,
+}
+
+impl NativePokeObserver {
+    pub fn new(
+        clock: fn() -> u64,
+        callback: impl FnOnce(u64, u64, &NativeOwnPokeResult) + Send + 'static,
+    ) -> Self {
+        Self {
+            clock,
+            callback: Box::new(callback),
+        }
+    }
+
+    pub(crate) fn time_us(&self) -> u64 {
+        (self.clock)()
+    }
+
+    pub(crate) fn complete(self, started_us: u64, completed_us: u64, result: &NativeOwnPokeResult) {
+        (self.callback)(started_us, completed_us, result);
+    }
+}
+
+impl std::fmt::Debug for NativePokeObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativePokeObserver").finish_non_exhaustive()
+    }
+}
+
 pub enum Operation {
     Poke,
     Peek,
@@ -62,6 +100,7 @@ pub enum IOAction {
         poke: NounSlab,
         ack_channel: oneshot::Sender<PokeResult>,
         timeout: Option<Duration>,
+        observer: Option<NativePokeObserver>,
     },
     /// Peek request to [`crate::NockApp`]
     Peek {
@@ -84,6 +123,7 @@ impl NockAppHandle {
                 poke,
                 ack_channel,
                 timeout: None,
+                observer: None,
             })
             .await?;
         Ok(())
@@ -102,6 +142,7 @@ impl NockAppHandle {
                 poke,
                 ack_channel,
                 timeout: Some(timeout),
+                observer: None,
             })
             .await?;
         Ok(())
@@ -120,6 +161,7 @@ impl NockAppHandle {
             poke,
             ack_channel,
             timeout: None,
+            observer: None,
         })?)
     }
 
@@ -127,6 +169,27 @@ impl NockAppHandle {
     pub async fn poke(&self, wire: WireRepr, poke: NounSlab) -> Result<PokeResult, NockAppError> {
         let (ack_channel, ack_future) = oneshot::channel();
         self.send_poke(ack_channel, wire, poke).await?;
+        Ok(ack_future.await?)
+    }
+
+    /// Submits a poke with an observer of its own native result and round-trip interval.
+    #[tracing::instrument(name = "nockapp::NockAppHandle::poke_observed", skip_all)]
+    pub async fn poke_observed(
+        &self,
+        wire: WireRepr,
+        poke: NounSlab,
+        observer: NativePokeObserver,
+    ) -> Result<PokeResult, NockAppError> {
+        let (ack_channel, ack_future) = oneshot::channel();
+        self.io_sender
+            .send(IOAction::Poke {
+                wire,
+                poke,
+                ack_channel,
+                timeout: None,
+                observer: Some(observer),
+            })
+            .await?;
         Ok(ack_future.await?)
     }
 

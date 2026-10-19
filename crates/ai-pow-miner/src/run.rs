@@ -423,6 +423,8 @@ pub enum MinerError {
     CanonicalCertificateUnavailable(String),
     #[error("production AI-PoW worker failed: {0}")]
     ProductionWorker(String),
+    #[error("local proof runtime setup failed: {0}")]
+    ProofRuntime(#[from] ai_pow_zk::runtime::ProofRuntimeError),
 }
 
 /// Production entry point using a physical-core CPU search backend.
@@ -441,6 +443,7 @@ pub async fn run_with_backend(
 ) -> Result<(), MinerError> {
     cfg.validate()?;
     cfg.puzzle.validate_canonical_submission_ready()?;
+    ai_pow_zk::runtime::prepare()?;
     info!(
         node = %cfg.node_addr,
         params = ?cfg.puzzle.params,
@@ -488,15 +491,17 @@ pub async fn run_with_backend(
         // Order matters: subscribe BEFORE enable_mining so the initial
         // candidate (which the post-poke update-candidate-block emits)
         // lands on a live stream.
-        if let Err(e) = client
-            .set_mining_key(
-                AiPowMinerWire::SetPubKey.to_wire(),
-                Vec::new(),
-                cfg.mining_pkh_configs.clone(),
-            )
-            .await
-        {
-            return Err(MinerError::Configure(format!("set_mining_key: {e}")));
+        if !client.is_operator_managed() {
+            if let Err(e) = client
+                .set_mining_key(
+                    AiPowMinerWire::SetPubKey.to_wire(),
+                    Vec::new(),
+                    cfg.mining_pkh_configs.clone(),
+                )
+                .await
+            {
+                return Err(MinerError::Configure(format!("set_mining_key: {e}")));
+            }
         }
         let mut candidates = match client.watch_candidates(vec![b"mine-ai".to_vec()]).await {
             Ok(s) => s,
@@ -506,11 +511,17 @@ pub async fn run_with_backend(
                 continue;
             }
         };
-        if let Err(e) = client
-            .enable_mining(AiPowMinerWire::Enable.to_wire(), true)
-            .await
-        {
-            return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
+        if !client.is_operator_managed() {
+            if let Err(e) = client
+                .enable_mining(AiPowMinerWire::Enable.to_wire(), true)
+                .await
+            {
+                return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
+            }
+        } else {
+            info!(
+                "ai-pow-miner: operator-managed mining; payout and enable state come from the node"
+            );
         }
         info!("ai-pow-miner: subscribed + mining enabled; awaiting candidates");
 
@@ -840,9 +851,11 @@ pub async fn run_with_backend(
         abort_and_drain_candidate_workers(&mut candidate_workers).await?;
         abort_and_drain_pearl_gateway_workers(&mut gateway_workers).await?;
         cancel_and_drain_pearl_workers(&mut workers, &mut current_cancel).await?;
-        let _ = client
-            .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
-            .await;
+        if !client.is_operator_managed() {
+            let _ = client
+                .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
+                .await;
+        }
 
         match inner_result {
             InnerOutcome::Shutdown => return Ok(()),
@@ -1359,6 +1372,7 @@ async fn run_gateway_free_with_backend(
     profile: GatewayFreeProfile,
 ) -> Result<(), MinerError> {
     validate_mining_pkh_configs(&mining_pkh_configs)?;
+    ai_pow_zk::runtime::prepare()?;
     let profile_name = profile.name();
     info!(
         node = %node_addr,
@@ -1380,15 +1394,17 @@ async fn run_gateway_free_with_backend(
                 continue;
             }
         };
-        if let Err(e) = client
-            .set_mining_key(
-                AiPowMinerWire::SetPubKey.to_wire(),
-                Vec::new(),
-                mining_pkh_configs.clone(),
-            )
-            .await
-        {
-            return Err(MinerError::Configure(format!("set_mining_key: {e}")));
+        if !client.is_operator_managed() {
+            if let Err(e) = client
+                .set_mining_key(
+                    AiPowMinerWire::SetPubKey.to_wire(),
+                    Vec::new(),
+                    mining_pkh_configs.clone(),
+                )
+                .await
+            {
+                return Err(MinerError::Configure(format!("set_mining_key: {e}")));
+            }
         }
         let mut candidates = match client.watch_candidates(vec![b"mine-ai".to_vec()]).await {
             Ok(s) => s,
@@ -1397,11 +1413,17 @@ async fn run_gateway_free_with_backend(
                 continue;
             }
         };
-        if let Err(e) = client
-            .enable_mining(AiPowMinerWire::Enable.to_wire(), true)
-            .await
-        {
-            return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
+        if !client.is_operator_managed() {
+            if let Err(e) = client
+                .enable_mining(AiPowMinerWire::Enable.to_wire(), true)
+                .await
+            {
+                return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
+            }
+        } else {
+            info!(
+                "ai-pow-miner: operator-managed mining; payout and enable state come from the node"
+            );
         }
         info!(
             profile = profile_name,
@@ -1550,9 +1572,11 @@ async fn run_gateway_free_with_backend(
         };
 
         cancel_and_await_reference_worker(&mut worker, &grind_cancel).await?;
-        let _ = client
-            .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
-            .await;
+        if !client.is_operator_managed() {
+            let _ = client
+                .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
+                .await;
+        }
         if reconnect {
             tokio::select! {
                 _ = shutdown.cancelled() => return Ok(()),
@@ -3007,7 +3031,9 @@ mod tests {
                     }
                 }
             });
-            let server = PrivateNockAppGrpcServer::new(handle);
+            // Mock node without bearer tokens: opt out of private gRPC auth
+            // explicitly, as the server otherwise refuses to start.
+            let server = PrivateNockAppGrpcServer::new(handle).with_allow_unauthenticated(true);
             let server_task = tokio::spawn(async move { server.serve(addr).await });
             tokio::time::sleep(Duration::from_millis(100)).await;
             MockNode {

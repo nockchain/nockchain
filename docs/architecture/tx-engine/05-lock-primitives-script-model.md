@@ -209,6 +209,19 @@ This is Nockchain's equivalent of Bitcoin's `OP_RETURN` — used for:
 - **Data anchoring**: Committing data to the chain without creating spendable outputs
 - **Mining commitments**: Permanently locking value as a proof mechanism
 
+## Protocol-Fund Recovery
+
+Protocol-fund coinbase notes whose first name is `fund-note-firstname` use the
+dedicated recovery rule in `check-context`. Their original lock wrapped the
+fund's multisig lock root as a public-key hash, so recovery checks the revealed
+multisig condition against `protocol-fund-address` instead of checking the
+original Merkle path.
+
+The revealed spend condition must hash to the pinned fund target, and its
+primitives must verify against the spending transaction's signature hash. The
+configured fund maturity rule still applies. Mempool validation and block
+admission share this rule; ordinary lock-condition handling is unchanged.
+
 ## Composition Model
 
 ### AND Logic: Within a SpendCondition

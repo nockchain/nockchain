@@ -2922,9 +2922,8 @@ impl CompositeTrace {
         }
 
         // ---- IRange7P1 (i7+1 ∈ [-64, 64], 129 values) ----
-        // Queries: NOISE_UNPACK[0..64] + MAT_UNPACK[0..64] every row (Pearl
-        // parity, audit N2: the plain matrix operand is int7 [-64,64], not full
-        // i8; it moved here from IRange8).
+        // Queries: NOISE_UNPACK[0..64] + MAT_UNPACK[0..64] every row.
+        // Both the noise and plain matrix operands are in [-64,64].
         // Map signed value v → table-row index (v + 64).
         let mut i7p1_count = [0u64; 129];
         for r in 0..n {
@@ -2953,8 +2952,8 @@ impl CompositeTrace {
         }
 
         // ---- IRange8 (i8 ∈ [-128, 127], 256 values) ----
-        // Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32] every row (the
-        // genuinely-i8 NOISED operands). MAT_UNPACK moved to IRange7P1 (audit N2).
+        // Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32] every row.
+        // These noised operands are in [-128,127]; MAT_UNPACK uses IRange7P1.
         let mut i8_count = [0u64; 256];
         let scan_i8_cells = |start: usize, len: usize, dst: &mut [u64; 256], values: &[Val]| {
             for r in 0..n {
@@ -4206,12 +4205,10 @@ mod tests {
             .expect("key-pin row must prove+verify (C1 non-vacuous, tractable)");
     }
 
-    /// Regression for `verify_round` leading-boundary gating: a bare
-    /// BLAKE3 block with no jackpot or extra selectors must prove and
-    /// verify at a mid-trace offset and at trace-terminal, not just
-    /// contiguous from row 0.
+    /// A bare BLAKE3 block with no jackpot or extra selectors must prove and
+    /// verify at a mid-trace offset and at trace-terminal, as well as from row 0.
     #[test]
-    fn blake_block_verifies_off_row_zero_after_gate_fix() {
+    fn blake_block_verifies_at_mid_trace_and_terminal_offsets() {
         let tweak = crate::chips::blake3::compress::Blake3Tweak {
             counter_low: 0,
             counter_high: 0,
@@ -4235,7 +4232,7 @@ mod tests {
                     .to_vec();
             let proof = prove::<AiPowStarkConfig, _>(&cfg, &CompositeFullAir, trace.matrix, &pis);
             verify::<AiPowStarkConfig, _>(&cfg, &CompositeFullAir, &proof, &pis)
-                .unwrap_or_else(|e| panic!("blake block at row {rs} must verify post-fix: {e:?}"));
+                .unwrap_or_else(|e| panic!("blake block at row {rs} must verify: {e:?}"));
         }
     }
 

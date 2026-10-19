@@ -21,7 +21,7 @@
   ::  Version the jet binding when changing its sample: old kernels/binaries
   ::  must hit the fail-safe body rather than misinterpret the new arguments.
   ~/  %ai-pow-verify-v2
-  |=  [rules=?(%legacy %hardened) artifact=* commit=* target=@]
+  |=  [rules=?(%legacy %hardened %consrule) artifact=* commit=* target=@]
   ^-  ?
   !!
 ::

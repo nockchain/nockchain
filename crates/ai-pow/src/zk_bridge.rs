@@ -122,9 +122,7 @@ impl Layer0RowBudget {
     /// boundary) BLAKE3 leaf chunks × 16 compressions × 8 rows,
     /// plus the authentication-path parents (≤ leaf-count + a
     /// log-depth spine, 8 rows each) + slack. **`O(t·k)`,
-    /// independent of the full matrix size** — vs the old
-    /// `O(|matrix|)` full re-hash (`136·⌈|M|/1024⌉`). This is the
-    /// production one-tile-one-STARK unblocker.
+    /// independent of the full matrix size**.
     fn strip_mhash_rows(t: u64, k: u64) -> u64 {
         let strip_chunks = (t * k).div_ceil(1024).max(1) + 1; // +1: boundary straddle
         strip_chunks * 136 + 2048 // leaves·(16·8) + parents/path + slack
@@ -1018,9 +1016,8 @@ pub enum BridgeError {
     InvalidParams(ParamError),
     /// Fiat-Shamir challenge parameters were invalid.
     FiatShamir(FiatShamirError),
-    /// `prove_and_verify_for_block`: `found_idx` is past the tile
-    /// count for these params (previously this was an `expect("found_idx
-    /// must be a valid tile index for these params")` panic).
+    /// `prove_and_verify_for_block`: `found_idx` is past the tile count for
+    /// these params.
     FoundIdxOutOfRange { found_idx: u32, num_tiles: u64 },
     /// `found_idx` is not the verifier-derived jackpot tile for this
     /// nonce-bound attempt.
@@ -1827,14 +1824,10 @@ fn prove_pearl_moe_compact_recursive_certificate_inner(
     })
 }
 
-/// Shared, soundness-critical L0-prove + MoE-ticket prefix for the MoE compact
-/// prove paths. Both the per-block mining path
-/// ([`prove_pearl_moe_compact_recursive_certificate`]) and the boot-setup seed
-/// path ([`prove_pearl_moe_compact_recursive_certificate_with_seed`]) call this so
-/// they can never drift on the ticket / routing-splice / strip-schedule derivation.
-/// Returns the L0 proof + canonical program + public inputs + derived
-/// `ZkParams`/trace-height and the MoE ticket. (The L1/L2 compact prove is done by
-/// each caller, since the `ChainVerifiedCompositeProof` borrows `pis`.)
+/// Prove Layer 0 and derive the authenticated MoE ticket, routing splice, and
+/// strip schedule for a compact recursive certificate.
+/// Returns the L0 proof, canonical program, public inputs, derived ZK parameters,
+/// trace height, MoE ticket, and common data used by the L1/L2 prover.
 #[allow(clippy::too_many_arguments)]
 fn prove_pearl_moe_l0_and_ticket(
     params: &MatmulParams,
@@ -1952,121 +1945,6 @@ pub fn pearl_moe_canonical_trace_height(
     let strip_schedule = StripIndexSchedule::from_indices(&zk_params, outer_indices, b_cols_global)
         .map_err(BridgeError::ZkParamsInvalid)?;
     Ok(expected_layer0_rows_for_strip_schedule(params, &strip_schedule)?.required_trace_len())
-}
-
-/// Boot-setup variant of [`prove_pearl_moe_compact_recursive_certificate`]:
-/// identical proving, but ALSO returns the small serializable
-/// [`ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed`] — the L0
-/// program/proof/PIs + L1 outer proof + metadata from which the boot table
-/// rebuilds the compact verifier context WITHOUT proving. Used only to build the
-/// offline/boot setup table (one seed per trace-height bucket); NEVER on the
-/// per-block mining path, which discards these parts.
-#[allow(clippy::too_many_arguments)]
-pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
-    params: &MatmulParams,
-    a_row_major: &[i8],
-    b_col_major: &[i8],
-    kappa: &[u8; 32],
-    h_a: &[u8; 32],
-    h_b: &[u8; 32],
-    routing: &crate::pearl_moe_routing::RoutingData,
-    expert_idx: usize,
-    inner_a_rows: &[u32],
-    local_b_cols: &[u32],
-    n_e: usize,
-) -> Result<
-    (
-        PearlMoeCompactProveRun,
-        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
-    ),
-    BridgeError,
-> {
-    prove_pearl_moe_compact_recursive_certificate_with_seed_with_rules(
-        params,
-        a_row_major,
-        b_col_major,
-        kappa,
-        h_a,
-        h_b,
-        routing,
-        expert_idx,
-        inner_a_rows,
-        local_b_cols,
-        n_e,
-        ProofRules::Hardened,
-    )
-}
-
-pub fn prove_pearl_moe_compact_recursive_certificate_with_seed_with_rules(
-    params: &MatmulParams,
-    a_row_major: &[i8],
-    b_col_major: &[i8],
-    kappa: &[u8; 32],
-    h_a: &[u8; 32],
-    h_b: &[u8; 32],
-    routing: &crate::pearl_moe_routing::RoutingData,
-    expert_idx: usize,
-    inner_a_rows: &[u32],
-    local_b_cols: &[u32],
-    n_e: usize,
-    rules: ProofRules,
-) -> Result<
-    (
-        PearlMoeCompactProveRun,
-        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
-    ),
-    BridgeError,
-> {
-    let (proof, prover_program, pis, zk_params, trace_height, ticket, l0_common) =
-        prove_pearl_moe_l0_and_ticket(
-            params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
-            local_b_cols, n_e, rules,
-        )?;
-
-    let verified_l0 = unsafe {
-        // SAFETY: as in `prove_pearl_moe_compact_recursive_certificate` — the
-        // ticket/routing/schedule are derived here and re-bound by the node verifier.
-        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_with_l0_common_after_chain_statement_verification(
-            prover_program,
-            proof,
-            &pis,
-            l0_common,
-        ).with_rules(rules)
-    };
-    let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)?;
-
-    // Capture the small rebuild inputs BEFORE moving the run's fields into the
-    // prove-run result. `verified_l0` is consumed into the seed (moving the L0
-    // program/proof out, cloning the borrowed PIs), which releases its borrow of
-    // `pis` so `pis` can move into the prove-run below.
-    let metadata = run
-        .verifier_context
-        .metadata_owned()
-        .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))?;
-    let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-        run.compact_cert.verifier_key_digest(),
-    )
-    .to_vec();
-    let seed = ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed::from_run(
-        &zk_params, verified_l0, run.l1_outer_proof, metadata, digest_bytes,
-    );
-
-    let prove_run = PearlMoeCompactProveRun {
-        compact_cert: run.compact_cert,
-        verifier_context: run.verifier_context,
-        pis,
-        zk_params,
-        trace_height,
-        commitments: ZkPublicCommitments {
-            h_a_chunk: *h_a,
-            h_b_chunk: *h_b,
-        },
-        ticket,
-        prover_cache: run
-            .prover_cache
-            .map(AiPowCompactRecursiveProverCache::from_inner),
-    };
-    Ok((prove_run, seed))
 }
 
 /// 5. **Recursive certificate verification** (`verify_recursive_certificate`).
@@ -2337,7 +2215,6 @@ pub fn prove_pearl_merge_compact_recursive_certificate(
         None,
         ProofRules::Hardened,
     )
-    .map(|(run, _)| run)
 }
 
 /// Cached-setup variant of [`prove_pearl_merge_compact_recursive_certificate`].
@@ -2358,7 +2235,6 @@ pub fn prove_pearl_merge_compact_recursive_certificate_with_prover_cache(
         Some(cache),
         ProofRules::Hardened,
     )
-    .map(|(run, _)| run)
 }
 
 /// Build the compact recursive certificate from an already checked mining ticket.
@@ -2387,7 +2263,6 @@ pub fn prove_pearl_merge_compact_recursive_certificate_checked_with_rules(
     prove_pearl_merge_compact_recursive_certificate_checked_inner(
         checked, params, a_row_major, b_col_major, None, rules,
     )
-    .map(|(run, _)| run)
 }
 
 /// Cached-setup variant of [`prove_pearl_merge_compact_recursive_certificate_checked`].
@@ -2424,57 +2299,6 @@ pub fn prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache
         Some(cache),
         rules,
     )
-    .map(|(run, _)| run)
-}
-
-/// Boot-setup variant of [`prove_pearl_merge_compact_recursive_certificate`]:
-/// identical proving, but ALSO returns the small serializable
-/// [`ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed`] — the L0
-/// program/proof/PIs + L1 outer proof + metadata from which the boot table
-/// rebuilds the compact verifier context WITHOUT proving. Used only to build
-/// the offline/boot setup table (one seed per trace-height bucket); NEVER on
-/// the per-block mining path, which discards these parts.
-pub fn prove_pearl_merge_compact_recursive_certificate_with_seed(
-    attempt: &PearlMergeTicketAttempt,
-    params: &MatmulParams,
-    a_row_major: &[i8],
-    b_col_major: &[i8],
-    max_pattern_len: usize,
-) -> Result<
-    (
-        AiPowCompactRecursiveCertificateRun,
-        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
-    ),
-    BridgeError,
-> {
-    prove_pearl_merge_compact_recursive_certificate_inner(
-        attempt,
-        params,
-        a_row_major,
-        b_col_major,
-        max_pattern_len,
-        None,
-        ProofRules::Hardened,
-    )
-}
-
-pub fn prove_pearl_merge_compact_recursive_certificate_with_seed_with_rules(
-    attempt: &PearlMergeTicketAttempt,
-    params: &MatmulParams,
-    a_row_major: &[i8],
-    b_col_major: &[i8],
-    max_pattern_len: usize,
-    rules: ProofRules,
-) -> Result<
-    (
-        AiPowCompactRecursiveCertificateRun,
-        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
-    ),
-    BridgeError,
-> {
-    prove_pearl_merge_compact_recursive_certificate_inner(
-        attempt, params, a_row_major, b_col_major, max_pattern_len, None, rules,
-    )
 }
 
 fn prove_pearl_merge_compact_recursive_certificate_inner(
@@ -2485,13 +2309,7 @@ fn prove_pearl_merge_compact_recursive_certificate_inner(
     max_pattern_len: usize,
     cache: Option<&AiPowCompactRecursiveProverCache>,
     rules: ProofRules,
-) -> Result<
-    (
-        AiPowCompactRecursiveCertificateRun,
-        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
-    ),
-    BridgeError,
-> {
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
     if params.difficulty_bits != 0 || params.spot_checks != 1 {
         return Err(BridgeError::PearlMergeUnsupportedTileShape);
     }
@@ -2553,13 +2371,7 @@ fn prove_pearl_merge_compact_recursive_certificate_checked_inner(
     b_col_major: &[i8],
     cache: Option<&AiPowCompactRecursiveProverCache>,
     rules: ProofRules,
-) -> Result<
-    (
-        AiPowCompactRecursiveCertificateRun,
-        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
-    ),
-    BridgeError,
-> {
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
     if params.difficulty_bits != 0 || params.spot_checks != 1 {
         return Err(BridgeError::PearlMergeUnsupportedTileShape);
     }
@@ -2606,13 +2418,7 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
     b_col_major: &[i8],
     cache: Option<&AiPowCompactRecursiveProverCache>,
     rules: ProofRules,
-) -> Result<
-    (
-        AiPowCompactRecursiveCertificateRun,
-        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
-    ),
-    BridgeError,
-> {
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
     if params.m != public_params.m
         || params.k != public_params.mining_config.common_dim
         || params.n != public_params.n
@@ -2731,22 +2537,6 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
     };
     let compact = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
 
-    // Capture the boot-setup seed: the small, serializable inputs from which
-    // the boot table rebuilds the compact verifier context WITHOUT proving.
-    // Mirrors `prove_pearl_moe_compact_recursive_certificate_with_seed`.
-    // `l1_outer_proof` is moved into the seed; the run does not carry it.
-    let metadata = compact
-        .verifier_context
-        .metadata_owned()
-        .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))?;
-    let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-        compact.compact_cert.verifier_key_digest(),
-    )
-    .to_vec();
-    let seed = ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed::from_run(
-        &zk_params, verified_l0, compact.l1_outer_proof, metadata, digest_bytes,
-    );
-
     let run = AiPowCompactRecursiveCertificateRun {
         zk_params,
         found_idx,
@@ -2769,7 +2559,7 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
             .prover_cache
             .map(AiPowCompactRecursiveProverCache::from_inner),
     };
-    Ok((run, seed))
+    Ok(run)
 }
 
 /// Check whether the current recursive certificate artifact can serve as a
@@ -3303,14 +3093,10 @@ fn prove_ai_pow_scheduled_full_with_context_with_rules<F: FnOnce(&mut CompositeT
     {
         return Err(BridgeError::PearlMergeUnsupportedTileShape);
     }
-    // γ Pearl-faithful: size the Layer-0 trace from `params`
-    // — the faithful analogue of Pearl's `degree_bits()` — instead
-    // of the fixed `MIN_STARK_LEN`. For sub-envelope test profiles
-    // (e.g. TEST_SMALL) the budget rounds back up to `MIN_STARK_LEN`
-    // so behaviour is bit-identical to the prior `baseline_min()`;
-    // PROD-class params grow the trace modestly (the
-    // matrix side is now an O(t·k) strip opening, not the
-    // O(|matrix|) full re-hash).
+    // Size the Layer-0 trace from `params`, analogous to Pearl's
+    // `degree_bits()`. Sub-envelope test profiles (e.g. TEST_SMALL)
+    // round up to `MIN_STARK_LEN`. The matrix-side budget accounts
+    // for an O(t·k) strip opening.
     let budget = expected_layer0_rows_for_strip_schedule(params, strip_schedule)?;
     let mut trace = CompositeTrace::baseline_with_rules(budget.required_trace_len(), rules);
     let height = trace.height();
@@ -3431,7 +3217,7 @@ fn prove_ai_pow_scheduled_full_with_context_with_rules<F: FnOnce(&mut CompositeT
     // useful-work chain: the sub-block-major matmul sweep over the
     // committed-matrix tile strips + the co-located StripeXor
     // reduction (`place_useful_work_chain`), then fold the
-    // chip-reduced per-stripe `x_steps`. The composite AIR now
+    // chip-reduced per-stripe `x_steps`. The composite AIR
     // *forces* the chain
     //   committed A/B → CUMSUM (matmul chip) →
     //   SX_IN (== nxt.CUMSUM) → SX_XR (StripeXor) →
@@ -3443,7 +3229,7 @@ fn prove_ai_pow_scheduled_full_with_context_with_rules<F: FnOnce(&mut CompositeT
     // seeds), then extract the attested tile's `t·k` row/col
     // strips. `HASH_JACKPOT = BLAKE3(real M, key=pow_key)` is the
     // genuine PoW digest, byte-equivalent to the plain miner
-    // (`high2_2_xstep_fold_pipeline_byte_equiv_plain`). Tile (0,0)
+    // (`xstep_fold_pipeline_byte_equiv_plain`). Tile (0,0)
     // is attested; threading the specific *found* tile + binding
     // its index does not change this binding.
     // Position-exact adversarial seam: the matmul sweep + the
@@ -4446,8 +4232,7 @@ mod tests {
         assert_ne!(out.pis.hash_jackpot, [0u32; 8]);
     }
 
-    /// FoldChip↔plain byte-equivalence (the
-    /// `high2_2_byte_equiv_plain` half of the byte-equivalence test plan).
+    /// FoldChip must be byte-equivalent to the plain miner.
     ///
     /// `ai-pow-zk`'s `FoldChip` must reproduce the *real* folded
     /// `TileState M` — the exact 16×u32 the plain miner hashes —
@@ -4458,14 +4243,14 @@ mod tests {
     /// not depend on `ai-pow`); `ai-pow` → `ai-pow-zk` under the
     /// `zk` feature is the legal direction.
     #[test]
-    fn high2_2_foldchip_byte_equiv_plain_tilestate() {
+    fn foldchip_byte_equiv_plain_tilestate() {
         use ai_pow_zk::chips::fold::{build_trace, final_state};
 
         use crate::matmul::{compute_tile_trace, BlockNoise, Matrices};
 
         let params = MatmulParams::TEST_SMALL;
-        let (a, b) = synth_matrices(b"high2_2-byteequiv", &params);
-        let ctx = BlockContext::build(b"high2_2-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        let (a, b) = synth_matrices(b"fold-byteequiv", &params);
+        let ctx = BlockContext::build(b"fold-block", TEST_NONCE, &a, &b, &params).expect("ctx");
 
         // Reconstruct the same noised matrices BlockContext built
         // internally (it exposes the seeds, not the matrices).
@@ -4515,15 +4300,14 @@ mod tests {
     /// per-stripe `x` values for real tiles — the parity ai-pow-zk
     /// cannot assert itself (no ai-pow dep).
     #[test]
-    fn high2_2_xstepchip_byte_equiv_plain_x_steps() {
+    fn xstepchip_byte_equiv_plain_x_steps() {
         use ai_pow_zk::chips::xstep::{build_trace, xsteps};
 
         use crate::matmul::{compute_tile_trace, BlockNoise, Matrices};
 
         let params = MatmulParams::TEST_SMALL;
-        let (a, b) = synth_matrices(b"high2_2-xstep", &params);
-        let ctx =
-            BlockContext::build(b"high2_2-xstep-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        let (a, b) = synth_matrices(b"xstep-equivalence", &params);
+        let ctx = BlockContext::build(b"xstep-block", TEST_NONCE, &a, &b, &params).expect("ctx");
         let noise = BlockNoise::expand(&ctx.s_a, &ctx.s_b, &params);
         let mats = Matrices::build(ctx.a, ctx.b, &noise, &params);
 
@@ -4576,16 +4360,15 @@ mod tests {
     /// the program-pinned HASH_A is enforced by the Route-C composite
     /// step.
     #[test]
-    fn high2_2_xstep_fold_pipeline_byte_equiv_plain() {
+    fn xstep_fold_pipeline_byte_equiv_plain() {
         use ai_pow_zk::chips::fold::{build_trace as fold_trace, final_state};
         use ai_pow_zk::chips::xstep::{build_trace as xstep_trace, xsteps};
 
         use crate::matmul::{compute_tile_trace, BlockNoise, Matrices, TileState};
 
         let params = MatmulParams::TEST_SMALL;
-        let (a, b) = synth_matrices(b"high2_2-pipeline", &params);
-        let ctx =
-            BlockContext::build(b"high2_2-pipe-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        let (a, b) = synth_matrices(b"fold-pipeline", &params);
+        let ctx = BlockContext::build(b"pipeline-block", TEST_NONCE, &a, &b, &params).expect("ctx");
         let noise = BlockNoise::expand(&ctx.s_a, &ctx.s_b, &params);
         let mats = Matrices::build(ctx.a, ctx.b, &noise, &params);
 
@@ -4661,11 +4444,11 @@ mod tests {
     /// it is byte-for-byte the primitive's chain-pinned target — no
     /// counterparty-supplied target is possible).
     #[test]
-    fn med3_prove_and_verify_for_block_roundtrips_and_derives_target() {
+    fn prove_and_verify_for_block_roundtrips_and_derives_target() {
         let params = MatmulParams::TEST_SMALL;
-        let (a, b) = synth_matrices(b"med3-seed", &params);
-        let nonce = b"med3-nonce";
-        let ctx = BlockContext::build(b"med3-blk", nonce, &a, &b, &params).expect("ctx");
+        let (a, b) = synth_matrices(b"roundtrip-seed", &params);
+        let nonce = b"roundtrip-nonce";
+        let ctx = BlockContext::build(b"roundtrip-block", nonce, &a, &b, &params).expect("ctx");
 
         // Hardened path: no target argument; found_idx 0 = tile
         // (0,0), matching the primitive's default tile so the PIs
@@ -4902,14 +4685,9 @@ mod tests {
     /// and confirms the certificate binds that pattern's ticket (jackpot), not a
     /// contiguous tile.
     ///
-    /// Enabled by two coordinated fixes (the matmul sweep previously indexed rows
-    /// by tile geometry, so for a non-contiguous pattern it computed the wrong
-    /// tile and the `noised_packed` LogUp + the opening argument both failed):
-    /// the canonical program (`canonical.rs`) and the trace generator
-    /// (`composite_trace::place_useful_work_chain_hw_indexed`) now index the
-    /// **opened pattern rows** via covering-range lanes (`index − chunk base`),
-    /// byte-identical for contiguous tiles (regression: the contiguous real
-    /// prove + the canonical schedule tests still pass). Opt-in (a real ~60s proof).
+    /// The canonical program and trace generator index opened pattern rows via
+    /// covering-range lanes (`index − chunk base`), including contiguous tiles.
+    /// Opt-in (a real ~60s proof).
     #[test]
     #[ignore = "real Layer-0 proof; non-contiguous recursive opening"]
     fn noncontiguous_recursive_certificate_proves_and_verifies() {
@@ -5079,16 +4857,12 @@ mod tests {
         .expect("opened rows are expert 0's routed tokens (routing binding)");
     }
 
-    /// R-b + MoE, WIDE-`k` end-to-end — the R-b
-    /// lane-awareness fix on the REAL production scheduled/MoE path. The MoE
-    /// ticket opens a NON-CONTIGUOUS `outer_indices` gather (routing), and at
-    /// `num_stripes = k/r = 2048/16 = 128 > STRIPE_MAX` the scheduled prover
-    /// routes to `place_useful_work_chain_rb_indexed` with the opened lanes. If
-    /// the lanes were tile-local (the pre-fix bug), the `noised_packed` bus
-    /// would not balance and the proof would fail. Asserts the L0 jackpot PI
-    /// equals the off-circuit MoE grouped tile — i.e. the wide-`k` R-b circuit
-    /// computed the correct grouped tile over the non-contiguous routed tokens.
-    /// Opt-in (a real proof).
+    /// R-b + MoE wide-`k` end-to-end on the production scheduled/MoE path.
+    /// The ticket opens a noncontiguous `outer_indices` gather. At
+    /// `num_stripes = k/r = 2048/16 = 128 > STRIPE_MAX`, the scheduled prover
+    /// uses `place_useful_work_chain_rb_indexed` with covering-range opened lanes.
+    /// The L0 jackpot PI must equal the off-circuit MoE grouped tile, binding
+    /// the wide-`k` circuit to the noncontiguous routed tokens. Opt-in (a real proof).
     #[test]
     #[ignore = "real MoE wide-stripe (ns=128) grouped-tile Layer-0 proof"]
     fn real_moe_grouped_tile_layer0_proof_wide_stripes() {
@@ -5608,13 +5382,11 @@ mod tests {
                 &mining_config, &moe_params, m as u32, n_e as u32, 0, 0, &bad_routing, 4096,
             )
             .is_err(),
-            "forged routing must be rejected on the compact node path (M7)"
+            "routing data with a mismatched committed root must be rejected on the compact node path"
         );
 
-        // (a) DE-RISK — arbitrary-model soundness. The node will TRUST the proven
-        // `hash_jackpot` PI for the difficulty check and DROP the off-circuit tile
-        // recompute (which is what pins matrices to synth). That is sound only if a
-        // forged `hash_jackpot` is rejected by the proof. The pis feed the statement
+        // The proof must reject a forged `hash_jackpot` PI without
+        // off-circuit matrix recomputation. The public inputs feed the statement
         // digest (`compact_batch_l1_public_values_for_statement`), so a tampered
         // `hash_jackpot` ⇒ statement mismatch ⇒ reject — WITHOUT any matrix recompute.
         let node_cert_jp = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
@@ -5632,9 +5404,9 @@ mod tests {
              invariant that lets the node trust hash_jackpot and drop the synth recompute)"
         );
 
-        // (a) DE-RISK — the raw tile PI `jackpot`. The DENSE compact node verify skips
-        // the off-circuit `jackpot` comparison entirely (option (a)); a forged raw tile
-        // must therefore be rejected by the proof (it feeds the same statement digest).
+        // Dense compact node verification skips the off-circuit `jackpot`
+        // comparison. A forged raw tile must be rejected by the proof because
+        // it feeds the same statement digest.
         let node_cert_j = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode for forged-tile test");
         let mut forged_tile = pis.clone();
@@ -6066,7 +5838,7 @@ mod tests {
     }
 
     #[test]
-    fn snd03_verifier_only_api_rejects_substituted_public_inputs() {
+    fn verifier_only_api_rejects_substituted_public_inputs() {
         let params = MatmulParams {
             m: 8,
             k: 512,
@@ -6077,9 +5849,14 @@ mod tests {
             difficulty_bits: 0,
         };
         params.validate_prod_envelope().unwrap();
-        let block_commitment = b"snd03-block";
-        let nonce = b"snd03-nonce";
-        let (a, b) = synth_matrices(b"snd03-seed", &params);
+        // Fixed block, nonce, and matrix-seed bytes for public-input-binding coverage.
+        let block_commitment =
+            &[0x73u8, 0x6e, 0x64, 0x30, 0x33, 0x2d, 0x62, 0x6c, 0x6f, 0x63, 0x6b];
+        let nonce = &[0x73u8, 0x6e, 0x64, 0x30, 0x33, 0x2d, 0x6e, 0x6f, 0x6e, 0x63, 0x65];
+        let (a, b) = synth_matrices(
+            &[0x73, 0x6e, 0x64, 0x30, 0x33, 0x2d, 0x73, 0x65, 0x65, 0x64],
+            &params,
+        );
         let ctx = BlockContext::build(block_commitment, nonce, &a, &b, &params).expect("ctx");
         let target = difficulty_target(&params);
         let public = ZkPublicCommitments::from_context(&ctx);
@@ -6116,7 +5893,7 @@ mod tests {
     }
 
     #[test]
-    fn snd05_production_verifier_rejects_non_prod_params() {
+    fn production_verifier_rejects_non_prod_params() {
         let params = MatmulParams {
             m: 8,
             k: 512,
@@ -6127,9 +5904,14 @@ mod tests {
             difficulty_bits: 0,
         };
         params.validate_prod_envelope().unwrap();
-        let block_commitment = b"snd05-block";
-        let nonce = b"snd05-nonce";
-        let (a, b) = synth_matrices(b"snd05-seed", &params);
+        // Fixed block, nonce, and matrix-seed bytes for production-envelope coverage.
+        let block_commitment =
+            &[0x73u8, 0x6e, 0x64, 0x30, 0x35, 0x2d, 0x62, 0x6c, 0x6f, 0x63, 0x6b];
+        let nonce = &[0x73u8, 0x6e, 0x64, 0x30, 0x35, 0x2d, 0x6e, 0x6f, 0x6e, 0x63, 0x65];
+        let (a, b) = synth_matrices(
+            &[0x73, 0x6e, 0x64, 0x30, 0x35, 0x2d, 0x73, 0x65, 0x65, 0x64],
+            &params,
+        );
         let ctx = BlockContext::build(block_commitment, nonce, &a, &b, &params).expect("ctx");
         let target = difficulty_target(&params);
         let public = ZkPublicCommitments::from_context(&ctx);
@@ -6151,10 +5933,16 @@ mod tests {
     }
 
     #[test]
-    fn snd07_bridge_rejects_context_params_mismatch() {
+    fn bridge_rejects_context_params_mismatch() {
         let params = MatmulParams::TEST_SMALL;
-        let (a, b) = synth_matrices(b"snd07-seed", &params);
-        let ctx = BlockContext::build(b"snd07-block", TEST_NONCE, &a, &b, &params).expect("ctx");
+        // Fixed block and matrix-seed bytes for context-parameter binding coverage.
+        let (a, b) = synth_matrices(
+            &[0x73, 0x6e, 0x64, 0x30, 0x37, 0x2d, 0x73, 0x65, 0x65, 0x64],
+            &params,
+        );
+        let block_commitment =
+            &[0x73u8, 0x6e, 0x64, 0x30, 0x37, 0x2d, 0x62, 0x6c, 0x6f, 0x63, 0x6b];
+        let ctx = BlockContext::build(block_commitment, TEST_NONCE, &a, &b, &params).expect("ctx");
         let mut supplied = params;
         supplied.spot_checks -= 1;
         supplied.validate().unwrap();
@@ -6171,7 +5959,7 @@ mod tests {
     /// the whole valid range, `None` past `num_tiles()` (the bound
     /// the verifier rejects on).
     #[test]
-    fn med3_tile_ij_derivation_and_bounds() {
+    fn tile_ij_derivation_and_bounds() {
         let params = MatmulParams::TEST_SMALL;
         let rt = params.row_tiles();
         let ct = params.col_tiles();
@@ -6190,9 +5978,8 @@ mod tests {
     }
 
     // ============================================================
-    //  Matmul-row placement / subtile-sweep GEOMETRY (pure
-    //  arithmetic; no composite proving yet — the
-    //  first "test after each sweep" gate). Validates that the
+    //  Matmul-row placement / subtile-sweep geometry (pure
+    //  arithmetic, without composite proving). Validates that the
     //  in-circuit 2×2×16 micro-tile chip primitive (`compute_row`),
     //  swept over the (t/2)² sub-blocks × `num_stripes` stripes
     //  with the r-wide stripe zero-padded into TILE_D, reproduces
@@ -6267,7 +6054,7 @@ mod tests {
         x_steps
     }
 
-    /// SPIKE GATE 1 — the subtile-sweep arithmetic equals
+    /// Subtile-sweep arithmetic must equal
     /// `compute_tile_trace`'s `x_steps` for a spread of tiles of a
     /// genuine `BlockContext` solve (TEST_SMALL: t=8, r=4, k=64 ⇒
     /// 16 stripes × (8/2)²=16 sub-blocks = 256 micro-steps/tile).
@@ -6275,7 +6062,7 @@ mod tests {
     /// `place_matmul_step` rows whose ⊕CUMSUM == the FoldChip's
     /// per-stripe X_STEP — the core of the in-circuit matmul sweep.
     #[test]
-    fn high2_2_spike_subtile_sweep_matches_compute_tile_trace() {
+    fn subtile_sweep_matches_compute_tile_trace() {
         use crate::matmul::{compute_tile_trace, BlockNoise, Matrices};
 
         let params = MatmulParams::TEST_SMALL;
@@ -6383,7 +6170,7 @@ mod tests {
         (row - row_start, acc_after, carry)
     }
 
-    /// SPIKE GATE 2 — the 256-row sub-block-major sweep places into
+    /// The 256-row sub-block-major sweep places into
     /// a `CompositeTrace` and **verifies through the unit
     /// `CompositeFullAir`** (the matmul chip's always-on
     /// `when_transition` recurrence is satisfied by the single
@@ -6393,7 +6180,7 @@ mod tests {
     /// `compute_tile_trace`'s `x_steps` (the sweep binding target
     /// is materialized in the real trace).
     #[test]
-    fn high2_2_spike_subtile_sweep_verifies_in_composite() {
+    fn subtile_sweep_verifies_in_composite() {
         use ai_pow_zk::composite_proof::build_config;
         use ai_pow_zk::{dev_unpinned_prove, dev_unpinned_verify, CircuitConfig, ZkParams};
 
@@ -6458,7 +6245,7 @@ mod tests {
         }
     }
 
-    /// SPIKE GATE 3 — the route-independent sweep core
+    /// The route-independent sweep core
     /// (`StripeXorChip`) reduces the **real** sub-block-major
     /// sweep's per-row accumulator-after-step to
     /// `compute_tile_trace`'s `x_steps` bit-for-bit. Visitation is
@@ -6470,7 +6257,7 @@ mod tests {
     /// (`constraints ⇔ build_trace`) is proven in `ai-pow-zk`'s own
     /// `chips::stripe_xor` suite (the legal-direction split).
     #[test]
-    fn high2_2_spike_stripe_xor_reduces_swept_to_x_steps() {
+    fn stripe_xor_reduces_swept_to_x_steps() {
         use ai_pow_zk::chips::stripe_xor::{
             build_trace as sx_build, final_register, ref_stripe_xor, IN_LEN,
         };
@@ -6530,7 +6317,7 @@ mod tests {
     /// could not bind; chunking + wide lanes close it for any
     /// single-Layer-0 tile.
     #[test]
-    fn high2_2_g1g2_chunked_and_wide_stripes() {
+    fn chunked_and_wide_stripes() {
         use ai_pow_zk::composite_proof::build_config;
         use ai_pow_zk::{dev_unpinned_prove, dev_unpinned_verify, CircuitConfig, ZkParams};
 
@@ -6609,10 +6396,8 @@ mod tests {
 
     // ─────────── Trace sizing + go/no-go ───────────
 
-    /// Sub-envelope test profiles round back up to `MIN_STARK_LEN`,
-    /// so the params-driven sizing is **bit-identical** to the
-    /// prior `baseline_min()` for them (zero regression — this is
-    /// why the whole `ai-pow --features zk` suite stays green).
+    /// Sub-envelope test profiles round up to `MIN_STARK_LEN`,
+    /// matching `baseline_min()` trace sizing.
     #[test]
     fn test_small_sizing_is_min_stark_len() {
         let b = expected_layer0_rows(&MatmulParams::TEST_SMALL);
@@ -6628,13 +6413,10 @@ mod tests {
         assert!(b.fits_one_stark());
     }
 
-    /// **Strip-opening resolution (pinned).** The *full-matrix*
-    /// chunk-Merkle was the one-STARK blocker (≈4.5M rows ≫ 2²² at
-    /// PROD). With the Pearl §4.6 strip-opening swap, the matrix side is
-    /// now `O(t·k)` (size-independent) and **every in-§4.8-envelope
-    /// params set — incl. the real Llama-3.1-8B INT GEMMs — fits
-    /// one STARK** (`fits_one_stark()` flips true: the production
-    /// unblocker). The matrix-hash no longer dominates the sweep.
+    /// **Strip-opening row budget.** The Pearl §4.6 matrix-side
+    /// strip opening is `O(t·k)`, independent of full matrix size.
+    /// The tested §4.8-envelope parameter sets, including the
+    /// Llama-3.1-8B INT GEMMs, must satisfy `fits_one_stark()`.
     #[test]
     fn prod_strip_opening_fits_one_stark() {
         for p in [
@@ -6651,8 +6433,8 @@ mod tests {
                  (total {} > 2²²)",
                 b.total()
             );
-            // The matrix side is now O(t·k), NOT O(|matrix|): for
-            // PROD it is ≪ the old 4.46M full-matrix rows.
+            // The O(t·k) matrix-side strip-opening budget must remain
+            // below half the production trace bound.
             assert!(
                 b.mhash_a + b.mhash_b < crate::params::PEARL_TRACE_BOUND / 2,
                 "{p:?}: strip mhash {}+{} should be ≪ 2²²",
@@ -6729,9 +6511,9 @@ mod tests {
     /// tile-strip source `(lane,l)`. This is precisely what
     /// the store rows carry
     /// (`MAT_UNPACK=plain`, `NOISE_UNPACK=noise`) and pin into
-    /// `NOISE_PACKED_PREP` — de-risked off-circuit first.
+    /// `NOISE_PACKED_PREP`.
     #[test]
-    fn sec_4c2_store_chunks_decompose_as_committed_plus_noise_ref() {
+    fn store_chunks_decompose_as_committed_plus_noise_ref() {
         use ai_pow_zk::composite_trace::CompositeTrace;
 
         use crate::matmul::{BlockNoise, Matrices};
@@ -6808,21 +6590,16 @@ mod tests {
         }
     }
 
-    /// **Store-plain multiset de-risk (off-circuit; no AIR
-    /// change).** The plain tie ships as a LogUp multiset bus
-    /// (store `MAT_UNPACK` ⊆ the committed-plain windows the
-    /// strip-opening hashes ∈ `HASH_A`). This KAT proves the
-    /// bus's honest-balance + producer-granularity premise
+    /// **Store-plain window membership.** This off-circuit KAT checks
+    /// the producer-granularity and membership premise
     /// against the *real* bridge geometry: every store row's
     /// plain `MAT_UNPACK` is a **contiguous 8-byte window of the
     /// exact committed bytes the strip-opening hashed** for the
     /// attested tile (within `[c0,c1)·1024`). So the bus producer
     /// = contiguous 8-byte windows of the strip-opening's hashed
-    /// plain bytes; every store query is a member ⇒ honest
-    /// balance (the KAT-first discipline: validate the key
-    /// off-circuit before any bus AIR).
+    /// plain bytes; every store query must be a member.
     #[test]
-    fn sec_4c2_cmset0_store_plain_is_contiguous_window_of_strip_opening() {
+    fn store_plain_is_contiguous_window_of_strip_opening() {
         use ai_pow_zk::blake3_tree::{pad_to_chunk_boundary, tile_chunk_range};
         use ai_pow_zk::composite_trace::CompositeTrace;
 
@@ -6925,25 +6702,12 @@ mod tests {
         }
     }
 
-    /// **The c-mset `BUS_PLAIN` bus was abandoned in favour of
-    /// c-exact** — *this KAT is retained* as the de-risk behind
-    /// that decision (it showed the bus needs invasive
-    /// canonical-program gating *and* only honest-balances `16|r`)
-    /// and it establishes the contiguity / `16|r`-word-alignment
-    /// facts **c-exact directly reuses** for its position-exact C3
-    /// binding. It is NOT dead code: it still validates a true,
-    /// c-exact-relevant property.
-    ///
-    /// **KAT-first de-risk at the exact
-    /// `BUS_PLAIN` AIR key (no AIR change).** The window-contiguity
-    /// KAT above validated
-    /// the *abstract* byte membership (store plain == committed at
-    /// contiguous positions inside the hashed span) but explicitly
-    /// `continue`d past zero-pad and never checked the property is
-    /// expressible as a *balancing LogUp bus* between the
-    /// strip-opening leaf rows and the store rows. This KAT carries
-    /// the same discipline to the precise key the
-    /// `BUS_PLAIN` AIR would emit:
+    /// **Committed word-pair membership and alignment.** This KAT
+    /// checks the contiguity and `16|r` word-alignment properties
+    /// used by position-exact C3 binding. Unlike byte-window
+    /// membership alone, it checks whether each store window,
+    /// including zero padding, belongs to the leaf-row producer
+    /// set at the u32-LE word-pair key:
     ///   * **Producer** = the strip-opening leaf-chunk round-0
     ///     (`IS_NEW_BLAKE`) rows' *unpermuted* `BLAKE3_MSG` — 16
     ///     u32-LE words = the 64 committed bytes of each hashed
@@ -6957,14 +6721,13 @@ mod tests {
     ///     `MAT_UNPACK` window, packed identically (u32-LE of its
     ///     `UINT8_DATA` u8 view = `polyval(.,256)` per 4 bytes).
     ///
-    /// Decisive de-risk: is `consumer ⊆ producer` (the exact LogUp
-    /// balance premise) at *this* key? **FINDING (validated here):
-    /// YES iff `16 | r`** — then every store window is 8 *dense*
+    /// `consumer ⊆ producer` is the LogUp balance premise at this
+    /// key and holds iff `16 | r`: every store window is 8 dense,
     /// contiguous committed bytes, 8-aligned in the row/col-major
     /// matrix (`i·k + l0` with `k, step·r, chunk·16, {0,8}` all
     /// multiples of 8), so it equals exactly one producer
-    /// word-pair. Pearl §4.8 pins `r ∈ {2⁵..2¹⁰}` (every value a
-    /// multiple of 16) ⇒ **production is always clean**.
+    /// word-pair. Pearl §4.8 pins `r ∈ {2⁵..2¹⁰}`, all multiples
+    /// of 16.
     /// `TEST_SMALL` (`r=4`, `16∤4`) is **not**: its windows carry a
     /// zero-pad tail (`col ≥ w`) with no committed counterpart, so
     /// the naive bus does *not* balance there. So the AIR emission
@@ -6972,7 +6735,7 @@ mod tests {
     /// `16|r`-gated and Route-A-validated on a `16|r`
     /// in-circuit-sweep single-STARK geometry, **not** `TEST_SMALL`.
     #[test]
-    fn sec_4c2_cmset1a_air_key_producer_superset_of_store_iff_16_divides_r() {
+    fn air_key_producer_superset_of_store_iff_16_divides_r() {
         use std::collections::HashSet;
 
         use ai_pow_zk::blake3_tree::{pad_to_chunk_boundary, tile_chunk_range};
@@ -7113,19 +6876,17 @@ mod tests {
         );
     }
 
-    /// **c-exact store-position binding — KAT-first de-risk (no AIR
-    /// change).** The c-exact design co-locates the
-    /// store rows onto the strip-opening leaf rows so the
-    /// **proven C3** (`IS_MSG_MAT·IS_NEW_BLAKE·(BLAKE3_MSG[w] −
+    /// **Position-exact store binding.** Co-located store and
+    /// strip-opening leaf rows use C3
+    /// (`IS_MSG_MAT·IS_NEW_BLAKE·(BLAKE3_MSG[w] −
     /// base256(UINT8_DATA[4j..4j+4]))=0`, generalized to a
     /// program-pinned per-row word-offset `o`) binds `MAT_UNPACK`
     /// to the **exact** committed
     /// bytes ∈ `HASH_A` — position-exact, zero-gap. This KAT
-    /// validates the mechanism's premise BEFORE any AIR change,
-    /// against the **position-addressed** store layout
-    /// (`enumerate_noised_chunks_positioned` — params-pure, the
-    /// layout c-exact's verifier-recomputable `o` is a function
-    /// of). For every position-addressed store row on a `16|r`
+    /// checks the position-addressed store layout
+    /// (`enumerate_noised_chunks_positioned`), from which the
+    /// verifier recomputes the word-offset `o`. For every
+    /// position-addressed store row on a `16|r`
     /// geometry (tile (0,0)), with `idx = lane_g·k + l0` its
     /// row/col-major committed byte offset:
     ///   1. **unique leaf address** — `idx` is 8-aligned and ∈
@@ -7149,7 +6910,7 @@ mod tests {
     /// Extends the earlier contiguity / `16|r`-alignment KATs to
     /// the exact `(block,word-offset)` address + the C3 pack.
     #[test]
-    fn sec_4c2_cx0_store_binds_exact_committed_leaf_subposition_via_c3() {
+    fn store_binds_exact_committed_leaf_subposition() {
         use ai_pow_zk::blake3_tree::{pad_to_chunk_boundary, tile_chunk_range};
         use ai_pow_zk::composite_trace::CompositeTrace;
 
@@ -7323,17 +7084,14 @@ mod tests {
         }
     }
 
-    /// **c-exact whole-block structure — KAT-first de-risk (no AIR
-    /// change).** The whole-block layout: ONE strip-opening leaf round-0 row
+    /// **Whole-block structure.** One strip-opening leaf round-0 row
     /// per 64-byte block (the real, non-duplicable compression)
     /// carries the whole block in a 64-wide `UINT8_DATA`;
     /// per-word C3 binds all 16 `BLAKE3_MSG` words to it (⇒
     /// `UINT8_DATA[0..64]` = the committed block bytes ∈
     /// `HASH_A`); every swept 8-byte store window of that block
     /// is the sub-slice `UINT8_DATA[8p..8p+8]`, `p∈0..8`. This
-    /// KAT validates the whole-block premise BEFORE any AIR change
-    /// (extending the word-pair KAT from one word-pair to the
-    /// **whole block / all swept sub-slices per block**):
+    /// KAT checks the whole block and all swept sub-slices per block:
     ///   * group the position-addressed store windows
     ///     (16|r) by their `(side, chunk, block)` leaf;
     ///   * **every** swept window in a block == that block's
@@ -7346,7 +7104,7 @@ mod tests {
     ///     the multi-window-per-block case is genuinely
     ///     exercised, not vacuous.
     #[test]
-    fn sec_4c2_cx21_x1_whole_block_covers_all_swept_subslices() {
+    fn whole_block_covers_all_swept_subslices() {
         use std::collections::HashMap;
 
         use ai_pow_zk::blake3_tree::pad_to_chunk_boundary;
@@ -7481,19 +7239,16 @@ mod tests {
         }
     }
 
-    /// **c-exact g=1 co-location flip — KAT-first de-risk (no AIR /
-    /// trace-gen change).** The co-location flip makes the
-    /// strip-opening leaf round-0 rows the `noised_packed`
+    /// **Co-located producer and noise obligations.** The
+    /// strip-opening leaf round-0 rows are the `noised_packed`
     /// producers: per leaf block of the opened chunk range
     /// `[c0,c1)` (tile (0,0)), per 8-byte sub-slice, the row
     /// carries `a′ = committed_plain + noise_ref` (committed via
     /// the whole-block C3 ∈ `HASH_A`; noise via the
     /// program-pinned `NOISE_PACKED_PREP[s] =
     /// polyval(noise_subslice,129)`), and publishes the 8 bus
-    /// keys. This validates, BEFORE the trace-gen change, the two
-    /// premises the flip relies on, against the **real bridge
-    /// geometry** (16|r — the production-faithful path; the same
-    /// KAT-first discipline as the earlier c-exact KATs):
+    /// keys. This KAT checks two required properties at `16|r`
+    /// bridge geometries:
     ///   (P1) **producer ⊇ consumer** at the `noised_packed`
     ///        value level: every swept `a′` 8-chunk
     ///        (`enumerate_noised_chunks_positioned`, the consumer)
@@ -7504,7 +7259,7 @@ mod tests {
     ///        polyval(noise_ref-subslice,129)` is well-formed and
     ///        bounded (the value the co-located row must carry).
     #[test]
-    fn sec_4c2_cx2coloc0_leaf_producer_superset_and_noise_pin() {
+    fn colocated_leaf_producer_superset_and_noise_pin() {
         use std::collections::HashSet;
 
         use ai_pow_zk::blake3_tree::{pad_to_chunk_boundary, tile_chunk_range};
@@ -7645,23 +7400,17 @@ mod tests {
         }
     }
 
-    /// **c-exact g=1 co-location flip,
-    /// end-to-end Route-A C3-ACTIVE roundtrip.** The decisive
-    /// validation that the flip is sound: a 16|r geometry
-    /// (`coloc=true`) drives `prove_and_verify_tiled` with the
-    /// co-located strip-opening leaf round-0 rows as the
-    /// `noised_packed` producers — so `g = IS_MSG_MAT·IS_NEW_BLAKE
-    /// = 1` on those rows ⇒ the whole-block C3
-    /// (`UINT8_DATA[0..64] ≡ committed block ∈ HASH_A`), the
-    /// 8-sub-slice InputChip, the 8-key `noised_packed` producer,
-    /// and `urange8`/`i8u8` are ALL live and must balance together
-    /// in one Route-A proof at real difficulty. A broken flip
-    /// (unbalanced bus / per-row C3 / InputChip violation) ⇒
-    /// `prove_and_verify_for_block` errors. Honest roundtrip ⇒ the
-    /// plain tie holds end-to-end (committed A/B
-    /// authenticated to HASH_A, swept a′ = noise(committed)).
+    /// **Co-located leaf-opening Route-A roundtrip.** At a `16|r`
+    /// geometry (`coloc=true`), the co-located strip-opening leaf
+    /// round-0 rows produce `noised_packed`, with
+    /// `g = IS_MSG_MAT·IS_NEW_BLAKE = 1`. Whole-block C3
+    /// (`UINT8_DATA[0..64] ≡ committed block ∈ HASH_A`),
+    /// the 8-sub-slice InputChip, the 8-key `noised_packed` producer,
+    /// and `urange8`/`i8u8` must balance together in one Route-A
+    /// proof. The roundtrip must authenticate committed A/B and
+    /// bind swept a′ to noise(committed).
     #[test]
-    fn sec_4c2_cx2_g1_p16_route_a_c3_active_roundtrip() {
+    fn colocated_leaf_opening_proves_and_verifies() {
         use crate::synth::synth_matrices;
         let params = MatmulParams {
             m: 16,
@@ -7692,23 +7441,20 @@ mod tests {
         );
     }
 
-    /// The **full production prove+pow-verify path**
-    /// for `num_stripes > STRIPE_MAX`. This is the end-to-end mineable
-    /// path (16|r co-location ⇒ `coloc=true` ⇒ 0 separate store rows,
-    /// the canonical params-pure verifier program) at a stripe count
-    /// the old sub-block-major sweep could NEVER exceed:
+    /// The production prove+pow-verify path must construct and verify
+    /// the canonical stripe-major sweep for `num_stripes > STRIPE_MAX`:
     ///   - the prover routes to `place_useful_work_chain_rb`
     ///     (stripe-major, interleaved fold, `sx_bound=false`);
     ///   - the R-b sweep's `noised_packed` consumers balance against the
-    ///     SAME co-located leaf producers as ≤64 (same chunk positions,
-    ///     stripe-major order; LogUp is a multiset);
+    ///     co-located leaf producers, with the same chunk positions as
+    ///     the bounded-stripe path (LogUp is a multiset);
     ///   - the verifier rebuilds the R-b canonical program and
     ///     `composite_verify_pow_pinned_logup_sx(sx_bound=false)` accepts.
-    /// `require_prod_envelope=false` bypasses the
-    /// admission cap; `num_tiles==1` (m=n=tile) keeps it on the
-    /// single-tile full-matmul proof (attested tile (0,0) ⇒ tile-local
-    /// lanes match the canonical). Boundary (65 = STRIPE_MAX+1) AND a
-    /// deep value (96) are both proven.
+    /// `16|r` selects co-location and zero separate store rows.
+    /// `require_prod_envelope=false` bypasses admission;
+    /// `num_tiles==1` (m=n=tile) selects the single-tile full-matmul
+    /// proof, with tile-local lanes matching the canonical program.
+    /// Both the boundary (65 = STRIPE_MAX+1) and 96 stripes are tested.
     #[test]
     fn rb_stage_d_production_prove_verify_over_stripe_max() {
         use crate::synth::synth_matrices;
@@ -7751,17 +7497,15 @@ mod tests {
         }
     }
 
-    /// The **real consensus entry**
-    /// (`prove_and_verify_for_block`, `require_prod_envelope = true`)
-    /// admits AND proves+verifies a wide-stripe Pearl shape that the old
-    /// `> STRIPE_MAX = 64` cap rejected. This shape is fully §4.8-valid
-    /// (`r = 128 ∈ [PEARL_R_MIN, PEARL_R_MAX]`, `16r ≤ k ≤ 4r²`, `64 | k`,
-    /// `h·w = 64 ∈ [32,256]`, single tile) with `num_stripes = 65 >
-    /// STRIPE_MAX`, and `r = 128 ⇒ ⌈r/16⌉ = 8` chunks per sub-block (the
-    /// R-b `chunks > 1` production path). Passing here means the lifted
-    /// admission, the R-b prover, and the R-b
-    /// canonical verifier compose end-to-end on the mineable
-    /// path — no `require_prod_envelope = false` escape hatch.
+    /// The consensus entry (`prove_and_verify_for_block`,
+    /// `require_prod_envelope = true`) must admit, prove, and verify
+    /// a wide-stripe Pearl shape satisfying §4.8:
+    /// `r = 128 ∈ [PEARL_R_MIN, PEARL_R_MAX]`, `16r ≤ k ≤ 4r²`,
+    /// `64 | k`, `h·w = 64 ∈ [32,256]`, and a single tile.
+    /// `num_stripes = 65 > STRIPE_MAX` and
+    /// `r = 128 ⇒ ⌈r/16⌉ = 8` exercise the R-b multi-chunk path.
+    /// Admission, the R-b prover, and the canonical stripe-major
+    /// verifier must compose without bypassing the production envelope.
     #[test]
     fn rb_stage_c_wide_stripe_admits_and_proves_via_consensus_entry() {
         use crate::synth::synth_matrices;
@@ -7774,7 +7518,7 @@ mod tests {
             spot_checks: 1,
             difficulty_bits: 0,
         };
-        // Consensus-admissible under the LIFTED cap (was TooManyStripes).
+        // This wide-stripe shape must satisfy consensus admission.
         params
             .validate_prod_envelope()
             .expect("wide-stripe shape must be consensus-admissible");
@@ -7837,8 +7581,7 @@ mod tests {
     }
 
     /// **c-exact position-exact adversarial.**
-    /// The soundness statement of the g=1 co-location flip: on a
-    /// 16|r `P16` *real bridge trace*, a co-located leaf round-0
+    /// On a 16|r `P16` bridge trace, a co-located leaf round-0
     /// row's committed-plain `UINT8_DATA` is bound (whole-block
     /// C3, g=1) to `BLAKE3_MSG` — the bytes the
     /// strip-opening hashed into `HASH_A`. Tampering one such byte
@@ -7871,7 +7614,7 @@ mod tests {
     /// public matrix root. A root-side tamper would exercise the same
     /// rejection mechanism because the whole chain is already bound.
     #[test]
-    fn sec_4c2_cx2_g1_p16_position_exact_adversarial_rejects() {
+    fn committed_leaf_subposition_mismatch_rejected() {
         use ai_pow_zk::composite_layout::{IS_MSG_MAT, TOTAL_TRACE_WIDTH, UINT8_DATA_START};
 
         use crate::synth::synth_matrices;
@@ -7970,9 +7713,8 @@ mod tests {
     ///     producers — the c-exact invariant), and ≥1 exists.
     ///   - **jackpot / no-misclass**: `IS_HASH_JACKPOT` rows are
     ///     `JackpotHash`; no live anchor lands on a `Pad` row.
-    /// A wrong `strip_opening_rows`/sweep/coloc offset ⇒ an anchor
-    /// falls in the wrong class ⇒ this fails. **No verify-path
-    /// change.**
+    /// A wrong `strip_opening_rows`/sweep/coloc offset puts an anchor
+    /// in the wrong class and must fail this comparison.
     #[test]
     fn cr0_row_schedule_matches_real_bridge_trace() {
         use std::cell::RefCell;
@@ -8144,22 +7886,14 @@ mod tests {
         }
     }
 
-    /// **The params-pure canonical program matches the honest
-    /// extract (staged).**
+    /// **The params-pure canonical program must match the honest extract.**
     /// `ai_pow_zk::canonical::canonical_program` (params-pure, no
     /// witness) must equal `extract_program(honest_trace)`
     /// bit-for-bit on **every row of every `is_class_canonical`
     /// class** (`Pad`), across all PROGRAM_COLS, on the
-    /// REAL `P16`(16|r) bridge trace. This gates, per
-    /// row class, the verify path's reliance on the canonical
-    /// program: when
-    /// every class is canonical and this KAT is all-green, the VK
-    /// can commit to `canonical_program` instead of
-    /// extract-of-reference. The honest trace verifies under the
-    /// extract-of-reference pin ⇒ its main-side PROGRAM_COLS
-    /// (`extract_program`) ARE the trusted canonical program ⇒ a
-    /// params-pure divergence on a canonical class fails here
-    /// BEFORE trust. **No verify-path change.**
+    /// `P16`(16|r) bridge trace. The comparison checks the canonical
+    /// program against the honest trace's main-side PROGRAM_COLS,
+    /// rejecting any params-pure divergence on a canonical row class.
     #[test]
     fn cr1_canonical_program_eq_extract_on_canonical_classes() {
         use std::cell::RefCell;
@@ -8270,10 +8004,9 @@ mod tests {
     /// (`IS_MSG_MAT == 0`). Those co-located rows additionally
     /// carry `IS_MSG_MAT` + the 8 `NOISE_PACKED_PREP` pins and are
     /// validated separately; here they are *skipped* so
-    /// the pure-BLAKE3 schedule is gated against the real
-    /// trace in isolation (KAT-first). A wrong
-    /// chunk-counter / flag / root-selector ⇒ a non-co-located
-    /// strip row diverges ⇒ this fails. **No verify-path change.**
+    /// the pure-BLAKE3 schedule is checked against the real trace
+    /// in isolation. A wrong chunk-counter, flag, or root-selector
+    /// must cause a non-co-located strip row to fail the comparison.
     #[test]
     fn cr4a_strip_open_pure_blake3_schedule_eq_extract() {
         use std::cell::RefCell;
@@ -8375,12 +8108,10 @@ mod tests {
         );
     }
 
-    /// **The canonical-program verify path is sound
-    /// (the pin is first-class).** The bridge now verifies against
-    /// `canonical_program(zk_params, BlockPublic)` — recomputed
-    /// params-pure by the verifier — NOT the prover's
-    /// `extract_program`. This test proves the soundness gain in
-    /// isolation: an honest control verifies, then a trace whose
+    /// **Verifier-owned canonical-program binding.** The bridge verifies
+    /// against `canonical_program(zk_params, BlockPublic)`, recomputed
+    /// params-pure by the verifier, not the prover's `extract_program`.
+    /// An honest control must verify, while a trace whose
     /// **`NOISE_PACKED_PREP+1`** (a PROGRAM_COL that is canonically
     /// 0 on a `Pad` row and carries *no* other AIR constraint
     /// there — `g = IS_MSG_MAT·IS_NEW_BLAKE = 0` ⇒ the
@@ -8390,9 +8121,7 @@ mod tests {
     /// `main == preproc` still holds prover-side), but the
     /// verifier's VK commits to the **canonical** program (0
     /// there) ⇒ the proof's preprocessed opening cannot match the
-    /// canonical commitment ⇒ rejected. Verified against
-    /// the prover's program, this forge would have *verified* —
-    /// the exact latent weakness the canonical-VK verify closes.
+    /// canonical commitment and must be rejected.
     #[test]
     fn cr6_verify_uses_canonical_not_prover_program_rejects_forge() {
         use ai_pow_zk::canonical::{row_schedule, RowClass};
@@ -8477,8 +8206,7 @@ mod tests {
     /// commits to IT, not the prover's. A malicious prover who submits a
     /// trace with a DIFFERENT R-b program column (e.g. a fabricated
     /// selector/schedule) must be rejected — otherwise a forged schedule
-    /// could zero out a keystone. This is the canonical-program forge test extended to
-    /// the R-b `>64` path (the Stage-A soundness linchpin). The Pad row
+    /// could zero out a keystone. This checks the R-b `>64` path. The Pad row
     /// is located by scanning for an all-zero PROGRAM_COL row (row_schedule
     /// is the segmented test-only view, not the R-b verify schedule).
     #[test]
@@ -8606,8 +8334,7 @@ mod tests {
         );
     }
 
-    /// **Decisive malicious-miner adversarial test.** A
-    /// profit-incentivized miner runs the in-circuit matmul
+    /// **Uncommitted-matrix rejection.** A miner runs the in-circuit matmul
     /// sweep on a matrix OTHER than the one it committed / strip-
     /// opened (the `HASH_A`/`HASH_B` it publishes). If such a proof
     /// verifies, the miner forged the PoW without doing the real
@@ -8619,7 +8346,7 @@ mod tests {
     /// strip-opening leaf rows on the 16∣r path) ⇒ the LogUp bus is
     /// unbalanced ⇒ reject.
     #[test]
-    fn sec_4c10_sweep_on_uncommitted_matrix_rejects() {
+    fn sweep_on_uncommitted_matrix_rejects() {
         use crate::synth::synth_matrices;
 
         // 16∣r ⇒ coloc (production-faithful path); num_stripes=64.
@@ -8641,9 +8368,8 @@ mod tests {
         prove_and_verify_tiled_full(&ctx, &params, TEST_NONCE, &target, 0, 0, |_| {}, None)
             .expect("honest block (sweep == committed) must verify");
 
-        // Attack: a DIFFERENT matrix drives the matmul sweep,
-        // while the strip-opening + HASH_A/HASH_B stay the committed
-        // (a, b). HASH_JACKPOT self-consistently becomes M(forged).
+        // The sweep matrix differs from the matrices authenticated by the strip
+        // openings and must be rejected.
         let (a2, b2) = synth_matrices(b"4c10-FORGED-sweep", &params);
         assert!(a2 != a || b2 != b, "forged matrix must differ");
         let res = prove_and_verify_tiled_full(
@@ -8696,7 +8422,7 @@ mod tests {
     /// IDs. A sound AIR MUST reject — else a miner forges the PoW by
     /// permuting the committed matrix's rows.
     #[test]
-    fn sec_4c10_sweep_on_row_permuted_matrix_rejects() {
+    fn sweep_on_row_permuted_matrix_rejects() {
         use crate::synth::synth_matrices;
 
         let params = MatmulParams {
@@ -8745,16 +8471,13 @@ mod tests {
         );
     }
 
-    /// **Two-byte kernel-move adversarial test.** On a co-located leaf row
-    /// (IS_MSG_MAT=1 && IS_NEW_BLAKE=1), a two-byte word-local move —
-    /// kernel byte (MAT_UNPACK -= 1, UINT8_DATA += 256, i8u8 pack invariant)
-    /// plus same-word table-hop byte (both views -= 1) — cancels in the
-    /// base-256 BLAKE3 recomposition, keeping HASH_A fixed, while changing
-    /// NOISED_PACKED and therefore the matmul store. Soundness rests on the
-    /// per-byte `urange8` queries: UINT8_DATA[4] = u4 + 256 > 255 has no
-    /// table entry, the bus cannot balance, and the proof MUST be rejected.
+    /// Byte-range checks apply independently of BLAKE3 word recomposition.
+    /// On a co-located matrix-message and BLAKE3 leaf row, paired changes to
+    /// bytes 4 and 5 preserve the recomposed word while UINT8_DATA[4] exceeds
+    /// 255. The signed operands and NOISED_PACKED cell match the modified
+    /// matmul input, but the proof must reject the out-of-range unsigned byte.
     #[test]
-    fn sec_uint8_data_two_byte_kernel_move_rejected_by_urange8_logup() {
+    fn uint8_data_word_recomposition_rejects_out_of_range_byte() {
         use ai_pow_zk::composite_layout::{
             I8U8_FREQ, IS_MSG_MAT, IS_NEW_BLAKE, MAT_UNPACK_START, NOISED_PACKED_START,
             TOTAL_TRACE_WIDTH, UINT8_DATA_START,
@@ -8780,9 +8503,16 @@ mod tests {
         params
             .validate_prod_envelope()
             .expect("params must pass the production envelope");
-        let (a, b) = synth_matrices(b"fused-poc-commit", &params);
-        // Kernel byte (col 4) needs headroom in int7; hop byte (col 5) must stay
-        // canonical (value >= 1). Row 0, word 1 (cols 4,5).
+        // Fixed matrix-seed bytes for this word-recomposition fixture.
+        let (a, b) = synth_matrices(
+            &[
+                0x66, 0x75, 0x73, 0x65, 0x64, 0x2d, 0x70, 0x6f, 0x63, 0x2d, 0x63, 0x6f, 0x6d, 0x6d,
+                0x69, 0x74,
+            ],
+            &params,
+        );
+        // Row 0, word 1: signed bytes at cols 4,5 need int7 headroom;
+        // col 5's unsigned byte must remain canonical after decrementing.
         let a4 = a[4] as i64;
         let a5 = a[5] as i64;
         let u4 = a4.rem_euclid(256); // canonical u8 of the committed byte
@@ -8792,7 +8522,10 @@ mod tests {
             "seed lacks headroom at cols 4,5: a4={a4} a5={a5}"
         );
 
-        let ctx = BlockContext::build(b"fused-poc-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        // Fixed block-commitment bytes for the same fixture.
+        let block_commitment =
+            &[0x66u8, 0x75, 0x73, 0x65, 0x64, 0x2d, 0x70, 0x6f, 0x63, 0x2d, 0x62, 0x6c, 0x6b];
+        let ctx = BlockContext::build(block_commitment, TEST_NONCE, &a, &b, &params).expect("ctx");
         let target = [0xffu8; 32]; // difficulty_bits=0 => easy target
 
         // Honest full mining proof: matmul on committed `a`.
@@ -8802,13 +8535,13 @@ mod tests {
                 .expect("honest full mining proof must verify");
         let j0 = honest.pis.hash_jackpot;
 
-        // a' = committed a with the two-byte kernel move (cols 4,5 of row 0).
+        // Modified matmul input: decrement cols 4,5 of row 0 in committed a.
         let mut a_prime = a.clone();
         a_prime[4] -= 1;
         a_prime[5] -= 1;
 
-        // Malicious i8u8 frequency: byte 4's pack = P(sigma=a4) stays a valid
-        // table entry, but the honest helper drops the non-canonical pair.
+        // Byte 4's i8u8 pack P(sigma=a4) has a table entry, but frequency
+        // population excludes the non-canonical signed/unsigned pair.
         let freq_row = (a4 + 128) as usize;
         set_post_populate_hook(Box::new(move |t: &mut CT| {
             let cell = freq_row * TOTAL_TRACE_WIDTH + I8U8_FREQ;
@@ -8816,8 +8549,8 @@ mod tests {
             t.matrix.values[cell] = <Val as QuotientMap<u64>>::from_int(cur + 1);
         }));
 
-        // Tamper: make the co-located leaf producer (A block 0) carry a' on the
-        // matmul view + NOISED_PACKED, while UINT8_DATA aliases to hold BLAKE3_MSG.
+        // The co-located leaf producer (A block 0) carries a' in its signed
+        // operands and NOISED_PACKED; the unsigned bytes preserve BLAKE3_MSG.
         let res = prove_and_verify_tiled_full(
             &ctx,
             &params,
@@ -8846,12 +8579,12 @@ mod tests {
                     <Val as QuotientMap<i64>>::from_int(a5),
                     "first live-C3 leaf must carry committed A[5]"
                 );
-                // byte 4 (kernel): MAT_UNPACK -= 1 (== a'), UINT8_DATA += 256 (>255).
+                // Byte 4: MAT_UNPACK -= 1 (== a'), UINT8_DATA += 256 (>255).
                 trace.matrix.values[base + MAT_UNPACK_START + 4] =
                     <Val as QuotientMap<i64>>::from_int(a4 - 1);
                 trace.matrix.values[base + UINT8_DATA_START + 4] =
                     <Val as QuotientMap<i64>>::from_int(u4 + 256);
-                // byte 5 (table-hop): MAT_UNPACK -= 1, UINT8_DATA -= 1 (canonical).
+                // Byte 5: MAT_UNPACK -= 1, UINT8_DATA -= 1 (canonical).
                 trace.matrix.values[base + MAT_UNPACK_START + 5] =
                     <Val as QuotientMap<i64>>::from_int(a5 - 1);
                 trace.matrix.values[base + UINT8_DATA_START + 5] =
@@ -8867,10 +8600,8 @@ mod tests {
 
         assert!(
             res.is_err(),
-            "the two-byte kernel move desyncs the matmul view from the \
-             committed bytes (HASH_A unchanged); the per-byte urange8 \
-             queries MUST reject it. If this verifies, the matmul matrix \
-             is not bound to the block commitment."
+            "a word-preserving change with UINT8_DATA[4] > 255 must be \
+             rejected by the per-byte urange8 queries"
         );
         let _ = j0;
     }
@@ -8884,7 +8615,7 @@ mod tests {
     /// bus must reject it exactly as in the contiguous case.
     #[test]
     #[ignore = "real Layer-0 proof; malicious-miner for non-contiguous opening"]
-    fn sec_4c10_noncontiguous_sweep_on_row_permuted_matrix_rejects() {
+    fn noncontiguous_sweep_on_row_permuted_matrix_rejects() {
         use crate::commit::matrix_commitment;
         use crate::fiat_shamir::canonical_noise_seeds_from_matrix_commitments;
         use crate::synth::synth_matrices;
@@ -8995,23 +8726,16 @@ mod tests {
         );
     }
 
-    // ===================================================================
-    // Structural-invariant defense at the `pub` bridge
-    // boundary. A `MatmulParams` with `noise_rank = 0` historically hit
-    // a `k / noise_rank` div-by-zero panic in `expected_layer0_rows`,
-    // and a `found_idx >= num_tiles()` hit an `.expect()` panic in
-    // `prove_and_verify_for_block`. Both are now Clean Err.
-    // ===================================================================
-
     #[test]
-    fn m2_invalid_params_yield_clean_error_not_panic() {
+    fn invalid_params_yield_clean_error_not_panic() {
         let good = MatmulParams::TEST_SMALL;
-        let (a, b) = synth_matrices(b"m2-seed", &good);
-        let ctx = BlockContext::build(b"m2-blk", TEST_NONCE, &a, &b, &good).expect("ctx");
+        // Fixed block and matrix-seed bytes for invalid-parameter coverage.
+        let (a, b) = synth_matrices(&[0x6d, 0x32, 0x2d, 0x73, 0x65, 0x65, 0x64], &good);
+        let block_commitment = &[0x6du8, 0x32, 0x2d, 0x62, 0x6c, 0x6b];
+        let ctx = BlockContext::build(block_commitment, TEST_NONCE, &a, &b, &good).expect("ctx");
         let target = [0xFFu8; 32];
 
-        // The concrete pre-fix panic: noise_rank == 0 ⇒ k/0 in
-        // `params.num_stripes()` inside `expected_layer0_rows`.
+        // Zero noise rank must be rejected before stripe-count division.
         let mut bad = good;
         bad.noise_rank = 0;
 
@@ -9039,10 +8763,15 @@ mod tests {
     }
 
     #[test]
-    fn m2_found_idx_out_of_range_yields_clean_error_not_panic() {
+    fn found_idx_out_of_range_yields_clean_error_not_panic() {
         let params = MatmulParams::TEST_SMALL;
-        let (a, b) = synth_matrices(b"m2-fb-seed", &params);
-        let ctx = BlockContext::build(b"m2-fb-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        // Fixed block and matrix-seed bytes for found-index-bound coverage.
+        let (a, b) = synth_matrices(
+            &[0x6d, 0x32, 0x2d, 0x66, 0x62, 0x2d, 0x73, 0x65, 0x65, 0x64],
+            &params,
+        );
+        let block_commitment = &[0x6du8, 0x32, 0x2d, 0x66, 0x62, 0x2d, 0x62, 0x6c, 0x6b];
+        let ctx = BlockContext::build(block_commitment, TEST_NONCE, &a, &b, &params).expect("ctx");
 
         let nt = params.num_tiles();
         let oob = nt as u32; // == num_tiles, just past the last valid idx

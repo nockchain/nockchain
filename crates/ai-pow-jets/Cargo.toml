@@ -14,12 +14,12 @@ nockvm_macros.workspace = true
 blake3.workspace = true
 either.workspace = true
 once_cell.workspace = true
-rayon.workspace = true
 tracing.workspace = true
 serde.workspace = true
 bincode = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+rayon.workspace = true
 nockapp = { path = "../nockapp" }
 tempfile = { workspace = true }
 tikv-jemallocator = { workspace = true }

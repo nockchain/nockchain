@@ -38,9 +38,40 @@ nockchain kernel --%mine-ai effect--> ai-pow-mine
 
 ## Trust boundaries
 
-The miner is untrusted from consensus's perspective. Successful local verification is an optimization and diagnostic; only the node's Hoon rules plus mandatory Rust verify jet admit a block. Private gRPC gives kernel-level poke access and should be bound to a trusted local interface.
+The miner is untrusted from consensus's perspective. Successful local verification is an optimization and diagnostic; only the node's Hoon rules plus mandatory Rust verify jet admit a block. Private gRPC is a loopback-only authenticated control plane: operator credentials permit kernel-level pokes, while restricted miner credentials permit only mining-candidate subscriptions and mined-proof submissions.
 
 Merge mining shares a mineable work unit, not a proof system or chain target. Pearl and Nockchain retain independent acceptance, targets, block commitments, and submission paths.
+
+### Private gRPC authentication
+
+The node requires `NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN` (at least 32 characters).
+It may also configure a distinct `NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN` of at
+least 32 characters. Missing authentication policy, short tokens, equal role
+tokens, miner-only node credentials, and non-loopback binds fail node startup
+before consensus preparation or kernel state creation. Credentials and policy
+are resolved once; rotate them by restarting the node and clients.
+
+- **Operator-managed miners (recommended):** give the worker only
+  `NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN`. Its presence selects restricted mode;
+  the worker cannot change payouts or enable/disable mining. Provision the
+  approved mining key and enable mining separately with the operator's
+  `configure_mining` command, as described in
+  [the deployment guide](../../docs/AI_POW_CUTOVER.md#private-grpc-operator-and-miner-access).
+- **Self-managed trusted miner:** give the worker
+  `NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN` and no miner token. This grants full
+  operator authority and allows its usual mining configuration at startup.
+- **Single-user development only:** explicitly start the node with
+  `--allow-unauthenticated-private-grpc` or
+  `NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC=1`. Tokenless workers can then
+  connect. Set the same environment opt-out for the container entrypoint.
+  Every local caller has operator authority in this mode; it is unsuitable for
+  shared hosts. An opt-out never bypasses configured credentials.
+
+Pass secrets through the environment, not command arguments, checked-in files,
+or logs. Remote miners must use an authenticated encrypted tunnel to the node's
+loopback listener, for example `ssh -N -L 127.0.0.1:15555:127.0.0.1:5555 node-host`,
+then `--node-addr http://127.0.0.1:15555`. Tokens alone do not encrypt HTTP.
+
 
 ## Soundness dependencies
 
@@ -57,14 +88,26 @@ docker buildx build \
   -t ai-pow-miner-gpu .
 ```
 
-The image mines to `2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j` by default. Set `MINING_PKH` to direct rewards to a different v1 mining public-key hash. `NODE_ADDR` is required.
+The image mines to `2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j` by default. Set `MINING_PKH` to direct rewards to a different v1 mining public-key hash. `NODE_ADDR` and an operator/miner credential or explicit development opt-out are required. In restricted mode the operator-approved node payout remains authoritative, regardless of the worker's `MINING_PKH`.
+
+With the tunnel above running on a Linux container host and the miner token
+already exported in the shell:
 
 ```sh
-docker run --rm --gpus all \
-  -e NODE_ADDR=http://node.example:5555 \
+docker run --rm --gpus all --network host \
+  -e NODE_ADDR=http://127.0.0.1:15555 \
+  -e NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN \
   -e MINING_PKH=<v1-mining-pkh> \
   ai-pow-miner-gpu
 ```
+
+For a trusted self-managed worker, pass `-e NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN`
+instead and omit the miner token. For a tokenless single-user development node,
+pass `-e NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC=1` instead; this does not
+change the node's own startup policy. The entrypoint never puts credentials in
+arguments or prints them. Do not publish the node's private port: container
+networking must reach the local tunnel or share its network namespace, not
+require a non-loopback node bind.
 
 The image uses up to eight visible CUDA devices, reference mode, and batches of 32,768 attempts per device by default. Set `CUDA_DEVICES` to `all` or a comma-separated ordinal list such as `0,1,2,3`; set `REFERENCE` or `GPU_BATCH_ATTEMPTS` to override the other values. Non-reference mode also requires `PEARL_GATEWAY`.
 

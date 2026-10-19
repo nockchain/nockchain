@@ -195,14 +195,9 @@ impl MatmulProof {
         if n > MAX_SPOT {
             return Err(DecodeError::SpotTooLarge);
         }
-        // Do NOT `Vec::with_capacity(n)`: `n` is an attacker-declared
-        // count, bounded only by the loose `MAX_SPOT` policy cap
-        // (2^20). A ~200-byte blob could declare 2^20 spot entries and
-        // force a ~100 MiB up-front allocation — a deserialization
-        // bomb. Grow the Vec as openings are *actually* decoded:
-        // `decode_opening` fails fast at EOF, so the loop
-        // self-terminates and the allocation stays proportional to the
-        // real input length.
+        // Grow the collection as openings are decoded rather than reserving the
+        // declared count. EOF terminates decoding, keeping allocation bounded
+        // by actual input.
         let mut spot = Vec::new();
         for _ in 0..n {
             spot.push(decode_opening(&mut cur)?);

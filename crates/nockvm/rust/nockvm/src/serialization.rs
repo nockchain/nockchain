@@ -1020,12 +1020,8 @@ mod tests {
     fn cue_rejects_self_referencing_backref() {
         use crate::ext::AtomExt;
 
-        // GHSA-vv3m-g96f-73r4: `0x5D` = bits `1 0 1 1 1 0 1` — a cell whose
-        // first child is a back-reference addressing the cell itself. The
-        // Hoon `++cue` registers a cell's back-reference id only after both
-        // children decode, so this is a deterministic reject there; the jet
-        // must match instead of producing a cyclic noun that later jams or
-        // traversals cannot handle.
+        // Self-referencing back-references must be rejected consistently by
+        // both cue forms.
         let mut stack = setup_stack();
         let jammed = Atom::from_bytes(&mut stack, &[0x5D]);
 

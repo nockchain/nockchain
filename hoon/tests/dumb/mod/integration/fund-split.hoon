@@ -38,8 +38,7 @@
 ::    by separating v1-phase from phase.zk-asert. Heights 1 are v0; heights
 ::    2..4 are v1 pre-asert-activation; height 5+ is v1 post-activation.
 ::    Used by test-fund-split-rejects-pre-activation-three-entries to
-::    pin the consensus-layer height-aware count rule
-::    (docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #1).
+::    pin the consensus-layer height-aware count rule.
 ++  bc-pre-activation-v1
   %*  .  default-bc:helpers
     blocks-per-epoch            1.000.000
@@ -134,8 +133,7 @@
 ::  +test-fund-split-accepts-two-miners-plus-fund: post-activation
 ::    candidate with 3 entries — 2 miner PKHs + protocol-fund-address at
 ::    floor(emission/5). The total adds to emission, the fund slot
-::    matches, so validate-page-with-txs accepts. Pins the multi-miner
-::    semantic preserved by Fix 2.
+::    matches, so validate-page-with-txs accepts a two-miner payout.
 ++  test-fund-split-accepts-two-miners-plus-fund
   =/  con  (initial-consensus-state-custom:h bc-fund-split)
   =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
@@ -173,11 +171,9 @@
   =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc-fund-split) pag)
   (expect-eq !>(%improper-fund-split) !>((rejection-reason r)))
 ::
-::  +test-fund-split-rejects-three-entries-no-fund-slot: 3-entry
-::    post-activation coinbase that totals to emission but no key is
-::    the fund address. Pre-Fix-2 this was rejected by the strict
-::    `=(2 ~(wyt z-by +.cb))` pin; post-Fix-2 it must still reject
-::    because the fund slot is missing.
+::  +test-fund-split-rejects-three-entries-no-fund-slot: a 3-entry
+::    post-activation coinbase that totals to emission must reject
+::    when none of its keys is the required fund address.
 ++  test-fund-split-rejects-three-entries-no-fund-slot
   =/  con  (initial-consensus-state-custom:h bc-fund-split)
   =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
@@ -237,18 +233,12 @@
   =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc-fund-split) pag)
   (expect-eq !>(%improper-fund-split) !>((rejection-reason r)))
 ::
-::  +test-fund-split-rejects-pre-activation-three-entries: closes the gap
-::    flagged in docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #1. The v1
-::    parser-level shape check (++based:coinbase-split:v1) admits
-::    `max-coinbase-split + 1` entries to leave room for the post-
-::    activation fund slot, but pre-asert-activation v1 blocks must not
-::    use that extra entry — they have no fund slot. With
-::    bc-pre-activation-v1 (v1-phase=2, phase.zk-asert=5) heights 2..4 are
-::    a real pre-asert-activation v1 window. Build to height 2 (so the
-::    parent is v1) and hand-craft a 3-entry coinbase at height 3.
-::    Without the consensus-layer phase-gated count check this block
-::    would validate; with the fix it rejects as
-::    %coinbase-split-pre-activation-too-many.
+::  +test-fund-split-rejects-pre-activation-three-entries: the v1
+::    parser admits max-coinbase-split + 1 entries for the post-activation
+::    fund slot, while pre-ASERT v1 blocks permit only miner entries.
+::    bc-pre-activation-v1 (v1-phase=2, phase.zk-asert=5) supplies
+::    a pre-activation v1 window at heights 2..4. A three-entry coinbase
+::    at height 3 must return %coinbase-split-pre-activation-too-many.
 ++  test-fund-split-rejects-pre-activation-three-entries
   =/  con  (initial-consensus-state-custom:h-pre bc-pre-activation-v1)
   =^  par=page:t-pre  con  (add-n-pages:h-pre 2 con default-retain:h-pre)
@@ -313,15 +303,11 @@
     (expect-eq !>(%coinbase-version-height-mismatch) !>((rejection-reason late)))
   ==
 ::
-::  +test-fund-split-post-cap-zero-emission-no-fund-slot: closes the gap
-::    flagged in docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #2. After
-::    `tail-end` the schedule emits zero subsidy, so the expected fund
-::    share is 0. ++based on v1 coinbase-split rejects zero-coin entries,
-::    so the only way for a post-cap block to pay the fund is to omit the
-::    slot entirely. Pre-fix, ++check-fund-split unconditionally required
-::    the fund slot to exist; that made post-cap blocks unmineable. This
-::    is a unit test of ++check-fund-split with hand-crafted inputs since
-::    reaching height tail-end+1 in an integration test is impractical
+::  +test-fund-split-post-cap-zero-emission-no-fund-slot: after `tail-end`
+::    the schedule emits zero subsidy, so the expected fund share is 0.
+::    ++based on v1 coinbase-split rejects zero-coin entries, requiring
+::    the fund slot to be absent. This tests ++check-fund-split directly
+::    with fixed inputs rather than building tail-end+1 blocks
 ::    (16,144,876 blocks).
 ++  test-fund-split-post-cap-zero-emission-no-fund-slot
   =/  con  (initial-consensus-state-custom:h bc-fund-split)

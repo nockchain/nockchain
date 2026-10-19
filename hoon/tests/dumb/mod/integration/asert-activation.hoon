@@ -146,7 +146,7 @@
 ::    anchor_target exactly. this pins the wrapper against a value
 ::    derived externally from Eq. (2), rather than against a library
 ::    call on the same inputs (as +test-asert-wrapper-matches-library
-::    does). covers audit item 9.
+::    does).
 ++  test-asert-wrapper-activation-identity
   =/  bc  bc-asert
   =/  con  (initial-consensus-state-custom:h bc)

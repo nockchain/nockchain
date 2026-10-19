@@ -19,6 +19,7 @@ exec env RUST_LOG="${RUST_LOG:-info}" "$node_bin" \
     --identity-path "$data_dir/identity.key" \
     --bind /ip4/0.0.0.0/udp/3400/quic-v1 \
     --bind-private-grpc-port 5555 \
+    --allow-unauthenticated-private-grpc \
     --no-default-peers \
     --force-peer /ip4/216.82.192.27/udp/3400/quic-v1 \
     --fakenet \

@@ -399,18 +399,26 @@ pub struct NockchainCli {
     pub bind_public_grpc_addr: Option<std::net::SocketAddr>,
     #[arg(
         long,
-        help = "Private gRPC binding address (e.g. 0.0.0.0:5555). \
-                Overrides --bind-private-grpc-port when set. \
-                Needed when the node runs inside a Docker container and the \
-                test host must reach the gRPC endpoint from outside. \
-                WARNING: the private gRPC endpoint is unauthenticated kernel \
-                command authority; bind a trusted interface only (the default \
-                is 127.0.0.1).",
+        help = "Private gRPC loopback binding address. Overrides \
+                --bind-private-grpc-port when set. The default is 127.0.0.1. \
+                Use an authenticated encrypted tunnel for remote miners and \
+                operators, including when the node runs in a container; bearer \
+                tokens are sent as gRPC metadata.",
         value_parser = clap::value_parser!(std::net::SocketAddr)
     )]
     pub bind_private_grpc_addr: Option<std::net::SocketAddr>,
     #[arg(long, default_value = "5555")]
     pub bind_private_grpc_port: u16,
+    #[arg(
+        long,
+        help = "Serve the private gRPC listener without bearer authentication. \
+                Without NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN the node refuses to \
+                start unless this flag (or \
+                NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC=1) is set; every \
+                loopback client then holds operator authority. Configured \
+                tokens still apply when this is set."
+    )]
+    pub allow_unauthenticated_private_grpc: bool,
     #[arg(
         long = "ai-pow-verifier-cache-cap",
         help = "Max resident AI-PoW verifier contexts (LRU). The default retains all \
@@ -551,6 +559,7 @@ mod tests {
             bind_public_grpc_addr: Some("127.0.0.1:5555".parse().unwrap()),
             bind_private_grpc_addr: None,
             bind_private_grpc_port: 5555,
+            allow_unauthenticated_private_grpc: false,
             ai_pow_verifier_cache_cap: None,
         }
     }
@@ -606,6 +615,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cli.ai_pow_verifier_cache_cap, Some(2));
+    }
+
+    #[test]
+    fn allow_unauthenticated_private_grpc_is_off_unless_passed() {
+        let cli =
+            NockchainCli::parse_from_with_default_stack_size(["nockchain"], NockStackSize::Medium);
+        assert!(!cli.allow_unauthenticated_private_grpc);
+
+        let cli = NockchainCli::parse_from_with_default_stack_size(
+            ["nockchain", "--allow-unauthenticated-private-grpc"],
+            NockStackSize::Medium,
+        );
+        assert!(cli.allow_unauthenticated_private_grpc);
     }
 
     #[test]

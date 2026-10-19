@@ -1,0 +1,15 @@
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY target/release/zk-pow-mine /usr/local/bin/zk-pow-mine
+
+ENV RUST_LOG=info
+ENV MINIMAL_LOG_FORMAT=true
+
+STOPSIGNAL SIGINT
+ENTRYPOINT ["/usr/local/bin/zk-pow-mine"]

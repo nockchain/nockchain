@@ -499,12 +499,12 @@ async fn bench_verifier(
             "bench-verifier requires a release build".to_string(),
         ));
     }
-    if runs == 0 || runs % 2 != 0 {
+    if runs == 0 || !runs.is_multiple_of(2) {
         return Err(NockAppError::OtherError(
             "bench-verifier requires a positive even number of measured runs".to_string(),
         ));
     }
-    if warmups % 2 != 0 {
+    if !warmups.is_multiple_of(2) {
         return Err(NockAppError::OtherError(
             "bench-verifier requires an even number of warmup runs".to_string(),
         ));
@@ -612,7 +612,7 @@ async fn bench_verifier(
 }
 
 fn verifier_bench_order(index: u64) -> [VerifierBenchVersion; 2] {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         [VerifierBenchVersion::V2, VerifierBenchVersion::V3]
     } else {
         [VerifierBenchVersion::V3, VerifierBenchVersion::V2]
@@ -662,7 +662,7 @@ fn median_f64(samples: &[f64]) -> Result<f64, NockAppError> {
         ));
     }
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         Ok((sorted[middle - 1] + sorted[middle]) / 2.0)
     } else {
         Ok(sorted[middle])
@@ -881,7 +881,7 @@ fn median_duration(samples: &[Duration]) -> Result<Duration, NockAppError> {
         ));
     }
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         let seconds = (sorted[middle - 1].as_secs_f64() + sorted[middle].as_secs_f64()) / 2.0;
         Ok(Duration::from_secs_f64(seconds))
     } else {

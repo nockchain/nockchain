@@ -253,43 +253,71 @@
     (expect-eq !>(9.719.996.073.121) !>((div ai-work 214)))
   ==
 ::
-::  The second reset prices 2,000 ZK GPUs at 28 MH/s each without changing AI
-::  capacity, lane cadence, or half-life. The preceding %5 schedule is historical.
+::  Historical reset rows and the consensus batch share cadence and half-life.
+::  Only the newest anchors use 100 billion ZK hashes/s and 20 ExaMAC/s.
 ++  test-mainnet-asert-reset-schedule
   ^-  tang
   =/  mainnet  *blockchain-constants:txe
   =/  mt  ~(. txe mainnet)
   =/  dc  ~(. dcon *consensus-state *derived-state mainnet)
   %-  zing
-  %+  turn  ~[153.500 154.000 154.001 154.499 154.500 154.501]
+  %+  turn  ~[153.500 154.000 154.001 154.499 154.500 154.501 169.999 170.000 170.001]
   |=  height=@
   =/  zk  (need (active-asert-anchor:dc %zk height))
   =/  ai  (need (active-asert-anchor:dc %ai height))
-  =/  phase=@  ?:((lth height 154.500) 147.500 154.500)
-  =/  zk-work=@  (mul ?:((lth height 154.500) 777.600.000.000 56.000.000.000) 500)
+  =/  batch=@  (need consensus-batch-phase:page:mt)
+  =/  phase=@
+    ?:((lth height 154.500) 147.500 ?:((lth height batch) 154.500 batch))
+  =/  ai-rate=@
+    ?:((lth height batch) 10.000.000.000.000.000.000 20.000.000.000.000.000.000)
+  =/  zk-work=@
+    (mul ?:((lth height 154.500) 777.600.000.000 ?:((lth height batch) 56.000.000.000 100.000.000.000)) 500)
   ;:  weld
-    (expect-eq !>(=(height 154.500)) !>((puzzle-asert-reset-at:page:mt height)))
+    (expect-eq !>(?|(=(height 154.500) =(height batch))) !>((puzzle-asert-reset-at:page:mt height)))
     (expect-eq !>([phase phase]) !>([activation-height.zk activation-height.ai]))
     (expect-eq !>((div max-target-atom:mt zk-work)) !>(target.zk))
-    (expect-eq !>((div (bex 256) (mul 10.000.000.000.000.000.000 214))) !>(target.ai))
+    (expect-eq !>((div (bex 256) (mul ai-rate 214))) !>(target.ai))
     (expect-eq !>([500 214]) !>([ideal-block-time.zk ideal-block-time.ai]))
     (expect-eq !>([43.200 43.200]) !>([half-life.zk half-life.ai]))
     (expect-eq !>([max-target-atom:mt max-ai-target-atom:mt]) !>([maximum-target.zk maximum-target.ai]))
   ==
+:::
+++  test-mainnet-consensus-batch-anchor-calibration
+  ^-  tang
+  =/  mt  ~(. txe *blockchain-constants:txe)
+  ;:  weld
+    (expect-eq !>(100.000.000.000) !>(consensus-batch-reference-zk-hashes-per-second:page:mt))
+    %+  expect-eq
+      !>(42.719.740.668.685.878.041.659.396.662.871.708.109.802.309.623.250.884.640.656.221.042.408.328.349.345.316.800)
+    !>(consensus-batch-zk-anchor-target:page:mt)
+    %+  expect-eq
+      !>(27.054.226.457.316.868.089.619.389.020.721.473.797.492.987.071.411.346.738)
+    !>(consensus-batch-ai-anchor-target:page:mt)
+    %+  expect-eq
+      !>(54.108.452.914.633.736.179.238.778.041.442.947.594.985.974.142.822.693.476)
+    !>(zk-pow-v5-ai-anchor-target:page:mt)
+  ==
 ::
 ::  Existing counters and heads must not leak into either first-child target.
-::  Exercise both a retained anchor cache and an upgrade parked at 154,499
-::  with only the predecessor's ordinary MTP available.
+::  Exercise retained caches and predecessor-only fallback at both resets.
 ++  test-mainnet-asert-reset-first-child-targets
+  ^-  tang
+  %-  zing
+  %+  turn  `(list [phase=@ cached=?])`~[[154.500 %.y] [154.500 %.n] [170.000 %.y] [170.000 %.n]]
+  |=  [phase=@ cached=?]
   ^-  tang
   =/  mainnet  *blockchain-constants:txe
   =/  mt  ~(. txe mainnet)
   =/  hm  ~(. helpers mainnet)
+  =/  ai-rate=@
+    ?:(=(phase 154.500) 10.000.000.000.000.000.000 20.000.000.000.000.000.000)
+  =/  zk-rate=@
+    ?:(=(phase 154.500) 56.000.000.000 100.000.000.000)
   =/  parent=page:t  default-genesis-page:hm
   =.  parent
     ?^  -.parent
-      parent(height 154.499, digest *block-id:t)
-    parent(height 154.499, digest *block-id:t)
+      parent(height (dec phase), digest *block-id:t)
+    parent(height (dec phase), digest *block-id:t)
   =/  parent-id=block-id:t  ~(digest get:page:mt parent)
   =/  old-head=block-id:t  ~(digest get:page:mt default-genesis-page:hm)
   =/  timestamps=(h-map block-id:t @)
@@ -297,9 +325,6 @@
   =/  prior=derived-state  *derived-state
   =.  puzzle-asert-states.prior
     (~(put h-by puzzle-asert-states.prior) parent-id [91 73 `old-head `old-head])
-  %-  zing
-  %+  turn  `(list ?)`~[%.y %.n]
-  |=  cached=?
   =/  con=consensus-state  *consensus-state
   =.  blocks.con
     (~(put h-by blocks.con) parent-id (to-local-page:page:mt parent))
@@ -310,30 +335,37 @@
   =/  dc  ~(. dcon con prior mainnet)
   ;:  weld
     %+  expect-eq
-      !>((div max-target-atom:mt (mul 56.000.000.000 500)))
-    !>((merge:bignum (compute-target-zk-asert:dc 154.500 parent-id)))
+      !>((div max-target-atom:mt (mul zk-rate 500)))
+    !>((merge:bignum (compute-target-zk-asert:dc phase parent-id)))
     %+  expect-eq
-      !>((div (bex 256) (mul 10.000.000.000.000.000.000 214)))
-    !>((merge:bignum (compute-target-ai-asert:dc 154.500 parent-id)))
+      !>((div (bex 256) (mul ai-rate 214)))
+    !>((merge:bignum (compute-target-ai-asert:dc phase parent-id)))
   ==
 ::
-::  Interleave two forks in the same consensus/derived maps. Each has its own
-::  154,499 MTP and nonzero old lineage. Integer half-life drifts make exact
-::  target multiples observable without duplicating ASERT's implementation.
-::  Each fork starts on a different puzzle, then alternates through 154,502.
+::  Interleave two forks in the same maps at each reset. Each predecessor has
+::  branch-local MTP and nonzero old lineage.
+::  Integer half-life drifts make exact target multiples observable.
+::  Each fork starts on a different puzzle, then alternates for three children.
 ++  test-mainnet-asert-reset-mixed-forks-reset-once
   ^-  tang
   =/  mainnet  *blockchain-constants:txe
   =/  mt  ~(. txe mainnet)
   =/  hm  ~(. helpers mainnet)
+  %-  zing
+  %+  turn  ~[154.500 170.000]
+  |=  phase=@
+  =/  ai-rate=@
+    ?:(=(phase 154.500) 10.000.000.000.000.000.000 20.000.000.000.000.000.000)
+  =/  zk-rate=@
+    ?:(=(phase 154.500) 56.000.000.000 100.000.000.000)
   =/  make-parent
     |=  stamp=@
     ^-  page:t
     =/  pag=page:t  default-genesis-page:hm
     =.  pag
       ?^  -.pag
-        pag(height 154.499, timestamp stamp)
-      pag(height 154.499, timestamp stamp)
+        pag(height (dec phase), timestamp stamp)
+      pag(height (dec phase), timestamp stamp)
     ?^  -.pag
       pag(digest (compute-digest:page:mt pag))
     pag(digest (compute-digest:page:mt pag))
@@ -394,9 +426,15 @@
   ::  Returning to a lane must retain its earlier block, not reset at each height.
   =/  a3  (extend con.b2 der.b2 tip.a2 %.n 230.600)
   =/  b3  (extend con.a3 der.a3 tip.b2 %.y 373.228)
-  =/  zk=@  (div max-target-atom:mt (mul 56.000.000.000 500))
-  =/  ai=@  (div (bex 256) (mul 10.000.000.000.000.000.000 214))
+  =/  zk=@  (div max-target-atom:mt (mul zk-rate 500))
+  =/  ai=@  (div (bex 256) (mul ai-rate 214))
   ;:  weld
+    %+  expect-eq
+      !>([2 1 `~(digest get:page:mt tip.a3) `~(digest get:page:mt tip.a2)])
+    !>((~(got h-by puzzle-asert-states.der.b3) ~(digest get:page:mt tip.a3)))
+    %+  expect-eq
+      !>([1 2 `~(digest get:page:mt tip.b2) `~(digest get:page:mt tip.b3)])
+    !>((~(got h-by puzzle-asert-states.der.b3) ~(digest get:page:mt tip.b3)))
     (expect-eq !>([(mul 2 zk) ai]) !>(after-first-a))
     (expect-eq !>([zk (mul 4 ai)]) !>(after-first-b))
     (expect-eq !>([(mul 2 zk) (mul 4 ai)]) !>(after-second-a))
@@ -412,6 +450,7 @@
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
   =/  ai-target=@  (div (bex 256) (mul 10.000.000.000.000.000.000 214))
+  =/  batch-ai-target=@  (div (bex 256) (mul 20.000.000.000.000.000.000 214))
   =/  old-zk-target=@  (div max-target-atom:mt (mul 777.600.000.000 500))
   =/  new-zk-target=@  (div max-target-atom:mt (mul 56.000.000.000 500))
   %-  zing
@@ -424,6 +463,9 @@
         [154.499 1.028.807]
         [154.500 14.285.714]
         [154.501 14.285.714]
+        [169.999 14.285.714]
+        [170.000 14.285.714]
+        [170.001 14.285.714]
     ==
   |=  [height=@ rate=@]
   ;:  weld
@@ -431,6 +473,9 @@
     %+  expect-eq
       !>((div (bex 256) (mul rate +(ai-target))))
     !>((merge:bignum (block-work-at:page:mt height %ai-pow (chunk:bignum ai-target))))
+    %+  expect-eq
+      !>((div (bex 256) (mul rate +(batch-ai-target))))
+    !>((merge:bignum (block-work-at:page:mt height %ai-pow (chunk:bignum batch-ai-target))))
     %+  expect-eq
       !>((div max-target-atom:mt +(old-zk-target)))
     !>((merge:bignum (block-work-at:page:mt height %dumb-zkpow (chunk:bignum old-zk-target))))
@@ -600,25 +645,12 @@
   =/  state  (~(got h-by puzzle-asert-states.der.built) tip-bid)
   %+  expect-eq  !>([2 3])  !>([ai-count.state zk-count.state])
 ::
-::  walks the production consensus promotion route for a post-activation
-::  AI-PoW block (GHSA-g3g3-q33c-6fwh).
-::
-::    A block whose transactions arrive late takes the pending route:
-::    +heard-block admits it via +validate-page-without-txs,
-::    +add-pending-block parks it in `.pending-blocks`, and when the
-::    transaction arrives +accept-page promotes it through
-::    +accept-pending-block. The promoted block must carry the same `%4`
-::    proof-version entry the direct +accept-block path writes. Before the
-::    fix the promotion route omitted the write, so +block-id-to-proof-version
-::    fell back to the height-derived legacy ZK version and misclassified
-::    the block. The final control asserts +block-compute-work reads the
-::    certificate artifact directly, so fork-choice heaviness stays AI-priced
-::    either way.
+::  Direct acceptance and pending promotion preserve the page's proof version.
+::  Fork-choice work agrees with the accepted AI certificate artifact.
 ++  test-pending-ai-block-promotion-records-proof-version
   ^-  tang
   =/  pt  ~(. txe bc-dual-post:helpers)
-  ::  Height-3 chain accepted through the DIRECT path (block-versions
-  ::  populated; the height-2 AI block carries its `%4` entry).
+  ::  A mixed chain with directly accepted proof-version metadata.
   =/  built  (build-typed-chain:hp ~[%zk %ai %zk])
   ::  Height-4 post-activation AI page whose transaction has NOT arrived yet.
   =/  ai-page=page:t  (make-ai-pow-page:hp tip.built con.built der.built)
@@ -647,9 +679,7 @@
     (~(accept-page dcon pending der.built bc-dual-post:helpers) ai-page *tx-acc:t *@da)
   ?>  (~(has h-by blocks.promoted) bid)
   ?>  ?!  (~(has h-by pending-blocks.promoted) bid)
-  ::  Setup guard: the DIRECT path recorded `%4` for its height-2 AI block,
-  ::  so +accept-block's conditional write is the only thing the promotion
-  ::  route lacks. If this fails the fixture is wrong, not the consensus.
+  ::  The directly accepted AI block carries proof version `%4`.
   =/  direct-ai-bid=block-id:t  (~(got z-by heaviest-chain.der.built) 2)
   ?>  ?=([~ %4] (~(get h-by block-versions.con.built) direct-ai-bid))
   =/  pv=proof-version:sp
@@ -657,16 +687,13 @@
   =/  aw=@
     (merge:bignum (~(block-compute-work dcon promoted der.built bc-dual-post:helpers) ai-page))
   ;:  weld
-    ::  the invariant: the promoted block carries the same `%4` entry the
-    ::  direct path writes (this fails on the unfixed promotion route).
+    ::  Pending promotion preserves the same proof-version metadata.
     %+  expect-eq  !>(%.y)
     !>(?=([~ %4] (~(get h-by block-versions.promoted) bid)))
-    ::  consequence: +block-id-to-proof-version identifies the promoted
-    ::  block as `%4` rather than the legacy height-derived ZK version.
+    ::  Proof-version lookup identifies the accepted AI page.
     %+  expect-eq  !>(%4)
     !>(pv)
-    ::  control: fork choice reads the certificate artifact directly, so
-    ::  heaviness stays AI-priced even while the entry was missing.
+    ::  Fork-choice work agrees with the AI certificate artifact.
     %+  expect-eq  !>(aw)
     !>((merge:bignum (ai-pow-work:page:pt ~(height get:page:pt ai-page) ~(target get:page:pt ai-page))))
   ==

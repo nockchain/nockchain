@@ -80,41 +80,77 @@ impl BatchItemResponseEnvelopeEstimate {
         }
     }
 
-    /// Build a synthetic envelope for local CBOR sizing only.
-    pub(crate) fn into_sizing_envelope(self, message: Vec<u8>) -> ResponseEnvelope {
+    /// Exact CBOR size of the estimated envelope, without constructing its body.
+    fn encoded_bytes(&self, message_bytes: usize) -> Result<usize, NockAppError> {
+        // Fixed bytes include map headers, kind/block_id/tx_id/message keys,
+        // encoded kind names, and null absent IDs. Bundle overhead also includes
+        // tx_envelopes/unincluded_tx_ids keys and their present empty arrays.
+        // Range overhead includes range_blocks, empty message, and null IDs;
+        // its array header is counted separately. Each block's 57 fixed bytes
+        // are map(4), block_id/block_message/tx_envelopes/unincluded_tx_ids keys,
+        // and two empty arrays. Payload and ID text headers are added below.
+        let body = || cbor_string_bytes(message_bytes);
         match self {
             Self::HeardBlock {
                 block_id_bytes_upper_bound,
-            } => ResponseEnvelope::heard_block("1".repeat(block_id_bytes_upper_bound), message),
+            } => checked_size_sum(&[41, cbor_string_bytes(*block_id_bytes_upper_bound)?, body()?]),
             Self::HeardBlockWithTxs {
                 block_id_bytes_upper_bound,
-            } => ResponseEnvelope::heard_block_with_txs(
-                "1".repeat(block_id_bytes_upper_bound),
-                message,
-                Vec::new(),
-                Vec::new(),
-            ),
-            Self::HeardBlockRangeWithTxs { block_count } => {
-                let block_message_each = if block_count == 0 {
-                    Vec::new()
-                } else {
-                    let chunk = message.len() / block_count.max(1);
-                    vec![0u8; chunk.max(1)]
-                };
-                let blocks = (0..block_count)
-                    .map(|i| crate::messages::BundledBlockWithTxs {
-                        block_id: format!("{:0>width$}", i, width = TIP5_BASE58_MAX_CHARS),
-                        block_message: serde_bytes::ByteBuf::from(block_message_each.clone()),
-                        tx_envelopes: Vec::new(),
-                        unincluded_tx_ids: Vec::new(),
-                    })
-                    .collect();
-                ResponseEnvelope::heard_block_range_with_txs(blocks)
+            } => checked_size_sum(&[81, cbor_string_bytes(*block_id_bytes_upper_bound)?, body()?]),
+            Self::HeardTx { tx_id } => {
+                checked_size_sum(&[38, cbor_string_bytes(tx_id.len())?, body()?])
             }
-            Self::HeardTx { tx_id } => ResponseEnvelope::heard_tx(tx_id, message),
-            Self::HeardElders => ResponseEnvelope::heard_elders(message),
+            Self::HeardElders => checked_size_sum(&[43, body()?]),
+            Self::HeardBlockRangeWithTxs { block_count } => {
+                let blocks_bytes = if *block_count == 0 {
+                    0
+                } else {
+                    let per_block = checked_size_sum(&[
+                        57,
+                        cbor_string_bytes(TIP5_BASE58_MAX_CHARS)?,
+                        cbor_string_bytes((message_bytes / block_count).max(1))?,
+                    ])?;
+                    per_block
+                        .checked_mul(*block_count)
+                        .ok_or_else(batch_size_overflow)?
+                };
+                checked_size_sum(&[68, cbor_argument_bytes(*block_count), blocks_bytes])
+            }
         }
     }
+}
+
+fn batch_size_overflow() -> NockAppError {
+    NockAppError::OtherError(String::from("batch response size overflow"))
+}
+
+fn checked_size_sum(parts: &[usize]) -> Result<usize, NockAppError> {
+    parts.iter().try_fold(0usize, |size, part| {
+        size.checked_add(*part).ok_or_else(batch_size_overflow)
+    })
+}
+
+// CBOR additional-information widths apply to unsigned integers and lengths.
+fn cbor_argument_bytes(value: usize) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=255 => 2,
+        256..=65535 => 3,
+        65536..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
+fn cbor_string_bytes(length: usize) -> Result<usize, NockAppError> {
+    checked_size_sum(&[cbor_argument_bytes(length), length])
+}
+
+pub(crate) fn estimated_single_result_bytes(
+    item_id: u32,
+    estimate: &BatchItemResponseEstimate,
+) -> Result<usize, NockAppError> {
+    // {"BatchResult":{"results":[item]}}: two maps, two text keys, array(1).
+    checked_size_sum(&[23, estimated_result_item_bytes(item_id, estimate)?])
 }
 
 #[derive(Clone, Debug)]
@@ -742,13 +778,26 @@ pub(crate) fn batch_error_result(item_id: u32, error: BatchErrorClass) -> BatchR
 pub(crate) fn req_res_message_encoded_bytes<T: serde::Serialize>(
     message: &T,
 ) -> Result<usize, NockAppError> {
-    let mut encoded = Vec::new();
+    struct ByteCount(usize);
+    impl std::io::Write for ByteCount {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("batch response size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut encoded = ByteCount(0);
     cbor4ii::serde::to_writer(&mut encoded, message).map_err(|err| {
         NockAppError::OtherError(format!(
             "failed to encode req-res message with wire codec: {err}"
         ))
     })?;
-    Ok(encoded.len())
+    Ok(encoded.0)
 }
 pub(crate) fn batch_result_encoded_bytes(
     results: &[BatchResultItem],
@@ -762,6 +811,107 @@ pub(crate) fn batch_results_fit(
     max_response_bytes: usize,
 ) -> Result<bool, NockAppError> {
     Ok(batch_result_encoded_bytes(results)? <= max_response_bytes)
+}
+
+// Every projected response has exactly one result per request item. Its CBOR
+// container header is therefore constant; replacing a backpressure item only
+// changes that item's encoding. This avoids repeatedly serializing the growing
+// response while retaining the exact wire-size budget.
+struct BatchResponseBudget {
+    encoded_bytes: usize,
+    backpressure_item_bytes: Vec<usize>,
+}
+
+impl BatchResponseBudget {
+    fn new(backpressure: &[BatchResultItem]) -> Result<Self, NockAppError> {
+        Ok(Self {
+            encoded_bytes: batch_result_encoded_bytes(backpressure)?,
+            backpressure_item_bytes: backpressure
+                .iter()
+                .map(req_res_message_encoded_bytes)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn with_replacement(
+        &self,
+        index: usize,
+        replacement: &BatchResultItem,
+    ) -> Result<usize, NockAppError> {
+        self.with_replacement_bytes(index, req_res_message_encoded_bytes(replacement)?)
+    }
+
+    fn with_replacement_bytes(
+        &self,
+        index: usize,
+        replacement_bytes: usize,
+    ) -> Result<usize, NockAppError> {
+        self.encoded_bytes
+            .checked_sub(self.backpressure_item_bytes[index])
+            .and_then(|size| size.checked_add(replacement_bytes))
+            .ok_or_else(|| NockAppError::OtherError(String::from("batch response size overflow")))
+    }
+
+    fn accept(&mut self, index: usize, accepted: &BatchResultItem) -> Result<(), NockAppError> {
+        self.encoded_bytes = self.with_replacement(index, accepted)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn incremental_batch_budget_matches_wire_encoding_across_array_boundaries() {
+    for count in [1usize, 23, 24, 25, 64] {
+        let mut response: Vec<_> = (0..count)
+            .map(|index| batch_error_result(index as u32, BatchErrorClass::Backpressure))
+            .collect();
+        let mut budget = BatchResponseBudget::new(&response).expect("initial budget");
+        for index in 0..count {
+            let item = if index % 2 == 0 {
+                BatchResultItem {
+                    item_id: index as u32,
+                    status: BatchResultStatus::Result,
+                    error: None,
+                    envelope: Some(ResponseEnvelope::heard_tx(
+                        "tx".to_string(),
+                        vec![index as u8; index * 11],
+                    )),
+                }
+            } else {
+                batch_error_result(index as u32, BatchErrorClass::TooLarge)
+            };
+            response[index] = item.clone();
+            let encoded = batch_result_encoded_bytes(&response).expect("wire encoding");
+            assert_eq!(
+                budget
+                    .with_replacement(index, &item)
+                    .expect("replacement budget must fit"),
+                encoded
+            );
+            if index % 2 == 0 {
+                let estimate = BatchItemResponseEstimate {
+                    request_kind: "raw-tx-by-id",
+                    envelope: BatchItemResponseEnvelopeEstimate::HeardTx {
+                        tx_id: "tx".to_string(),
+                    },
+                    message_bytes: index * 11,
+                    source: "test",
+                };
+                let projection = budget
+                    .with_replacement_bytes(
+                        index,
+                        estimated_result_item_bytes(index as u32, &estimate)
+                            .expect("estimated item size"),
+                    )
+                    .expect("estimated replacement");
+                assert_eq!(projection, encoded);
+            }
+            budget
+                .accept(index, &item)
+                .expect("replacement item must fit the batch budget");
+            assert_eq!(budget.encoded_bytes, encoded);
+        }
+    }
 }
 
 pub(crate) fn batch_backpressure_results(items: &[BatchRequestItem]) -> Vec<BatchResultItem> {
@@ -780,18 +930,198 @@ pub(crate) fn request_kind_name(request: &NockchainDataRequest) -> &'static str 
     }
 }
 
-pub(crate) fn estimated_result_item(
+pub(crate) fn estimated_result_item_bytes(
     item_id: u32,
     estimate: &BatchItemResponseEstimate,
-) -> BatchResultItem {
-    let message = vec![0u8; estimate.message_bytes];
-    let envelope = estimate.envelope.clone().into_sizing_envelope(message);
+) -> Result<usize, NockAppError> {
+    // Fixed schema overheads include map headers, kind/status text, keys,
+    // null IDs/error, omitted None bundle fields, and present empty arrays.
+    // Item overhead: map(4), item_id/status/error/envelope keys, Result, null.
+    checked_size_sum(&[
+        39,
+        cbor_argument_bytes(item_id as usize),
+        estimate.envelope.encoded_bytes(estimate.message_bytes)?,
+    ])
+}
 
-    BatchResultItem {
-        item_id,
-        status: BatchResultStatus::Result,
+#[cfg(test)]
+#[test]
+fn estimated_cbor_sizes_match_wire_boundaries() {
+    use BatchItemResponseEnvelopeEstimate::*;
+    for message_bytes in [0, 1, 23, 24, 255, 256, 65535, 65536] {
+        let mut shapes = vec![HeardElders];
+        for length in [0, 23, 24, 55, 255, 256, 65535, 65536] {
+            shapes.push(HeardBlock {
+                block_id_bytes_upper_bound: length,
+            });
+            shapes.push(HeardBlockWithTxs {
+                block_id_bytes_upper_bound: length,
+            });
+        }
+        for tx_id in [
+            "",
+            "a",
+            "é漢",
+            &"x".repeat(23),
+            &"x".repeat(24),
+            &"x".repeat(255),
+            &"x".repeat(256),
+        ] {
+            shapes.push(HeardTx {
+                tx_id: tx_id.to_string(),
+            });
+        }
+        for count in [0, 1, 23, 24, 64, 255] {
+            shapes.push(HeardBlockRangeWithTxs { block_count: count });
+        }
+        for shape in shapes {
+            let payload = vec![0; message_bytes];
+            let envelope = match &shape {
+                HeardBlock {
+                    block_id_bytes_upper_bound: n,
+                } => ResponseEnvelope::heard_block("1".repeat(*n), payload),
+                HeardBlockWithTxs {
+                    block_id_bytes_upper_bound: n,
+                } => ResponseEnvelope::heard_block_with_txs(
+                    "1".repeat(*n),
+                    payload,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                HeardTx { tx_id } => ResponseEnvelope::heard_tx(tx_id.clone(), payload),
+                HeardElders => ResponseEnvelope::heard_elders(payload),
+                HeardBlockRangeWithTxs { block_count } => {
+                    let blocks = (0..*block_count)
+                        .map(|index| crate::messages::BundledBlockWithTxs {
+                            block_id: format!("{index:0>55}"),
+                            block_message: ByteBuf::from(vec![
+                                0;
+                                (message_bytes / block_count).max(1)
+                            ]),
+                            tx_envelopes: Vec::new(),
+                            unincluded_tx_ids: Vec::new(),
+                        })
+                        .collect();
+                    ResponseEnvelope::heard_block_range_with_txs(blocks)
+                }
+            };
+            for item_id in [0, 23, 24, 255, 256, 65535, 65536, u32::MAX] {
+                let estimate = BatchItemResponseEstimate {
+                    request_kind: "parity",
+                    envelope: shape.clone(),
+                    message_bytes,
+                    source: "test",
+                };
+                let item = BatchResultItem {
+                    item_id,
+                    status: BatchResultStatus::Result,
+                    error: None,
+                    envelope: Some(envelope.clone()),
+                };
+                assert_eq!(
+                    estimated_result_item_bytes(item_id, &estimate).expect("item size"),
+                    req_res_message_encoded_bytes(&item).expect("wire item"),
+                    "{shape:?}, message={message_bytes}, id={item_id}",
+                );
+                assert_eq!(
+                    estimated_single_result_bytes(item_id, &estimate).expect("single size"),
+                    batch_result_encoded_bytes(&[item]).expect("wire response"),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn estimated_cbor_sizes_reject_overflow() {
+    for envelope in [
+        BatchItemResponseEnvelopeEstimate::HeardElders,
+        BatchItemResponseEnvelopeEstimate::HeardBlock {
+            block_id_bytes_upper_bound: usize::MAX,
+        },
+        BatchItemResponseEnvelopeEstimate::HeardBlockRangeWithTxs { block_count: 255 },
+    ] {
+        let estimate = BatchItemResponseEstimate {
+            request_kind: "overflow",
+            envelope,
+            message_bytes: usize::MAX,
+            source: "test",
+        };
+        assert!(estimated_single_result_bytes(u32::MAX, &estimate).is_err());
+    }
+    // An empty range has no body, even when the unused message length is huge.
+    assert_eq!(
+        BatchItemResponseEnvelopeEstimate::HeardBlockRangeWithTxs { block_count: 0 }
+            .encoded_bytes(usize::MAX)
+            .expect("empty range"),
+        69,
+    );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn estimated_batch_admission_preserves_exact_cap_and_reserved_tail() {
+    let items: Vec<_> = (1..=3)
+        .map(|item_id| BatchRequestItem {
+            item_id,
+            message: ByteBuf::from(Vec::new()),
+        })
+        .collect();
+    let estimate = BatchItemResponseEstimate {
+        request_kind: "raw-tx-by-id",
+        envelope: BatchItemResponseEnvelopeEstimate::HeardTx { tx_id: "x".into() },
+        message_bytes: 256,
+        source: "test",
+    };
+    let head = BatchResultItem {
+        item_id: 1,
+        status: BatchResultStatus::NotFound,
         error: None,
-        envelope: Some(envelope),
+        envelope: None,
+    };
+    let mut budget =
+        BatchResponseBudget::new(&batch_backpressure_results(&items)).expect("initial budget");
+    budget.accept(0, &head).expect("accepted head");
+    let cap = budget
+        .with_replacement_bytes(
+            1,
+            estimated_result_item_bytes(2, &estimate).expect("item size"),
+        )
+        .expect("projected budget");
+    for (limit, expected_calls) in [(cap, vec![1, 2, 3]), (cap - 1, vec![1])] {
+        let mut calls = Vec::new();
+        let results = execute_batch_request_items(
+            &items,
+            limit,
+            |item| {
+                let projected = (item.item_id == 2).then(|| estimate.clone());
+                async move { Ok(projected) }
+            },
+            |item| {
+                calls.push(item.item_id);
+                async { BatchItemExecutionOutcome::Completed(RequestExecutionOutcome::NotFound) }
+            },
+        )
+        .await
+        .expect("bounded execution");
+        assert_eq!(calls, expected_calls);
+        assert!(batch_result_encoded_bytes(&results).expect("wire size") <= limit);
+        if limit == cap {
+            assert!(results
+                .iter()
+                .all(|item| item.status == BatchResultStatus::NotFound));
+        } else {
+            assert_eq!(results[0], head);
+            assert_eq!(
+                results[1],
+                batch_error_result(2, BatchErrorClass::Backpressure)
+            );
+            assert_eq!(
+                results[2],
+                batch_error_result(3, BatchErrorClass::Backpressure)
+            );
+        }
     }
 }
 pub(crate) async fn estimate_batch_request_item_response(
@@ -895,7 +1225,8 @@ where
     Fut: Future<Output = BatchItemExecutionOutcome>,
 {
     let all_backpressure = batch_backpressure_results(items);
-    if !batch_results_fit(&all_backpressure, max_response_bytes)? {
+    let mut budget = BatchResponseBudget::new(&all_backpressure)?;
+    if budget.encoded_bytes > max_response_bytes {
         return Err(NockAppError::OtherError(String::from(
             "batch response size cap cannot fit a backpressure-only response",
         )));
@@ -904,24 +1235,19 @@ where
     let mut results = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let tail = &items[index + 1..];
-        let retryable_tail = batch_results_with_backpressure_tail(&results, &items[index..]);
-        if !batch_results_fit(&retryable_tail, max_response_bytes)? {
+        let retryable_tail_bytes = budget.encoded_bytes;
+        if retryable_tail_bytes > max_response_bytes {
             return Err(NockAppError::OtherError(String::from(
                 "batch response size cap cannot fit required backpressure tail",
             )));
         }
-        let retryable_tail_bytes = batch_result_encoded_bytes(&retryable_tail)?;
         let mut projected_item_bytes = None;
         let mut projected_batch_bytes = None;
         let item_estimate = estimate_item(item).await?;
         if let Some(estimate) = item_estimate.as_ref() {
-            let projected = estimated_result_item(item.item_id, estimate);
-            let projected_single_bytes =
-                batch_result_encoded_bytes(std::slice::from_ref(&projected))?;
-            let mut projected_candidate = results.clone();
-            projected_candidate.push(projected);
-            projected_candidate.extend(batch_backpressure_results(tail));
-            let projected_total_bytes = batch_result_encoded_bytes(&projected_candidate)?;
+            let projected = estimated_result_item_bytes(item.item_id, estimate)?;
+            let projected_single_bytes = estimated_single_result_bytes(item.item_id, estimate)?;
+            let projected_total_bytes = budget.with_replacement_bytes(index, projected)?;
             projected_item_bytes = Some(projected_single_bytes);
             projected_batch_bytes = Some(projected_total_bytes);
 
@@ -951,18 +1277,19 @@ where
                         tail,
                     ));
                 }
-                return Ok(retryable_tail);
+                return Ok(batch_results_with_backpressure_tail(
+                    &results,
+                    &items[index..],
+                ));
             }
         }
 
         match execute_item(item).await {
             BatchItemExecutionOutcome::Completed(outcome) => {
                 let actual = outcome.into_batch_result_item(item.item_id);
-                let mut candidate = results.clone();
-                candidate.push(actual.clone());
-                candidate.extend(batch_backpressure_results(tail));
-                let actual_total_bytes = batch_result_encoded_bytes(&candidate)?;
+                let actual_total_bytes = budget.with_replacement(index, &actual)?;
                 if actual_total_bytes <= max_response_bytes {
+                    budget.accept(index, &actual)?;
                     results.push(actual);
                     continue;
                 }
@@ -994,10 +1321,8 @@ where
             }
             BatchItemExecutionOutcome::Failed(error) => {
                 let failed = batch_error_result(item.item_id, error);
-                let mut candidate = results.clone();
-                candidate.push(failed.clone());
-                candidate.extend(batch_backpressure_results(tail));
-                if batch_results_fit(&candidate, max_response_bytes)? {
+                if budget.with_replacement(index, &failed)? <= max_response_bytes {
+                    budget.accept(index, &failed)?;
                     results.push(failed);
                     continue;
                 }
@@ -1010,7 +1335,10 @@ where
                 ));
             }
             BatchItemExecutionOutcome::Backpressure => {
-                return Ok(retryable_tail);
+                return Ok(batch_results_with_backpressure_tail(
+                    &results,
+                    &items[index..],
+                ));
             }
         }
     }

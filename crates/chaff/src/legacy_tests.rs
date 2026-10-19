@@ -298,11 +298,8 @@ mod tests {
 
     #[test]
     fn chaff_rejects_exabyte_atom_declaration_without_allocating() {
-        // GHSA-7hhm-wxwr-9mg4: `zeros == 64` passes the `> MAX_USIZE_BITS`
-        // guard, `size_low == 0` yields `bit_count == 2^63`, and the
-        // pre-allocation `vec![0u8; (bit_count + 7) >> 3]` requests ~1 EB
-        // before `read_bits_to_bytes` ever bounds-checks. Must be rejected
-        // up front instead of aborting the process.
+        // Excessive declared atom lengths must be rejected before allocating
+        // storage for atom data absent from the input.
         let mut slab: NounSlab<Chaff> = NounSlab::new();
         let mut writer = BitWriter::new();
         writer.write_bit(false); // atom tag
@@ -324,9 +321,8 @@ mod tests {
 
     #[test]
     fn chaff_rejects_max_size_low_atom_declaration_without_allocating() {
-        // GHSA-3697-qw8x-6j63: zeros == 63 with size_low == 2^62-1 declares
-        // bit_count == 2^63-1, again ~1 EB of `vec![0u8; ...]` before the
-        // truncation check. Must be rejected before allocating.
+        // Atom-length boundary declarations must be checked against the
+        // available input before allocating storage for the declared data.
         let mut slab: NounSlab<Chaff> = NounSlab::new();
         let mut writer = BitWriter::new();
         writer.write_bit(false); // atom tag

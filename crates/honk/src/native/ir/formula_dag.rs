@@ -618,7 +618,9 @@ mod tests {
         let deep_constant = T(&mut slab, &[D(42), deep_tail]);
         let noun = T(&mut slab, &[D(1), deep_constant]);
         let mut arena = FormulaArena::new();
-        let id = arena.import(noun, &slab.noun_space()).unwrap();
+        let id = arena
+            .import(noun, &slab.noun_space())
+            .expect("import quoted deep constant formula");
         assert_eq!(arena.distinct(), 1);
         assert!(unsafe { arena.materialize(id, &mut slab).raw_equals(&noun) });
     }
@@ -644,7 +646,9 @@ mod tests {
         let core = T(&mut slab, &[D(0), D(1)]);
         let noun = T(&mut slab, &[D(10), D(2), core]);
         let mut arena = FormulaArena::new();
-        let id = arena.import(noun, &slab.noun_space()).unwrap();
+        let id = arena
+            .import(noun, &slab.noun_space())
+            .expect("import noncanonical hand formula as opaque");
         let emitted = arena.materialize(id, &mut slab);
         assert!(unsafe { emitted.raw_equals(&noun) });
     }
@@ -656,14 +660,15 @@ mod tests {
         let mut arena = FormulaArena::new();
         let id = arena.quote(value, &slab.noun_space());
         let formula = arena.materialize(id, &mut slab);
-        let (_, emitted) = noun_pair(formula, &slab.noun_space()).unwrap();
+        let (_, emitted) =
+            noun_pair(formula, &slab.noun_space()).expect("materialized quote must be a cell");
         assert_eq!(
             emitted
                 .in_space(&slab.noun_space())
                 .as_atom()
-                .unwrap()
+                .expect("materialized quoted value must be an atom")
                 .as_u64()
-                .unwrap(),
+                .expect("materialized quoted atom must fit u64"),
             u64::MAX
         );
     }
@@ -673,9 +678,11 @@ mod tests {
         let mut old = NounSlab::new();
         let old_a = T(&mut old, &[D(0), D(6)]);
         let old_b = T(&mut old, &[D(0), D(7)]);
-        let old_comb = noun_formula::comb(&mut old, old_a, old_b).unwrap();
+        let old_comb =
+            noun_formula::comb(&mut old, old_a, old_b).expect("combine legacy slot formulas");
         let old_true = T(&mut old, &[D(1), D(0)]);
-        let old_cond = noun_formula::cond(&mut old, old_true, old_comb, old_b).unwrap();
+        let old_cond = noun_formula::cond(&mut old, old_true, old_comb, old_b)
+            .expect("construct legacy conditional formula");
 
         let mut new = NounSlab::new();
         let mut arena = FormulaArena::new();

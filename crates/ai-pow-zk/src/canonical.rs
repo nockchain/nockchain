@@ -26,7 +26,7 @@ use crate::chips::blake3::compress::Blake3Tweak;
 use crate::chips::control::NUM_SELECTORS;
 use crate::chips::input::NOISE_PACKING_BASE;
 use crate::composite_layout::{TILE_D, TILE_H};
-use crate::composite_preprocess::{build_preprocessed_columns, RowDescriptor};
+use crate::composite_preprocess::{preprocessed_program_row, RowDescriptor};
 use crate::noise_ref::{e_value, f_value};
 use crate::params::ZkParams;
 use crate::proof_rules::ProofRules;
@@ -734,39 +734,16 @@ fn blake3_block_descriptor(j: usize, tweak_packed: u64, finalize_extra: &[usize]
     }
 }
 
-/// **The params-pure canonical program.** Builds the
-/// `trace_len × PROGRAM_COLS.len()` preprocessed matrix the
-/// canonical-program pin commits to, from public data **only** (`params` + the
-/// attested/pinned `BlockPublic` + the params-pure `trace_len`) —
-/// *no witness*. Per row: `row_schedule` → [`RowClass`] →
-/// a params-pure [`RowDescriptor`] → the existing
-/// [`build_preprocessed_columns`] packing (the *one* shared
-/// schedule + the *one* packing — no prover/verifier divergence).
-///
-/// Classes in [`is_class_canonical`] are
-/// reconstructed exactly; all others fall back to
-/// [`RowDescriptor::padding`] — a deliberate, KAT-fenced
-/// *placeholder*, NOT a soundness claim. The KAT
-/// (`canonical_program == extract_program(honest_trace)`) asserts
-/// equality **only on `is_class_canonical` rows**. **The verify
-/// path commits to this only once every class is canonical, gated
-/// on the full KAT/Route-A/crit1_*/debug-assertions-ON suite**
-/// (the soundness linchpin). Until then this is dead w.r.t.
-/// prove/verify.
+/// Construct the complete canonical 22-column program from the trusted public
+/// schedule, block inputs, parameters, and trace height. Packing is shared with
+/// witness-derived programs through the same preprocessing row packer.
 pub fn canonical_program(
     params: &ZkParams,
     bp: &BlockPublic,
     trace_len: usize,
 ) -> Result<RowMajorMatrix<Val>, String> {
-    // Defense-in-depth at the verify-side params-pure
-    // entry. The deep helpers (`schedule_layout`, `tile_chunk_range`,
-    // `strip_opening_rows`) `assert!` invariants that *hold under
-    // validated `ZkParams` + in-range `tile_i/j` + a non-degenerate
-    // `trace_len`*. The production verifier reaches here only with
-    // validated params (via `ai-pow::zk_bridge`), so the asserts
-    // are unreachable on the chain path. This entry validation turns
-    // an attacker-controlled-params bypass (a broken canonical-program
-    // trust pin) into a typed `Err` rather than a deep cryptic panic.
+    // Validate parameters before schedule and opening helpers assert their
+    // geometry invariants. Invalid parameters return a typed error here.
     params.validate()?;
     if !params.noise_rank.is_multiple_of(16) {
         return Err(format!(
@@ -850,13 +827,13 @@ pub fn canonical_program_for_strip_schedule_with_rules(
         schedule_layout_for_strip_schedule(params, strip_schedule, trace_len)
     };
     let sp = StripPlan::build_for_strip_schedule_with_rules(params, strip_schedule, rules)?;
-    let program: Vec<RowDescriptor> = (0..trace_len)
-        .map(|r| row_descriptor(r, l.class_of(r), &l, &sp, params, bp))
-        .collect();
-    let rows = build_preprocessed_columns(&program, trace_len);
-    let w = rows.first().map(|r| r.len()).unwrap_or(0);
-    let flat: Vec<Val> = rows.into_iter().flatten().collect();
-    Ok(RowMajorMatrix::new(flat, w))
+    let width = crate::composite_full_air::PROGRAM_COLS.len();
+    let mut flat = Vec::with_capacity(trace_len * width);
+    for row in 0..trace_len {
+        let descriptor = row_descriptor(row, l.class_of(row), &l, &sp, params, bp);
+        flat.extend(preprocessed_program_row(row, &descriptor));
+    }
+    Ok(RowMajorMatrix::new(flat, width))
 }
 
 /// One 8-row BLAKE3 block of a tile's strip-opening — the

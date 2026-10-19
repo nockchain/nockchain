@@ -51,6 +51,11 @@ This document is NOT canonical for:
   make two wire sources interchangeable.
 - Nouns crossing thread, persistence, or RPC boundaries retain canonical JAM
   representation and explicit ownership.
+- `NounSlab` keeps each active region's allocation frontier within its backing
+  block, including the one-past-end position. Capacity checks compare the
+  requested word count with the remaining words before advancing the frontier;
+  an empty region has no capacity, and requests exceeding capacity grow the
+  region using the existing backing-block allocation policy.
 - Cancellation and shutdown stop new work without exposing partially applied
   kernel transitions as committed state.
 - Native jets are accelerators or explicitly mandatory protocol components.
@@ -75,6 +80,21 @@ When runtime-interface behavior changes in `nockapp`, update this doc in the sam
 Minimum validation:
 - `make docs-check`
 - `cargo check -p nockapp`
+
+The slab capacity boundary test uses a borrowed word buffer and exercises the
+same private predicate used by region growth, without allocating backing blocks:
+
+```bash
+cargo +nightly-2026-04-03 miri test -p nockapp --lib \
+  noun::slab::tests::region_capacity_boundaries -- --exact
+```
+
+Run the slab module tests normally to exercise backing-block growth, checkpoint
+rewind, and frame reclamation:
+
+```bash
+cargo test -p nockapp --lib noun::slab::tests
+```
 
 <br>
 

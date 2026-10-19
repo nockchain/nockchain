@@ -4,7 +4,7 @@ use nockapp::utils::error::{CrownError, ExternalError};
 use nockapp::utils::make_tas;
 use nockapp::utils::scry::ScryResult;
 use nockapp::{AtomExt, NockAppError};
-use nockvm::noun::{Atom, Noun, NounHandle, NounSpace, D, T};
+use nockvm::noun::{Atom, Noun, NounAllocator, NounHandle, NounSpace, D, T};
 use nockvm_macros::tas;
 use tracing::{debug, trace, warn};
 
@@ -56,6 +56,28 @@ pub(crate) fn block_range_with_txs_scry_slab(
     let noun = T(&mut slab, &[range_tag, start_atom, end_atom, D(0)]);
     slab.set_root(noun);
     Ok(slab)
+}
+
+/// `[%heaviest-chain ~]` returns `(unit (unit [page-number block-id]))`.
+pub(crate) fn heaviest_chain_scry_slab() -> NounSlab {
+    let mut slab = NounSlab::new();
+    let tag = make_tas(&mut slab, "heaviest-chain").as_noun();
+    let noun = T(&mut slab, &[tag, D(0)]);
+    slab.set_root(noun);
+    slab
+}
+
+pub(crate) fn heaviest_chain_height_from_scry(
+    scry_res: &NounSlab,
+) -> Result<Option<u64>, NockAppError> {
+    let space = scry_res.noun_space();
+    match ScryResult::from_noun(unsafe { scry_res.root() }, &space) {
+        ScryResult::Some(payload) => Ok(Some(payload.as_cell()?.head().as_atom()?.as_u64()?)),
+        ScryResult::Nothing => Ok(None),
+        ScryResult::BadPath | ScryResult::Invalid => Err(NockAppError::OtherError(String::from(
+            "Invalid heaviest-chain scry result",
+        ))),
+    }
 }
 
 pub(crate) fn raw_tx_by_id_scry_slab(tx_id: &str) -> Result<NounSlab, NockAppError> {

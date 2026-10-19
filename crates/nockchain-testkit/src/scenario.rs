@@ -15,6 +15,8 @@ pub struct Scenario {
     #[serde(default)]
     pub binaries: BTreeMap<String, PathBuf>,
     #[serde(default)]
+    pub miner_binaries: BTreeMap<String, PathBuf>,
+    #[serde(default)]
     pub nodes: Vec<NodeSpec>,
     #[serde(default)]
     pub steps: Vec<Action>,
@@ -56,6 +58,10 @@ fn default_seed() -> u64 {
     1
 }
 
+fn default_mining_threads() -> u64 {
+    1
+}
+
 fn default_true() -> bool {
     true
 }
@@ -77,6 +83,13 @@ pub struct NodeSpec {
     pub mine: bool,
     #[serde(default)]
     pub mining_pkh: Option<String>,
+    #[serde(default = "default_mining_threads")]
+    pub mining_threads: u64,
+    /// Host executable in process mode, or executable path inside the miner image.
+    #[serde(default)]
+    pub miner_binary: Option<PathBuf>,
+    #[serde(default)]
+    pub miner_image: Option<String>,
     #[serde(default)]
     pub peers: Vec<String>,
     #[serde(default)]
@@ -198,6 +211,10 @@ pub enum Action {
         groups: Vec<Vec<String>>,
     },
     Upgrade {
+        node: String,
+        version: String,
+    },
+    UpgradeMiner {
         node: String,
         version: String,
     },

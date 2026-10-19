@@ -29,6 +29,9 @@ TEST_DATA_DIR="${BRIDGE_DIR}/test_run_data"
 BRIDGE_DATA_DIR="${TEST_DATA_DIR}/bridge"
 
 NODE_PRIVATE_GRPC_PORT="${NODE_PRIVATE_GRPC_PORT:-5002}"
+# Authenticated nodes require NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN in this
+# process's environment. The shared client forwards it; miner tokens cannot
+# authorize bridge operations. No credential is needed for an opted-out node.
 BRIDGE_INGRESS="127.0.0.1:8002"
 
 # Environment configuration (set via environment variables or defaults to virtual testnet)

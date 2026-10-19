@@ -35,7 +35,8 @@ use super::*;
 use crate::messages::{
     block_by_height_message, block_range_with_txs_request_message, request_slab_from_message,
     BatchErrorClass, BatchRequestItem, BatchResultItem, BatchResultStatus, BundledBlockWithTxs,
-    BundledTxEnvelope, EnvelopeKind, NockchainDataRequest, NockchainFact, ResponseEnvelope,
+    BundledTxEnvelope, EnvelopeKind, NockchainDataRequest, NockchainFact, NockchainResponse,
+    ResponseEnvelope,
 };
 use crate::p2p_state::BlockSource;
 use crate::peer_stats::{PeerReqResGeneration, PeerStatsRegistry};
@@ -46,6 +47,1441 @@ use crate::test_support::{
 use crate::tip5_util::{tip5_hash_to_base58, TIP5_BASE58_MAX_CHARS};
 
 pub static LIBP2P_CONFIG: LazyLock<LibP2PConfig> = LazyLock::new(LibP2PConfig::default);
+
+fn observed_address_test_swarm() -> Swarm<NockchainBehaviour> {
+    start_swarm(
+        LibP2PConfig::default(),
+        Keypair::generate_ed25519(),
+        Vec::new(),
+        None,
+        connection_limits::ConnectionLimits::default(),
+        None,
+        PeerExclusions::default(),
+    )
+    .expect("production swarm should build")
+}
+
+fn observed_address_test_connection(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    peer_id: PeerId,
+    connection_id: ConnectionId,
+    address: &str,
+) -> libp2p::core::ConnectedPoint {
+    use libp2p::swarm::behaviour::ConnectionEstablished;
+    use libp2p::swarm::{FromSwarm, NetworkBehaviour};
+
+    let endpoint = libp2p::core::ConnectedPoint::Dialer {
+        address: address.parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    swarm
+        .behaviour_mut()
+        .recovery
+        .on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id,
+            connection_id,
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+    endpoint
+}
+
+fn observed_address_test_close(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    peer_id: PeerId,
+    connection_id: ConnectionId,
+    endpoint: &libp2p::core::ConnectedPoint,
+) {
+    use libp2p::swarm::behaviour::ConnectionClosed;
+    use libp2p::swarm::{FromSwarm, NetworkBehaviour};
+
+    swarm
+        .behaviour_mut()
+        .recovery
+        .on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+            peer_id,
+            connection_id,
+            endpoint,
+            cause: None,
+            remaining_established: 0,
+        }));
+}
+
+fn observed_address_test_info(
+    keypair: &Keypair,
+    observed_addr: &Multiaddr,
+    listen_addrs: Vec<Multiaddr>,
+) -> libp2p::identify::Info {
+    libp2p::identify::Info {
+        public_key: keypair.public(),
+        protocol_version: String::from("heterogeneous-identify"),
+        agent_version: String::from("another-implementation"),
+        listen_addrs,
+        protocols: Vec::new(),
+        observed_addr: observed_addr.clone(),
+        signed_peer_record: None,
+    }
+}
+
+struct ObservedAddressTestReporter {
+    keypair: Keypair,
+    connection_id: ConnectionId,
+    endpoint: libp2p::core::ConnectedPoint,
+}
+
+impl ObservedAddressTestReporter {
+    fn new(swarm: &mut Swarm<NockchainBehaviour>, id: usize) -> Self {
+        let keypair = Keypair::generate_ed25519();
+        let connection_id = ConnectionId::new_unchecked(10_000 + id);
+        let endpoint = observed_address_test_connection(
+            swarm,
+            keypair.public().to_peer_id(),
+            connection_id,
+            "/ip4/127.0.0.1/udp/3000/quic-v1",
+        );
+        Self {
+            keypair,
+            connection_id,
+            endpoint,
+        }
+    }
+
+    fn peer_id(&self) -> PeerId {
+        self.keypair.public().to_peer_id()
+    }
+}
+
+fn observed_address_test_claim(port: usize) -> Multiaddr {
+    format!("/ip4/127.0.0.1/udp/{port}/quic-v1")
+        .parse()
+        .unwrap()
+}
+
+fn observed_address_test_has(swarm: &Swarm<NockchainBehaviour>, address: &Multiaddr) -> bool {
+    swarm
+        .external_addresses()
+        .any(|external| external == address)
+}
+
+fn observed_address_test_observe(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    votes: &mut ObservedAddressVotes,
+    peer_id: PeerId,
+    connection_id: ConnectionId,
+    address: &Multiaddr,
+    now: tokio::time::Instant,
+) -> bool {
+    let update = votes.observe_at(swarm, peer_id, connection_id, address, now);
+    let added = update.add.as_ref() == Some(address);
+    assert!(update.remove.len() <= OBSERVED_ADDRESS_ADMITTED_LIMIT);
+    update.apply(swarm);
+    assert!(votes.pending.len() <= OBSERVED_ADDRESS_PENDING_LIMIT);
+    assert!(votes
+        .pending
+        .values()
+        .all(|claim| claim.len() <= OBSERVED_ADDRESS_PEERS_PER_CLAIM));
+    assert!(votes.admitted.len() <= OBSERVED_ADDRESS_ADMITTED_LIMIT);
+    assert!(votes.admitted.len() + votes.retired.len() <= OBSERVED_ADDRESS_ADMISSION_HISTORY_LIMIT);
+    added
+}
+
+fn observed_address_test_report(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    votes: &mut ObservedAddressVotes,
+    reporter: &ObservedAddressTestReporter,
+    address: &Multiaddr,
+    now: tokio::time::Instant,
+) -> bool {
+    observed_address_test_observe(
+        swarm,
+        votes,
+        reporter.peer_id(),
+        reporter.connection_id,
+        address,
+        now,
+    )
+}
+
+fn observed_address_test_admit(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    votes: &mut ObservedAddressVotes,
+    pair: &[ObservedAddressTestReporter; 2],
+    address: &Multiaddr,
+    now: tokio::time::Instant,
+) {
+    assert!(!observed_address_test_report(
+        swarm, votes, &pair[0], address, now
+    ));
+    assert!(observed_address_test_report(
+        swarm, votes, &pair[1], address, now
+    ));
+    assert!(observed_address_test_has(swarm, address));
+    let receipt = &votes.admitted[address];
+    assert_eq!(receipt.admitted_at, now);
+    assert_eq!(receipt.observers.len(), 2);
+    for reporter in pair {
+        assert!(receipt.observers.contains(&reporter.peer_id()));
+        assert!(votes.peer_usage(&reporter.peer_id()) <= OBSERVED_ADDRESS_CLAIMS_PER_PEER);
+    }
+}
+
+// Fill using disjoint pairs, four admissions per pair, never a quota bypass.
+// Unique times make the first generated claim the unequivocal FIFO victim.
+fn observed_address_test_fill(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    votes: &mut ObservedAddressVotes,
+    count: usize,
+    now: tokio::time::Instant,
+) -> Vec<[ObservedAddressTestReporter; 2]> {
+    let mut pairs = Vec::new();
+    for slot in 0..count {
+        if slot % OBSERVED_ADDRESS_CLAIMS_PER_PEER == 0 {
+            pairs.push([
+                ObservedAddressTestReporter::new(swarm, slot * 2),
+                ObservedAddressTestReporter::new(swarm, slot * 2 + 1),
+            ]);
+        }
+        observed_address_test_admit(
+            swarm,
+            votes,
+            pairs.last().unwrap(),
+            &observed_address_test_claim(4000 + slot),
+            now + Duration::from_millis(slot as u64),
+        );
+    }
+    pairs
+}
+
+#[test]
+fn observed_address_identify_requires_exact_live_identity_and_connection() {
+    let mut swarm = observed_address_test_swarm();
+    let mut votes = ObservedAddressVotes::default();
+    let claimed = "/ip4/203.0.113.10/udp/4001/quic-v1".parse().unwrap();
+    let first = Keypair::generate_ed25519();
+    let second = Keypair::generate_ed25519();
+    let first_peer = first.public().to_peer_id();
+    let second_peer = second.public().to_peer_id();
+    let live = ConnectionId::new_unchecked(100);
+    let unresolved = ConnectionId::new_unchecked(101);
+    let closed = ConnectionId::new_unchecked(102);
+    observed_address_test_connection(
+        &mut swarm, first_peer, live, "/ip4/198.51.100.1/udp/3000/quic-v1",
+    );
+    observed_address_test_connection(
+        &mut swarm, second_peer, unresolved, "/dns4/localhost/udp/3000/quic-v1",
+    );
+    let endpoint = observed_address_test_connection(
+        &mut swarm, second_peer, closed, "/ip4/198.51.100.1/udp/3001/quic-v1",
+    );
+    observed_address_test_close(&mut swarm, second_peer, closed, &endpoint);
+    let exclusions = PeerExclusions::default();
+    let metrics = isolated_test_metrics();
+
+    for connection in [ConnectionId::new_unchecked(999), live, unresolved, closed] {
+        identify_received(
+            &mut swarm,
+            &mut votes,
+            second_peer,
+            connection,
+            observed_address_test_info(&second, &claimed, Vec::new()),
+            &exclusions,
+            &metrics,
+        )
+        .unwrap();
+        assert!(
+            votes.pending.is_empty(),
+            "unsupported or foreign CIDs cannot vote"
+        );
+        assert!(swarm.external_addresses().next().is_none());
+    }
+    identify_received(
+        &mut swarm,
+        &mut votes,
+        first_peer,
+        live,
+        observed_address_test_info(&first, &claimed, Vec::new()),
+        &exclusions,
+        &metrics,
+    )
+    .unwrap();
+    assert_eq!(votes.pending[&claimed].len(), 1);
+    assert!(swarm.external_addresses().next().is_none());
+}
+
+#[test]
+fn observed_address_identify_repeats_sessions_and_reconnects_count_one_identity() {
+    let mut swarm = observed_address_test_swarm();
+    let mut votes = ObservedAddressVotes::default();
+    let claimed = "/ip4/203.0.113.10/udp/4001/quic-v1".parse().unwrap();
+    let first = Keypair::generate_ed25519();
+    let second = Keypair::generate_ed25519();
+    let first_peer = first.public().to_peer_id();
+    let second_peer = second.public().to_peer_id();
+    let exclusions = PeerExclusions::default();
+    let metrics = isolated_test_metrics();
+    let mut overlapping = None;
+    for id in 1..=3 {
+        let connection = ConnectionId::new_unchecked(id);
+        let endpoint = observed_address_test_connection(
+            &mut swarm, first_peer, connection, "/ip4/198.51.100.1/udp/3000/quic-v1",
+        );
+        for _ in 0..3 {
+            identify_received(
+                &mut swarm,
+                &mut votes,
+                first_peer,
+                connection,
+                observed_address_test_info(&first, &claimed, Vec::new()),
+                &exclusions,
+                &metrics,
+            )
+            .unwrap();
+            assert_eq!(votes.pending[&claimed].len(), 1);
+            assert!(swarm.external_addresses().next().is_none());
+        }
+        if id == 1 {
+            // The second session overlaps the first without adding a voter.
+            overlapping = Some((connection, endpoint));
+            continue;
+        }
+        observed_address_test_close(&mut swarm, first_peer, connection, &endpoint);
+        if let Some((connection, endpoint)) = overlapping.take() {
+            observed_address_test_close(&mut swarm, first_peer, connection, &endpoint);
+        }
+    }
+    let second_connection = ConnectionId::new_unchecked(4);
+    observed_address_test_connection(
+        &mut swarm, second_peer, second_connection, "/ip4/198.51.100.1/udp/3000/quic-v1",
+    );
+    identify_received(
+        &mut swarm,
+        &mut votes,
+        second_peer,
+        second_connection,
+        observed_address_test_info(&second, &claimed, Vec::new()),
+        &exclusions,
+        &metrics,
+    )
+    .unwrap();
+    assert!(
+        swarm.external_addresses().next().is_none(),
+        "a vote from a closed CID cannot combine with another identity"
+    );
+    let reconnected = ConnectionId::new_unchecked(5);
+    observed_address_test_connection(
+        &mut swarm, first_peer, reconnected, "/ip4/198.51.100.1/udp/3000/quic-v1",
+    );
+    identify_received(
+        &mut swarm,
+        &mut votes,
+        first_peer,
+        reconnected,
+        observed_address_test_info(&first, &claimed, Vec::new()),
+        &exclusions,
+        &metrics,
+    )
+    .unwrap();
+    assert!(swarm
+        .external_addresses()
+        .any(|address| address == &claimed));
+    assert!(votes.pending.is_empty());
+    assert_eq!(votes.admitted.len(), 1);
+}
+
+#[test]
+fn observed_address_requires_exact_numeric_unicast_quic_endpoint() {
+    let mut swarm = observed_address_test_swarm();
+    let peers = [PeerId::random(), PeerId::random()];
+    let connections = [ConnectionId::new_unchecked(1), ConnectionId::new_unchecked(2)];
+    for (peer, connection) in peers.into_iter().zip(connections) {
+        observed_address_test_connection(
+            &mut swarm, peer, connection, "/ip4/198.51.100.1/udp/3000/quic-v1",
+        );
+    }
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let mut invalid = vec![
+        "/dns4/example.com/udp/4001/quic-v1".to_owned(),
+        "/ip4/203.0.113.10/tcp/4001".to_owned(),
+        "/ip4/203.0.113.10/udp/0/quic-v1".to_owned(),
+        "/ip4/203.0.113.10/udp/4001".to_owned(),
+        "/ip4/203.0.113.10/udp/4001/quic".to_owned(),
+        "/ip4/0.0.0.0/udp/4001/quic-v1".to_owned(),
+        "/ip6/::/udp/4001/quic-v1".to_owned(),
+        "/ip4/224.0.0.1/udp/4001/quic-v1".to_owned(),
+        "/ip6/ff02::1/udp/4001/quic-v1".to_owned(),
+        "/ip4/255.255.255.255/udp/4001/quic-v1".to_owned(),
+        "/ip6/::ffff:0.0.0.0/udp/4001/quic-v1".to_owned(),
+        "/ip6/::ffff:224.0.0.1/udp/4001/quic-v1".to_owned(),
+        "/ip4/127.0.0.1/udp/4001/quic-v1".to_owned(),
+        "/ip6/::1/udp/4001/quic-v1".to_owned(),
+        "/ip6/::ffff:127.0.0.1/udp/4001/quic-v1".to_owned(),
+    ];
+    invalid.push(format!(
+        "/ip4/203.0.113.10/udp/4001/quic-v1/p2p/{}",
+        peers[0]
+    ));
+    for address in invalid {
+        let address = address.parse().unwrap();
+        for (peer, connection) in peers.into_iter().zip(connections) {
+            assert!(!observed_address_test_observe(
+                &mut swarm, &mut votes, peer, connection, &address, now,
+            ));
+        }
+        assert!(
+            votes.pending.is_empty(),
+            "{address} must not consume vote capacity"
+        );
+    }
+    let first = "/ip4/10.0.0.1/udp/4001/quic-v1".parse().unwrap();
+    let different_port = "/ip4/10.0.0.1/udp/4002/quic-v1".parse().unwrap();
+    let different_ip = "/ip4/10.0.0.2/udp/4001/quic-v1".parse().unwrap();
+    assert!(!observed_address_test_observe(
+        &mut swarm, &mut votes, peers[0], connections[0], &first, now
+    ));
+    assert!(!observed_address_test_observe(
+        &mut swarm, &mut votes, peers[1], connections[1], &different_port, now
+    ));
+    assert!(!observed_address_test_observe(
+        &mut swarm, &mut votes, peers[1], connections[1], &different_ip, now
+    ));
+    assert!(observed_address_test_observe(
+        &mut swarm, &mut votes, peers[1], connections[1], &first, now
+    ));
+    let v6 = "/ip6/fd00::1/udp/4001/quic-v1".parse().unwrap();
+    assert!(!observed_address_test_observe(
+        &mut swarm, &mut votes, peers[0], connections[0], &v6, now
+    ));
+    assert!(observed_address_test_observe(
+        &mut swarm, &mut votes, peers[1], connections[1], &v6, now
+    ));
+}
+
+#[test]
+fn observed_address_votes_expire_without_repeat_or_switch_refresh() {
+    let mut swarm = observed_address_test_swarm();
+    let pair = [
+        ObservedAddressTestReporter::new(&mut swarm, 0),
+        ObservedAddressTestReporter::new(&mut swarm, 1),
+    ];
+    let mut votes = ObservedAddressVotes::default();
+    let first = observed_address_test_claim(4001);
+    let switched = observed_address_test_claim(4002);
+    let now = tokio::time::Instant::now();
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &pair[0], &first, now
+    ));
+    let later = now + OBSERVED_ADDRESS_VOTE_TTL - Duration::from_secs(1);
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &pair[0], &switched, later
+    ));
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &pair[0], &first, later
+    ));
+    let replacement = ConnectionId::new_unchecked(30_000);
+    observed_address_test_connection(
+        &mut swarm,
+        pair[0].peer_id(),
+        replacement,
+        "/ip4/127.0.0.1/udp/3001/quic-v1",
+    );
+    assert!(!observed_address_test_observe(
+        &mut swarm,
+        &mut votes,
+        pair[0].peer_id(),
+        replacement,
+        &first,
+        later
+    ));
+    assert_eq!(votes.pending[&first][&pair[0].peer_id()].first_seen, now);
+    let expired = now + OBSERVED_ADDRESS_VOTE_TTL;
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &pair[1], &first, expired
+    ));
+    assert_eq!(votes.pending[&first].len(), 1);
+    assert!(observed_address_test_observe(
+        &mut swarm,
+        &mut votes,
+        pair[0].peer_id(),
+        replacement,
+        &first,
+        expired
+    ));
+    assert_eq!(votes.admitted[&first].admitted_at, expired);
+}
+
+#[test]
+fn observed_address_pending_bounds_resist_one_identity_churn_and_recover() {
+    let mut swarm = observed_address_test_swarm();
+    let first = ObservedAddressTestReporter::new(&mut swarm, 0);
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    for port in 4000..4200 {
+        assert!(!observed_address_test_report(
+            &mut swarm,
+            &mut votes,
+            &first,
+            &observed_address_test_claim(port),
+            now
+        ));
+    }
+    assert_eq!(votes.pending.len(), OBSERVED_ADDRESS_CLAIMS_PER_PEER);
+    for id in 1..16 {
+        let reporter = ObservedAddressTestReporter::new(&mut swarm, id);
+        for slot in 0..OBSERVED_ADDRESS_CLAIMS_PER_PEER {
+            let claim =
+                observed_address_test_claim(5000 + id * OBSERVED_ADDRESS_CLAIMS_PER_PEER + slot);
+            assert!(!observed_address_test_report(
+                &mut swarm, &mut votes, &reporter, &claim, now
+            ));
+        }
+    }
+    assert_eq!(votes.pending.len(), OBSERVED_ADDRESS_PENDING_LIMIT);
+    let other = ObservedAddressTestReporter::new(&mut swarm, 100);
+    let fresh = observed_address_test_claim(6000);
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &other, &fresh, now
+    ));
+    assert!(!votes.pending.contains_key(&fresh));
+    let existing = observed_address_test_claim(4000);
+    assert!(observed_address_test_report(
+        &mut swarm, &mut votes, &other, &existing, now
+    ));
+    assert!(!observed_address_test_report(
+        &mut swarm,
+        &mut votes,
+        &other,
+        &fresh,
+        now + OBSERVED_ADDRESS_VOTE_TTL
+    ));
+    assert_eq!(votes.pending.len(), 1);
+    assert!(votes.pending.contains_key(&fresh));
+    assert_eq!(
+        votes.peer_usage(&other.peer_id()),
+        2,
+        "one immutable admission plus one pending vote"
+    );
+}
+
+#[test]
+fn observed_address_fixed_pair_cannot_fill_table_or_refund_by_reconnecting() {
+    let mut swarm = observed_address_test_swarm();
+    let mut pair = [
+        ObservedAddressTestReporter::new(&mut swarm, 0),
+        ObservedAddressTestReporter::new(&mut swarm, 1),
+    ];
+    let mut votes = ObservedAddressVotes::default();
+    let exclusions = PeerExclusions::default();
+    let metrics = isolated_test_metrics();
+    // Exercise the actual Identify caller for more than sixteen claims.
+    for port in 4000..4020 {
+        let claim = observed_address_test_claim(port);
+        for reporter in &pair {
+            identify_received(
+                &mut swarm,
+                &mut votes,
+                reporter.peer_id(),
+                reporter.connection_id,
+                observed_address_test_info(&reporter.keypair, &claim, Vec::new()),
+                &exclusions,
+                &metrics,
+            )
+            .unwrap();
+        }
+        assert_eq!(observed_address_test_has(&swarm, &claim), port < 4004);
+    }
+    assert_eq!(votes.admitted.len(), 4);
+    assert!(votes.pending.is_empty());
+    assert_eq!(swarm.external_addresses().count(), 4);
+    let receipts: Vec<_> = votes
+        .admitted
+        .iter()
+        .map(|(address, receipt)| (address.clone(), receipt.admitted_at, receipt.observers))
+        .collect();
+    for (_, _, witnesses) in &receipts {
+        for reporter in &pair {
+            assert!(witnesses.contains(&reporter.peer_id()));
+        }
+    }
+    let later = tokio::time::Instant::now() + OBSERVED_ADDRESS_VOTE_TTL;
+    for (slot, reporter) in pair.iter_mut().enumerate() {
+        observed_address_test_close(
+            &mut swarm,
+            reporter.peer_id(),
+            reporter.connection_id,
+            &reporter.endpoint,
+        );
+        reporter.connection_id = ConnectionId::new_unchecked(30_000 + slot);
+        reporter.endpoint = observed_address_test_connection(
+            &mut swarm,
+            reporter.peer_id(),
+            reporter.connection_id,
+            "/ip4/127.0.0.1/udp/3001/quic-v1",
+        );
+    }
+    for port in 4000..4020 {
+        for reporter in &pair {
+            assert!(!observed_address_test_report(
+                &mut swarm,
+                &mut votes,
+                reporter,
+                &observed_address_test_claim(port),
+                later
+            ));
+            assert_eq!(votes.peer_usage(&reporter.peer_id()), 4);
+        }
+    }
+    for (address, admitted_at, observers) in receipts {
+        assert_eq!(votes.admitted[&address].admitted_at, admitted_at);
+        assert_eq!(votes.admitted[&address].observers, observers);
+    }
+    assert_eq!(votes.admitted.len(), 4);
+    assert!(votes.pending.is_empty());
+}
+
+#[test]
+fn observed_address_fresh_pair_replaces_full_table_without_refunding_retired_receipt() {
+    let mut swarm = observed_address_test_swarm();
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let original = observed_address_test_fill(&mut swarm, &mut votes, 16, now);
+    let victim = observed_address_test_claim(4000);
+    let witnesses = votes.admitted[&victim].observers;
+    let fresh = [
+        ObservedAddressTestReporter::new(&mut swarm, 100),
+        ObservedAddressTestReporter::new(&mut swarm, 101),
+    ];
+    let candidate = observed_address_test_claim(6000);
+    let later = now + Duration::from_secs(1);
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &fresh[0], &candidate, later
+    ));
+    let update = votes.observe_at(
+        &swarm,
+        fresh[1].peer_id(),
+        fresh[1].connection_id,
+        &candidate,
+        later,
+    );
+    assert_eq!(update.remove, vec![victim.clone()]);
+    assert_eq!(update.add.as_ref(), Some(&candidate));
+    update.apply(&mut swarm);
+    assert_eq!(votes.admitted.len(), 16);
+    assert_eq!(votes.retired.len(), 1);
+    assert_eq!(swarm.external_addresses().count(), 16);
+    assert!(!observed_address_test_has(&swarm, &victim));
+    assert!(observed_address_test_has(&swarm, &candidate));
+    assert_eq!(votes.retired[0].admitted_at, now);
+    assert_eq!(votes.retired[0].observers, witnesses);
+    for reporter in &original[0] {
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 4);
+        assert!(!observed_address_test_report(
+            &mut swarm,
+            &mut votes,
+            reporter,
+            &observed_address_test_claim(6001),
+            later
+        ));
+    }
+    // At the original receipt boundary the old pair regains exactly that slot.
+    let boundary = now + OBSERVED_ADDRESS_ADMITTED_TTL;
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &original[0][0], &victim, boundary
+    ));
+    assert!(votes
+        .retired
+        .iter()
+        .all(|receipt| receipt.admitted_at != now));
+    assert_eq!(votes.peer_usage(&original[0][0].peer_id()), 4);
+    assert_eq!(votes.pending[&victim].len(), 1);
+    assert!(observed_address_test_report(
+        &mut swarm, &mut votes, &original[0][1], &victim, boundary
+    ));
+    assert_eq!(votes.admitted[&victim].admitted_at, boundary);
+}
+
+#[test]
+fn observed_address_evicted_real_address_restores_without_refunding_old_charges() {
+    let mut swarm = observed_address_test_swarm();
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let honest = [
+        ObservedAddressTestReporter::new(&mut swarm, 500),
+        ObservedAddressTestReporter::new(&mut swarm, 501),
+    ];
+    let real = observed_address_test_claim(4000);
+    observed_address_test_admit(&mut swarm, &mut votes, &honest, &real, now);
+    let original_witnesses = votes.admitted[&real].observers;
+    // The real address's dedicated pair has no other initial charges.
+    let mut filler_pairs = Vec::new();
+    for slot in 0..15 {
+        if slot % OBSERVED_ADDRESS_CLAIMS_PER_PEER == 0 {
+            filler_pairs.push([
+                ObservedAddressTestReporter::new(&mut swarm, slot * 2),
+                ObservedAddressTestReporter::new(&mut swarm, slot * 2 + 1),
+            ]);
+        }
+        observed_address_test_admit(
+            &mut swarm,
+            &mut votes,
+            filler_pairs.last().unwrap(),
+            &observed_address_test_claim(4001 + slot),
+            now + Duration::from_millis(1 + slot as u64),
+        );
+    }
+    assert_eq!(votes.admitted.len(), 16);
+    let malicious = [
+        ObservedAddressTestReporter::new(&mut swarm, 600),
+        ObservedAddressTestReporter::new(&mut swarm, 601),
+    ];
+    observed_address_test_admit(
+        &mut swarm,
+        &mut votes,
+        &malicious,
+        &observed_address_test_claim(6000),
+        now + Duration::from_secs(1),
+    );
+    assert!(!observed_address_test_has(&swarm, &real));
+    assert_eq!(votes.retired.len(), 1);
+    assert_eq!(votes.retired[0].admitted_at, now);
+    assert_eq!(votes.retired[0].observers, original_witnesses);
+    let restored_at = now + Duration::from_secs(2);
+    observed_address_test_admit(&mut swarm, &mut votes, &honest, &real, restored_at);
+    assert_eq!(votes.retired[0].admitted_at, now);
+    assert_eq!(votes.retired[0].observers, original_witnesses);
+    for reporter in &honest {
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 2);
+    }
+    for slot in 1..4 {
+        observed_address_test_admit(
+            &mut swarm,
+            &mut votes,
+            &malicious,
+            &observed_address_test_claim(6000 + slot),
+            now + Duration::from_secs(2 + slot as u64),
+        );
+        assert!(observed_address_test_has(&swarm, &real));
+        assert_eq!(votes.admitted[&real].admitted_at, restored_at);
+    }
+    let fifth = observed_address_test_claim(6004);
+    for reporter in &malicious {
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 4);
+        assert!(!observed_address_test_report(
+            &mut swarm,
+            &mut votes,
+            reporter,
+            &fifth,
+            now + Duration::from_secs(6)
+        ));
+    }
+    assert!(!votes.pending.contains_key(&fifth));
+    assert!(!observed_address_test_has(&swarm, &fifth));
+    assert_eq!(votes.admitted.len(), 16);
+    assert_eq!(votes.retired.len(), 5);
+    assert_eq!(votes.admitted.len() + votes.retired.len(), 21);
+    assert_eq!(swarm.external_addresses().count(), 16);
+    assert!(observed_address_test_has(&swarm, &real));
+    // Active repeats do not refresh the new receipt or the old charge.
+    let before_expiry = now + OBSERVED_ADDRESS_ADMITTED_TTL - Duration::from_secs(1);
+    for reporter in &honest {
+        assert!(!observed_address_test_report(
+            &mut swarm, &mut votes, reporter, &real, before_expiry
+        ));
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 2);
+    }
+    assert_eq!(votes.admitted[&real].admitted_at, restored_at);
+    assert_eq!(votes.admitted[&real].observers, original_witnesses);
+    assert_eq!(votes.retired[0].admitted_at, now);
+    assert_eq!(votes.retired[0].observers, original_witnesses);
+    // Only the original admission expires at its original boundary.
+    assert!(!observed_address_test_report(
+        &mut swarm,
+        &mut votes,
+        &honest[0],
+        &real,
+        now + OBSERVED_ADDRESS_ADMITTED_TTL
+    ));
+    for reporter in &honest {
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 1);
+    }
+    for reporter in &malicious {
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 4);
+    }
+    assert_eq!(votes.admitted[&real].admitted_at, restored_at);
+    assert_eq!(votes.retired.len(), 4);
+    assert_eq!(votes.admitted.len() + votes.retired.len(), 20);
+    assert!(observed_address_test_has(&swarm, &real));
+}
+
+#[test]
+fn observed_address_receipt_selects_only_two_live_witnesses_and_starts_new_clock() {
+    let mut swarm = observed_address_test_swarm();
+    let stale = ObservedAddressTestReporter::new(&mut swarm, 0);
+    let first = ObservedAddressTestReporter::new(&mut swarm, 1);
+    let second = ObservedAddressTestReporter::new(&mut swarm, 2);
+    let mut votes = ObservedAddressVotes::default();
+    let address = observed_address_test_claim(4000);
+    let now = tokio::time::Instant::now();
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &stale, &address, now
+    ));
+    observed_address_test_close(
+        &mut swarm,
+        stale.peer_id(),
+        stale.connection_id,
+        &stale.endpoint,
+    );
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &first, &address, now
+    ));
+    let admitted_at = now + OBSERVED_ADDRESS_VOTE_TTL - Duration::from_secs(1);
+    assert!(observed_address_test_report(
+        &mut swarm, &mut votes, &second, &address, admitted_at
+    ));
+    let receipt = &votes.admitted[&address];
+    assert_eq!(receipt.admitted_at, admitted_at);
+    assert!(receipt.observers.contains(&first.peer_id()));
+    assert!(receipt.observers.contains(&second.peer_id()));
+    assert_eq!(
+        votes.peer_usage(&stale.peer_id()),
+        0,
+        "an unselected stale voter is not an admission sponsor"
+    );
+    let witnesses = receipt.observers;
+    // Disconnecting selected witnesses does not revoke or refund their receipt.
+    observed_address_test_close(
+        &mut swarm,
+        first.peer_id(),
+        first.connection_id,
+        &first.endpoint,
+    );
+    observed_address_test_close(
+        &mut swarm,
+        second.peer_id(),
+        second.connection_id,
+        &second.endpoint,
+    );
+    let fresh = ObservedAddressTestReporter::new(&mut swarm, 3);
+    assert!(!observed_address_test_report(
+        &mut swarm,
+        &mut votes,
+        &fresh,
+        &address,
+        now + OBSERVED_ADDRESS_VOTE_TTL
+    ));
+    assert_eq!(votes.admitted[&address].admitted_at, admitted_at);
+    assert_eq!(votes.admitted[&address].observers, witnesses);
+    assert_eq!(votes.peer_usage(&first.peer_id()), 1);
+    assert_eq!(votes.peer_usage(&second.peer_id()), 1);
+    assert!(observed_address_test_has(&swarm, &address));
+}
+
+#[test]
+fn observed_address_history64_backpressures_without_forgetting_or_withdrawing() {
+    let mut swarm = observed_address_test_swarm();
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let pairs = observed_address_test_fill(&mut swarm, &mut votes, 64, now);
+    assert_eq!(votes.admitted.len(), 16);
+    assert_eq!(votes.retired.len(), 48);
+    assert_eq!(swarm.external_addresses().count(), 16);
+    for pair in &pairs {
+        for reporter in pair {
+            assert_eq!(votes.peer_usage(&reporter.peer_id()), 4);
+        }
+    }
+    let candidate = observed_address_test_claim(6000);
+    let later = now + Duration::from_secs(1);
+    let mut fresh = Vec::new();
+    for id in 100..109 {
+        let reporter = ObservedAddressTestReporter::new(&mut swarm, id);
+        let update = votes.observe_at(
+            &swarm,
+            reporter.peer_id(),
+            reporter.connection_id,
+            &candidate,
+            later,
+        );
+        assert!(
+            update.remove.is_empty(),
+            "backpressure cannot evict before a receipt fits"
+        );
+        assert!(update.add.is_none());
+        update.apply(&mut swarm);
+        fresh.push(reporter);
+    }
+    assert_eq!(votes.pending[&candidate].len(), 8);
+    assert_eq!(votes.peer_usage(&fresh[8].peer_id()), 0);
+    assert_eq!(votes.admitted.len() + votes.retired.len(), 64);
+    assert_eq!(votes.retired[0].admitted_at, now);
+    assert!(observed_address_test_has(
+        &swarm,
+        &observed_address_test_claim(4048)
+    ));
+    // The first exact one-hour boundary frees one receipt, not every receipt.
+    let boundary = now + OBSERVED_ADDRESS_ADMITTED_TTL;
+    let invalid = "/ip4/0.0.0.0/udp/6000/quic-v1".parse().unwrap();
+    let update = votes.observe_at(
+        &swarm,
+        fresh[0].peer_id(),
+        fresh[0].connection_id,
+        &invalid,
+        boundary,
+    );
+    assert!(update.remove.is_empty());
+    assert!(update.add.is_none());
+    assert_eq!(votes.admitted.len(), 16);
+    assert_eq!(
+        votes.retired.len(),
+        48,
+        "invalid input must not prune retired receipts either"
+    );
+    assert_eq!(votes.pending[&candidate].len(), 8);
+    assert_eq!(votes.retired[0].admitted_at, now);
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &fresh[0], &candidate, boundary
+    ));
+    assert_eq!(
+        votes.pending[&candidate].len(),
+        1,
+        "old pending votes expired independently"
+    );
+    assert!(observed_address_test_report(
+        &mut swarm, &mut votes, &fresh[1], &candidate, boundary
+    ));
+    assert_eq!(votes.admitted.len(), 16);
+    assert_eq!(votes.retired.len(), 48);
+    assert_eq!(votes.admitted.len() + votes.retired.len(), 64);
+    assert!(observed_address_test_has(&swarm, &candidate));
+    assert!(!observed_address_test_has(
+        &swarm,
+        &observed_address_test_claim(4048)
+    ));
+    assert!(votes
+        .retired
+        .iter()
+        .all(|receipt| receipt.admitted_at != now));
+}
+
+#[test]
+fn observed_address_expiry_validates_before_pruning_and_preserves_protected_addresses() {
+    let mut swarm = observed_address_test_swarm();
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let pairs = observed_address_test_fill(&mut swarm, &mut votes, 16, now);
+    let protected = observed_address_test_claim(7000);
+    let fresh = [
+        ObservedAddressTestReporter::new(&mut swarm, 100),
+        ObservedAddressTestReporter::new(&mut swarm, 101),
+    ];
+    // A pending claim becomes independently installed before corroboration.
+    let later = now + Duration::from_secs(1);
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &fresh[0], &protected, later
+    ));
+    swarm.add_external_address(protected.clone());
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &fresh[1], &protected, later
+    ));
+    assert!(!votes.pending.contains_key(&protected));
+    assert!(!votes.admitted.contains_key(&protected));
+    assert_eq!(votes.peer_usage(&fresh[0].peer_id()), 0);
+    let pending = observed_address_test_claim(7001);
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &fresh[0], &pending, later
+    ));
+    let unresolved_peer = PeerId::random();
+    let unresolved = ConnectionId::new_unchecked(30_000);
+    observed_address_test_connection(
+        &mut swarm, unresolved_peer, unresolved, "/dns4/localhost/udp/3000/quic-v1",
+    );
+    let closed = ObservedAddressTestReporter::new(&mut swarm, 102);
+    observed_address_test_close(
+        &mut swarm,
+        closed.peer_id(),
+        closed.connection_id,
+        &closed.endpoint,
+    );
+    let remote_peer = PeerId::random();
+    let remote = ConnectionId::new_unchecked(30_001);
+    observed_address_test_connection(
+        &mut swarm, remote_peer, remote, "/ip4/198.51.100.1/udp/3000/quic-v1",
+    );
+    let expired = now + OBSERVED_ADDRESS_ADMITTED_TTL + Duration::from_secs(1);
+    let invalid = "/ip4/0.0.0.0/udp/7002/quic-v1".parse().unwrap();
+    for (peer, connection, address) in [
+        (fresh[0].peer_id(), fresh[0].connection_id, &invalid),
+        (fresh[0].peer_id(), fresh[1].connection_id, &pending), // foreign exact CID
+        (
+            fresh[0].peer_id(),
+            ConnectionId::new_unchecked(99_999),
+            &pending,
+        ),
+        (unresolved_peer, unresolved, &pending),
+        (closed.peer_id(), closed.connection_id, &pending),
+        (remote_peer, remote, &pending), // public observer cannot sponsor loopback
+    ] {
+        let update = votes.observe_at(&swarm, peer, connection, address, expired);
+        assert!(update.remove.is_empty());
+        assert!(update.add.is_none());
+        assert_eq!(
+            votes.admitted.len(),
+            16,
+            "invalid input must not prune active receipts"
+        );
+        assert!(
+            votes.pending.contains_key(&pending),
+            "invalid input must not prune pending votes"
+        );
+        assert_eq!(swarm.external_addresses().count(), 17);
+    }
+    // Valid input with no quorum still withdraws all expired owned advertisements.
+    let update = votes.observe_at(
+        &swarm,
+        fresh[1].peer_id(),
+        fresh[1].connection_id,
+        &pending,
+        expired,
+    );
+    assert_eq!(update.remove.len(), 16);
+    assert!(update.add.is_none());
+    update.apply(&mut swarm);
+    assert!(votes.admitted.is_empty());
+    assert_eq!(votes.pending[&pending].len(), 1);
+    assert_eq!(swarm.external_addresses().count(), 1);
+    assert!(observed_address_test_has(&swarm, &protected));
+    // Protected ownership also survives replacement of another full table.
+    for (slot, pair) in pairs.iter().enumerate() {
+        for index in 0..4 {
+            observed_address_test_admit(
+                &mut swarm,
+                &mut votes,
+                pair,
+                &observed_address_test_claim(8000 + slot * 4 + index),
+                expired,
+            );
+        }
+    }
+    observed_address_test_admit(
+        &mut swarm,
+        &mut votes,
+        &fresh,
+        &observed_address_test_claim(9000),
+        expired,
+    );
+    assert_eq!(votes.admitted.len(), 16);
+    assert!(observed_address_test_has(&swarm, &protected));
+    assert_eq!(swarm.external_addresses().count(), 17);
+}
+
+#[test]
+fn observed_address_just_expired_current_claim_can_start_a_new_quorum() {
+    let mut swarm = observed_address_test_swarm();
+    let pair = [
+        ObservedAddressTestReporter::new(&mut swarm, 0),
+        ObservedAddressTestReporter::new(&mut swarm, 1),
+    ];
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let address = observed_address_test_claim(4000);
+    observed_address_test_admit(&mut swarm, &mut votes, &pair, &address, now);
+    let boundary = now + OBSERVED_ADDRESS_ADMITTED_TTL;
+    let update = votes.observe_at(
+        &swarm,
+        pair[0].peer_id(),
+        pair[0].connection_id,
+        &address,
+        boundary,
+    );
+    assert_eq!(update.remove, vec![address.clone()]);
+    assert!(update.add.is_none());
+    assert_eq!(
+        votes.pending[&address].len(),
+        1,
+        "pre-application swarm membership is not independent ownership"
+    );
+    update.apply(&mut swarm);
+    assert!(!observed_address_test_has(&swarm, &address));
+    assert!(observed_address_test_report(
+        &mut swarm, &mut votes, &pair[1], &address, boundary
+    ));
+    assert_eq!(votes.admitted[&address].admitted_at, boundary);
+}
+
+#[test]
+fn observed_address_independent_confirmation_or_expiry_preserves_receipt_not_ownership() {
+    let mut swarm = observed_address_test_swarm();
+    let pair = [
+        ObservedAddressTestReporter::new(&mut swarm, 0),
+        ObservedAddressTestReporter::new(&mut swarm, 1),
+    ];
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let confirmed = observed_address_test_claim(4000);
+    let externally_expired = observed_address_test_claim(4001);
+    observed_address_test_admit(&mut swarm, &mut votes, &pair, &confirmed, now);
+    observed_address_test_admit(&mut swarm, &mut votes, &pair, &externally_expired, now);
+    let witnesses = votes.admitted[&confirmed].observers;
+    // Same helper as ExternalAddrConfirmed: leave the independently owned ad.
+    votes.relinquish(&confirmed);
+    // Same helper as ExternalAddrExpired: the swarm has already removed the ad.
+    swarm.remove_external_address(&externally_expired);
+    votes.relinquish(&externally_expired);
+    votes.relinquish(&confirmed); // Duplicate notification is harmless.
+    assert!(votes.admitted.is_empty());
+    assert_eq!(votes.retired.len(), 2);
+    assert_eq!(votes.retired[0].admitted_at, now);
+    assert_eq!(votes.retired[0].observers, witnesses);
+    for reporter in &pair {
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 2);
+    }
+    assert!(!observed_address_test_has(&swarm, &externally_expired));
+    // External expiry does not reinstall automatically; a new quorum pays
+    // another charge while both original receipts keep their original clocks.
+    let readmitted_at = now + Duration::from_secs(1);
+    observed_address_test_admit(
+        &mut swarm, &mut votes, &pair, &externally_expired, readmitted_at,
+    );
+    for reporter in &pair {
+        assert_eq!(votes.peer_usage(&reporter.peer_id()), 3);
+    }
+    assert_eq!(votes.retired.len(), 2);
+    assert!(votes
+        .retired
+        .iter()
+        .all(|receipt| receipt.admitted_at == now));
+    let boundary = now + OBSERVED_ADDRESS_ADMITTED_TTL;
+    let update = votes.observe_at(
+        &swarm,
+        pair[0].peer_id(),
+        pair[0].connection_id,
+        &confirmed,
+        boundary,
+    );
+    assert!(
+        update.remove.is_empty(),
+        "independent confirmations must not later be withdrawn"
+    );
+    assert!(update.add.is_none());
+    update.apply(&mut swarm);
+    assert!(votes.retired.is_empty());
+    assert_eq!(votes.peer_usage(&pair[0].peer_id()), 1);
+    assert_eq!(swarm.external_addresses().count(), 2);
+    assert!(observed_address_test_has(&swarm, &confirmed));
+}
+
+#[test]
+fn observed_address_pending_active_and_retired_share_one_identity_budget() {
+    let mut swarm = observed_address_test_swarm();
+    let pair = [
+        ObservedAddressTestReporter::new(&mut swarm, 0),
+        ObservedAddressTestReporter::new(&mut swarm, 1),
+    ];
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let retired = observed_address_test_claim(4000);
+    let active = observed_address_test_claim(4001);
+    observed_address_test_admit(&mut swarm, &mut votes, &pair, &retired, now);
+    observed_address_test_admit(&mut swarm, &mut votes, &pair, &active, now);
+    swarm.remove_external_address(&retired);
+    votes.relinquish(&retired);
+    for port in 5000..5002 {
+        assert!(!observed_address_test_report(
+            &mut swarm,
+            &mut votes,
+            &pair[0],
+            &observed_address_test_claim(port),
+            now
+        ));
+    }
+    assert_eq!(votes.peer_usage(&pair[0].peer_id()), 4);
+    let fifth = observed_address_test_claim(5002);
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &pair[0], &fifth, now
+    ));
+    assert!(!votes.pending.contains_key(&fifth));
+    // Pending expiration refunds only the two pending votes, not either receipt.
+    let boundary = now + OBSERVED_ADDRESS_VOTE_TTL;
+    assert!(!observed_address_test_report(
+        &mut swarm, &mut votes, &pair[0], &fifth, boundary
+    ));
+    assert_eq!(votes.peer_usage(&pair[0].peer_id()), 3);
+    assert_eq!(votes.admitted.len(), 1);
+    assert_eq!(votes.retired.len(), 1);
+    assert!(observed_address_test_has(&swarm, &active));
+}
+
+#[test]
+fn observed_address_same_address_retirements_keep_each_charge_and_exhaust_quota() {
+    let mut swarm = observed_address_test_swarm();
+    let pair = [
+        ObservedAddressTestReporter::new(&mut swarm, 0),
+        ObservedAddressTestReporter::new(&mut swarm, 1),
+    ];
+    let mut votes = ObservedAddressVotes::default();
+    let now = tokio::time::Instant::now();
+    let address = observed_address_test_claim(4000);
+    for slot in 0..OBSERVED_ADDRESS_CLAIMS_PER_PEER {
+        observed_address_test_admit(
+            &mut swarm,
+            &mut votes,
+            &pair,
+            &address,
+            now + Duration::from_secs(slot as u64),
+        );
+        swarm.remove_external_address(&address);
+        votes.relinquish(&address);
+        assert!(votes.admitted.is_empty());
+        assert_eq!(votes.retired.len(), slot + 1);
+        for reporter in &pair {
+            assert_eq!(votes.peer_usage(&reporter.peer_id()), slot + 1);
+        }
+    }
+    let fifth_at = now + Duration::from_secs(OBSERVED_ADDRESS_CLAIMS_PER_PEER as u64);
+    for reporter in &pair {
+        assert!(!observed_address_test_report(
+            &mut swarm, &mut votes, reporter, &address, fifth_at
+        ));
+        assert_eq!(
+            votes.peer_usage(&reporter.peer_id()),
+            OBSERVED_ADDRESS_CLAIMS_PER_PEER
+        );
+    }
+    assert!(votes.pending.is_empty());
+    assert!(votes.admitted.is_empty());
+    assert!(!observed_address_test_has(&swarm, &address));
+    assert_eq!(votes.retired.len(), OBSERVED_ADDRESS_CLAIMS_PER_PEER);
+    for (slot, receipt) in votes.retired.iter().enumerate() {
+        assert_eq!(receipt.admitted_at, now + Duration::from_secs(slot as u64));
+        for reporter in &pair {
+            assert!(receipt.observers.contains(&reporter.peer_id()));
+        }
+    }
+}
+
+#[test]
+fn observed_address_identify_preserves_claimed_ip_evidence_and_remote_discovery() {
+    let mut swarm = observed_address_test_swarm();
+    let mut votes = ObservedAddressVotes::default();
+    let exclusions = PeerExclusions::new(crate::config::PeerExclusionConfig {
+        wrong_peer_id_ip_threshold: 3,
+        ..crate::config::PeerExclusionConfig::default()
+    });
+    for port in [4002, 4003] {
+        let address = format!("/ip4/203.0.113.10/udp/{port}/quic-v1")
+            .parse()
+            .unwrap();
+        assert!(exclusions
+            .record_wrong_peer_id(&address, Some(PeerId::random()), PeerId::random())
+            .ip_exclusion
+            .is_none());
+    }
+    let claimed = "/ip4/203.0.113.10/udp/4001/quic-v1".parse().unwrap();
+    let excluded: Multiaddr = "/ip4/198.51.100.30/udp/3000/quic-v1".parse().unwrap();
+    exclusions.record_permission_denied(&excluded);
+    let discovered: Multiaddr = "/ip4/198.51.100.20/udp/3000/quic-v1".parse().unwrap();
+    let dnsaddr: Multiaddr = "/dnsaddr/example.com".parse().unwrap();
+    let metrics = isolated_test_metrics();
+    let mut reporting_peers = Vec::new();
+    for id in 1..=2 {
+        let keypair = Keypair::generate_ed25519();
+        let peer = keypair.public().to_peer_id();
+        reporting_peers.push(peer);
+        let connection = ConnectionId::new_unchecked(id);
+        observed_address_test_connection(
+            &mut swarm, peer, connection, "/ip4/198.51.100.1/udp/3000/quic-v1",
+        );
+        // A rejected observation still carries ordinary peer discovery data.
+        let invalid = "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap();
+        identify_received(
+            &mut swarm,
+            &mut votes,
+            peer,
+            connection,
+            observed_address_test_info(
+                &keypair,
+                &invalid,
+                vec![discovered.clone(), excluded.clone(), dnsaddr.clone()],
+            ),
+            &exclusions,
+            &metrics,
+        )
+        .unwrap();
+        identify_received(
+            &mut swarm,
+            &mut votes,
+            peer,
+            connection,
+            observed_address_test_info(&keypair, &claimed, Vec::new()),
+            &exclusions,
+            &metrics,
+        )
+        .unwrap();
+    }
+    assert!(swarm
+        .external_addresses()
+        .any(|address| address == &claimed));
+    let mut discovered_peers = BTreeSet::new();
+    for bucket in swarm.behaviour_mut().kad.kbuckets() {
+        for entry in bucket.iter() {
+            let peer = entry.node.key.into_preimage();
+            if reporting_peers.contains(&peer) {
+                assert_eq!(entry.node.value.len(), 1);
+                assert_eq!(
+                    entry.node.value.first(),
+                    &discovered.clone().with_p2p(peer).unwrap(),
+                    "excluded endpoints and dnsaddr hints must not enter the routing table"
+                );
+                discovered_peers.insert(peer);
+            }
+        }
+    }
+    assert_eq!(discovered_peers.len(), 2);
+    let third = "/ip4/203.0.113.10/udp/4004/quic-v1".parse().unwrap();
+    assert!(
+        exclusions
+            .record_wrong_peer_id(&third, Some(PeerId::random()), PeerId::random())
+            .ip_exclusion
+            .is_some(),
+        "corroborating a claim must not erase the two earlier negative evidence events"
+    );
+}
+
+#[tokio::test]
+async fn observed_address_three_production_quic_swarms_replace_and_publish_loopback() {
+    fn production_swarm() -> Swarm<NockchainBehaviour> {
+        start_swarm(
+            LibP2PConfig {
+                identify_interval_secs: 1,
+                ..LibP2PConfig::default()
+            },
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            None,
+            connection_limits::ConnectionLimits::default(),
+            None,
+            PeerExclusions::default(),
+        )
+        .expect("production QUIC swarm should build")
+    }
+
+    // Thirty seconds is a failure deadline, not a sleep. Identify runs every second
+    // and this returns as soon as a downstream consumer receives the endpoint.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut subject = production_swarm();
+        let mut first = production_swarm();
+        let mut second = production_swarm();
+        let subject_peer = *subject.local_peer_id();
+        let observers = [*first.local_peer_id(), *second.local_peer_id()];
+        assert_ne!(observers[0], observers[1]);
+        let address = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = subject.select_next_some().await {
+                break address;
+            }
+        };
+        let mut votes = ObservedAddressVotes::default();
+        let primed_at = tokio::time::Instant::now() - Duration::from_secs(1);
+        // Controlled fixtures only prime capacity. The target claim below comes
+        // exclusively from real authenticated QUIC/Identify Received events.
+        let _priming_pairs = observed_address_test_fill(&mut subject, &mut votes, 16, primed_at);
+        let victim = observed_address_test_claim(4000);
+        let victim_witnesses = votes.admitted[&victim].observers;
+        assert_eq!(subject.external_addresses().count(), 16);
+        assert!(!observed_address_test_has(&subject, &address));
+        first
+            .dial(address.clone().with_p2p(subject_peer).unwrap())
+            .unwrap();
+        let mut identified = BTreeSet::new();
+        let mut second_started = false;
+        let exclusions = PeerExclusions::default();
+        let metrics = isolated_test_metrics();
+        loop {
+            let (actor, event) = tokio::select! {
+                event = subject.select_next_some() => (0, event),
+                event = first.select_next_some() => (1, event),
+                event = second.select_next_some() => (2, event),
+            };
+            match event {
+                SwarmEvent::Behaviour(NockchainEvent::Identify(Received {
+                    peer_id,
+                    connection_id,
+                    info,
+                })) if actor == 0 => {
+                    assert!(observers.contains(&peer_id));
+                    assert_eq!(info.public_key.to_peer_id(), peer_id);
+                    assert_eq!(info.observed_addr, address);
+                    let endpoint = subject
+                        .behaviour()
+                        .recovery
+                        .connection_endpoint(&peer_id, connection_id)
+                        .expect("genuine Identify must have exact live transport evidence");
+                    assert!(endpoint.ip().is_loopback());
+                    identified.insert(peer_id);
+                    identify_received(
+                        &mut subject, &mut votes, peer_id, connection_id, info, &exclusions,
+                        &metrics,
+                    )
+                    .unwrap();
+                    if identified.len() == 1 {
+                        assert!(!observed_address_test_has(&subject, &address));
+                        assert!(observed_address_test_has(&subject, &victim));
+                        if !second_started {
+                            second
+                                .dial(address.clone().with_p2p(subject_peer).unwrap())
+                                .unwrap();
+                            second_started = true;
+                        }
+                    } else {
+                        assert!(observed_address_test_has(&subject, &address));
+                        assert!(!observed_address_test_has(&subject, &victim));
+                        assert_eq!(votes.admitted.len(), 16);
+                        assert_eq!(votes.retired.len(), 1);
+                        assert_eq!(votes.retired[0].admitted_at, primed_at);
+                        assert_eq!(votes.retired[0].observers, victim_witnesses);
+                        assert_eq!(subject.external_addresses().count(), 16);
+                        let receipt = &votes.admitted[&address];
+                        assert!(
+                            receipt.admitted_at.duration_since(primed_at)
+                                < OBSERVED_ADDRESS_ADMITTED_TTL
+                        );
+                        for observer in observers {
+                            assert!(receipt.observers.contains(&observer));
+                        }
+                    }
+                }
+                SwarmEvent::Behaviour(NockchainEvent::Identify(Received {
+                    peer_id, info, ..
+                })) => {
+                    assert_eq!(peer_id, subject_peer);
+                    if info.listen_addrs.contains(&address) {
+                        assert_eq!(identified.len(), 2);
+                        assert!(observed_address_test_has(&subject, &address));
+                        assert!(!observed_address_test_has(&subject, &victim));
+                        assert_eq!(subject.external_addresses().count(), 16);
+                        break;
+                    }
+                }
+                SwarmEvent::ExternalAddrConfirmed { address }
+                | SwarmEvent::ExternalAddrExpired { address }
+                    if actor == 0 =>
+                {
+                    votes.relinquish(&address);
+                }
+                SwarmEvent::OutgoingConnectionError { error, .. } => {
+                    panic!("loopback production QUIC dial failed: {error}");
+                }
+                SwarmEvent::ConnectionClosed { .. } => {
+                    panic!("both authenticated observers must remain live");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("fresh shared-IP quorum must replace and advertise to a real consumer promptly");
+}
 
 async fn handle_effect(
     noun_slab: NounSlab,
@@ -107,15 +1543,16 @@ impl Default for DriverTranscript {
 }
 
 #[test]
-fn should_redial_initial_peers_requires_zero_connected_peers() {
+fn should_redial_initial_peers_recovers_named_seed_even_with_other_outbound_peers() {
     let initial_peers: Vec<Multiaddr> = vec![
         "/ip4/127.0.0.1/udp/30001/quic-v1/p2p/12D3KooWQb2uWwR7C3yFqKf4LxQ7s7rC5QZr9dA4zD4m6J7QfJ6A"
             .parse()
             .expect("valid multiaddr"),
     ];
 
-    assert!(should_redial_initial_peers(0, &initial_peers, &[]));
-    assert!(!should_redial_initial_peers(1, &initial_peers, &[]));
+    assert!(should_redial_initial_peers(0, true, &initial_peers, &[]));
+    assert!(should_redial_initial_peers(8, true, &initial_peers, &[]));
+    assert!(!should_redial_initial_peers(8, false, &initial_peers, &[]));
 }
 
 #[test]
@@ -127,12 +1564,1670 @@ fn should_redial_initial_peers_requires_seed_peers() {
     ];
 
     // No seed or backbone peers: nothing to redial.
-    assert!(!should_redial_initial_peers(0, &[], &[]));
-    // With seed peers and zero connected peers we redial regardless of how
+    assert!(!should_redial_initial_peers(0, false, &[], &[]));
+    // With seed peers and zero outbound peers we redial regardless of how
     // many attempts have already been made — we never give up.
-    assert!(should_redial_initial_peers(0, &initial_peers, &[]));
+    assert!(should_redial_initial_peers(0, true, &initial_peers, &[]));
     // Backbone peers alone are enough to trigger a redial.
-    assert!(should_redial_initial_peers(0, &[], &initial_peers));
+    assert!(should_redial_initial_peers(0, true, &[], &initial_peers));
+    // Public backbone addresses have no /p2p suffix. They still need periodic
+    // redial if a different set of outbound peers occupies the connections.
+    assert!(should_redial_initial_peers(8, true, &[], &initial_peers));
+}
+
+/// the redial backoff is a pure function of "did this tick redial".
+#[test]
+fn initial_peer_redial_backoff_grows_while_missing_and_resets_when_connected() {
+    let mut backoff = INITIAL_PEER_REDIAL_INTERVAL;
+    backoff = next_initial_peer_redial_backoff(backoff, true);
+    assert_eq!(backoff, INITIAL_PEER_REDIAL_INTERVAL * 2);
+    for _ in 0..16 {
+        backoff = next_initial_peer_redial_backoff(backoff, true);
+    }
+    assert_eq!(backoff, INITIAL_PEER_REDIAL_MAX_INTERVAL);
+    assert_eq!(
+        next_initial_peer_redial_backoff(backoff, true),
+        INITIAL_PEER_REDIAL_MAX_INTERVAL,
+        "the backoff holds at the cap while a configured peer stays missing"
+    );
+    assert_eq!(
+        next_initial_peer_redial_backoff(backoff, false),
+        INITIAL_PEER_REDIAL_INTERVAL,
+        "one tick with every configured peer connected resets straight to the base interval"
+    );
+    assert_eq!(
+        next_initial_peer_redial_backoff(INITIAL_PEER_REDIAL_INTERVAL * 8, false),
+        INITIAL_PEER_REDIAL_INTERVAL
+    );
+}
+
+fn configured_recovery_scheduler_test_swarm() -> Swarm<NockchainBehaviour> {
+    start_swarm(
+        LibP2PConfig {
+            handshake_timeout_secs: 1,
+            swarm_idle_timeout_secs: 2,
+            ..LibP2PConfig::default()
+        },
+        Keypair::generate_ed25519(),
+        Vec::new(),
+        None,
+        connection_limits::ConnectionLimits::default(),
+        None,
+        PeerExclusions::default(),
+    )
+    .expect("production swarm should build")
+}
+
+async fn configured_recovery_scheduler_test_endpoint() -> (tokio::net::UdpSocket, Multiaddr) {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = format!(
+        "/ip4/127.0.0.1/udp/{}/quic-v1",
+        socket.local_addr().unwrap().port(),
+    )
+    .parse()
+    .unwrap();
+    (socket, address)
+}
+
+async fn configured_recovery_scheduler_finish_failure(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    state: &P2PState,
+    initial: &[Multiaddr],
+    backbone: &[Multiaddr],
+) -> Multiaddr {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let SwarmEvent::OutgoingConnectionError {
+                connection_id,
+                peer_id,
+                error,
+                ..
+            } = swarm.select_next_some().await
+            {
+                assert!(matches!(&error, DialError::Transport(_)), "{error}");
+                let address = swarm
+                    .behaviour()
+                    .recovery
+                    .pending_address(connection_id)
+                    .expect("the failed transport dial must belong to configured recovery")
+                    .clone();
+                reclaim_recovery_slot(
+                    swarm, state, connection_id, peer_id, &error, initial, backbone,
+                );
+                assert!(!swarm.behaviour().recovery.pending_at(&address));
+                return address;
+            }
+        }
+    })
+    .await
+    .expect("the nonresponsive endpoint must finish its actual transport dial")
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_recovery_lost_last_path_preempts_hourly_background_backoff() {
+    use futures::FutureExt;
+
+    let (_healthy_socket, healthy) = configured_recovery_scheduler_test_endpoint().await;
+    let (_other_healthy_socket, other_healthy) =
+        configured_recovery_scheduler_test_endpoint().await;
+    let (_dead_socket, dead) = configured_recovery_scheduler_test_endpoint().await;
+    let backbone = vec![dead.clone(), healthy.clone(), other_healthy.clone()];
+    let mut swarm = configured_recovery_scheduler_test_swarm();
+    let mut state = P2PState::new(isolated_test_metrics(), 100);
+    let healthy_id = ConnectionId::new_unchecked(90_000);
+    let endpoint = libp2p::core::ConnectedPoint::Dialer {
+        address: healthy.clone(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    state.track_connection(
+        healthy_id,
+        PeerId::random(),
+        endpoint.get_remote_address(),
+        endpoint.clone(),
+    );
+    let other_healthy_id = ConnectionId::new_unchecked(90_001);
+    let other_endpoint = libp2p::core::ConnectedPoint::Dialer {
+        address: other_healthy.clone(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    state.track_connection(
+        other_healthy_id,
+        PeerId::random(),
+        other_endpoint.get_remote_address(),
+        other_endpoint.clone(),
+    );
+    let mut recovery = ConfiguredPeerRedial::new();
+    recovery.observe_path(&swarm, &state, &[], &backbone);
+    let mut cursor = 0;
+    let mut remaining = INITIAL_PEER_REDIAL_INTERVAL;
+    let epsilon = Duration::from_millis(1);
+
+    // A live path plus one permanently absent endpoint is not an all-connected
+    // pool. Real failed dials must keep their bounded background backoff.
+    for attempt in 0..12 {
+        tokio::time::advance(remaining - epsilon).await;
+        assert!(recovery.timer.tick().now_or_never().is_none());
+        assert_eq!(
+            swarm
+                .network_info()
+                .connection_counters()
+                .num_pending_outgoing(),
+            0,
+            "no dial before the armed deadline",
+        );
+        tokio::time::advance(epsilon).await;
+        recovery.timer.tick().await;
+        recovery
+            .redial(&mut swarm, &state, &[], &backbone, &mut cursor, 3)
+            .unwrap();
+        let retry_at = tokio::time::Instant::now() + recovery.backoff;
+        assert!(swarm.behaviour().recovery.pending_at(&dead));
+        assert!(!swarm.behaviour().recovery.pending_at(&healthy));
+        assert!(!swarm.behaviour().recovery.pending_at(&other_healthy));
+        assert_eq!(
+            swarm
+                .network_info()
+                .connection_counters()
+                .num_pending_outgoing(),
+            1,
+        );
+        assert_eq!(
+            configured_recovery_scheduler_finish_failure(&mut swarm, &state, &[], &backbone).await,
+            dead,
+        );
+        if attempt >= 9 {
+            assert_eq!(recovery.backoff, INITIAL_PEER_REDIAL_MAX_INTERVAL);
+        }
+        remaining = retry_at.saturating_duration_since(tokio::time::Instant::now());
+        assert!(remaining > epsilon);
+    }
+    assert_eq!(recovery.backoff, INITIAL_PEER_REDIAL_MAX_INTERVAL);
+
+    // Losing one configured path while another remains usable must not turn
+    // background pool maintenance into urgent recovery or reset its deadline.
+    state.lost_connection(other_healthy_id);
+    recovery.observe_path(&swarm, &state, &[], &backbone);
+    assert_eq!(recovery.backoff, INITIAL_PEER_REDIAL_MAX_INTERVAL);
+    tokio::time::advance(INITIAL_PEER_REDIAL_INTERVAL).await;
+    recovery.observe_path(&swarm, &state, &[], &backbone);
+    assert_eq!(recovery.backoff, INITIAL_PEER_REDIAL_MAX_INTERVAL);
+    assert!(recovery.timer.tick().now_or_never().is_none());
+
+    // A background attempt may already be in flight when the last live path
+    // disappears. Its real failure must not keep postponing urgent recovery.
+    assert!(dial_recovery_peer(&mut swarm, dead.clone()));
+
+    // The actual connection-loss path must preempt the outstanding hour-long
+    // deadline even though the permanently dead pool member never recovered.
+    state.lost_connection(healthy_id);
+    let lost_at = tokio::time::Instant::now();
+    recovery.observe_path(&swarm, &state, &[], &backbone);
+    assert_eq!(
+        configured_recovery_scheduler_finish_failure(&mut swarm, &state, &[], &backbone).await,
+        dead,
+    );
+    recovery.observe_path(&swarm, &state, &[], &backbone);
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        recovery.observe_path(&swarm, &state, &[], &backbone);
+        assert!(recovery.timer.tick().now_or_never().is_none());
+    }
+    let remaining = INITIAL_PEER_REDIAL_INTERVAL
+        .checked_sub(lost_at.elapsed())
+        .expect("the pending failed dial must leave time before the base deadline");
+    assert!(remaining > epsilon);
+    tokio::time::advance(remaining - epsilon).await;
+    assert!(recovery.timer.tick().now_or_never().is_none());
+    assert_eq!(
+        swarm
+            .network_info()
+            .connection_counters()
+            .num_pending_outgoing(),
+        0
+    );
+    tokio::time::advance(epsilon).await;
+    recovery.timer.tick().await;
+    recovery
+        .redial(&mut swarm, &state, &[], &backbone, &mut cursor, 3)
+        .unwrap();
+    let recovery_delay = tokio::time::Instant::now() - lost_at;
+    assert!(recovery_delay >= INITIAL_PEER_REDIAL_INTERVAL);
+    assert!(recovery_delay <= INITIAL_PEER_REDIAL_INTERVAL + epsilon);
+    assert!(swarm.behaviour().recovery.pending_at(&healthy));
+    assert!(swarm.behaviour().recovery.pending_at(&other_healthy));
+    assert!(swarm.behaviour().recovery.pending_at(&dead));
+    assert_eq!(
+        swarm
+            .network_info()
+            .connection_counters()
+            .num_pending_outgoing(),
+        3
+    );
+    assert!(
+        recovery.timer.tick().now_or_never().is_none(),
+        "no immediate retry storm"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_recovery_scheduler_keeps_dead_backbone_windows_fair() {
+    let mut sockets = Vec::new();
+    let mut backbone = Vec::new();
+    for _ in 0..3 {
+        let (socket, address) = configured_recovery_scheduler_test_endpoint().await;
+        sockets.push(socket);
+        backbone.push(address);
+    }
+    let mut swarm = configured_recovery_scheduler_test_swarm();
+    let state = P2PState::new(isolated_test_metrics(), 100);
+    let mut recovery = ConfiguredPeerRedial::new();
+    let mut cursor = 0;
+    let mut counts = [0; 3];
+    for round in 0..6 {
+        recovery.timer.tick().await;
+        recovery
+            .redial(&mut swarm, &state, &[], &backbone, &mut cursor, 1)
+            .unwrap();
+        assert_eq!(
+            swarm
+                .network_info()
+                .connection_counters()
+                .num_pending_outgoing(),
+            1
+        );
+        let failed =
+            configured_recovery_scheduler_finish_failure(&mut swarm, &state, &[], &backbone).await;
+        assert_eq!(failed, backbone[round % backbone.len()]);
+        counts[round % backbone.len()] += 1;
+        assert_eq!(
+            swarm
+                .network_info()
+                .connection_counters()
+                .num_pending_outgoing(),
+            0
+        );
+    }
+    assert_eq!(counts, [2, 2, 2]);
+    drop(sockets);
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_recovery_scheduler_respects_capacity_and_reserved_slots() {
+    use futures::FutureExt;
+
+    let (_socket, address) = configured_recovery_scheduler_test_endpoint().await;
+    let state = P2PState::new(isolated_test_metrics(), 100);
+    for reserved in [false, true] {
+        let mut swarm = configured_recovery_scheduler_test_swarm();
+        if reserved {
+            swarm
+                .behaviour_mut()
+                .recovery
+                .reserve(ConnectionId::new_unchecked(91_000), address.clone());
+        } else {
+            for index in 0..64 {
+                let pending: Multiaddr = format!("/ip4/127.0.0.1/udp/{}/quic-v1", 30_000 + index,)
+                    .parse()
+                    .unwrap();
+                assert!(swarm
+                    .behaviour_mut()
+                    .recovery
+                    .track(ConnectionId::new_unchecked(92_000 + index), pending,));
+            }
+            assert!(!swarm.behaviour().recovery.has_capacity());
+        }
+        let mut recovery = ConfiguredPeerRedial::new();
+        let mut cursor = 0;
+        recovery.timer.tick().await;
+        recovery
+            .redial(
+                &mut swarm,
+                &state,
+                &[],
+                std::slice::from_ref(&address),
+                &mut cursor,
+                1,
+            )
+            .unwrap();
+        assert!(!swarm.behaviour().recovery.pending_at(&address));
+        assert_eq!(
+            swarm
+                .network_info()
+                .connection_counters()
+                .num_pending_outgoing(),
+            0
+        );
+        assert_eq!(cursor, 0);
+        assert!(recovery.timer.tick().now_or_never().is_none());
+        assert_eq!(recovery.backoff, INITIAL_PEER_REDIAL_INTERVAL * 2);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_recovery_scheduler_empty_pool_never_dials() {
+    let mut swarm = configured_recovery_scheduler_test_swarm();
+    let state = P2PState::new(isolated_test_metrics(), 100);
+    let mut recovery = ConfiguredPeerRedial::new();
+    let mut cursor = 0;
+    for _ in 0..3 {
+        recovery.timer.tick().await;
+        recovery
+            .redial(&mut swarm, &state, &[], &[], &mut cursor, 0)
+            .unwrap();
+        assert_eq!(recovery.backoff, INITIAL_PEER_REDIAL_INTERVAL);
+        assert_eq!(
+            swarm
+                .network_info()
+                .connection_counters()
+                .num_pending_outgoing(),
+            0
+        );
+        assert_eq!(cursor, 0);
+    }
+}
+
+#[tokio::test]
+async fn configured_startup_dials_remain_pending_until_transport_completion() {
+    fn test_swarm(listeners: Vec<Multiaddr>) -> Swarm<NockchainBehaviour> {
+        let config = LibP2PConfig {
+            handshake_timeout_secs: 1,
+            swarm_idle_timeout_secs: 2,
+            ..LibP2PConfig::default()
+        };
+        start_swarm(
+            config,
+            Keypair::generate_ed25519(),
+            listeners,
+            None,
+            connection_limits::ConnectionLimits::default().with_max_pending_outgoing(Some(32)),
+            None,
+            PeerExclusions::default(),
+        )
+        .expect("production swarm should build")
+    }
+
+    async fn listen_at(swarm: &mut Swarm<NockchainBehaviour>, address: &Multiaddr) {
+        swarm
+            .listen_on(address.clone())
+            .expect("listener should bind");
+        loop {
+            if let SwarmEvent::NewListenAddr {
+                address: actual, ..
+            } = swarm.select_next_some().await
+            {
+                assert_eq!(&actual, address);
+                return;
+            }
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for named in [false, true] {
+            for initially_online in [false, true] {
+                // An ordinary UDP socket keeps an offline endpoint nonresponsive
+                // until the real transport reports its terminal handshake error.
+                let mut offline_socket =
+                    Some(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                let port = offline_socket.as_ref().unwrap().local_addr().unwrap().port();
+                let address: Multiaddr =
+                    format!("/ip4/127.0.0.1/udp/{port}/quic-v1").parse().unwrap();
+                let mut server = test_swarm(Vec::new());
+                let server_peer = *server.local_peer_id();
+                let configured = if named {
+                    address.clone().with_p2p(server_peer).unwrap()
+                } else {
+                    address.clone()
+                };
+                let mut client =
+                    test_swarm(vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()]);
+                let mut state = P2PState::new(isolated_test_metrics(), 100);
+                let mut cursor = 0;
+
+                if initially_online {
+                    drop(offline_socket.take());
+                    listen_at(&mut server, &address).await;
+                }
+                dial_peers(&mut client, std::slice::from_ref(&configured), true).unwrap();
+                // A overlapping backbone startup window must share the same
+                // admission state, just like an immediate recovery trigger.
+                dial_peers(&mut client, std::slice::from_ref(&configured), true).unwrap();
+                assert!(redial_initial_peers(
+                    &mut client,
+                    &state,
+                    std::slice::from_ref(&configured),
+                    &[],
+                    &mut cursor,
+                    0,
+                    "initial_configured_pending",
+                )
+                .unwrap());
+                assert!(client.behaviour().recovery.pending_at(&configured));
+                assert_eq!(
+                    client.network_info().connection_counters().num_pending_outgoing(),
+                    1,
+                );
+
+                if !initially_online {
+                    loop {
+                        if let SwarmEvent::OutgoingConnectionError {
+                            connection_id, peer_id, error, ..
+                        } = client.select_next_some().await
+                        {
+                            assert!(matches!(&error, DialError::Transport(_)));
+                            reclaim_recovery_slot(
+                                &mut client,
+                                &state,
+                                connection_id,
+                                peer_id,
+                                &error,
+                                std::slice::from_ref(&configured),
+                                &[],
+                            );
+                            break;
+                        }
+                    }
+                    assert!(!client.behaviour().recovery.pending_at(&configured));
+                    assert_eq!(
+                        client.network_info().connection_counters().num_pending_outgoing(),
+                        0,
+                    );
+                    // Restore the same socket endpoint and the same server key.
+                    drop(offline_socket.take());
+                    listen_at(&mut server, &address).await;
+                    assert!(redial_initial_peers(
+                        &mut client,
+                        &state,
+                        std::slice::from_ref(&configured),
+                        &[],
+                        &mut cursor,
+                        0,
+                        "configured_transport_completed",
+                    )
+                    .unwrap());
+                    assert!(client.behaviour().recovery.pending_at(&configured));
+                }
+
+                let mut client_connected = false;
+                let mut server_connected = false;
+                while !client_connected || !server_connected {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::ConnectionEstablished {
+                                connection_id, peer_id, endpoint, ..
+                            } => {
+                                assert!(!client_connected, "only one configured connection");
+                                assert_eq!(peer_id, server_peer);
+                                assert!(endpoint.is_dialer());
+                                assert!(client.behaviour_mut().recovery.finish(connection_id).is_some());
+                                state.track_connection(
+                                    connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone(),
+                                );
+                                client_connected = true;
+                            }
+                            SwarmEvent::OutgoingConnectionError { error, .. } => {
+                                panic!("restored configured endpoint failed: {error}");
+                            }
+                            _ => {}
+                        },
+                        event = server.select_next_some() => {
+                            if let SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = event {
+                                assert!(!server_connected, "server accepts only one connection");
+                                assert_eq!(peer_id, *client.local_peer_id());
+                                assert!(endpoint.is_listener());
+                                server_connected = true;
+                            }
+                        }
+                    }
+                }
+                assert!(!client.behaviour().recovery.pending_at(&configured));
+                assert_eq!(client.network_info().connection_counters().num_pending_outgoing(), 0);
+                assert_eq!(client.network_info().connection_counters().num_established_outgoing(), 1);
+                assert_eq!(server.network_info().connection_counters().num_established_incoming(), 1);
+                assert!(!redial_initial_peers(
+                    &mut client,
+                    &state,
+                    std::slice::from_ref(&configured),
+                    &[],
+                    &mut cursor,
+                    0,
+                    "configured_connected",
+                )
+                .unwrap());
+            }
+        }
+    })
+    .await
+    .expect("real configured startup and terminal retry must complete");
+}
+
+/// a `/dnsaddr` backbone without a `/p2p` suffix counts as connected once
+/// its dial is tracked, so `configured_peer_missing` clears and the backoff
+/// resets instead of ratcheting to the hourly cap.
+///
+/// libp2p reports an outbound connection under the address exactly as dialed
+/// (the DNS transport resolves internally), so the tracked endpoint of a
+/// dnsaddr dial is the unresolved `/dnsaddr/...` form. The live counterpart is
+/// `dns_backbone_dial_is_tracked_under_its_configured_address`.
+#[tokio::test]
+async fn dnsaddr_backbone_counts_as_connected_once_its_dial_is_tracked() {
+    let mut swarm = start_swarm(
+        LibP2PConfig::default(),
+        Keypair::generate_ed25519(),
+        Vec::new(),
+        None,
+        connection_limits::ConnectionLimits::default(),
+        None,
+        PeerExclusions::default(),
+    )
+    .expect("production swarm should build");
+    let mut state = P2PState::new(isolated_test_metrics(), 100);
+    let backbone: Multiaddr = "/dnsaddr/backbone.example".parse().unwrap();
+    let connection_id = ConnectionId::new_unchecked(7);
+    assert!(p2p_peer_id(&backbone).is_none());
+    assert!(!configured_peer_connected(&swarm, &state, &backbone));
+
+    let endpoint = libp2p::core::ConnectedPoint::Dialer {
+        address: backbone.clone(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    state.track_connection(
+        connection_id,
+        PeerId::random(),
+        endpoint.get_remote_address(),
+        endpoint.clone(),
+    );
+    assert!(state.has_outbound_connection_at_address(&backbone));
+    assert!(configured_peer_connected(&swarm, &state, &backbone));
+
+    let mut cursor = 0;
+    let redialed = redial_initial_peers(
+        &mut swarm,
+        &state,
+        &[],
+        std::slice::from_ref(&backbone),
+        &mut cursor,
+        1,
+        "dnsaddr_backbone_connected",
+    )
+    .expect("redial decision should succeed");
+    assert!(
+        !redialed,
+        "a connected dnsaddr backbone must not count as missing"
+    );
+    assert_eq!(
+        next_initial_peer_redial_backoff(INITIAL_PEER_REDIAL_MAX_INTERVAL, redialed),
+        INITIAL_PEER_REDIAL_INTERVAL,
+        "a tick that finds the backbone connected resets the backoff"
+    );
+
+    state.lost_connection(connection_id);
+    assert!(!configured_peer_connected(&swarm, &state, &backbone));
+    assert!(redial_initial_peers(
+        &mut swarm,
+        &state,
+        &[],
+        &[backbone],
+        &mut cursor,
+        1,
+        "dnsaddr_backbone_lost",
+    )
+    .expect("redial decision should succeed"));
+}
+
+/// DNS-named recovery keeps its configured alias while request accounting
+/// follows the numeric socket reported by the production QUIC transport.
+#[tokio::test]
+async fn dns_backbone_dial_is_tracked_under_its_configured_address() {
+    use libp2p::swarm::SwarmEvent;
+
+    fn test_swarm() -> Swarm<NockchainBehaviour> {
+        start_swarm(
+            LibP2PConfig::default(),
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            None,
+            connection_limits::ConnectionLimits::default(),
+            None,
+            PeerExclusions::default(),
+        )
+        .expect("production swarm should build")
+    }
+
+    let mut victim = test_swarm();
+    let mut backbone = test_swarm();
+    let backbone_addr = loop {
+        if let Some(SwarmEvent::NewListenAddr { address, .. }) = backbone.next().await {
+            break address;
+        }
+    };
+    let port = backbone_addr
+        .iter()
+        .find_map(|protocol| match protocol {
+            Protocol::Udp(port) => Some(port),
+            _ => None,
+        })
+        .expect("listen address should carry a UDP port");
+    let configured: Multiaddr = format!("/dns4/localhost/udp/{port}/quic-v1")
+        .parse()
+        .unwrap();
+    let mut state = P2PState::new(isolated_test_metrics(), 100);
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        victim
+            .dial(configured.clone())
+            .expect("dns dial should start");
+        loop {
+            tokio::select! {
+                event = victim.select_next_some() => match event {
+                    SwarmEvent::ConnectionEstablished {
+                        peer_id, connection_id, endpoint, ..
+                    } => {
+                        assert_eq!(
+                            endpoint.get_remote_address(),
+                            &configured,
+                            "libp2p reports the connection under the address as dialed"
+                        );
+                        state.track_connection(
+                            connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone()
+                        );
+                    }
+                    SwarmEvent::Behaviour(NockchainEvent::ConnectionAddressChanged {
+                        peer_id, connection_id, address: new,
+                    }) => {
+                        let numeric = crate::p2p_util::quic_socket_addr(&new)
+                            .expect("DNS transport must report the numeric QUIC socket");
+                        state.update_connection_address(connection_id, &new);
+                        let endpoints = victim.behaviour().recovery.request_endpoints(&peer_id)
+                            .expect("SDK selection candidates must have resolved endpoints");
+                        assert_eq!(endpoints.len(), 1);
+                        assert_eq!(endpoints[0].connection_id, connection_id);
+                        assert_eq!(endpoints[0].endpoint, numeric);
+                        assert_eq!(state.connection_address(connection_id), Some(new.clone()));
+                        assert_eq!(state.ip_bucket_connection_count(connection_id).unwrap().1, 1);
+                        state.update_connection_address(connection_id, &new);
+                        assert_eq!(state.ip_bucket_connection_count(connection_id).unwrap().1, 1);
+                        assert!(state.recovery_connection_to_reclaim(&[], std::slice::from_ref(&configured)).is_none());
+                        break;
+                    }
+                    SwarmEvent::OutgoingConnectionError { error, .. } => {
+                        panic!("dns dial to the local backbone failed: {error}");
+                    }
+                    _ => {}
+                },
+                _ = backbone.select_next_some() => {}
+            }
+        }
+    })
+    .await
+    .expect("dns-named backbone dial must complete before timeout");
+
+    assert!(state.has_outbound_connection_at_address(&configured));
+    assert!(configured_peer_connected(&victim, &state, &configured));
+    let mut cursor = 0;
+    assert!(!redial_initial_peers(
+        &mut victim,
+        &state,
+        &[],
+        &[configured],
+        &mut cursor,
+        1,
+        "live_dns_backbone_connected",
+    )
+    .expect("connected dns backbone should not redial"));
+}
+
+#[tokio::test]
+async fn unnamed_backbone_recovers_with_unrelated_outbound_connection() {
+    use libp2p::swarm::SwarmEvent;
+
+    fn test_swarm() -> Swarm<NockchainBehaviour> {
+        start_swarm(
+            LibP2PConfig::default(),
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            None,
+            connection_limits::ConnectionLimits::default(),
+            None,
+            PeerExclusions::default(),
+        )
+        .expect("production swarm should build")
+    }
+
+    async fn listen_address(swarm: &mut Swarm<NockchainBehaviour>) -> Multiaddr {
+        loop {
+            if let Some(SwarmEvent::NewListenAddr { address, .. }) = swarm.next().await {
+                return address;
+            }
+        }
+    }
+
+    let mut victim = test_swarm();
+    let mut unrelated = test_swarm();
+    let mut backbone = test_swarm();
+    let unrelated_addr = listen_address(&mut unrelated).await;
+    let backbone_addr = listen_address(&mut backbone).await;
+    let unrelated_id = *unrelated.local_peer_id();
+    let backbone_id = *backbone.local_peer_id();
+    let mut state = P2PState::new(isolated_test_metrics(), 100);
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        victim
+            .dial(unrelated_addr)
+            .expect("unrelated dial should start");
+        loop {
+            tokio::select! {
+                event = victim.select_next_some() => {
+                    if let SwarmEvent::ConnectionEstablished {
+                        peer_id, connection_id, endpoint, ..
+                    } = event {
+                        state.track_connection(
+                            connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone()
+                        );
+                        if peer_id == unrelated_id { break; }
+                    }
+                }
+                _ = unrelated.select_next_some() => {}
+            }
+        }
+        assert_eq!(state.outbound_peer_count(), 1);
+        assert!(!state.has_outbound_connection_at_address(&backbone_addr));
+
+        let mut cursor = 0;
+        assert!(redial_initial_peers(
+            &mut victim,
+            &state,
+            &[],
+            std::slice::from_ref(&backbone_addr),
+            &mut cursor,
+            1,
+            "live_unnamed_backbone_recovery"
+        )
+        .expect("backbone redial should start"));
+        loop {
+            tokio::select! {
+                event = victim.select_next_some() => {
+                    if let SwarmEvent::ConnectionEstablished {
+                        peer_id, connection_id, endpoint, ..
+                    } = event {
+                        state.track_connection(
+                            connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone()
+                        );
+                        if peer_id == backbone_id { break; }
+                    }
+                }
+                _ = unrelated.select_next_some() => {}
+                _ = backbone.select_next_some() => {}
+            }
+        }
+        assert_eq!(state.outbound_peer_count(), 2);
+        assert!(state.has_outbound_connection_at_address(&backbone_addr));
+        assert!(!redial_initial_peers(
+            &mut victim,
+            &state,
+            &[],
+            &[backbone_addr],
+            &mut cursor,
+            1,
+            "live_unnamed_backbone_recovery"
+        )
+        .expect("connected backbone should not redial"));
+    })
+    .await
+    .expect("real swarm recovery must complete before timeout");
+}
+
+async fn assert_configured_recovery_reclaims_slot(total_limit: bool) {
+    fn test_swarm(limits: connection_limits::ConnectionLimits) -> Swarm<NockchainBehaviour> {
+        start_swarm(
+            LibP2PConfig::default(),
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            None,
+            limits,
+            None,
+            PeerExclusions::default(),
+        )
+        .expect("production swarm should build")
+    }
+    async fn listen(swarm: &mut Swarm<NockchainBehaviour>) -> Multiaddr {
+        loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+                return address;
+            }
+        }
+    }
+    let limits = if total_limit {
+        connection_limits::ConnectionLimits::default().with_max_established(Some(1))
+    } else {
+        connection_limits::ConnectionLimits::default().with_max_established_outgoing(Some(1))
+    };
+    let mut victim = test_swarm(limits);
+    let mut unrelated = test_swarm(connection_limits::ConnectionLimits::default());
+    let mut recovery = test_swarm(connection_limits::ConnectionLimits::default());
+    let unrelated_address = listen(&mut unrelated).await;
+    let recovery_address = listen(&mut recovery).await;
+    let recovery_id = *recovery.local_peer_id();
+    let mut state = P2PState::new(isolated_test_metrics(), 100);
+    let configured = vec![recovery_address.clone()];
+    victim.dial(unrelated_address).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut attempted = false;
+        let mut reclaimed = false;
+        loop {
+            tokio::select! {
+                event = victim.select_next_some() => match event {
+                    SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                        victim.behaviour_mut().recovery.finish(connection_id);
+                        state.track_connection(connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone());
+                        if peer_id == recovery_id {
+                            assert!(reclaimed, "the existing slot must actually be reclaimed");
+                            assert_eq!(state.outbound_peer_count(), 1);
+                            break;
+                        }
+                        if !attempted {
+                            attempted = true;
+                            state.record_request_success(peer_id);
+                            assert!(state.try_admit_inbound_req_res(peer_id, 4));
+                            let mut cursor = 0;
+                            redial_initial_peers(&mut victim, &state, &configured, &[], &mut cursor, 0, "test").unwrap();
+                        }
+                    }
+                    SwarmEvent::OutgoingConnectionError { connection_id, peer_id, error, .. } => {
+                        reclaim_recovery_slot(&mut victim, &state, connection_id, peer_id, &error, &configured, &[]);
+                    }
+                    SwarmEvent::ConnectionClosed { connection_id, .. } => {
+                        state.lost_connection(connection_id);
+                        if let Some(address) = victim.behaviour_mut().recovery.closed(connection_id) {
+                            reclaimed = true;
+                            dial_recovery_peer(&mut victim, address);
+                        }
+                    }
+                    _ => {}
+                },
+                _ = unrelated.select_next_some() => {},
+                _ = recovery.select_next_some() => {},
+            }
+        }
+    }).await.expect("configured endpoint must recover without unrelated peer cooperation");
+}
+
+#[tokio::test]
+async fn configured_recovery_reclaims_an_exhausted_outbound_slot() {
+    assert_configured_recovery_reclaims_slot(false).await;
+}
+
+#[tokio::test]
+async fn configured_recovery_reclaims_exhausted_total_capacity() {
+    assert_configured_recovery_reclaims_slot(true).await;
+}
+
+#[test]
+fn configured_recovery_preserves_configured_and_recently_useful_connections() {
+    let mut state = P2PState::new(isolated_test_metrics(), 100);
+    let trusted = PeerId::random();
+    let useful = PeerId::random();
+    let idle = PeerId::random();
+    let mut configured = Vec::new();
+    for (number, peer) in [(1, trusted), (2, useful), (3, idle)] {
+        let address: Multiaddr = format!("/ip4/127.0.0.1/udp/{}/quic-v1", 3000 + number)
+            .parse()
+            .unwrap();
+        if peer == trusted {
+            configured.push(address.clone());
+        }
+        let endpoint = libp2p::core::ConnectedPoint::Dialer {
+            address: address.clone(),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        state.track_connection(
+            ConnectionId::new_unchecked(number),
+            peer,
+            &address,
+            endpoint,
+        );
+    }
+    state.track_block_id_str_and_peer("accepted".to_owned(), useful);
+    state.validate_and_untrack_block_sources("accepted".to_owned());
+    state.record_accepted_chain_progress("accepted", 1);
+    assert_eq!(
+        state.recovery_connection_to_reclaim(&configured, &[]),
+        Some(ConnectionId::new_unchecked(3))
+    );
+    state.lost_connection(ConnectionId::new_unchecked(3));
+    assert_eq!(state.recovery_connection_to_reclaim(&configured, &[]), None);
+}
+
+#[tokio::test]
+async fn configured_recovery_preserves_other_peers_on_per_peer_denial() {
+    fn test_swarm(per_peer: Option<u32>) -> Swarm<NockchainBehaviour> {
+        start_swarm(
+            LibP2PConfig::default(),
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            None,
+            connection_limits::ConnectionLimits::default()
+                .with_max_established_per_peer(per_peer)
+                .with_max_established_outgoing(Some(4))
+                .with_max_established(Some(8)),
+            None,
+            PeerExclusions::default(),
+        )
+        .expect("production swarm should build")
+    }
+    async fn listen(swarm: &mut Swarm<NockchainBehaviour>) -> Multiaddr {
+        loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+                return address;
+            }
+        }
+    }
+    let mut victim = test_swarm(Some(1));
+    let mut target = test_swarm(None);
+    let mut other = test_swarm(None);
+    let victim_address = listen(&mut victim).await;
+    let target_address = listen(&mut target).await;
+    let other_address = listen(&mut other).await;
+    let target_id = *target.local_peer_id();
+    let other_id = *other.local_peer_id();
+    let mut state = P2PState::new(isolated_test_metrics(), 100);
+    target.dial(victim_address).unwrap();
+    victim.dial(other_address).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut attempted = false;
+        loop {
+            tokio::select! {
+                event = victim.select_next_some() => match event {
+                    SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                        state.track_connection(connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone());
+                        if !attempted && victim.is_connected(&target_id) && victim.is_connected(&other_id) {
+                            attempted = true;
+                            dial_recovery_peer(&mut victim, target_address.clone());
+                        }
+                    }
+                    SwarmEvent::OutgoingConnectionError { connection_id, peer_id, error, .. } => {
+                        assert_eq!(peer_id, Some(target_id));
+                        assert!(matches!(&error, DialError::Denied { cause }
+                            if cause.downcast_ref::<connection_limits::Exceeded>().is_some()));
+                        reclaim_recovery_slot(&mut victim, &state, connection_id, peer_id, &error,
+                            std::slice::from_ref(&target_address), &[]);
+                        assert!(!victim.behaviour_mut().recovery.reserved(), "another peer cannot relieve the target's per-peer limit");
+                        assert!(victim.is_connected(&other_id));
+                        assert_eq!(victim.network_info().connection_counters().num_established_outgoing(), 1);
+                        assert_eq!(victim.network_info().connection_counters().num_established(), 2);
+                        break;
+                    }
+                    SwarmEvent::ConnectionClosed { connection_id, peer_id, .. } => {
+                        state.lost_connection(connection_id);
+                        panic!("existing connection {peer_id} must not be reclaimed");
+                    }
+                    _ => {}
+                },
+                _ = target.select_next_some() => {},
+                _ = other.select_next_some() => {},
+            }
+        }
+    }).await.expect("alternate unnamed endpoint should produce the per-peer denial");
+}
+
+#[tokio::test]
+async fn configured_recovery_admission_rotates_and_deduplicates_pending_endpoints() {
+    // Real, non-responding UDP endpoints give each configured dial its normal
+    // transport lifecycle without racing other listeners or freeing slots early.
+    let mut sockets = Vec::new();
+    let mut addresses = Vec::new();
+    for _ in 0..130 {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        addresses.push(
+            format!("/ip4/127.0.0.1/udp/{port}/quic-v1")
+                .parse::<Multiaddr>()
+                .unwrap(),
+        );
+        sockets.push(socket);
+    }
+    let (initial, backbone) = addresses.split_at(65);
+    let state = P2PState::new(isolated_test_metrics(), 100);
+    for pending_limit in [32, 128] {
+        let config = LibP2PConfig {
+            handshake_timeout_secs: 1,
+            swarm_idle_timeout_secs: 2,
+            ..LibP2PConfig::default()
+        };
+        let mut swarm = start_swarm(
+            config,
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            None,
+            connection_limits::ConnectionLimits::default()
+                .with_max_pending_outgoing(Some(pending_limit)),
+            None,
+            PeerExclusions::default(),
+        )
+        .unwrap();
+        let admitted = pending_limit.min(64);
+        let rounds = if pending_limit == 32 { 5 } else { 3 };
+        let mut cursor = 0;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            for round in 0..rounds {
+                redial_initial_peers(
+                    &mut swarm, &state, initial, backbone, &mut cursor, 65, "test",
+                )
+                .unwrap();
+                assert_eq!(
+                    swarm
+                        .network_info()
+                        .connection_counters()
+                        .num_pending_outgoing(),
+                    admitted
+                );
+                redial_initial_peers(
+                    &mut swarm, &state, initial, backbone, &mut cursor, 65, "test",
+                )
+                .unwrap();
+                assert_eq!(
+                    swarm
+                        .network_info()
+                        .connection_counters()
+                        .num_pending_outgoing(),
+                    admitted
+                );
+                if round == rounds - 1 {
+                    assert!(swarm.behaviour().recovery.pending_at(&initial[64]));
+                    assert!(swarm.behaviour().recovery.pending_at(&backbone[64]));
+                    break;
+                }
+                for _ in 0..admitted {
+                    loop {
+                        if let SwarmEvent::OutgoingConnectionError { connection_id, .. } =
+                            swarm.select_next_some().await
+                        {
+                            swarm.behaviour_mut().recovery.finish(connection_id);
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("both configured list tails must be admitted after bounded transport completions");
+    }
+    drop(sockets);
+}
+
+#[tokio::test]
+async fn configured_transport_outage_keeps_retry_admissible() {
+    for case in [
+        "initial", "backbone", "unnamed", "outer_timeout", "discovery", "alternate",
+        "other_identity",
+    ] {
+        let mut config = LibP2PConfig::default();
+        if case == "outer_timeout" {
+            config.handshake_timeout_secs = 20;
+            config.swarm_idle_timeout_secs = 1;
+        } else {
+            config.handshake_timeout_secs = 1;
+        }
+        let exclusions = PeerExclusions::default();
+        let metrics = isolated_test_metrics();
+        let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+        let keypair = Keypair::generate_ed25519();
+        let peer = keypair.public().to_peer_id();
+        // Keep the endpoint allocated but non-responsive until the real QUIC
+        // dial completes, then serve that same endpoint and identity.
+        let offline = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = loopback_quic_addr_with_port(offline.local_addr().unwrap().port());
+        let alternate = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let alternate_address =
+            loopback_quic_addr_with_port(alternate.local_addr().unwrap().port());
+        let intended = match case {
+            "alternate" => alternate_address.with_p2p(peer).unwrap(),
+            "other_identity" => address.clone().with_p2p(PeerId::random()).unwrap(),
+            "unnamed" => address.clone(),
+            _ => address.clone().with_p2p(peer).unwrap(),
+        };
+        let initial = if matches!(case, "backbone" | "discovery") {
+            Vec::new()
+        } else {
+            vec![intended.clone()]
+        };
+        let backbone = if case == "backbone" {
+            vec![intended]
+        } else {
+            Vec::new()
+        };
+        let dial_address = if case == "unnamed" {
+            address.clone()
+        } else {
+            address.clone().with_p2p(peer).unwrap()
+        };
+        let mut client = start_swarm(
+            config.clone(),
+            Keypair::generate_ed25519(),
+            Vec::new(),
+            None,
+            connection_limits::ConnectionLimits::default(),
+            None,
+            exclusions.clone(),
+        )
+        .unwrap();
+        let retry_admissible = matches!(case, "initial" | "backbone" | "unnamed" | "outer_timeout");
+        assert!(dial_recovery_peer(&mut client, dial_address.clone()));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let SwarmEvent::OutgoingConnectionError {
+                    connection_id,
+                    peer_id,
+                    error,
+                    ..
+                } = client.select_next_some().await
+                {
+                    assert!(matches!(&error, DialError::Transport(_)), "{case}: {error}");
+                    reclaim_recovery_slot(
+                        &mut client,
+                        &*state.lock().await,
+                        connection_id,
+                        peer_id,
+                        &error,
+                        &initial,
+                        &backbone,
+                    );
+                    handle_outgoing_connection_error(
+                        &mut client, &state, &exclusions, &metrics, error, peer_id, &initial,
+                        &backbone,
+                    )
+                    .await;
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the allocated non-responsive endpoint must finish its dial");
+        assert_eq!(
+            exclusions.is_address_excluded(&dial_address, p2p_peer_id(&dial_address)),
+            !retry_admissible,
+            "{case}",
+        );
+        assert_eq!(
+            metrics.address_cooldowns_created.fetch_add(0),
+            usize::from(!retry_admissible)
+        );
+        if !retry_admissible {
+            assert!(
+                matches!(
+                    client.dial(dial_address.clone()),
+                    Err(DialError::Denied { .. })
+                ),
+                "{case}"
+            );
+        } else {
+            drop(offline);
+            let mut server = start_swarm(
+                config,
+                keypair,
+                vec![address.clone()],
+                None,
+                connection_limits::ConnectionLimits::default(),
+                None,
+                PeerExclusions::default(),
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let SwarmEvent::NewListenAddr { .. } = server.select_next_some().await {
+                        break;
+                    }
+                }
+                client
+                    .dial(dial_address.clone())
+                    .expect("an ordinary configured outage must not deny a fresh dial");
+                loop {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                                assert_eq!(peer_id, peer);
+                                break;
+                            }
+                            SwarmEvent::OutgoingConnectionError { error, .. } => {
+                                panic!("{case}: the restored endpoint must connect: {error}");
+                            }
+                            _ => {}
+                        },
+                        _ = server.select_next_some() => {}
+                    }
+                }
+            })
+            .await
+            .expect("the fresh configured retry must reach the restored peer");
+        }
+        let ip = address.ip_addr().unwrap();
+        assert_eq!(
+            exclusions
+                .record_kad_cardinality(ip, usize::MAX, usize::MAX)
+                .is_some(),
+            !retry_admissible,
+            "configured outages must not supply corroborating IP failure evidence: {case}",
+        );
+        if retry_admissible {
+            // Other observed behavior still excludes the IP, including its
+            // configured endpoint; configuration is not an admission bypass.
+            exclusions.record_wrong_peer_id(&address, Some(PeerId::random()), PeerId::random());
+            assert!(exclusions
+                .record_kad_cardinality(ip, usize::MAX, usize::MAX)
+                .is_some());
+            assert!(matches!(
+                client.dial(dial_address),
+                Err(DialError::Denied { .. })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn configured_transport_penalties_still_deny_retry() {
+    use libp2p::core::transport::TransportError;
+
+    for case in ["permission", "permission_wrapped", "invalid", "unsupported", "unknown"] {
+        let exclusions = PeerExclusions::default();
+        let metrics = isolated_test_metrics();
+        let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+        let mut client = start_swarm(
+            LibP2PConfig::default(),
+            Keypair::generate_ed25519(),
+            Vec::new(),
+            None,
+            connection_limits::ConnectionLimits::default(),
+            None,
+            exclusions.clone(),
+        )
+        .unwrap();
+        let peer = PeerId::random();
+        let address = loopback_quic_addr_with_port(36048).with_p2p(peer).unwrap();
+        let error = if case == "unsupported" {
+            TransportError::MultiaddrNotSupported(address.clone())
+        } else if case == "permission_wrapped" {
+            TransportError::Other(std::io::Error::other(libp2p::quic::Error::Io(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "egress denied"),
+            )))
+        } else {
+            TransportError::Other(std::io::Error::new(
+                match case {
+                    "permission" => std::io::ErrorKind::PermissionDenied,
+                    "invalid" => std::io::ErrorKind::InvalidData,
+                    _ => std::io::ErrorKind::Other,
+                },
+                "dial failed",
+            ))
+        };
+        handle_outgoing_connection_error(
+            &mut client,
+            &state,
+            &exclusions,
+            &metrics,
+            DialError::Transport(vec![(address.clone(), error)]),
+            Some(peer),
+            std::slice::from_ref(&address),
+            &[],
+        )
+        .await;
+        assert!(
+            exclusions.is_address_excluded(&address, Some(peer)),
+            "{case}"
+        );
+        assert!(
+            !exclusions.is_ip_excluded(&address.ip_addr().unwrap()),
+            "{case}"
+        );
+        assert_eq!(metrics.address_cooldowns_created.fetch_add(0), 1);
+        assert!(
+            matches!(client.dial(address.clone()), Err(DialError::Denied { .. })),
+            "{case}"
+        );
+        let after_permission_cooldown = Instant::now()
+            + Duration::from_secs(
+                crate::config::PeerExclusionConfig::default().permission_denied_cooldown_secs + 1,
+            );
+        assert_eq!(
+            exclusions.is_address_excluded_at(&address, Some(peer), after_permission_cooldown),
+            !case.starts_with("permission"),
+            "PermissionDenied must retain its own shorter cooldown: {case}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_ping_outages_preserve_retry_and_semantic_penalties() {
+    for dns in [false, true] {
+        for case in [
+            "timeout", "reset", "permission", "invalid", "unsupported", "unknown", "alternate",
+        ] {
+            let exclusions = PeerExclusions::default();
+            let metrics = isolated_test_metrics();
+            let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+            let mut client = start_swarm(
+                LibP2PConfig::default(),
+                Keypair::generate_ed25519(),
+                Vec::new(),
+                None,
+                connection_limits::ConnectionLimits::default(),
+                None,
+                exclusions.clone(),
+            )
+            .unwrap();
+            let mut server = start_swarm(
+                LibP2PConfig::default(),
+                Keypair::generate_ed25519(),
+                vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+                None,
+                connection_limits::ConnectionLimits::default(),
+                None,
+                PeerExclusions::default(),
+            )
+            .unwrap();
+            let peer = *server.local_peer_id();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let numeric = loop {
+                    if let SwarmEvent::NewListenAddr { address, .. } = server.select_next_some().await {
+                        break address;
+                    }
+                };
+                let port = quic_socket_addr(&numeric).unwrap().port();
+                let original = if dns {
+                    format!("/dns4/localhost/udp/{port}/quic-v1").parse::<Multiaddr>().unwrap()
+                } else {
+                    numeric.clone().with_p2p(peer).unwrap()
+                };
+                let configured = if case == "alternate" {
+                    loopback_quic_addr_with_port(if port == u16::MAX { port - 1 } else { port + 1 })
+                        .with_p2p(peer).unwrap()
+                } else {
+                    original.clone()
+                };
+                client.dial(original.clone()).unwrap();
+                let connection = loop {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                                state.lock().await.track_connection(
+                                    connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone(),
+                                );
+                                if !dns { break connection_id; }
+                            }
+                            SwarmEvent::Behaviour(NockchainEvent::ConnectionAddressChanged {
+                                connection_id, address, ..
+                            }) => {
+                                state.lock().await.update_connection_address(connection_id, &address);
+                                if dns { break connection_id; }
+                            }
+                            SwarmEvent::OutgoingConnectionError { error, .. } => panic!("{error}"),
+                            _ => {}
+                        },
+                        _ = server.select_next_some() => {}
+                    }
+                };
+                assert!(state.lock().await.has_outbound_connection_at_address(&original));
+                let error = match case {
+                    "timeout" | "alternate" => ping::Failure::Timeout,
+                    "unsupported" => ping::Failure::Unsupported,
+                    _ => ping::Failure::Other {
+                        error: Box::new(std::io::Error::new(match case {
+                            "reset" => std::io::ErrorKind::ConnectionReset,
+                            "permission" => std::io::ErrorKind::PermissionDenied,
+                            "invalid" => std::io::ErrorKind::InvalidData,
+                            _ => std::io::ErrorKind::Other,
+                        }, "ping failed")),
+                    },
+                };
+                handle_ping_event(
+                    &mut client, &state, &exclusions, &metrics,
+                    ping::Event { peer, connection, result: Err(error) },
+                    2, &[], std::slice::from_ref(&configured),
+                ).await;
+                let outage = matches!(case, "timeout" | "reset");
+                assert_eq!(
+                    exclusions.is_address_excluded(&numeric, Some(peer)), !outage,
+                    "{case}, DNS={dns}",
+                );
+                assert!(client.is_connected(&peer), "one failure must retain the connection");
+                assert_eq!(metrics.address_cooldowns_created.fetch_add(0), usize::from(!outage));
+                assert_eq!(
+                    exclusions.record_kad_cardinality(
+                        numeric.ip_addr().unwrap(), usize::MAX, usize::MAX,
+                    ).is_some(), !outage,
+                    "{case}, DNS={dns}",
+                );
+                if !outage {
+                    assert!(matches!(
+                        client.dial(numeric.clone().with_p2p(peer).unwrap()),
+                        Err(DialError::Denied { .. }),
+                    ));
+                    return;
+                }
+                handle_ping_event(
+                    &mut client, &state, &exclusions, &metrics,
+                    ping::Event { peer, connection, result: Err(ping::Failure::Timeout) },
+                    2, &[], std::slice::from_ref(&configured),
+                ).await;
+                loop {
+                    tokio::select! {
+                        event = client.select_next_some() => if let SwarmEvent::ConnectionClosed {
+                            connection_id, ..
+                        } = event {
+                            assert_eq!(connection_id, connection);
+                            state.lock().await.lost_connection(connection_id);
+                            break;
+                        },
+                        _ = server.select_next_some() => {}
+                    }
+                }
+                client.dial(original).expect("ping closure must leave configured recovery admissible");
+                loop {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                                assert_eq!(peer_id, peer);
+                                break;
+                            }
+                            SwarmEvent::OutgoingConnectionError { error, .. } => panic!("{error}"),
+                            _ => {}
+                        },
+                        _ = server.select_next_some() => {}
+                    }
+                }
+            }).await.expect("ping failure policy must retain normal close and retry behavior");
+        }
+    }
+}
+
+async fn assert_ping_closure_preserves_healthy_shared_ip_connection(same_peer: bool) {
+    fn test_swarm() -> Swarm<NockchainBehaviour> {
+        start_swarm(
+            LibP2PConfig::default(),
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            None,
+            connection_limits::ConnectionLimits::default().with_max_established_per_peer(Some(2)),
+            None,
+            PeerExclusions::default(),
+        )
+        .unwrap()
+    }
+    async fn listen(swarm: &mut Swarm<NockchainBehaviour>) -> Multiaddr {
+        loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+                return address;
+            }
+        }
+    }
+    let mut client = test_swarm();
+    let mut target = test_swarm();
+    let mut healthy = test_swarm();
+    let target_address = listen(&mut target).await;
+    let healthy_address = listen(&mut healthy).await;
+    let target_peer = *target.local_peer_id();
+    let healthy_peer = if same_peer {
+        target_peer
+    } else {
+        *healthy.local_peer_id()
+    };
+    let configured = target_address.clone().with_p2p(target_peer).unwrap();
+    let metrics = isolated_test_metrics();
+    let exclusions = PeerExclusions::default();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut established = Vec::new();
+        for (peer, address) in [
+            (healthy_peer, if same_peer { target_address.clone() } else { healthy_address }),
+            (target_peer, target_address),
+        ] {
+            let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
+                .addresses(vec![address])
+                .build();
+            let expected_cid = opts.connection_id();
+            client.dial(opts).unwrap();
+            loop {
+                tokio::select! {
+                    event = client.select_next_some() => match event {
+                        SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                            assert_eq!((connection_id, peer_id), (expected_cid, peer));
+                            state.lock().await.track_connection(
+                                connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone(),
+                            );
+                            established.push(connection_id);
+                            break;
+                        }
+                        SwarmEvent::OutgoingConnectionError { error, .. } => panic!("{error}"),
+                        SwarmEvent::ConnectionClosed { .. } => panic!("both sessions must remain live"),
+                        _ => {}
+                    },
+                    _ = target.select_next_some() => {},
+                    _ = healthy.select_next_some() => {},
+                }
+            }
+        }
+        let healthy_cid = established[0];
+        let mut failing_cid = established[1];
+        let threshold = LibP2PConfig::default().failed_pings_before_close();
+        let mut backoff = INITIAL_PEER_REDIAL_MAX_INTERVAL;
+        let mut cursor = 0;
+        for _ in 0..if same_peer { 1 } else { 2 } {
+            let redialed = redial_initial_peers(
+                &mut client, &*state.lock().await, std::slice::from_ref(&configured), &[],
+                &mut cursor, 0, "configured_ping_healthy",
+            ).unwrap();
+            assert!(!redialed);
+            backoff = next_initial_peer_redial_backoff(backoff, redialed);
+            assert_eq!(backoff, INITIAL_PEER_REDIAL_INTERVAL);
+            for _ in 0..threshold {
+                handle_ping_event(
+                    &mut client, &state, &exclusions, &metrics,
+                    ping::Event { peer: target_peer, connection: failing_cid, result: Err(ping::Failure::Timeout) },
+                    threshold, std::slice::from_ref(&configured), &[],
+                ).await;
+                handle_ping_event(
+                    &mut client, &state, &exclusions, &metrics,
+                    ping::Event { peer: healthy_peer, connection: healthy_cid, result: Ok(Duration::ZERO) },
+                    threshold, std::slice::from_ref(&configured), &[],
+                ).await;
+            }
+            loop {
+                tokio::select! {
+                    event = client.select_next_some() => {
+                        if let SwarmEvent::ConnectionClosed { connection_id, peer_id, .. } = event {
+                            assert_eq!((connection_id, peer_id), (failing_cid, target_peer));
+                            state.lock().await.lost_connection(connection_id);
+                            break;
+                        }
+                    },
+                    _ = target.select_next_some() => {},
+                    _ = healthy.select_next_some() => {},
+                }
+            }
+            assert!(client.is_connected(&healthy_peer));
+            assert_eq!(client.network_info().connection_counters().num_established_outgoing(), 1);
+            assert!(!exclusions.is_address_excluded(&configured, Some(target_peer)));
+            assert_eq!(metrics.address_cooldowns_created.fetch_add(0), 0);
+            for (peer, connection) in [
+                (target_peer, failing_cid),
+                (PeerId::random(), healthy_cid),
+                (target_peer, ConnectionId::new_unchecked(usize::MAX)),
+            ] {
+                for _ in 0..threshold {
+                    handle_ping_event(
+                        &mut client, &state, &exclusions, &metrics,
+                        ping::Event { peer, connection, result: Err(ping::Failure::Timeout) },
+                        threshold, std::slice::from_ref(&configured), &[],
+                    ).await;
+                }
+            }
+            let redialed = redial_initial_peers(
+                &mut client, &*state.lock().await, std::slice::from_ref(&configured), &[],
+                &mut cursor, 0, "configured_ping_connection_closed",
+            ).unwrap();
+            assert_eq!(redialed, !same_peer);
+            backoff = next_initial_peer_redial_backoff(backoff, redialed);
+            assert_eq!(
+                backoff,
+                INITIAL_PEER_REDIAL_INTERVAL * if same_peer { 1 } else { 2 },
+            );
+            if !same_peer {
+                loop {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                                assert_eq!(peer_id, target_peer);
+                                assert_ne!(connection_id, failing_cid);
+                                assert_ne!(connection_id, healthy_cid);
+                                client.behaviour_mut().recovery.finish(connection_id);
+                                state.lock().await.track_connection(
+                                    connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone(),
+                                );
+                                failing_cid = connection_id;
+                                break;
+                            }
+                            SwarmEvent::ConnectionClosed { .. } => panic!("healthy session must survive"),
+                            SwarmEvent::OutgoingConnectionError { error, .. } => panic!("{error}"),
+                            _ => {}
+                        },
+                        _ = target.select_next_some() => {},
+                        _ = healthy.select_next_some() => {},
+                    }
+                }
+                assert!(client.is_connected(&healthy_peer));
+                assert_eq!(client.network_info().connection_counters().num_established_outgoing(), 2);
+            } else {
+                loop {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::ConnectionClosed { .. } => {
+                                panic!("stale and foreign ping events must not close the healthy CID");
+                            }
+                            SwarmEvent::Behaviour(NockchainEvent::Ping(event))
+                                if event.connection == healthy_cid && event.result.is_ok() => break,
+                            _ => {}
+                        },
+                        _ = target.select_next_some() => {},
+                        _ = healthy.select_next_some() => {},
+                    }
+                }
+                assert!(client.is_connected(&healthy_peer));
+            }
+        }
+    }).await.expect("connection-local ping failures must close and permit configured recovery");
+}
+
+#[tokio::test]
+async fn configured_ping_failures_close_only_the_failing_shared_ip_peer_connection() {
+    assert_ping_closure_preserves_healthy_shared_ip_connection(false).await;
+}
+
+#[tokio::test]
+async fn configured_ping_failures_close_only_the_failing_same_peer_connection() {
+    assert_ping_closure_preserves_healthy_shared_ip_connection(true).await;
 }
 
 #[test]
@@ -665,15 +3760,7 @@ fn checkpoint_path_for_report() -> Option<PathBuf> {
         }
     }
 
-    let home = std::env::var("HOME").ok()?;
-    [
-        format!("{home}/gwe/oct-21-jams/0.chkjam"),
-        format!("{home}/gwe/oct-21-jams/1.chkjam"),
-        format!("{home}/gwe/oct-21-jams/0-001.chkjam"),
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|path| path.is_file())
+    None
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -1003,6 +4090,7 @@ async fn build_scripted_traffic_cop(
                     poke: _,
                     ack_channel,
                     timeout: _,
+                    observer: _,
                 } => {
                     let result = scripted_pokes.pop_front().unwrap_or(PokeResult::Ack);
                     let observed = poke_count_task.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1079,6 +4167,7 @@ async fn build_scripted_traffic_cop_with_delay(
                     poke: _,
                     ack_channel,
                     timeout: _,
+                    observer: _,
                 } => {
                     let result = scripted_pokes.pop_front().unwrap_or(PokeResult::Ack);
                     let observed = poke_count_task.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1138,6 +4227,7 @@ async fn build_scripted_traffic_cop_with_dropped_peek_reply(
                     poke: _,
                     ack_channel,
                     timeout: _,
+                    observer: _,
                 } => {
                     transcript.record("scripted-kernel", format!("unexpected poke wire={wire:?}"));
                     let _ = ack_channel.send(PokeResult::Ack);
@@ -1528,9 +4618,8 @@ async fn req_res_driver_gen2_like_high_priority_backlog_does_not_starve_followup
         "gen2-like multi-peer high-priority backlog should not starve follow-up peek or timer",
     );
 
-    // Pre-nous already had TrafficCop. The regression shape here is the
-    // nous-era workload, many peers feeding high-priority timeout pokes
-    // into one serialized dispatcher, not TrafficCop existing at all.
+    // Many peers feed high-priority pokes into one serialized dispatcher
+    // while peeks and timers retain service.
     let live_traffic = build_live_traffic_cop_with_test_kernel().await;
     let burst = 16_384usize;
     let probe_deadline = Duration::from_secs(5);
@@ -2759,6 +5848,229 @@ async fn block_by_height_request_without_buffered_block_dispatches_outbound() {
     );
 }
 
+#[tokio::test]
+async fn retained_future_gossip_prefetches_on_native_frontier_demand() {
+    let metrics = isolated_test_metrics();
+    let state_arc = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let peer = PeerId::random();
+    let (future, _) = heard_block_fact_with_tx_ids(24, &[]);
+    let NockchainFact::HeardBlock(block_id, _) = &future else {
+        panic!("expected heard-block fact");
+    };
+    {
+        let mut state = state_arc.lock().await;
+        state.first_negative = 3;
+        assert!(state.defer_heard_block(peer, 24, block_id.clone(), future));
+    }
+    let mut actions = VecDeque::new();
+    handle_effect_with_dispatcher(
+        request_slab_from_message(block_by_height_message(3).as_ref()).unwrap(),
+        &mut SwarmActionDispatcher::Buffered(&mut actions),
+        vec![peer],
+        false,
+        PrefetchConfig {
+            enabled: true,
+            window_initial: LIBP2P_CONFIG.prefetch_window_initial,
+            window_max: LIBP2P_CONFIG.prefetch_window_max,
+            max_inflight_per_peer: LIBP2P_CONFIG.prefetch_max_inflight_per_peer,
+            kernel_demand_threshold: 8,
+        },
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        Arc::clone(&state_arc),
+        metrics,
+        PeerExclusions::default(),
+    )
+    .await
+    .expect("frontier demand with retained future gossip should dispatch catch-up");
+    assert_eq!(
+        actions.len(),
+        2,
+        "range advisory must accompany the kernel singleton"
+    );
+    let SwarmAction::QueueKernelRequest {
+        peer_id,
+        request_message,
+    } = actions.pop_front().unwrap()
+    else {
+        panic!("expected range request");
+    };
+    assert_eq!(peer_id, peer);
+    assert!(
+        matches!(
+            crate::messages::decode_request_item_message(&request_message).unwrap(),
+            crate::messages::NockchainDataRequest::BlockRangeWithTxs {
+                start_height: 3,
+                len: 2
+            }
+        ),
+        "unknown range capability must use the standard bounded probe at demanded height"
+    );
+    let SwarmAction::QueueKernelRequest {
+        peer_id,
+        request_message,
+    } = actions.pop_front().unwrap()
+    else {
+        panic!("expected singleton request");
+    };
+    assert_eq!(peer_id, peer);
+    assert!(matches!(
+        crate::messages::decode_request_item_message(&request_message).unwrap(),
+        crate::messages::NockchainDataRequest::BlockByHeight(3)
+    ));
+    let state = state_arc.lock().await;
+    assert_eq!(
+        state.first_negative, 3,
+        "future gossip is not accepted progress"
+    );
+    assert!(state.has_kernel_block_height_request(3));
+    assert!(!state.has_kernel_block_height_request(24));
+    assert!(state.has_deferred_block_at_height(24));
+    assert!(!state.has_ready_deferred_heard_blocks());
+}
+
+#[tokio::test]
+async fn retained_future_gossip_prefetch_preserves_boundaries_and_fallbacks() {
+    // Inclusive catch-up depth matches the existing deep-demand threshold.
+    for (case, frontier, demand, future_height, expected_range) in [
+        ("no_hint", 3, 3, None, false),
+        ("below_threshold", 3, 3, Some(9), false),
+        ("threshold", 3, 3, Some(10), true),
+        ("nonfrontier", 3, 4, Some(24), false),
+        ("genesis", 0, 0, Some(24), false),
+        ("prefetch_only", 3, 3, Some(24), false),
+        ("invalidated", 3, 3, Some(24), false),
+        ("evicted", 3, 3, Some(24), false),
+        ("disabled", 3, 3, Some(24), false),
+        ("unsupported", 3, 3, Some(24), false),
+        ("inflight", 3, 3, Some(24), false),
+        ("covered", 3, 3, Some(24), false),
+        ("no_peer", 3, 3, Some(24), false),
+        ("ordinary_deep_demand", 3, 10, None, true),
+    ] {
+        let metrics = isolated_test_metrics();
+        let state_arc = Arc::new(Mutex::new(P2PState::new(
+            metrics.clone(),
+            LIBP2P_CONFIG.seen_tx_clear_interval,
+        )));
+        let peer = PeerId::random();
+        {
+            let mut state = state_arc.lock().await;
+            state.first_negative = frontier;
+            state.mark_peer_range_supported(peer);
+            if let Some(height) = future_height {
+                let (future, _) = heard_block_fact_with_tx_ids(height, &[]);
+                let NockchainFact::HeardBlock(block_id, _) = &future else {
+                    panic!("expected heard-block fact");
+                };
+                let block_id = block_id.clone();
+                assert!(state.defer_heard_block_with_source(
+                    peer,
+                    height,
+                    block_id.clone(),
+                    future,
+                    if case == "prefetch_only" {
+                        BlockSource::Prefetch
+                    } else {
+                        BlockSource::Gossip
+                    },
+                ));
+                if case == "invalidated" {
+                    assert!(state.invalidate_deferred_block_id(&block_id));
+                } else if case == "evicted" {
+                    state.set_deferred_heard_block_byte_caps(0, 0);
+                }
+            }
+            if case == "unsupported" {
+                state.mark_peer_non_range_capable(peer);
+            } else if case == "inflight" || case == "covered" {
+                state.register_prefetch(
+                    fresh_outbound_request_id(),
+                    peer,
+                    if case == "covered" { demand } else { 100 },
+                    2,
+                );
+            }
+        }
+        let mut actions = VecDeque::new();
+        handle_effect_with_dispatcher(
+            request_slab_from_message(block_by_height_message(demand).as_ref()).unwrap(),
+            &mut SwarmActionDispatcher::Buffered(&mut actions),
+            if case == "no_peer" {
+                vec![]
+            } else {
+                vec![peer]
+            },
+            false,
+            PrefetchConfig {
+                enabled: case != "disabled",
+                window_initial: 4,
+                window_max: 4,
+                max_inflight_per_peer: 1,
+                kernel_demand_threshold: 8,
+            },
+            runtime_limits_from_config(&LIBP2P_CONFIG),
+            Arc::clone(&state_arc),
+            metrics,
+            PeerExclusions::default(),
+        )
+        .await
+        .expect("catch-up boundaries should retain ordinary dispatch");
+        assert_eq!(
+            actions.len(),
+            if expected_range {
+                2
+            } else if case == "no_peer" {
+                0
+            } else {
+                1
+            },
+            "{case}"
+        );
+        if expected_range {
+            let Some(SwarmAction::QueueKernelRequest {
+                peer_id,
+                request_message,
+            }) = actions.pop_front()
+            else {
+                panic!("{case}: expected range");
+            };
+            assert_eq!(peer_id, peer, "{case}");
+            assert!(
+                matches!(
+                    crate::messages::decode_request_item_message(&request_message).unwrap(),
+                    crate::messages::NockchainDataRequest::BlockRangeWithTxs { start_height, len: 4 }
+                        if start_height == demand
+                ),
+                "{case}: preserve standard window and demanded start"
+            );
+        }
+        if case != "no_peer" {
+            let Some(SwarmAction::QueueKernelRequest {
+                request_message, ..
+            }) = actions.pop_front()
+            else {
+                panic!("{case}: expected singleton");
+            };
+            assert!(
+                matches!(
+                    crate::messages::decode_request_item_message(&request_message).unwrap(),
+                    crate::messages::NockchainDataRequest::BlockByHeight(height) if height == demand
+                ),
+                "{case}: preserve kernel singleton"
+            );
+        }
+        let state = state_arc.lock().await;
+        assert_eq!(state.first_negative, frontier, "{case}");
+        assert!(!state.has_ready_deferred_heard_blocks(), "{case}");
+        if let Some(height) = future_height {
+            assert!(!state.has_kernel_block_height_request(height), "{case}");
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prefetch_disabled_falls_through_to_singleton_outbound() {
     // With prefetch disabled, the cache-miss path must dispatch the existing
@@ -3522,11 +6834,9 @@ async fn inflight_prefetch_does_not_suppress_kernel_singleton() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lax1_missing_parent_loop_backs_off_after_failure_budget() {
-    // Phase 5: reproduce the shape of the LAX1 sync-gap incident
-    // where a height N is repeatedly requested but never served. The
-    // alternate-peer retry path must back off after the configured
-    // failure budget rather than amplifying the loop on every retrigger.
+async fn missing_parent_retries_back_off_after_failure_budget() {
+    // Repeated requests for an unavailable height back off after the
+    // configured failure budget.
     use crate::messages::block_by_height_message;
 
     let metrics = isolated_test_metrics();
@@ -3567,6 +6877,7 @@ async fn lax1_missing_parent_loop_backs_off_after_failure_budget() {
                 crate::driver::gen2::queue_block_height_retry_to_alternate_peer_with_dispatcher(
                     &mut swarm_actions,
                     &state_arc,
+                    &PeerExclusions::default(),
                     stuck_height,
                     request_message.clone(),
                 )
@@ -3641,6 +6952,50 @@ async fn payload_only_seen_block_effect_tracks_id_without_advancing_frontier() {
         state_guard.first_negative, 10,
         "payload-only seen effect must not advance the block frontier"
     );
+}
+
+#[tokio::test]
+async fn only_height_bearing_seen_block_clears_sync_peer_attempts() {
+    let metrics = isolated_test_metrics();
+    let state_arc = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let peer = PeerId::random();
+    state_arc
+        .lock()
+        .await
+        .track_block_height_attempted_peers(42, [peer]);
+
+    for (effect, should_clear) in [
+        (seen_block_payload_only_effect_slab(42_001), false),
+        (seen_block_effect_slab(42_002, 42), true),
+    ] {
+        let mut buffered_swarm_actions = VecDeque::new();
+        let mut swarm_actions = SwarmActionDispatcher::Buffered(&mut buffered_swarm_actions);
+        handle_effect_with_dispatcher(
+            effect,
+            &mut swarm_actions,
+            vec![],
+            false,
+            PrefetchConfig::disabled(),
+            runtime_limits_from_config(&LIBP2P_CONFIG),
+            Arc::clone(&state_arc),
+            metrics.clone(),
+            PeerExclusions::default(),
+        )
+        .await
+        .expect("seen block effect should be processed");
+        assert_eq!(
+            state_arc
+                .lock()
+                .await
+                .get_block_height_attempted_peers(42)
+                .is_empty(),
+            should_clear,
+            "only an accepted block should recycle a height's peer attempts"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3937,6 +7292,104 @@ async fn heard_elders_re_emits_same_recovery_window_until_progress() {
         vec![0],
         "without progress, the same heard-elders payload should still reissue by-height 0"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn block_height_source_preference_native_demand_after_failure_budget() {
+    let mut checkpoint_app = start_nockchain_app().await;
+    seed_fakenet_pre_genesis_direct(&mut checkpoint_app.app).await;
+    let _ = send_born_direct(&mut checkpoint_app.app).await;
+    let mut peers = (0u8..33)
+        .map(|seed| {
+            libp2p::identity::Keypair::ed25519_from_bytes([seed; 32])
+                .expect("fixed ed25519 seed should be valid")
+                .public()
+                .to_peer_id()
+        })
+        .collect::<Vec<_>>();
+    peers.sort_unstable();
+    let source = peers[32];
+    let genesis_id = match fake_genesis_block_message_fact() {
+        NockchainFact::HeardBlock(block_id, _) => block_id,
+        other => panic!("expected genesis heard-block fact, got {other:?}"),
+    };
+    let synthetic_branch_head = {
+        let mut slab = NounSlab::new();
+        let noun = tip5_tuple(&mut slab, 90_001);
+        let space = slab.noun_space();
+        tip5_hash_to_base58(noun, &space).unwrap()
+    };
+    let heard_elders = heard_elders_fact(0, &[synthetic_branch_head, genesis_id]);
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    let address: Multiaddr = format!("/ip4/127.0.0.1/udp/3000/quic-v1/p2p/{source}")
+        .parse()
+        .unwrap();
+    {
+        let mut guard = state.lock().await;
+        for (index, peer) in peers.iter().enumerate() {
+            seed_connected_peer(&mut guard, *peer, 500 + index);
+        }
+        guard.track_connection(
+            ConnectionId::new_unchecked(600),
+            source,
+            &address,
+            libp2p::core::ConnectedPoint::Dialer {
+                address: address.clone(),
+                role_override: libp2p::core::Endpoint::Dialer,
+                port_use: libp2p::core::transport::PortUse::Reuse,
+            },
+        );
+        guard.set_configured_recovery_peers(Arc::from([address]), Arc::default());
+        guard.set_prefetch_safety_config(8, Duration::from_secs(20), 50 * 1024 * 1024);
+        let budget = guard.prefetch_height_failure_budget();
+        let backoff = guard.prefetch_stuck_backoff();
+        guard.track_block_height_attempted_peers(0, peers[..usize::from(budget)].iter().copied());
+        for _ in 0..budget {
+            guard.record_block_height_failure(0, budget, backoff);
+        }
+        assert!(guard.is_block_height_stuck(0));
+    }
+    let effects = poke_fact_direct(
+        &mut checkpoint_app.app, source, &heard_elders, "native height demand",
+    )
+    .await;
+    assert_eq!(request_effect_block_heights_from_effects(&effects), vec![0]);
+    let effect = effects
+        .into_iter()
+        .find(|effect| request_effect_block_height(effect) == Some(0))
+        .unwrap();
+    let mut actions = VecDeque::new();
+    handle_effect_with_dispatcher(
+        effect,
+        &mut SwarmActionDispatcher::Buffered(&mut actions),
+        peers,
+        false,
+        PrefetchConfig::disabled(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        state.clone(),
+        metrics,
+        PeerExclusions::default(),
+    )
+    .await
+    .unwrap();
+    match actions.pop_front() {
+        Some(SwarmAction::QueueKernelRequest {
+            peer_id,
+            request_message,
+        }) => {
+            assert_eq!(peer_id, source);
+            assert_eq!(request_message, block_by_height_message(0));
+        }
+        other => panic!("expected singleton height demand, got {other:?}"),
+    }
+    assert!(actions.is_empty());
+    let guard = state.lock().await;
+    assert!(
+        guard.is_block_height_stuck(0),
+        "kernel demand must not reset the retry budget"
+    );
+    assert!(guard.get_block_height_attempted_peers(0).contains(&source));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4279,6 +7732,14 @@ async fn connect_test_swarms(
         .expect("connection timeout");
 }
 
+fn measured_test_response(message: NockchainResponse) -> crate::behaviour::TransportResponse {
+    let received_bytes = Some(req_res_message_encoded_bytes(&message).unwrap());
+    crate::behaviour::TransportResponse {
+        message,
+        received_bytes,
+    }
+}
+
 async fn recv_request_event(
     requester: &mut ReqResTestSwarm,
     responder: &mut ReqResTestSwarm,
@@ -4286,7 +7747,7 @@ async fn recv_request_event(
 ) -> (
     PeerId,
     ConnectionId,
-    request_response::Message<NockchainRequest, NockchainResponse>,
+    request_response::Message<NockchainRequest, crate::behaviour::TransportResponse>,
 ) {
     tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -4342,7 +7803,7 @@ async fn recv_response_event(
                                         "requester",
                                         format!("received response for {request_id:?} from {peer}"),
                                     );
-                                    return response;
+                                    return response.message;
                                 }
                                 request_response::Message::Request { request_id, .. } => {
                                     transcript.record(
@@ -5380,9 +8841,9 @@ async fn run_tx_live_response_sample(
                 ConnectionId::new_unchecked(900 + wave),
                 request_response::Message::Response {
                     request_id,
-                    response: NockchainResponse::BatchResult {
+                    response: measured_test_response(NockchainResponse::BatchResult {
                         results: result_items.clone(),
-                    },
+                    }),
                 },
                 swarm_tx.clone(),
                 &mut equix_builder,
@@ -5577,9 +9038,9 @@ async fn run_block_all_miss_response_sample(
                 ConnectionId::new_unchecked(1_000 + wave),
                 request_response::Message::Response {
                     request_id,
-                    response: NockchainResponse::BatchResult {
+                    response: measured_test_response(NockchainResponse::BatchResult {
                         results: result_items.clone(),
-                    },
+                    }),
                 },
                 swarm_tx.clone(),
                 &mut equix_builder,
@@ -5620,9 +9081,7 @@ async fn run_block_batch_miss_response_sample(
     wave_count: usize,
 ) -> Option<RecoveryResponseSample> {
     let Some(chkjam_path) = checkpoint_path_for_report() else {
-        println!(
-                "recovery block-batch sample skipped: no checkpoint found via REQ_RES_GEN2_CHECKPOINT_PATH or ~/gwe/oct-21-jams/{{0,1}}.chkjam"
-            );
+        println!("recovery block-batch sample skipped: set REQ_RES_GEN2_CHECKPOINT_PATH");
         return None;
     };
     let transcript = DriverTranscript::silent();
@@ -5700,9 +9159,9 @@ async fn run_block_batch_miss_response_sample(
                 ConnectionId::new_unchecked(1_200 + wave),
                 request_response::Message::Response {
                     request_id,
-                    response: NockchainResponse::BatchResult {
+                    response: measured_test_response(NockchainResponse::BatchResult {
                         results: result_items.clone(),
-                    },
+                    }),
                 },
                 swarm_tx.clone(),
                 &mut equix_builder,
@@ -6184,7 +9643,10 @@ async fn authenticated_gossip_routes_to_kernel() {
             responder
                 .behaviour_mut()
                 .request_response
-                .send_response(channel, response.clone())
+                .send_response(
+                    channel,
+                    crate::behaviour::TransportResponse::outgoing(response.clone()),
+                )
                 .expect("authenticated gossip ack should send");
             response
         }
@@ -6306,7 +9768,7 @@ async fn run_checkpoint_prefetch_cost_sample(
             ConnectionId::new_unchecked(500 + replay_blocks),
             request_response::Message::Response {
                 request_id,
-                response: NockchainResponse::BatchResult { results },
+                response: measured_test_response(NockchainResponse::BatchResult { results }),
             },
             swarm_tx,
             &mut equix_builder,
@@ -6462,7 +9924,7 @@ async fn run_checkpoint_requester_cost_sample(
             ConnectionId::new_unchecked(400 + replay_blocks),
             request_response::Message::Response {
                 request_id,
-                response: NockchainResponse::BatchResult { results },
+                response: measured_test_response(NockchainResponse::BatchResult { results }),
             },
             swarm_tx,
             &mut equix_builder,
@@ -6699,7 +10161,7 @@ async fn run_requester_response_workload(
             ConnectionId::new_unchecked(90 + item_count),
             request_response::Message::Response {
                 request_id,
-                response: NockchainResponse::BatchResult { results },
+                response: measured_test_response(NockchainResponse::BatchResult { results }),
             },
             swarm_tx,
             &mut equix_builder,
@@ -6811,7 +10273,10 @@ async fn run_two_peer_driver_latency_workload(
             responder
                 .behaviour_mut()
                 .request_response
-                .send_response(channel, response.clone())
+                .send_response(
+                    channel,
+                    crate::behaviour::TransportResponse::outgoing(response.clone()),
+                )
                 .expect("response should send");
             response
         }
@@ -7255,6 +10720,159 @@ fn test_equix_pow_verification() {
         .expect("authenticated gossip PoW should verify");
 }
 
+fn gossip_test_context(
+    slab: &mut NounSlab,
+    origin: &str,
+    phase: &str,
+    source: Option<PeerId>,
+) -> nockvm::noun::Noun {
+    let origin = Atom::from_value(slab, origin).expect("producer origin");
+    let phase = Atom::from_value(slab, phase).expect("producer phase");
+    let source = match source {
+        Some(peer) => {
+            let peer = Atom::from_value(slab, peer.to_string().as_str()).expect("source peer");
+            T(slab, &[D(0), peer.as_noun()])
+        }
+        None => D(0),
+    };
+    T(slab, &[origin.as_noun(), phase.as_noun(), source])
+}
+
+fn gossip_effect_from_message(
+    message: &ByteBuf,
+    origin: &str,
+    phase: &str,
+    source: Option<PeerId>,
+) -> NounSlab {
+    let payload = request_slab_from_message(message).expect("valid fact payload");
+    let mut effect = NounSlab::new();
+    let copied = effect.copy_into(unsafe { *payload.root() }, &payload.noun_space());
+    let context = gossip_test_context(&mut effect, origin, phase, source);
+    let noun = T(
+        &mut effect,
+        &[D(tas!(b"gossip")), context, D(FACT_POKE_VERSION), copied],
+    );
+    effect.set_root(noun);
+    effect
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn first_peer_tx_effect_excludes_source_but_later_announcements_reach_it() {
+    let first_source = PeerId::random();
+    let second_source = PeerId::random();
+    let recipient = PeerId::random();
+    let peers = vec![first_source, second_source, recipient];
+    let message = result_message_from_fact(&heard_tx_fact(91_777, 64));
+    let other_message = result_message_from_fact(&heard_tx_fact(91_778, 64));
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    for (payload, origin, phase, source) in [
+        (&message, "peer", "initial-acceptance", Some(first_source)),
+        (&message, "local", "local-resend", None),
+        (&message, "chain", "new-head", None),
+        (&message, "mining", "mining-regossip", None),
+        (
+            &other_message,
+            "peer",
+            "initial-acceptance",
+            Some(second_source),
+        ),
+    ] {
+        let effect = gossip_effect_from_message(payload, origin, phase, source);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        handle_effect(
+            effect,
+            tx,
+            peers.clone(),
+            false,
+            state.clone(),
+            metrics.clone(),
+        )
+        .await
+        .expect("canonical kernel gossip effect");
+        for expected_peer in peers.iter().copied().filter(|peer| Some(*peer) != source) {
+            match rx.recv().await {
+                Some(SwarmAction::SendGossip {
+                    peer_id, message, ..
+                }) => {
+                    assert_eq!(peer_id, expected_peer);
+                    assert_eq!(
+                        &message, payload,
+                        "producer metadata must not alter fact bytes"
+                    );
+                }
+                other => panic!("expected directed unchanged gossip payload, got {other:?}"),
+            }
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "source excluded only for this initial peer effect"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn gossip_context_rejects_malformed_metadata_before_side_effects() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    state.lock().await.cache_block_response(42, NounSlab::new());
+    let (_, message) = build_gossip_effect(FACT_POKE_VERSION, &[1, 2, 3]);
+    for (origin, phase, source) in [
+        ("invalid", "new-head", None),
+        ("chain", "invalid", None),
+        ("peer", "initial-acceptance", None),
+        ("local", "local-resend", Some(PeerId::random())),
+    ] {
+        let effect = gossip_effect_from_message(&message, origin, phase, source);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        assert!(handle_effect(
+            effect,
+            tx,
+            vec![PeerId::random()],
+            false,
+            state.clone(),
+            metrics.clone()
+        )
+        .await
+        .is_err());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(state.lock().await.block_cache.len(), 1);
+    }
+    let payload = request_slab_from_message(&message).expect("valid payload");
+    let mut invalid_unit = NounSlab::new();
+    let copied = invalid_unit.copy_into(unsafe { *payload.root() }, &payload.noun_space());
+    let context = T(
+        &mut invalid_unit,
+        &[D(tas!(b"chain")), D(tas!(b"new-head")), D(7)],
+    );
+    let noun = T(
+        &mut invalid_unit,
+        &[D(tas!(b"gossip")), context, D(FACT_POKE_VERSION), copied],
+    );
+    invalid_unit.set_root(noun);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    assert!(handle_effect(
+        invalid_unit,
+        tx,
+        vec![PeerId::random()],
+        false,
+        state.clone(),
+        metrics
+    )
+    .await
+    .is_err());
+    assert!(rx.try_recv().is_err());
+    assert_eq!(state.lock().await.block_cache.len(), 1);
+}
+
 fn build_gossip_effect_with_tag(
     version: u64,
     tag: &'static str,
@@ -7272,7 +10890,11 @@ fn build_gossip_effect_with_tag(
         ),
     };
     let payload = T(&mut effect_slab, &[gossip_tag.as_noun(), page]);
-    let effect = T(&mut effect_slab, &[D(tas!(b"gossip")), D(version), payload]);
+    let context = gossip_test_context(&mut effect_slab, "chain", "new-head", None);
+    let effect = T(
+        &mut effect_slab,
+        &[D(tas!(b"gossip")), context, D(version), payload],
+    );
     effect_slab.set_root(effect);
 
     let mut payload_slab: NounSlab = NounSlab::new();
@@ -7290,6 +10912,8 @@ fn build_gossip_effect(version: u64, page_words: &[u64]) -> (NounSlab, ByteBuf) 
 
 #[test]
 fn test_select_request_peers_preserves_order_for_block_windows() {
+    let state = P2PState::new(isolated_test_metrics(), 100);
+    let exclusions = PeerExclusions::default();
     let peer_a = PeerId::random();
     let peer_b = PeerId::random();
     let peer_c = PeerId::random();
@@ -7298,33 +10922,37 @@ fn test_select_request_peers_preserves_order_for_block_windows() {
     expected.sort_unstable_by_key(|peer| peer.to_base58());
 
     assert_eq!(
-        select_request_peers_with_preferences(peers.clone(), 2, true, &[]),
+        state.select_request_peers_with_preferences(peers.clone(), 2, &exclusions, true, &[]),
         expected[..2].to_vec()
     );
     assert_eq!(
-        select_request_peers_with_preferences(peers.clone(), 8, true, &[]),
+        state.select_request_peers_with_preferences(peers.clone(), 8, &exclusions, true, &[]),
         expected
     );
 }
 
 #[test]
 fn test_select_request_peers_prefers_tx_source_hints() {
+    let state = P2PState::new(isolated_test_metrics(), 100);
+    let exclusions = PeerExclusions::default();
     let peer_a = PeerId::random();
     let peer_b = PeerId::random();
     let peer_c = PeerId::random();
     let peer_d = PeerId::random();
 
-    let selected = select_request_peers_with_preferences(
+    let selected = state.select_request_peers_with_preferences(
         vec![peer_a, peer_b, peer_c, peer_d],
         2,
+        &exclusions,
         false,
         &[peer_c, peer_a, PeerId::random()],
     );
     assert_eq!(selected, vec![peer_c, peer_a]);
 
-    let selected_with_stable_tail = select_request_peers_with_preferences(
+    let selected_with_stable_tail = state.select_request_peers_with_preferences(
         vec![peer_d, peer_b, peer_a, peer_c],
         3,
+        &exclusions,
         true,
         &[peer_c, peer_a],
     );
@@ -7334,6 +10962,264 @@ fn test_select_request_peers_prefers_tx_source_hints() {
         selected_with_stable_tail,
         vec![peer_c, peer_a, expected_tail[0]]
     );
+}
+
+#[tokio::test]
+async fn block_height_source_preference_primary_and_alternate_keep_eligibility() {
+    use crate::config::PeerExclusionConfig;
+
+    for condition in ["eligible", "cooled", "excluded", "attempted", "all-cooled"] {
+        for alternate in [false, true] {
+            let metrics = isolated_test_metrics();
+            let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+            let exclusions = PeerExclusions::new(PeerExclusionConfig {
+                request_peer_cooldown_secs: 60,
+                wrong_peer_id_ip_threshold: 1,
+                ..PeerExclusionConfig::default()
+            });
+            let mut peers = (0..4).map(|_| PeerId::random()).collect::<Vec<_>>();
+            peers.sort_unstable();
+            let source = peers[3];
+            let address: Multiaddr = format!("/ip4/203.0.113.9/udp/3000/quic-v1/p2p/{source}")
+                .parse()
+                .unwrap();
+            {
+                let mut guard = state.lock().await;
+                for (index, peer) in peers[..3].iter().enumerate() {
+                    seed_connected_peer(&mut guard, *peer, 700 + index);
+                }
+                guard.track_connection(
+                    ConnectionId::new_unchecked(703),
+                    source,
+                    &address,
+                    libp2p::core::ConnectedPoint::Dialer {
+                        address: address.clone(),
+                        role_override: libp2p::core::Endpoint::Dialer,
+                        port_use: libp2p::core::transport::PortUse::Reuse,
+                    },
+                );
+                guard.set_configured_recovery_peers(Arc::default(), Arc::from([address.clone()]));
+                if condition == "attempted" {
+                    guard.track_block_height_attempted_peers(42, [source]);
+                }
+            }
+            match condition {
+                "cooled" => {
+                    assert!(exclusions.record_peer_request_failure(source));
+                }
+                "excluded" => {
+                    assert!(exclusions
+                        .record_wrong_peer_id(&address, Some(source), PeerId::random(),)
+                        .ip_exclusion
+                        .is_some());
+                }
+                "all-cooled" => {
+                    for peer in &peers {
+                        assert!(exclusions.record_peer_request_failure(*peer));
+                    }
+                }
+                _ => {}
+            }
+            let expected = if matches!(condition, "eligible" | "all-cooled") {
+                source
+            } else {
+                peers[0]
+            };
+            let message = block_by_height_message(42);
+            let mut actions = VecDeque::new();
+            let mut dispatcher = SwarmActionDispatcher::Buffered(&mut actions);
+            if alternate {
+                assert!(queue_block_height_retry_to_alternate_peer_with_dispatcher(
+                    &mut dispatcher,
+                    &state,
+                    &exclusions,
+                    42,
+                    message.clone(),
+                )
+                .await
+                .unwrap());
+            } else {
+                handle_effect_with_dispatcher(
+                    request_slab_from_message(&message).unwrap(),
+                    &mut dispatcher,
+                    peers,
+                    false,
+                    PrefetchConfig::disabled(),
+                    runtime_limits_from_config(&LIBP2P_CONFIG),
+                    state.clone(),
+                    metrics,
+                    exclusions,
+                )
+                .await
+                .unwrap();
+            }
+            match actions.pop_front() {
+                Some(SwarmAction::QueueKernelRequest {
+                    peer_id,
+                    request_message,
+                }) => {
+                    assert_eq!(
+                        peer_id, expected,
+                        "condition={condition}, alternate={alternate}"
+                    );
+                    assert_eq!(request_message, message);
+                }
+                other => panic!("expected singleton request, got {other:?}"),
+            }
+            assert!(actions.is_empty());
+            assert!(state
+                .lock()
+                .await
+                .get_block_height_attempted_peers(42)
+                .contains(&expected));
+        }
+    }
+}
+
+#[tokio::test]
+async fn block_height_source_preference_accepted_supplier_follows_frontier_not_gossip_ack() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    let mut peers = (0..3).map(|_| PeerId::random()).collect::<Vec<_>>();
+    peers.sort_unstable();
+    let supplier = peers[2];
+    let gossip_peer = peers[1];
+    {
+        let mut guard = state.lock().await;
+        guard.first_negative = 1;
+        for (index, peer) in peers.iter().enumerate() {
+            seed_connected_peer(&mut guard, *peer, 800 + index);
+        }
+    }
+    let traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        Vec::new(),
+        vec![PokeResult::Ack],
+    )
+    .await;
+    let (swarm_tx, mut swarm_rx) = mpsc::channel(8);
+    let request_id = fresh_outbound_request_id();
+    state.lock().await.record_outbound_request(
+        request_id,
+        OutboundRequestContext::new(
+            gossip_peer,
+            NockchainRequest::AuthenticatedGossip {
+                pow: [0; 16],
+                nonce: 0,
+                message: ByteBuf::from(vec![0xAB]),
+            },
+        ),
+    );
+    handle_request_response(
+        gossip_peer,
+        ConnectionId::new_unchecked(801),
+        request_response::Message::Response {
+            request_id,
+            response: measured_test_response(NockchainResponse::Ack { acked: true }),
+        },
+        swarm_tx.clone(),
+        &mut equix::EquiXBuilder::new(),
+        PeerId::random(),
+        traffic.traffic.clone(),
+        metrics.clone(),
+        state.clone(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        PeerExclusions::default(),
+    )
+    .await
+    .unwrap();
+    let (block, _) = heard_block_fact_with_tx_ids(1, &[]);
+    let block_id = match &block {
+        NockchainFact::HeardBlock(block_id, _) => block_id.clone(),
+        other => panic!("expected heard-block fact, got {other:?}"),
+    };
+    route_response_fact(
+        supplier, block, &traffic.traffic, &metrics, &state, &swarm_tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(traffic.poke_count.load(Ordering::SeqCst), 1);
+    assert!(swarm_rx.try_recv().is_err());
+    {
+        let mut guard = state.lock().await;
+        guard.track_block_id_str_and_peer(block_id.clone(), supplier);
+        guard.validate_and_untrack_block_sources(block_id);
+    }
+
+    // A routed block Ack and a gossip Ack are not height acceptance.
+    let mut actions = VecDeque::new();
+    handle_effect_with_dispatcher(
+        request_slab_from_message(block_by_height_message(2).as_ref()).unwrap(),
+        &mut SwarmActionDispatcher::Buffered(&mut actions),
+        peers.clone(),
+        false,
+        PrefetchConfig::disabled(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        state.clone(),
+        metrics.clone(),
+        PeerExclusions::default(),
+    )
+    .await
+    .unwrap();
+    match actions.pop_front() {
+        Some(SwarmAction::QueueKernelRequest { peer_id, .. }) => assert_eq!(peer_id, peers[0]),
+        other => panic!("expected pre-acceptance singleton, got {other:?}"),
+    }
+    assert!(actions.is_empty());
+    state.lock().await.clear_block_height_attempted_peers(2);
+    handle_effect(
+        seen_block_effect_slab(10_001, 1),
+        swarm_tx,
+        peers.clone(),
+        false,
+        state.clone(),
+        metrics.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.lock().await.first_negative, 2);
+    assert!(swarm_rx.try_recv().is_err());
+
+    for alternate in [false, true] {
+        state.lock().await.clear_block_height_attempted_peers(2);
+        let mut dispatcher = SwarmActionDispatcher::Buffered(&mut actions);
+        if alternate {
+            assert!(queue_block_height_retry_to_alternate_peer_with_dispatcher(
+                &mut dispatcher,
+                &state,
+                &PeerExclusions::default(),
+                2,
+                block_by_height_message(2),
+            )
+            .await
+            .unwrap());
+        } else {
+            handle_effect_with_dispatcher(
+                request_slab_from_message(block_by_height_message(2).as_ref()).unwrap(),
+                &mut dispatcher,
+                peers.clone(),
+                false,
+                PrefetchConfig::disabled(),
+                runtime_limits_from_config(&LIBP2P_CONFIG),
+                state.clone(),
+                metrics.clone(),
+                PeerExclusions::default(),
+            )
+            .await
+            .unwrap();
+        }
+        match actions.pop_front() {
+            Some(SwarmAction::QueueKernelRequest {
+                peer_id,
+                request_message,
+            }) => {
+                assert_eq!(peer_id, supplier);
+                assert_eq!(request_message, block_by_height_message(2));
+            }
+            other => panic!("expected accepted-source singleton, got {other:?}"),
+        }
+        assert!(actions.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -7347,7 +11233,7 @@ async fn test_request_effect_queues_block_request_for_single_stable_peer() {
     let peer_b = PeerId::random();
     let peers = vec![peer_a, peer_b];
     let mut canonical_peers = peers.clone();
-    canonical_peers.sort_unstable_by_key(|peer| peer.to_base58());
+    canonical_peers.sort_unstable();
 
     let metrics = Arc::new(
         NockchainP2PMetrics::register(gnort::global_metrics_registry())
@@ -7449,6 +11335,122 @@ async fn test_elders_request_targets_source_peer_and_applies_cooldown() {
     );
 }
 
+/// Distinct block ids share a single in-flight elders slot per peer.
+#[tokio::test]
+async fn elders_requests_from_one_peer_are_bounded_by_its_slot() {
+    use tokio::sync::mpsc;
+
+    let source_peer = PeerId::random();
+    let peers = vec![PeerId::random(), source_peer];
+    let metrics = isolated_test_metrics();
+    let state_arc = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let (swarm_tx, mut swarm_rx) = mpsc::channel(16);
+
+    // Each effect names a different block id.
+    let elders_effect_for = |seed: u64| {
+        let mut slab = NounSlab::new();
+        let block_id = T(&mut slab, &[D(seed), D(102), D(103), D(104), D(105)]);
+        let peer_atom =
+            Atom::from_value(&mut slab, source_peer.to_base58()).expect("peer ID should encode");
+        let elders = T(&mut slab, &[block_id, peer_atom.as_noun()]);
+        let block_request = T(&mut slab, &[D(tas!(b"elders")), elders]);
+        let request = T(&mut slab, &[D(tas!(b"block")), block_request]);
+        let effect = T(&mut slab, &[D(tas!(b"request")), request]);
+        slab.set_root(effect);
+        slab
+    };
+
+    for seed in 0..6u64 {
+        handle_effect(
+            elders_effect_for(seed),
+            swarm_tx.clone(),
+            peers.clone(),
+            false,
+            state_arc.clone(),
+            metrics.clone(),
+        )
+        .await
+        .expect("elders request should be accepted");
+    }
+
+    let mut queued = 0usize;
+    while let Ok(action) = swarm_rx.try_recv() {
+        if matches!(action, SwarmAction::QueueKernelRequest { .. }) {
+            queued += 1;
+        }
+    }
+    assert_eq!(
+        queued, 1,
+        "six distinct block ids from one peer must yield one outbound elders request, not six"
+    );
+
+    // The walk's next step goes out as soon as the peer's response lands.
+    state_arc.lock().await.clear_elders_inflight(&source_peer);
+    handle_effect(
+        elders_effect_for(6),
+        swarm_tx,
+        peers,
+        false,
+        state_arc,
+        metrics,
+    )
+    .await
+    .expect("elders request after the response should be accepted");
+    assert!(
+        matches!(
+            swarm_rx.try_recv(),
+            Ok(SwarmAction::QueueKernelRequest { .. })
+        ),
+        "releasing the slot on the response must not delay the sequential recovery walk"
+    );
+}
+
+/// An elders request needs a key before it can claim a scheduling slot.
+#[tokio::test]
+async fn elders_request_with_unkeyable_block_id_is_dropped_not_sent_ungated() {
+    use tokio::sync::mpsc;
+
+    let source_peer = PeerId::random();
+    let peers = vec![PeerId::random(), source_peer];
+    let mut slab = NounSlab::new();
+    // Four limbs: not a Tip5 digest, so no slot key can be derived from it.
+    let block_id = T(&mut slab, &[D(101), D(102), D(103), D(104)]);
+    let peer_atom =
+        Atom::from_value(&mut slab, source_peer.to_base58()).expect("peer ID should encode");
+    let elders = T(&mut slab, &[block_id, peer_atom.as_noun()]);
+    let block_request = T(&mut slab, &[D(tas!(b"elders")), elders]);
+    let request = T(&mut slab, &[D(tas!(b"block")), block_request]);
+    let effect = T(&mut slab, &[D(tas!(b"request")), request]);
+    slab.set_root(effect);
+
+    let metrics = isolated_test_metrics();
+    let state_arc = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let (swarm_tx, mut swarm_rx) = mpsc::channel(8);
+
+    handle_effect(
+        slab,
+        swarm_tx,
+        peers,
+        false,
+        state_arc.clone(),
+        metrics.clone(),
+    )
+    .await
+    .expect("dropping an unkeyable elders request is not an error");
+    assert!(
+        swarm_rx.try_recv().is_err(),
+        "an elders request that cannot claim a slot must not be sent at all"
+    );
+    assert_eq!(metrics.elders_requests_suppressed.fetch_add(0), 1);
+    assert_eq!(state_arc.lock().await.elders_inflight_len(), 0);
+}
+
 #[tokio::test]
 async fn test_elders_request_rejects_non_atom_source_peer() {
     use tokio::sync::mpsc;
@@ -7489,7 +11491,7 @@ async fn test_request_effect_skips_bundle_upgrade_for_non_bundle_capable_peer() 
     let effect_slab =
         request_slab_from_message(&classic_message).expect("request slab should decode");
     let mut peers = vec![PeerId::random(), PeerId::random()];
-    peers.sort_unstable_by_key(|peer| peer.to_base58());
+    peers.sort_unstable();
     let classic_peer = peers[0];
 
     let metrics = isolated_test_metrics();
@@ -7559,12 +11561,7 @@ fn test_bundle_request_batch_item_height_distinguishes_bundle_from_classic() {
         nonce: 0,
         items,
     };
-    let context = OutboundRequestContext {
-        peer_id: PeerId::random(),
-        request,
-        retry_count: 0,
-        started_at: std::time::Instant::now(),
-    };
+    let context = OutboundRequestContext::new(PeerId::random(), request);
 
     assert_eq!(
         bundle_request_batch_item_height(Some(&context), 1),
@@ -7601,16 +11598,126 @@ async fn test_bundle_response_estimate_uses_bundle_envelope_shape() {
         .await
         .expect("bundle estimate should not error")
         .expect("bundle estimate should decode");
-    assert_eq!(estimate.request_kind, "block-with-txs-by-height");
-    assert_eq!(estimate.source, "configured_bundle_cap");
 
-    let projected = estimated_result_item(1, &estimate);
-    let envelope = projected
-        .envelope
-        .expect("estimated bundle result should carry an envelope");
-    assert_eq!(envelope.kind, EnvelopeKind::HeardBlockWithTxs);
-    assert!(envelope.tx_envelopes.as_ref().is_some());
-    assert!(envelope.unincluded_tx_ids.as_ref().is_some());
+    let actual = BatchResultItem {
+        item_id: 1,
+        status: BatchResultStatus::Result,
+        error: None,
+        envelope: Some(ResponseEnvelope::heard_block_with_txs(
+            "1".repeat(TIP5_BASE58_MAX_CHARS),
+            vec![0; estimate.message_bytes],
+            Vec::new(),
+            Vec::new(),
+        )),
+    };
+    assert_eq!(
+        estimated_single_result_bytes(1, &estimate).expect("estimated size"),
+        batch_result_encoded_bytes(&[actual]).expect("wire size"),
+    );
+}
+
+#[tokio::test]
+async fn test_estimated_enormous_body_stops_without_execution() {
+    let items = vec![BatchRequestItem {
+        item_id: u32::MAX,
+        message: crate::messages::block_by_height_message(1),
+    }];
+    for message_bytes in [usize::MAX / 2, usize::MAX] {
+        let result = execute_batch_request_items(
+            &items,
+            1024,
+            move |_| async move {
+                Ok(Some(BatchItemResponseEstimate {
+                    request_kind: "block-by-height",
+                    envelope: BatchItemResponseEnvelopeEstimate::HeardBlock {
+                        block_id_bytes_upper_bound: TIP5_BASE58_MAX_CHARS,
+                    },
+                    message_bytes,
+                    source: "test",
+                }))
+            },
+            |_| async { panic!("oversize projection must not execute a body lookup") },
+        )
+        .await;
+        if message_bytes == usize::MAX {
+            assert!(result.is_err(), "overflow must fail before execution");
+        } else {
+            assert_eq!(
+                result.expect("enormous representable projection"),
+                vec![batch_error_result(u32::MAX, BatchErrorClass::TooLarge)],
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_cold_block_batch_all_64_not_found_keeps_hints_cold() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    // Requested historical heights must reach the scripted kernel, not the
+    // known-negative frontier cache.
+    state.lock().await.first_negative = 80_000;
+    let scripted = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        (0..64).map(|_| None).collect(),
+        Vec::new(),
+    )
+    .await;
+    let limits = runtime_limits_from_config(&LIBP2P_CONFIG);
+    let items: Vec<_> = (0..64)
+        .map(|index| BatchRequestItem {
+            item_id: index + 1,
+            message: crate::messages::block_by_height_message(u64::from(index) + 100),
+        })
+        .collect();
+    let mut before = Vec::new();
+    for item in &items {
+        let estimate = estimate_batch_request_item_response(item, limits, &state)
+            .await
+            .expect("estimate")
+            .expect("valid request");
+        before.push((estimate.message_bytes, estimate.source));
+    }
+    let peer = PeerId::random();
+    let results = execute_batch_request_items(
+        &items,
+        limits.gen2_batch_max_bytes,
+        |item| {
+            let item = item.clone();
+            let state = Arc::clone(&state);
+            async move { estimate_batch_request_item_response(&item, limits, &state).await }
+        },
+        |item| {
+            let item = item.clone();
+            let state = Arc::clone(&state);
+            let metrics = Arc::clone(&metrics);
+            let traffic = &scripted.traffic;
+            async move {
+                execute_batch_request_item(peer, &item, limits, traffic, &metrics, &state).await
+            }
+        },
+    )
+    .await
+    .expect("cold batch");
+    assert_eq!(scripted.peek_count.load(Ordering::SeqCst), 64);
+    assert_eq!(results.len(), 64);
+    for ((item, result), expected_hint) in items.iter().zip(&results).zip(before) {
+        assert_eq!(result.item_id, item.item_id);
+        assert_eq!(result.status, BatchResultStatus::NotFound);
+        assert!(result.error.is_none());
+        assert!(result.envelope.is_none());
+        let estimate = estimate_batch_request_item_response(item, limits, &state)
+            .await
+            .expect("estimate")
+            .expect("valid request");
+        assert_eq!((estimate.message_bytes, estimate.source), expected_hint);
+    }
+    assert!(
+        batch_result_encoded_bytes(&results).expect("wire size") <= limits.gen2_batch_max_bytes
+    );
 }
 
 #[test]
@@ -7684,7 +11791,7 @@ async fn test_request_effect_upgrades_block_by_height_to_bundle_when_flag_enable
 }
 
 #[tokio::test]
-async fn test_block_request_effects_keep_stable_peer_subset_for_batching() {
+async fn test_block_request_effects_rotate_equal_priority_peers_across_heights() {
     use tokio::sync::mpsc;
 
     let first_message = ByteBuf::from(jam_block_by_height_request(42));
@@ -7697,8 +11804,6 @@ async fn test_block_request_effects_keep_stable_peer_subset_for_batching() {
     let peer_b = PeerId::random();
     let peer_c = PeerId::random();
     let peers = vec![peer_a, peer_b, peer_c];
-    let mut canonical_peers = peers.clone();
-    canonical_peers.sort_unstable_by_key(|peer| peer.to_base58());
     let permuted_peers = vec![peer_c, peer_a, peer_b];
 
     let metrics = Arc::new(
@@ -7727,21 +11832,27 @@ async fn test_block_request_effects_keep_stable_peer_subset_for_batching() {
     .await
     .expect("second block request should be accepted");
 
+    let mut selected = Vec::new();
     for expected_message in [first_message, second_message] {
         match swarm_rx.recv().await {
             Some(SwarmAction::QueueKernelRequest {
                 peer_id,
                 request_message,
             }) => {
-                assert_eq!(peer_id, canonical_peers[0]);
+                assert!(peers.contains(&peer_id));
+                selected.push(peer_id);
                 assert_eq!(request_message, expected_message);
             }
             other => panic!("expected QueueKernelRequest action, got {:?}", other),
         }
     }
+    assert_ne!(
+        selected[0], selected[1],
+        "independent heights must rotate peers"
+    );
     assert!(
         swarm_rx.try_recv().is_err(),
-        "block requests should keep the same stable peer across adjacent heights"
+        "each block demand should queue only one peer"
     );
 }
 
@@ -7754,7 +11865,7 @@ async fn test_block_request_effects_skip_previously_attempted_peers_on_repeat() 
         request_slab_from_message(&request_message).expect("request slab should decode");
     let peers = (0..10).map(|_| PeerId::random()).collect::<Vec<_>>();
     let mut canonical_peers = peers.clone();
-    canonical_peers.sort_unstable_by_key(|peer| peer.to_base58());
+    canonical_peers.sort_unstable();
 
     let metrics = Arc::new(
         NockchainP2PMetrics::register(gnort::global_metrics_registry())
@@ -7797,7 +11908,7 @@ async fn test_block_request_effects_skip_previously_attempted_peers_on_repeat() 
             peer_id,
             request_message: queued_message,
         }) => {
-            assert_eq!(peer_id, canonical_peers[1]);
+            assert!(canonical_peers[1..].contains(&peer_id));
             assert_eq!(queued_message, request_message);
         }
         other => panic!("expected QueueKernelRequest action, got {:?}", other),
@@ -7884,6 +11995,70 @@ async fn test_block_request_effects_recycle_attempted_peers_when_exhausted() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)] // ibig has a memory leak so miri fails this test
+async fn heard_block_gossip_skips_all_recorded_source_peers() {
+    use tokio::sync::mpsc;
+
+    let (fact, _) = heard_block_fact_with_block_seed(42, 91_001, &[]);
+    let NockchainFact::HeardBlock(block_id, _) = &fact else {
+        panic!("expected heard-block fact");
+    };
+    let message = result_message_from_fact(&fact);
+    let payload_slab = request_slab_from_message(&message).expect("valid heard-block payload");
+    let mut effect_slab = NounSlab::new();
+    let payload =
+        effect_slab.copy_into(unsafe { *payload_slab.root() }, &payload_slab.noun_space());
+    let context = gossip_test_context(&mut effect_slab, "chain", "new-head", None);
+    let effect = T(
+        &mut effect_slab,
+        &[D(tas!(b"gossip")), context, D(FACT_POKE_VERSION), payload],
+    );
+    effect_slab.set_root(effect);
+
+    let source = PeerId::random();
+    let second_source = PeerId::random();
+    let other = PeerId::random();
+    let metrics = isolated_test_metrics();
+    let state_arc = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    {
+        let mut state = state_arc.lock().await;
+        state.record_block_echo_source(source, block_id);
+        state.record_block_echo_source(second_source, block_id);
+        state.record_block_echo_source(source, block_id);
+    }
+    let (swarm_tx, mut swarm_rx) = mpsc::channel(4);
+    handle_effect(
+        effect_slab,
+        swarm_tx,
+        vec![source, second_source, other],
+        false,
+        state_arc,
+        metrics,
+    )
+    .await
+    .expect("valid gossip effect");
+
+    match swarm_rx.recv().await {
+        Some(SwarmAction::SendGossip {
+            peer_id,
+            message: sent,
+            ..
+        }) => {
+            assert_eq!(peer_id, other);
+            assert_eq!(sent, message);
+        }
+        other => panic!("expected gossip to the other peer, got {other:?}"),
+    }
+    assert!(
+        swarm_rx.try_recv().is_err(),
+        "neither source must receive an echo"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // ibig has a memory leak so miri fails this test
 async fn test_gossip_effect_current_version_forwards_payload_and_clears_caches() {
     use tokio::sync::mpsc;
 
@@ -7902,10 +12077,8 @@ async fn test_gossip_effect_current_version_forwards_payload_and_clears_caches()
     )));
     {
         let mut state_guard = state_arc.lock().await;
-        state_guard.block_cache.insert(42, NounSlab::new());
-        state_guard
-            .elders_cache
-            .insert(String::from("elders"), NounSlab::new());
+        state_guard.cache_block_response(42, NounSlab::new());
+        state_guard.cache_elders_response(String::from("elders"), NounSlab::new());
         state_guard
             .elders_negative_cache
             .insert(String::from("missing-elders"));
@@ -7929,7 +12102,9 @@ async fn test_gossip_effect_current_version_forwards_payload_and_clears_caches()
 
     for expected_peer in peers {
         match swarm_rx.recv().await {
-            Some(SwarmAction::SendGossip { peer_id, message }) => {
+            Some(SwarmAction::SendGossip {
+                peer_id, message, ..
+            }) => {
                 assert_eq!(peer_id, expected_peer, "gossip should preserve peer order");
                 assert_eq!(message, expected_message);
             }
@@ -7955,7 +12130,7 @@ async fn unvalidated_future_block_does_not_suppress_outbound_gossip() {
     let peer_a = PeerId::random();
     let peer_b = PeerId::random();
     let peers = vec![peer_a, peer_b];
-    let attacker = PeerId::random();
+    let source_peer = PeerId::random();
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::new(
         metrics.clone(),
@@ -7969,9 +12144,13 @@ async fn unvalidated_future_block_does_not_suppress_outbound_gossip() {
     let transcript = DriverTranscript::default();
     let scripted_traffic = build_scripted_traffic_cop(transcript, Vec::new(), Vec::new()).await;
     let (future_block, _) = heard_block_fact_with_block_seed(u64::MAX, 900_000, &[]);
+    let NockchainFact::HeardBlock(future_block_id, _) = &future_block else {
+        panic!("expected heard-block fact");
+    };
+    let future_block_id = future_block_id.clone();
     let (defer_swarm_tx, _defer_swarm_rx) = mpsc::channel(1);
     route_response_fact(
-        attacker, future_block, &scripted_traffic.traffic, &metrics, &state_arc, &defer_swarm_tx,
+        source_peer, future_block, &scripted_traffic.traffic, &metrics, &state_arc, &defer_swarm_tx,
     )
     .await
     .expect("future heard-block should defer without kernel validation");
@@ -7985,7 +12164,15 @@ async fn unvalidated_future_block_does_not_suppress_outbound_gossip() {
             .lock()
             .await
             .has_deferred_block_at_height(u64::MAX),
-        "attacker-authored future block should be deferred"
+        "source-provided future block should be deferred"
+    );
+    assert!(
+        state_arc
+            .lock()
+            .await
+            .block_echo_sources(&future_block_id)
+            .is_some_and(|sources| sources.contains(&source_peer)),
+        "response routing should retain the source before the kernel poke"
     );
 
     let (swarm_tx, mut swarm_rx) = mpsc::channel(8);
@@ -8017,7 +12204,9 @@ async fn unvalidated_future_block_does_not_suppress_outbound_gossip() {
             .await
             .expect("kernel gossip should fan out despite unvalidated deferred height");
         match action {
-            Some(SwarmAction::SendGossip { peer_id, message }) => {
+            Some(SwarmAction::SendGossip {
+                peer_id, message, ..
+            }) => {
                 assert_eq!(peer_id, expected_peer, "gossip should preserve peer order");
                 assert_eq!(message, expected_message);
             }
@@ -8065,7 +12254,9 @@ async fn test_buffered_gossip_effect_returns_without_waiting_on_swarm_queue() {
 
     for expected_peer in peers {
         match buffered_swarm_actions.pop_front() {
-            Some(SwarmAction::SendGossip { peer_id, message }) => {
+            Some(SwarmAction::SendGossip {
+                peer_id, message, ..
+            }) => {
                 assert_eq!(peer_id, expected_peer, "gossip should preserve peer order");
                 assert_eq!(message, expected_message);
             }
@@ -8097,10 +12288,8 @@ async fn test_gossip_effect_rejects_unsupported_versions_before_side_effects() {
     )));
     {
         let mut state_guard = state_arc.lock().await;
-        state_guard.block_cache.insert(7, NounSlab::new());
-        state_guard
-            .elders_cache
-            .insert(String::from("elders"), NounSlab::new());
+        state_guard.cache_block_response(7, NounSlab::new());
+        state_guard.cache_elders_response(String::from("elders"), NounSlab::new());
         state_guard
             .elders_negative_cache
             .insert(String::from("missing-elders"));
@@ -9306,6 +13495,180 @@ fn range_batch_result_bytes(blocks: Vec<BundledBlockWithTxs>) -> usize {
     .expect("range batch result should encode")
 }
 
+fn cache_test_block_scry(height: u64, payload_len: usize) -> NounSlab {
+    let mut slab = NounSlab::new();
+    let block_id = tip5_tuple(&mut slab, 10_000 + height);
+    let payload = Atom::from_value(&mut slab, vec![0xCDu8; payload_len])
+        .expect("payload atom should build")
+        .as_noun();
+    let page = T(
+        &mut slab,
+        &[
+            D(1),
+            block_id,
+            D(0),
+            D(0),
+            D(0),
+            D(0),
+            D(0),
+            D(0),
+            D(0),
+            D(0),
+            D(height),
+            payload,
+        ],
+    );
+    let root = T(&mut slab, &[D(0), D(0), page]);
+    slab.set_root(root);
+    slab
+}
+
+async fn execute_cache_test_request(
+    request: NockchainDataRequest,
+    response: NounSlab,
+    metrics: &Arc<NockchainP2PMetrics>,
+    state: &Arc<Mutex<P2PState>>,
+) {
+    let scripted = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        vec![Some(response)],
+        Vec::new(),
+    )
+    .await;
+    let outcome = execute_request_item(
+        PeerId::random(),
+        request.clone(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        &scripted.traffic,
+        metrics,
+        state,
+    )
+    .await
+    .expect("ordinary response should be serviced");
+    assert!(
+        matches!(outcome, RequestExecutionOutcome::Result { .. }),
+        "expected successful response for {request:?}, got {outcome:?}"
+    );
+    assert_eq!(scripted.peek_count.load(Ordering::SeqCst), 1);
+    state.lock().await.assert_response_cache_bounds();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execute_request_item_ordinary_caches_share_combined_entry_cap() {
+    for block_request in [true, false] {
+        let metrics = isolated_test_metrics();
+        let state = Arc::new(Mutex::new(P2PState::new(
+            metrics.clone(),
+            LIBP2P_CONFIG.seen_tx_clear_interval,
+        )));
+        {
+            let mut guard = state.lock().await;
+            guard.first_negative = 80_000;
+            for index in 0..4_096 {
+                let mut slab = NounSlab::new();
+                slab.set_root(D(0));
+                match index % 3 {
+                    0 => guard.cache_block_response(index, slab),
+                    1 => guard.cache_tx_response(format!("prefill-{index}"), slab),
+                    _ => guard.cache_elders_response(format!("prefill-{index}"), slab),
+                }
+            }
+            assert_eq!(
+                guard.block_cache.len() + guard.tx_cache.len() + guard.elders_cache.len(),
+                4_096
+            );
+            guard.assert_response_cache_bounds();
+        }
+        let request = if block_request {
+            NockchainDataRequest::BlockByHeight(50_000)
+        } else {
+            decode_request_item_message(&jam_raw_tx_request(50_000)).expect("valid tx request")
+        };
+        let response = if block_request {
+            cache_test_block_scry(50_000, 64)
+        } else {
+            scry_some_raw_tx(50_000, 64)
+        };
+        execute_cache_test_request(request, response, &metrics, &state).await;
+        let (bundle, _, _) = scry_some_heavy_txs(50_000, &[50_002], 64);
+        execute_cache_test_request(
+            NockchainDataRequest::BlockWithTxsByHeight(50_000),
+            bundle,
+            &metrics,
+            &state,
+        )
+        .await;
+        state.lock().await.clear_block_and_elders_responses();
+        state.lock().await.assert_response_cache_bounds();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execute_request_item_ordinary_caches_enforce_slab_byte_budget() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    state.lock().await.first_negative = 80_000;
+    let mut supplied_bytes = 0;
+    for index in 0..8 {
+        let height = 60_000 + index;
+        let (request, response) = if index % 2 == 0 {
+            (
+                NockchainDataRequest::BlockByHeight(height),
+                cache_test_block_scry(height, 8 * 1024 * 1024),
+            )
+        } else {
+            (
+                decode_request_item_message(&jam_raw_tx_request(height)).expect("valid tx request"),
+                scry_some_raw_tx(height, 8 * 1024 * 1024),
+            )
+        };
+        supplied_bytes += response.allocated_bytes();
+        execute_cache_test_request(request, response, &metrics, &state).await;
+    }
+    assert!(supplied_bytes > 100 * 1024 * 1024);
+    let (bundle, _, _) = scry_some_heavy_txs(60_006, &[60_101], 64);
+    execute_cache_test_request(
+        NockchainDataRequest::BlockWithTxsByHeight(60_006),
+        bundle,
+        &metrics,
+        &state,
+    )
+    .await;
+    state.lock().await.clear_block_and_elders_responses();
+    state.lock().await.assert_response_cache_bounds();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execute_request_item_oversized_slabs_are_serviced_without_retention() {
+    for block_request in [true, false] {
+        let metrics = isolated_test_metrics();
+        let state = Arc::new(Mutex::new(P2PState::new(
+            metrics.clone(),
+            LIBP2P_CONFIG.seen_tx_clear_interval,
+        )));
+        state.lock().await.first_negative = 80_000;
+        let request = if block_request {
+            NockchainDataRequest::BlockByHeight(70_000)
+        } else {
+            decode_request_item_message(&jam_raw_tx_request(70_000)).expect("valid tx request")
+        };
+        let response = if block_request {
+            cache_test_block_scry(70_000, 101 * 1024 * 1024)
+        } else {
+            scry_some_raw_tx(70_000, 101 * 1024 * 1024)
+        };
+        assert!(response.allocated_bytes() > 100 * 1024 * 1024);
+        execute_cache_test_request(request, response, &metrics, &state).await;
+        let guard = state.lock().await;
+        assert!(guard.block_cache.is_empty());
+        assert!(guard.tx_cache.is_empty());
+        assert!(guard.elders_cache.is_empty());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn execute_request_item_bundle_assembles_block_plus_all_txs_in_page_order() {
     let transcript = DriverTranscript::default();
@@ -10443,15 +14806,13 @@ async fn test_suppress_duplicate_active_outbound_request_blocks_exact_inflight_r
     }
     assert_eq!(metrics.req_res_effect_dedup_suppressed.fetch_add(0), 1);
 
-    let cleared = state_arc
+    let retired = state_arc
         .lock()
         .await
-        .clear_outbound_requests_for_peer(&peer_id);
-    assert_eq!(
-        cleared.len(),
-        1,
-        "test setup should clear the live outbound request"
-    );
+        .remove_outbound_request(request_id)
+        .expect("terminal retirement should remove the retained request");
+    assert_eq!(retired.peer_id, peer_id);
+    assert_eq!(state_arc.lock().await.total_outbound_request_count(), 0);
 
     let suppressed = suppress_duplicate_active_outbound_request(
         &state_arc, &metrics, peer_id, "request", &request_message,
@@ -10919,6 +15280,9 @@ async fn wrong_peer_id_for_connected_obtained_peer_removes_stale_address_without
             obtained,
             address: stale_expected_addr,
         },
+        Some(expected),
+        &[],
+        &[],
     )
     .await;
 
@@ -10996,6 +15360,9 @@ async fn wrong_peer_id_for_unconnected_obtained_peer_records_address_cooldown() 
             obtained,
             address: stale_expected_addr,
         },
+        Some(expected),
+        std::slice::from_ref(&stale_base_addr),
+        &[],
     )
     .await;
 
@@ -11007,6 +15374,11 @@ async fn wrong_peer_id_for_unconnected_obtained_peer_records_address_cooldown() 
         !peer_exclusions.is_ip_excluded(&ip),
         "single wrong-peer-id response should not exclude the IP before the repeat threshold"
     );
+    assert_eq!(metrics.address_cooldowns_created.fetch_add(0), 1);
+    assert!(matches!(
+        swarm.dial(stale_base_addr.with_p2p(expected).unwrap()),
+        Err(DialError::Denied { .. }),
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11257,7 +15629,10 @@ async fn req_res_driver_inbound_gen2_batch_request_updates_receive_counters() {
             responder
                 .behaviour_mut()
                 .request_response
-                .send_response(channel, response.clone())
+                .send_response(
+                    channel,
+                    crate::behaviour::TransportResponse::outgoing(response.clone()),
+                )
                 .expect("batch response should send");
             response
         }
@@ -11372,9 +15747,7 @@ fn req_res_gen2_payload_fit_report() {
 #[ignore = "checkpoint-backed sizing harness, run explicitly with -- --ignored --nocapture"]
 async fn req_res_gen2_checkpoint_block_sizing_report() {
     let Some(chkjam_path) = checkpoint_path_for_report() else {
-        eprintln!(
-                "skipping checkpoint sizing report: set REQ_RES_GEN2_CHECKPOINT_PATH or provide ~/gwe/oct-21-jams/0.chkjam or ~/gwe/oct-21-jams/1.chkjam (legacy fallback: 0-001.chkjam)"
-            );
+        eprintln!("skipping checkpoint sizing report: set REQ_RES_GEN2_CHECKPOINT_PATH");
         return;
     };
 
@@ -11890,7 +16263,7 @@ async fn req_res_gen2_requester_cost_report() {
                 ConnectionId::new_unchecked(90 + item_count),
                 request_response::Message::Response {
                     request_id,
-                    response,
+                    response: measured_test_response(response),
                 },
                 swarm_tx,
                 &mut equix_builder,
@@ -12013,7 +16386,7 @@ async fn req_res_gen2_requester_cost_report() {
                 ConnectionId::new_unchecked(200),
                 request_response::Message::Response {
                     request_id,
-                    response,
+                    response: measured_test_response(response),
                 },
                 swarm_tx,
                 &mut equix_builder,
@@ -12092,8 +16465,8 @@ async fn req_res_gen2_requester_cost_report() {
         }
     } else {
         println!(
-                "requester-cost checkpoint block sample skipped: no checkpoint found via REQ_RES_GEN2_CHECKPOINT_PATH or ~/gwe/oct-21-jams/{{0,1}}.chkjam"
-            );
+            "requester-cost checkpoint block sample skipped: set REQ_RES_GEN2_CHECKPOINT_PATH"
+        );
     }
 
     maybe_write_report_json(&RequesterCostReport {
@@ -12284,9 +16657,7 @@ async fn req_res_gen2_recovery_path_report() {
 #[ignore = "checkpoint-only requester replay harness, run explicitly with -- --ignored --nocapture"]
 async fn req_res_gen2_checkpoint_requester_cost_report() {
     let Some(chkjam_path) = checkpoint_path_for_report() else {
-        println!(
-                "checkpoint requester cost report skipped: no checkpoint found via REQ_RES_GEN2_CHECKPOINT_PATH or ~/gwe/oct-21-jams/{{0,1}}.chkjam"
-            );
+        println!("checkpoint requester cost report skipped: set REQ_RES_GEN2_CHECKPOINT_PATH");
         return;
     };
 
@@ -12351,9 +16722,7 @@ async fn req_res_gen2_checkpoint_requester_cost_report() {
 #[ignore = "rollout harness, run explicitly with -- --ignored --nocapture"]
 async fn req_res_gen2_checkpoint_prefetch_cost_report() {
     let Some(chkjam_path) = checkpoint_path_for_report() else {
-        println!(
-            "checkpoint prefetch cost report skipped: no checkpoint found via REQ_RES_GEN2_CHECKPOINT_PATH or ~/gwe/oct-21-jams/{{0,1}}.chkjam"
-        );
+        println!("checkpoint prefetch cost report skipped: set REQ_RES_GEN2_CHECKPOINT_PATH");
         return;
     };
 
@@ -12425,9 +16794,7 @@ async fn req_res_gen2_checkpoint_requester_profile_report() {
         .with_writer(std::io::stderr)
         .try_init();
     let Some(chkjam_path) = checkpoint_path_for_report() else {
-        println!(
-                "checkpoint requester profile skipped: no checkpoint found via REQ_RES_GEN2_CHECKPOINT_PATH or ~/gwe/oct-21-jams/{{0,1}}.chkjam"
-            );
+        println!("checkpoint requester profile skipped: set REQ_RES_GEN2_CHECKPOINT_PATH");
         return;
     };
 
@@ -12516,9 +16883,7 @@ async fn req_res_gen2_checkpoint_requester_profile_report() {
 #[ignore = "checkpoint kernel latency harness, run explicitly with -- --ignored --nocapture"]
 async fn req_res_gen2_checkpoint_range_scry_latency_report() {
     let Some(chkjam_path) = checkpoint_path_for_report() else {
-        println!(
-            "checkpoint range scry latency report skipped: no checkpoint found via REQ_RES_GEN2_CHECKPOINT_PATH or ~/gwe/oct-21-jams/{{0,1}}.chkjam"
-        );
+        println!("checkpoint range scry latency report skipped: set REQ_RES_GEN2_CHECKPOINT_PATH");
         return;
     };
 
@@ -13005,7 +17370,10 @@ async fn req_res_gen2_kernel_sensitivity_report() {
                 responder
                     .behaviour_mut()
                     .request_response
-                    .send_response(channel, response)
+                    .send_response(
+                        channel,
+                        crate::behaviour::TransportResponse::outgoing(response),
+                    )
                     .expect("response should send");
             }
             other => panic!("expected SendResponse, got {other:?}"),
@@ -13326,12 +17694,10 @@ async fn test_execute_batch_request_items_stops_before_executing_estimated_tail(
     ])
     .expect("bounded fallback result should encode");
 
-    let projected_too_large = batch_result_encoded_bytes(&[
-        head_result.clone(),
-        estimated_result_item(2, &estimated_tail),
-        batch_error_result(3, BatchErrorClass::Backpressure),
-    ])
-    .expect("projected tail estimate should encode");
+    let projected_too_large = limit
+        - req_res_message_encoded_bytes(&batch_error_result(2, BatchErrorClass::Backpressure))
+            .expect("tail size")
+        + estimated_result_item_bytes(2, &estimated_tail).expect("estimated tail size");
     assert!(projected_too_large > limit);
 
     let results = execute_batch_request_items(
@@ -13406,8 +17772,8 @@ async fn test_execute_batch_request_items_marks_estimated_impossible_item_too_la
         batch_error_result(2, BatchErrorClass::Backpressure),
     ])
     .expect("backpressure-only result should encode");
-    let projected_single = batch_result_encoded_bytes(&[estimated_result_item(1, &estimate)])
-        .expect("projected single item should encode");
+    let projected_single = estimated_single_result_bytes(1, &estimate)
+        .expect("projected single item should fit usize");
     assert!(projected_single > limit);
 
     let results = execute_batch_request_items(
@@ -13467,18 +17833,22 @@ async fn req_res_driver_responder_fit_stops_before_executing_tail_item() {
         message_bytes: estimated_message_bytes,
         source: "configured_fallback",
     };
-    let first_projection = batch_result_encoded_bytes(&[
-        estimated_result_item(1, &estimate),
+    let baseline = batch_result_encoded_bytes(&[
+        batch_error_result(1, BatchErrorClass::Backpressure),
         batch_error_result(2, BatchErrorClass::Backpressure),
         batch_error_result(3, BatchErrorClass::Backpressure),
     ])
-    .expect("first projected batch should encode");
-    let second_projection = batch_result_encoded_bytes(&[
-        expected_head.clone(),
-        estimated_result_item(2, &estimate),
-        batch_error_result(3, BatchErrorClass::Backpressure),
-    ])
-    .expect("second projected batch should encode");
+    .expect("baseline size");
+    let first_projection = baseline
+        - req_res_message_encoded_bytes(&batch_error_result(1, BatchErrorClass::Backpressure))
+            .expect("reserved size")
+        + estimated_result_item_bytes(1, &estimate).expect("first estimate size");
+    let second_projection = first_projection
+        - req_res_message_encoded_bytes(&batch_error_result(2, BatchErrorClass::Backpressure))
+            .expect("reserved size")
+        + req_res_message_encoded_bytes(&expected_head).expect("head size")
+        - estimated_result_item_bytes(1, &estimate).expect("first estimate size")
+        + estimated_result_item_bytes(2, &estimate).expect("second estimate size");
     let first_actual = batch_result_encoded_bytes(&[
         expected_head.clone(),
         batch_error_result(2, BatchErrorClass::Backpressure),
@@ -13606,7 +17976,10 @@ async fn req_res_driver_responder_fit_stops_before_executing_tail_item() {
             responder
                 .behaviour_mut()
                 .request_response
-                .send_response(channel, response.clone())
+                .send_response(
+                    channel,
+                    crate::behaviour::TransportResponse::outgoing(response.clone()),
+                )
                 .expect("response should send");
             response
         }
@@ -13807,7 +18180,10 @@ async fn req_res_driver_wholesale_inbound_backpressure_reject_recovers_on_same_c
             responder
                 .behaviour_mut()
                 .request_response
-                .send_response(channel, response.clone())
+                .send_response(
+                    channel,
+                    crate::behaviour::TransportResponse::outgoing(response.clone()),
+                )
                 .expect("follow-up response should send");
             response
         }
@@ -13922,7 +18298,10 @@ async fn req_res_driver_rejects_replayed_inbound_batch_before_execution() {
             responder
                 .behaviour_mut()
                 .request_response
-                .send_response(channel, response.clone())
+                .send_response(
+                    channel,
+                    crate::behaviour::TransportResponse::outgoing(response.clone()),
+                )
                 .expect("first response should send");
             response
         }
@@ -14146,7 +18525,7 @@ async fn req_res_driver_retry_requeues_only_retryable_and_missing_batch_items() 
             ConnectionId::new_unchecked(1),
             request_response::Message::Response {
                 request_id,
-                response,
+                response: measured_test_response(response),
             },
             swarm_tx,
             &mut equix_builder,
@@ -14208,6 +18587,129 @@ async fn req_res_driver_retry_requeues_only_retryable_and_missing_batch_items() 
     assert!(rendered.contains("poke #1"));
 }
 
+async fn connected_fallback_test_peer(
+    state: &Arc<Mutex<P2PState>>,
+) -> (
+    Swarm<NockchainBehaviour>,
+    ReqResTestSwarm,
+    PeerId,
+    ConnectionId,
+) {
+    let mut client = start_swarm(
+        LibP2PConfig::default(),
+        Keypair::generate_ed25519(),
+        Vec::new(),
+        None,
+        connection_limits::ConnectionLimits::default(),
+        None,
+        PeerExclusions::default(),
+    )
+    .unwrap();
+    let mut server = build_req_res_test_swarm(
+        LibP2PConfig::default(),
+        Keypair::generate_ed25519(),
+        vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+    )
+    .unwrap();
+    let peer = *server.local_peer_id();
+    let connection_id = tokio::time::timeout(Duration::from_secs(20), async {
+        let address = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = server.select_next_some().await {
+                break address;
+            }
+        };
+        client.dial(address).unwrap();
+        loop {
+            tokio::select! {
+                event = client.select_next_some() => match event {
+                    SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
+                        assert_eq!(peer_id, peer);
+                        state.lock().await.track_connection(
+                            connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone());
+                        break connection_id;
+                    }
+                    SwarmEvent::OutgoingConnectionError { error, .. } => panic!("fixture dial failed: {error}"),
+                    _ => {}
+                },
+                _ = server.select_next_some() => {}
+            }
+        }
+    }).await.expect("fallback fixture must establish a real SDK connection");
+    (client, server, peer, connection_id)
+}
+
+async fn fallback_test_wire_response(
+    client: &mut Swarm<NockchainBehaviour>,
+    server: &mut ReqResTestSwarm,
+    state: &Arc<Mutex<P2PState>>,
+    metrics: &NockchainP2PMetrics,
+    context: OutboundRequestContext,
+    response: NockchainResponse,
+    expected_connection: ConnectionId,
+) -> (
+    request_response::OutboundRequestId,
+    request_response::Message<NockchainRequest, crate::behaviour::TransportResponse>,
+) {
+    send_outbound_request_now(client, state, metrics, context).await;
+    let mut response = Some(response);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            tokio::select! {
+                event = client.select_next_some() => match event {
+                    SwarmEvent::Behaviour(NockchainEvent::RequestResponse(request_response::Event::Message {
+                        peer, connection_id, message,
+                    })) => {
+                        if let request_response::Message::Response { request_id, response } = &message {
+                            assert_eq!(connection_id, expected_connection);
+                            let bytes = response.received_bytes.expect("codec measurement");
+                            let receipt_endpoint = client.behaviour().recovery.connection_endpoint(&peer, connection_id);
+                            state.lock().await.charge_received_response(*request_id, peer, connection_id, receipt_endpoint, bytes).unwrap();
+                            return (*request_id, message);
+                        }
+                    }
+                    SwarmEvent::Behaviour(NockchainEvent::RequestResponse(
+                        request_response::Event::OutboundFailure { error, .. }
+                    )) => panic!("fixture exchange failed: {error}"),
+                    _ => {}
+                },
+                event = server.select_next_some() => {
+                    if let SwarmEvent::Behaviour(ReqResTestEvent::RequestResponse(request_response::Event::Message {
+                        message: request_response::Message::Request { channel, .. }, ..
+                    })) = event {
+                        server.behaviour_mut().request_response.send_response(
+                            channel, crate::behaviour::TransportResponse::outgoing(response.take().expect("fixture serves exactly one request"))).unwrap();
+                    }
+                }
+            }
+        }
+    }).await.expect("fallback fixture must receive a real decoded SDK response")
+}
+
+async fn close_fallback_test_peer(
+    client: &mut Swarm<NockchainBehaviour>,
+    server: &mut ReqResTestSwarm,
+    state: &Arc<Mutex<P2PState>>,
+    connection_id: ConnectionId,
+) {
+    assert!(client.close_connection(connection_id));
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            tokio::select! {
+                event = client.select_next_some() => {
+                    if let SwarmEvent::ConnectionClosed { connection_id: closed, .. } = event {
+                        assert_eq!(closed, connection_id);
+                        state.lock().await.lost_connection(closed);
+                        break;
+                    }
+                },
+                _ = server.select_next_some() => {}
+            }
+        }
+    })
+    .await
+    .expect("fallback fixture must retire its actual SDK connection");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn req_res_driver_bundle_too_large_error_queues_classic_fallback() {
     let transcript = DriverTranscript::default();
@@ -14220,9 +18722,9 @@ async fn req_res_driver_bundle_too_large_error_queues_classic_fallback() {
         metrics.clone(),
         LIBP2P_CONFIG.seen_tx_clear_interval,
     )));
-    let peer = PeerId::random();
-    let local_peer = PeerId::random();
-    let request_id = fresh_outbound_request_id();
+    let (mut client, mut server, peer, connection_id) =
+        connected_fallback_test_peer(&state_arc).await;
+    let local_peer = *client.local_peer_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
         NockchainRequest::BatchRequest {
@@ -14236,10 +18738,6 @@ async fn req_res_driver_bundle_too_large_error_queues_classic_fallback() {
         },
         0,
     );
-    state_arc
-        .lock()
-        .await
-        .record_outbound_request(request_id, request_context);
 
     let response = NockchainResponse::BatchResult {
         results: vec![batch_error_result(7, BatchErrorClass::TooLarge)],
@@ -14249,16 +18747,18 @@ async fn req_res_driver_bundle_too_large_error_queues_classic_fallback() {
     let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
     let mut equix_builder = equix::EquiXBuilder::new();
 
+    let (request_id, response_message) = fallback_test_wire_response(
+        &mut client, &mut server, &state_arc, &metrics, request_context, response, connection_id,
+    )
+    .await;
+
     run_driver_with_timeout(
         &transcript,
         "driver should downgrade oversized bundle response",
         handle_request_response(
             peer,
-            ConnectionId::new_unchecked(1),
-            request_response::Message::Response {
-                request_id,
-                response,
-            },
+            connection_id,
+            response_message,
             swarm_tx,
             &mut equix_builder,
             local_peer,
@@ -14299,6 +18799,13 @@ async fn req_res_driver_bundle_too_large_error_queues_classic_fallback() {
         state_guard.outbound_request_context(request_id).is_none(),
         "completed batch response should clear retained outbound context"
     );
+    assert!(client.is_connected(&peer));
+    drop(state_guard);
+    close_fallback_test_peer(&mut client, &mut server, &state_arc, connection_id).await;
+    assert!(
+        !state_arc.lock().await.is_peer_non_bundle_capable(&peer),
+        "capability downgrade is connection-session metadata, not a permanent identity blacklist"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -14313,9 +18820,9 @@ async fn req_res_driver_invalid_range_response_queues_classic_fallback() {
         metrics.clone(),
         LIBP2P_CONFIG.seen_tx_clear_interval,
     )));
-    let peer = PeerId::random();
-    let local_peer = PeerId::random();
-    let request_id = fresh_outbound_request_id();
+    let (mut client, mut server, peer, connection_id) =
+        connected_fallback_test_peer(&state_arc).await;
+    let local_peer = *client.local_peer_id();
     let request_context = OutboundRequestContext::with_attempt(
         peer,
         NockchainRequest::BatchRequest {
@@ -14329,10 +18836,6 @@ async fn req_res_driver_invalid_range_response_queues_classic_fallback() {
         },
         0,
     );
-    state_arc
-        .lock()
-        .await
-        .record_outbound_request(request_id, request_context);
 
     let response = NockchainResponse::BatchResult {
         results: vec![BatchResultItem {
@@ -14350,16 +18853,18 @@ async fn req_res_driver_invalid_range_response_queues_classic_fallback() {
     let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
     let mut equix_builder = equix::EquiXBuilder::new();
 
+    let (request_id, response_message) = fallback_test_wire_response(
+        &mut client, &mut server, &state_arc, &metrics, request_context, response, connection_id,
+    )
+    .await;
+
     run_driver_with_timeout(
         &transcript,
         "driver should downgrade invalid range response",
         handle_request_response(
             peer,
-            ConnectionId::new_unchecked(1),
-            request_response::Message::Response {
-                request_id,
-                response,
-            },
+            connection_id,
+            response_message,
             swarm_tx,
             &mut equix_builder,
             local_peer,
@@ -14373,32 +18878,80 @@ async fn req_res_driver_invalid_range_response_queues_classic_fallback() {
     .await
     .expect("driver should process invalid range response");
 
-    match recv_swarm_action(&mut swarm_rx).await {
-        SwarmAction::QueueKernelRequest {
-            peer_id,
-            request_message,
-        } => {
-            assert_eq!(peer_id, peer);
-            let decoded = crate::messages::decode_request_item_message(&request_message)
-                .expect("classic fallback request should decode");
-            match decoded {
-                NockchainDataRequest::BlockByHeight(height) => assert_eq!(height, 50),
-                other => panic!("expected classic BlockByHeight fallback, got {other:?}"),
+    let actual_endpoint = state_arc
+        .lock()
+        .await
+        .connection_address(connection_id)
+        .and_then(|address| quic_socket_addr(&address))
+        .expect("the live response stream must have a numeric QUIC endpoint");
+    let mut fallback_count = 0;
+    let mut exclusion_count = 0;
+    let mut retry_request_count = 0;
+    while let Ok(action) = swarm_rx.try_recv() {
+        match action {
+            SwarmAction::QueueKernelRequest {
+                peer_id,
+                request_message,
+            } => {
+                assert_eq!(peer_id, peer);
+                let decoded = crate::messages::decode_request_item_message(&request_message)
+                    .expect("classic fallback request should decode");
+                assert!(
+                    matches!(decoded, NockchainDataRequest::BlockByHeight(50)),
+                    "range fallback must request its missing start height"
+                );
+                fallback_count += 1;
             }
+            SwarmAction::RecordExclusionOutcome {
+                outcome,
+                related_peers,
+            } => {
+                assert_eq!(related_peers, vec![peer]);
+                let cooldown = outcome
+                    .address_cooldown
+                    .expect("a validated response mismatch records endpoint-scoped evidence");
+                assert_eq!(quic_socket_addr(&cooldown.address), Some(actual_endpoint));
+                assert_eq!(cooldown.key.expected_peer, Some(peer));
+                assert_eq!(
+                    cooldown.reason,
+                    crate::ip_block::ExclusionReason::PeerMisbehavior
+                );
+                assert!(
+                    outcome.ip_exclusion.is_none(),
+                    "one invalid response must not exclude sibling endpoints on its IP"
+                );
+                exclusion_count += 1;
+            }
+            SwarmAction::RetryRequests { requests, .. } => retry_request_count += requests.len(),
+            SwarmAction::SendRequest { .. } => retry_request_count += 1,
+            other => panic!("unexpected response-consumer action: {other:?}"),
         }
-        other => panic!("expected QueueKernelRequest fallback, got {other:?}"),
     }
-
-    match tokio::time::timeout(Duration::from_millis(50), swarm_rx.recv()).await {
-        Err(_) | Ok(None) => {}
-        Ok(Some(other)) => panic!("expected no retry action for invalid range, got {other:?}"),
-    }
+    assert_eq!(
+        fallback_count, 1,
+        "exactly one classic start-height fallback is required"
+    );
+    assert_eq!(
+        exclusion_count, 1,
+        "the actual response endpoint must retain mismatch evidence"
+    );
+    assert_eq!(
+        retry_request_count, 0,
+        "invalid ranges must not queue unrelated second requests"
+    );
 
     let state_guard = state_arc.lock().await;
     assert!(state_guard.is_peer_non_range_capable(&peer));
     assert!(
         state_guard.outbound_request_context(request_id).is_none(),
         "completed batch response should clear retained outbound context"
+    );
+    assert!(client.is_connected(&peer));
+    drop(state_guard);
+    close_fallback_test_peer(&mut client, &mut server, &state_arc, connection_id).await;
+    assert!(
+        !state_arc.lock().await.is_peer_non_range_capable(&peer),
+        "late session cleanup must not leave a permanent range downgrade after disconnect"
     );
 }
 
@@ -14741,7 +19294,7 @@ async fn req_res_driver_single_response_updates_peer_stats_snapshot() {
             connection_id,
             request_response::Message::Response {
                 request_id,
-                response,
+                response: measured_test_response(response),
             },
             swarm_tx,
             &mut equix_builder,
@@ -14776,6 +19329,58 @@ async fn req_res_driver_single_response_updates_peer_stats_snapshot() {
             .is_none(),
         "completed single response should clear retained outbound context"
     );
+}
+
+#[tokio::test]
+async fn response_without_transport_measurement_clears_context_without_consumption() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    let peer = PeerId::random();
+    let request_id = fresh_outbound_request_id();
+    state.lock().await.record_outbound_request(
+        request_id,
+        OutboundRequestContext::new(
+            peer,
+            NockchainRequest::BatchRequest {
+                pow: [0; 16],
+                nonce: 1,
+                items: vec![BatchRequestItem {
+                    item_id: 0,
+                    message: block_range_with_txs_request_message(42, 2).unwrap(),
+                }],
+            },
+        ),
+    );
+    let traffic =
+        build_scripted_traffic_cop(DriverTranscript::default(), Vec::new(), Vec::new()).await;
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(4);
+    handle_request_response(
+        peer,
+        ConnectionId::new_unchecked(1),
+        request_response::Message::Response {
+            request_id,
+            response: crate::behaviour::TransportResponse::outgoing(NockchainResponse::Ack {
+                acked: true,
+            }),
+        },
+        swarm_tx,
+        &mut equix::EquiXBuilder::new(),
+        PeerId::random(),
+        traffic.traffic.clone(),
+        metrics.clone(),
+        state.clone(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        PeerExclusions::default(),
+    )
+    .await
+    .unwrap();
+    let guard = state.lock().await;
+    assert!(guard.outbound_request_context(request_id).is_none());
+    assert_eq!(guard.inflight_prefetch_count_for_peer(&peer), 0);
+    assert_eq!(guard.prefetch_bandwidth_window_bytes(&peer), 0);
+    assert!(swarm_rx.try_recv().is_err());
+    assert_eq!(traffic.peek_count.load(Ordering::SeqCst), 0);
+    assert_eq!(traffic.poke_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -14846,7 +19451,7 @@ async fn req_res_driver_terminal_batch_ack_and_not_found_clear_context_without_r
             ConnectionId::new_unchecked(1),
             request_response::Message::Response {
                 request_id,
-                response,
+                response: measured_test_response(response),
             },
             swarm_tx,
             &mut equix_builder,
@@ -14884,6 +19489,259 @@ async fn req_res_driver_terminal_batch_ack_and_not_found_clear_context_without_r
     assert!(rendered.contains("terminal batch ack/not-found response"));
 }
 
+fn jam_elders_request(seed: u64, source_peer: &PeerId) -> Vec<u8> {
+    let mut slab: NounSlab = NounSlab::new();
+    let block_id = tip5_tuple(&mut slab, seed);
+    let peer_atom =
+        Atom::from_value(&mut slab, source_peer.to_base58()).expect("peer ID should encode");
+    let elders = T(&mut slab, &[block_id, peer_atom.as_noun()]);
+    let block_request = T(&mut slab, &[D(tas!(b"elders")), elders]);
+    let request = T(&mut slab, &[D(tas!(b"block")), block_request]);
+    let effect = T(&mut slab, &[D(tas!(b"request")), request]);
+    slab.set_root(effect);
+    slab.jam().as_ref().to_vec()
+}
+
+/// A terminal elders response releases its peer's scheduling slot immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn req_res_driver_terminal_elders_batch_item_releases_elders_slot() {
+    let transcript = DriverTranscript::default();
+    let metrics = isolated_test_metrics();
+    let state_arc = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let peer = PeerId::random();
+    let local_peer = PeerId::random();
+    let scripted_traffic =
+        build_scripted_traffic_cop(transcript.clone(), Vec::new(), Vec::new()).await;
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
+    let mut equix_builder = equix::EquiXBuilder::new();
+
+    let terminal_results = [
+        (BatchResultStatus::NotFound, None),
+        (BatchResultStatus::Ack, None),
+        (BatchResultStatus::Error, Some(BatchErrorClass::InvalidPow)),
+    ];
+    for (round, (status, error)) in terminal_results.into_iter().enumerate() {
+        let elders_message = ByteBuf::from(jam_elders_request(500 + round as u64, &peer));
+        assert!(matches!(
+            decode_request_item_message(&elders_message),
+            Ok(NockchainDataRequest::EldersById(..))
+        ));
+        let key = format!("elders-round-{round}:{}", peer.to_base58());
+        {
+            let mut state_guard = state_arc.lock().await;
+            assert!(
+                state_guard.should_send_elders_request(
+                    peer,
+                    &key,
+                    Instant::now(),
+                    crate::p2p_state::ELDERS_REQUEST_COOLDOWN,
+                    crate::p2p_state::ELDERS_INFLIGHT_TTL,
+                ),
+                "round {round}: the slot should be free before the request goes out"
+            );
+            assert_eq!(state_guard.elders_inflight_len(), 1);
+        }
+        let request_id = fresh_outbound_request_id();
+        state_arc.lock().await.record_outbound_request(
+            request_id,
+            OutboundRequestContext::with_attempt(
+                peer,
+                NockchainRequest::BatchRequest {
+                    pow: [0; 16],
+                    nonce: 1,
+                    items: vec![BatchRequestItem {
+                        item_id: 1,
+                        message: elders_message,
+                    }],
+                },
+                0,
+            ),
+        );
+
+        let response = NockchainResponse::BatchResult {
+            results: vec![BatchResultItem {
+                item_id: 1,
+                status,
+                error,
+                envelope: None,
+            }],
+        };
+        run_driver_with_timeout(
+            &transcript,
+            "driver should process a terminal elders batch item",
+            handle_request_response(
+                peer,
+                ConnectionId::new_unchecked(1),
+                request_response::Message::Response {
+                    request_id,
+                    response: measured_test_response(response),
+                },
+                swarm_tx.clone(),
+                &mut equix_builder,
+                local_peer,
+                scripted_traffic.traffic.clone(),
+                metrics.clone(),
+                Arc::clone(&state_arc),
+                runtime_limits_from_config(&LIBP2P_CONFIG),
+                PeerExclusions::default(),
+            ),
+        )
+        .await
+        .expect("driver should process a terminal elders batch item");
+
+        assert_eq!(
+            state_arc.lock().await.elders_inflight_len(),
+            0,
+            "round {round}: a {status:?} answer for the elders item must release the peer's slot"
+        );
+        while swarm_rx.try_recv().is_ok() {}
+    }
+    assert_eq!(scripted_traffic.poke_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn exhausted_eof_height_retry_dispatches_alternate_or_stops_without_one() {
+    for has_alternate in [true, false] {
+        let metrics = isolated_test_metrics();
+        let state = Arc::new(Mutex::new(P2PState::with_peer_stats_registry(
+            metrics.clone(),
+            LIBP2P_CONFIG.seen_tx_clear_interval,
+            Arc::new(PeerStatsRegistry::default()),
+        )));
+        let local_peer = PeerId::random();
+        let source_peer = PeerId::random();
+        let alternate_peer = PeerId::random();
+        let height = 10030;
+        let height_message = ByteBuf::from(jam_block_by_height_request(height));
+        let tx_message = ByteBuf::from(jam_raw_tx_request(44));
+        {
+            let mut guard = state.lock().await;
+            seed_connected_peer(&mut guard, source_peer, 400);
+            if has_alternate {
+                seed_connected_peer(&mut guard, alternate_peer, 401);
+            }
+            guard.track_block_height_attempted_peers(height, [source_peer]);
+        }
+        let context = OutboundRequestContext::with_attempt(
+            source_peer,
+            NockchainRequest::BatchRequest {
+                pow: [0; 16],
+                nonce: 1,
+                items: vec![
+                    BatchRequestItem {
+                        item_id: 1,
+                        message: height_message.clone(),
+                    },
+                    BatchRequestItem {
+                        item_id: 2,
+                        message: tx_message.clone(),
+                    },
+                ],
+            },
+            0,
+        );
+        let mut pending = VecDeque::from([context]);
+        let mut equix_builder = equix::EquiXBuilder::new();
+        let exclusions = PeerExclusions::default();
+        let mut alternate_dispatches = 0;
+        while let Some(failed_context) = pending.pop_front() {
+            let attempt = failed_context.retry_count;
+            let NockchainRequest::BatchRequest { items, .. } = &failed_context.request else {
+                panic!("expected retained batch");
+            };
+            let expected_items = items
+                .iter()
+                .map(|item| (item.item_id, item.message.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let request_id = fresh_outbound_request_id();
+            state
+                .lock()
+                .await
+                .record_outbound_request(request_id, failed_context);
+            let mut buffered = VecDeque::new();
+            let mut dispatcher = SwarmActionDispatcher::Buffered(&mut buffered);
+            handle_outbound_request_failure_with_dispatcher(
+                &mut dispatcher,
+                state.clone(),
+                metrics.clone(),
+                local_peer,
+                &mut equix_builder,
+                exclusions.clone(),
+                source_peer,
+                request_id,
+                request_response::OutboundFailure::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                )),
+            )
+            .await;
+            assert!(state
+                .lock()
+                .await
+                .outbound_request_context(request_id)
+                .is_none());
+            if attempt < GEN2_RETRY_MAX_ATTEMPTS {
+                let Some(SwarmAction::RetryRequests { requests, .. }) = buffered.pop_front() else {
+                    panic!("unexhausted EOF must retain same-peer retries");
+                };
+                let mut retried_items = BTreeMap::new();
+                for retry in requests {
+                    assert_eq!(retry.peer_id, source_peer);
+                    assert_eq!(retry.retry_count, attempt + 1);
+                    retry
+                        .request
+                        .verify_pow(&mut equix_builder, &source_peer, &local_peer)
+                        .expect("same-peer retry must retain authenticated identity");
+                    let NockchainRequest::BatchRequest { items, .. } = &retry.request else {
+                        panic!("expected batch retry");
+                    };
+                    for item in items {
+                        assert!(retried_items
+                            .insert(item.item_id, item.message.clone())
+                            .is_none());
+                    }
+                    pending.push_back(retry);
+                }
+                assert_eq!(retried_items, expected_items);
+                assert_eq!(
+                    state.lock().await.get_block_height_attempted_peers(height),
+                    vec![source_peer],
+                );
+            } else {
+                while let Some(action) = buffered.pop_front() {
+                    let SwarmAction::QueueKernelRequest {
+                        peer_id,
+                        request_message,
+                    } = action
+                    else {
+                        panic!("exhausted EOF cannot restart same-peer retries");
+                    };
+                    assert!(has_alternate);
+                    assert_eq!(peer_id, alternate_peer);
+                    assert_eq!(request_message, height_message);
+                    alternate_dispatches += 1;
+                }
+            }
+            assert!(buffered.is_empty(), "failure must not queue unrelated work");
+        }
+        assert_eq!(alternate_dispatches, usize::from(has_alternate));
+        let guard = state.lock().await;
+        assert_eq!(guard.total_outbound_request_count(), 0);
+        let attempted = guard.get_block_height_attempted_peers(height);
+        if has_alternate {
+            assert!(attempted.contains(&source_peer));
+            assert!(attempted.contains(&alternate_peer));
+        } else {
+            assert!(
+                attempted.is_empty(),
+                "no alternate recycles history without looping"
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn req_res_driver_block_by_height_timeout_queues_alternate_peer_retry() {
     let metrics = isolated_test_metrics();
@@ -14894,7 +19752,7 @@ async fn req_res_driver_block_by_height_timeout_queues_alternate_peer_retry() {
     let local_peer = PeerId::random();
     let peers = (0..3).map(|_| PeerId::random()).collect::<Vec<_>>();
     let mut canonical_peers = peers.clone();
-    canonical_peers.sort_unstable_by_key(|peer| peer.to_base58());
+    canonical_peers.sort_unstable();
     let source_peer = canonical_peers[0];
     let expected_retry_peer = canonical_peers[1];
     let request_message = ByteBuf::from(jam_block_by_height_request(10030));
@@ -14987,7 +19845,7 @@ async fn req_res_driver_batch_block_timeout_queues_alternate_peer_retry() {
     let local_peer = PeerId::random();
     let peers = (0..3).map(|_| PeerId::random()).collect::<Vec<_>>();
     let mut canonical_peers = peers.clone();
-    canonical_peers.sort_unstable_by_key(|peer| peer.to_base58());
+    canonical_peers.sort_unstable();
     let source_peer = canonical_peers[0];
     let expected_retry_peer = canonical_peers[1];
     let block_request_message = ByteBuf::from(jam_block_by_height_request(10030));
@@ -15107,7 +19965,7 @@ async fn req_res_driver_batch_block_not_found_queues_alternate_peer_retry() {
     let connection_id = ConnectionId::new_unchecked(22);
     let peers = (0..10).map(|_| PeerId::random()).collect::<Vec<_>>();
     let mut canonical_peers = peers.clone();
-    canonical_peers.sort_unstable_by_key(|peer| peer.to_base58());
+    canonical_peers.sort_unstable();
     let initial_peers = canonical_peers.iter().take(8).copied().collect::<Vec<_>>();
     let source_peer = canonical_peers[0];
     let expected_retry_peer = canonical_peers[8];
@@ -15177,25 +20035,30 @@ async fn req_res_driver_batch_block_not_found_queues_alternate_peer_retry() {
     let mut equix_builder = equix::EquiXBuilder::new();
     let scripted_traffic =
         build_scripted_traffic_cop(DriverTranscript::default(), Vec::new(), Vec::new()).await;
+    let exclusions = PeerExclusions::default();
+    exclusions.record_peer_request_failure(source_peer);
+    state_arc.lock().await.record_request_failure(source_peer);
 
     handle_request_response(
         source_peer,
         connection_id,
         request_response::Message::Response {
             request_id,
-            response,
+            response: measured_test_response(response),
         },
-        swarm_tx,
+        swarm_tx.clone(),
         &mut equix_builder,
         local_peer,
-        scripted_traffic.traffic,
-        metrics,
+        scripted_traffic.traffic.clone(),
+        metrics.clone(),
         state_arc.clone(),
         runtime_limits_from_config(&LIBP2P_CONFIG),
-        PeerExclusions::default(),
+        exclusions.clone(),
     )
     .await
     .expect("batch not-found block item should be handled");
+    assert!(exclusions.is_peer_request_cooled_down(&source_peer));
+    assert_eq!(state_arc.lock().await.request_score(&source_peer), -1);
 
     match recv_swarm_action(&mut swarm_rx).await {
         SwarmAction::QueueKernelRequest {
@@ -15214,6 +20077,79 @@ async fn req_res_driver_batch_block_not_found_queues_alternate_peer_retry() {
             .get_block_height_attempted_peers(10030)
             .contains(&expected_retry_peer),
         "alternate peer retry should be recorded as attempted"
+    );
+    let retry_id = fresh_outbound_request_id();
+    state_arc.lock().await.record_outbound_request(
+        retry_id,
+        OutboundRequestContext::with_attempt(
+            expected_retry_peer,
+            NockchainRequest::BatchRequest {
+                pow: [0; 16],
+                nonce: 2,
+                items: vec![
+                    BatchRequestItem {
+                        item_id: 1,
+                        message: block_request_message,
+                    },
+                    BatchRequestItem {
+                        item_id: 2,
+                        message: ByteBuf::from(jam_raw_tx_request(44)),
+                    },
+                ],
+            },
+            0,
+        ),
+    );
+    let block = bundled_block_from_fact(&heard_block_fact_with_tx_ids(10030, &[]).0);
+    let useful_traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        Vec::new(),
+        vec![PokeResult::Ack],
+    )
+    .await;
+    handle_request_response(
+        expected_retry_peer,
+        connection_id,
+        request_response::Message::Response {
+            request_id: retry_id,
+            response: measured_test_response(NockchainResponse::BatchResult {
+                results: vec![
+                    BatchResultItem {
+                        item_id: 1,
+                        status: BatchResultStatus::Result,
+                        error: None,
+                        envelope: Some(ResponseEnvelope::heard_block(
+                            block.block_id, block.block_message,
+                        )),
+                    },
+                    batch_result_not_found_item(2),
+                ],
+            }),
+        },
+        swarm_tx,
+        &mut equix_builder,
+        local_peer,
+        useful_traffic.traffic,
+        metrics,
+        state_arc.clone(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        exclusions.clone(),
+    )
+    .await
+    .expect("alternate useful block should route");
+    let guard = state_arc.lock().await;
+    assert_eq!(guard.request_score(&source_peer), -1);
+    assert_eq!(guard.request_score(&expected_retry_peer), 2);
+    assert!(
+        guard
+            .get_block_height_attempted_peers(10030)
+            .contains(&expected_retry_peer),
+        "kernel Ack alone must not claim accepted-chain progress"
+    );
+    assert!(exclusions.is_peer_request_cooled_down(&source_peer));
+    assert!(
+        swarm_rx.try_recv().is_err(),
+        "useful alternate must not retry"
     );
 }
 
@@ -15281,7 +20217,7 @@ async fn req_res_driver_batch_block_not_found_recycles_attempts_when_no_alternat
         connection_id,
         request_response::Message::Response {
             request_id,
-            response,
+            response: measured_test_response(response),
         },
         swarm_tx,
         &mut equix_builder,
@@ -15294,6 +20230,11 @@ async fn req_res_driver_batch_block_not_found_recycles_attempts_when_no_alternat
     )
     .await
     .expect("single-peer batch not-found should recycle attempts");
+    assert_eq!(
+        state_arc.lock().await.request_score(&source_peer),
+        0,
+        "NotFound-only must not earn useful-response score"
+    );
 
     assert!(
         swarm_rx.try_recv().is_err(),
@@ -15379,7 +20320,7 @@ async fn req_res_driver_retry_respects_bounded_backoff_and_split_batches() {
             ConnectionId::new_unchecked(2),
             request_response::Message::Response {
                 request_id,
-                response,
+                response: measured_test_response(response),
             },
             swarm_tx,
             &mut equix_builder,
@@ -15548,4 +20489,1729 @@ fn test_heard_block_response_dedupe_allows_kernel_requested_replay() {
     assert!(state.is_processing_block(&block_id));
     assert_eq!(metrics.block_seen_cache_hits.fetch_add(0), 1);
     assert_eq!(metrics.block_seen_cache_misses.fetch_add(0), 1);
+}
+
+// ---- deferred flush worker lifecycle ----
+
+async fn dispatch_deferred_flush(
+    swarm: &mut Swarm<NockchainBehaviour>,
+    swarm_tx: &tokio::sync::mpsc::Sender<SwarmAction>,
+    deferred_flush_running: &Arc<std::sync::atomic::AtomicBool>,
+    join_set: &mut TrackedJoinSet<Result<(), NockAppError>>,
+    state: &Arc<Mutex<P2PState>>,
+    metrics: &Arc<NockchainP2PMetrics>,
+    traffic: &traffic_cop::TrafficCop,
+) {
+    let mut equix_builder = equix::EquiXBuilder::new();
+    let mut pending_gen2_batches = BTreeMap::new();
+    process_swarm_action(
+        SwarmAction::FlushDeferredHeardBlocks,
+        swarm,
+        swarm_tx,
+        deferred_flush_running,
+        join_set,
+        state,
+        metrics,
+        &PeerExclusions::default(),
+        &mut equix_builder,
+        &mut pending_gen2_batches,
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        traffic,
+    )
+    .await
+    .expect("flush dispatch should succeed");
+}
+
+fn deferred_flush_test_swarm() -> Swarm<NockchainBehaviour> {
+    start_swarm(
+        LibP2PConfig::default(),
+        Keypair::generate_ed25519(),
+        Vec::new(),
+        None,
+        connection_limits::ConnectionLimits::default(),
+        None,
+        PeerExclusions::default(),
+    )
+    .expect("production swarm should build")
+}
+
+fn malformed_heard_block_fact(block_id: &str) -> NockchainFact {
+    let mut slab: NounSlab = NounSlab::new();
+    let inner = T(&mut slab, &[D(1), D(2)]);
+    slab.set_root(inner);
+    NockchainFact::HeardBlock(String::from(block_id), slab)
+}
+
+/// Let a freshly spawned worker run until it parks on the state lock the
+/// test is holding. Under the current-thread test runtime a few yields are
+/// enough to poll it to that point.
+async fn let_worker_park() {
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// a second flush action arriving while the worker flag is set is
+/// coalesced; it does not spawn a second worker.
+#[tokio::test]
+async fn deferred_flush_action_is_coalesced_while_worker_runs() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let harness =
+        build_scripted_traffic_cop(DriverTranscript::default(), Vec::new(), Vec::new()).await;
+    let mut swarm = deferred_flush_test_swarm();
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut join_set = TrackedJoinSet::<Result<(), NockAppError>>::new();
+
+    // Hold the state lock so the first worker is parked while the second
+    // action arrives.
+    let guard = state.lock().await;
+    dispatch_deferred_flush(
+        &mut swarm, &swarm_tx, &running, &mut join_set, &state, &metrics, &harness.traffic,
+    )
+    .await;
+    assert!(
+        running.load(Ordering::Acquire),
+        "the first action must claim the worker flag"
+    );
+    dispatch_deferred_flush(
+        &mut swarm, &swarm_tx, &running, &mut join_set, &state, &metrics, &harness.traffic,
+    )
+    .await;
+    drop(guard);
+
+    let first = tokio::time::timeout(Duration::from_secs(5), join_set.join_next())
+        .await
+        .expect("worker should finish")
+        .expect("one worker should have been spawned")
+        .expect("worker task should not panic");
+    assert!(first.is_ok(), "worker should exit cleanly: {first:?}");
+    assert!(
+        join_set.join_next().await.is_none(),
+        "the coalesced action must not spawn a second worker"
+    );
+    assert!(
+        !running.load(Ordering::Acquire),
+        "the worker releases its flag on exit"
+    );
+    assert!(
+        swarm_rx.try_recv().is_err(),
+        "nothing was ready, so the worker must not re-arm itself"
+    );
+}
+
+/// a wakeup that is coalesced after the worker's empty check but before
+/// it releases the flag is recovered by the post-release re-check.
+#[tokio::test]
+async fn deferred_flush_wakeup_arriving_as_worker_exits_is_recovered() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let harness =
+        build_scripted_traffic_cop(DriverTranscript::default(), Vec::new(), Vec::new()).await;
+    let mut swarm = deferred_flush_test_swarm();
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut join_set = TrackedJoinSet::<Result<(), NockAppError>>::new();
+    let peer = PeerId::random();
+
+    let mut guard = state.lock().await;
+    guard.first_negative = 10;
+    dispatch_deferred_flush(
+        &mut swarm, &swarm_tx, &running, &mut join_set, &state, &metrics, &harness.traffic,
+    )
+    .await;
+    let_worker_park().await;
+    drop(guard);
+    // tokio's mutex is FIFO: this guard is handed over right after the
+    // worker's empty take and before its post-release re-check, which is the
+    // window a coalesced wakeup falls into.
+    let mut guard = state.lock().await;
+    assert!(!guard.has_ready_deferred_heard_blocks());
+    guard.defer_heard_block(
+        peer,
+        9,
+        String::from("ready-9"),
+        malformed_heard_block_fact("ready-9"),
+    );
+    assert!(guard.has_ready_deferred_heard_blocks());
+    drop(guard);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), join_set.join_next())
+        .await
+        .expect("worker should finish")
+        .expect("one worker should have been spawned")
+        .expect("worker task should not panic");
+    assert!(
+        result.is_ok(),
+        "an empty flush must exit cleanly: {result:?}"
+    );
+    match tokio::time::timeout(Duration::from_secs(1), swarm_rx.recv()).await {
+        Ok(Some(SwarmAction::FlushDeferredHeardBlocks)) => {}
+        other => panic!("expected the exiting worker to re-arm the flush, got {other:?}"),
+    }
+    assert!(!running.load(Ordering::Acquire));
+}
+
+/// a worker that fails mid-flush still releases its flag and re-arms for
+/// the ready blocks it did not reach, instead of parking them until the next
+/// seen-effect.
+#[tokio::test]
+async fn failed_deferred_flush_worker_releases_flag_and_rearms_for_remaining_blocks() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+    let harness =
+        build_scripted_traffic_cop(DriverTranscript::default(), Vec::new(), Vec::new()).await;
+    let mut swarm = deferred_flush_test_swarm();
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(8);
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut join_set = TrackedJoinSet::<Result<(), NockAppError>>::new();
+    let peer = PeerId::random();
+
+    let mut guard = state.lock().await;
+    guard.first_negative = 10;
+    // Ready now; its malformed page makes routing fail before any kernel poke.
+    assert!(guard.defer_heard_block(
+        peer,
+        5,
+        String::from("broken-5"),
+        malformed_heard_block_fact("broken-5"),
+    ));
+    // Parked until the kernel asks for its height.
+    assert!(guard.defer_heard_block_with_source(
+        peer,
+        7,
+        String::from("parked-7"),
+        malformed_heard_block_fact("parked-7"),
+        BlockSource::Prefetch,
+    ));
+    dispatch_deferred_flush(
+        &mut swarm, &swarm_tx, &running, &mut join_set, &state, &metrics, &harness.traffic,
+    )
+    .await;
+    let_worker_park().await;
+    drop(guard);
+    // Handed over after the worker took block 5 and before its re-check.
+    let mut guard = state.lock().await;
+    assert!(
+        !guard.has_deferred_block_at_height(5),
+        "the worker should have taken the ready block"
+    );
+    assert!(!guard.has_ready_deferred_heard_blocks());
+    guard.note_kernel_block_height_requested(7);
+    assert!(guard.has_ready_deferred_heard_blocks());
+    drop(guard);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), join_set.join_next())
+        .await
+        .expect("worker should finish")
+        .expect("one worker should have been spawned")
+        .expect("worker task should not panic");
+    assert!(
+        result.is_err(),
+        "a malformed deferred block must surface as a worker error"
+    );
+    match tokio::time::timeout(Duration::from_secs(1), swarm_rx.recv()).await {
+        Ok(Some(SwarmAction::FlushDeferredHeardBlocks)) => {}
+        other => panic!("expected the failed worker to re-arm for block 7, got {other:?}"),
+    }
+    assert!(
+        !running.load(Ordering::Acquire),
+        "a failed worker must release its flag"
+    );
+    assert_eq!(harness.poke_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn prefetch_response_budget_follows_the_actual_sdk_connection() {
+    use libp2p::core::ConnectedPoint;
+
+    use crate::p2p_state::IpBucket;
+    for reverse in [false, true] {
+        let config = LibP2PConfig::default();
+        let mut client = start_swarm(
+            config.clone(),
+            Keypair::generate_ed25519(),
+            Vec::new(),
+            None,
+            connection_limits::ConnectionLimits::default(),
+            None,
+            PeerExclusions::default(),
+        )
+        .unwrap();
+        let (mut server, _trace, _raw_request, raw_response) =
+            crate::test_support::build_req_res_test_swarm_with_protocol_trace(
+                "attribution-server",
+                config,
+                Keypair::generate_ed25519(),
+                vec![
+                    "/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap(),
+                    "/ip6/::1/udp/0/quic-v1".parse().unwrap(),
+                ],
+            )
+            .unwrap();
+        let server_peer = *server.local_peer_id();
+        let metrics = isolated_test_metrics();
+        let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+        let mut server_sockets = BTreeMap::new();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut addresses = Vec::new();
+            while addresses.len() < 2 {
+                if let SwarmEvent::NewListenAddr { address, .. } = server.select_next_some().await {
+                    addresses.push(address);
+                }
+            }
+            addresses.sort();
+            if reverse { addresses.reverse(); }
+            for address in &addresses {
+                client.dial(address.clone()).unwrap();
+                loop {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                                state.lock().await.track_connection(
+                                    connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone());
+                                break;
+                            }
+                            SwarmEvent::OutgoingConnectionError { error, .. } => panic!("dial failed: {error}"),
+                            _ => {}
+                        },
+                        event = server.select_next_some() => {
+                            if let SwarmEvent::ConnectionEstablished {
+                                connection_id, endpoint: ConnectedPoint::Listener { local_addr, .. }, ..
+                            } = event {
+                                server_sockets.insert(connection_id, quic_socket_addr(&local_addr).unwrap());
+                            }
+                        }
+                    }
+                }
+            }
+            let snapshot = client.behaviour().recovery.request_endpoints(&server_peer).unwrap();
+            assert_eq!(snapshot.len(), 2);
+            assert_ne!(snapshot[0].endpoint.ip(), snapshot[1].endpoint.ip());
+            let mut served_endpoints = BTreeSet::new();
+            let mut expected_socket = None;
+            for nonce in 0..2 {
+                send_outbound_request_now(&mut client, &state, &metrics,
+                    OutboundRequestContext::new(server_peer, NockchainRequest::BatchRequest {
+                        pow: [0; 16], nonce,
+                        items: vec![BatchRequestItem {
+                            item_id: 0,
+                            message: block_range_with_txs_request_message(42 + nonce, 2).unwrap(),
+                        }],
+                    })).await;
+                loop {
+                    tokio::select! {
+                        event = client.select_next_some() => match event {
+                            SwarmEvent::Behaviour(NockchainEvent::RequestResponse(request_response::Event::Message {
+                                peer, connection_id,
+                                message: request_response::Message::Response { request_id, response },
+                            })) => {
+                                let bytes = response.received_bytes.expect("codec measurement");
+                                assert_eq!(bytes, req_res_message_encoded_bytes(&response.message).unwrap() + 257);
+                                let mut guard = state.lock().await;
+                                let context = guard.outbound_request_context(request_id).unwrap();
+                                assert_eq!(context.request_endpoints.len(), 2);
+                                assert!(!context.request_endpoints.spilled());
+                                assert!(context.request_endpoints.iter().any(|candidate|
+                                    candidate.connection_id == connection_id));
+                                let bucket_windows: Vec<_> = context.request_endpoints.iter()
+                                    .map(|candidate| {
+                                        let bucket = IpBucket::from_ip(candidate.endpoint.ip());
+                                        (bucket, guard.prefetch_bucket_window_bytes(bucket))
+                                    }).collect();
+                                let charge = guard.charge_received_response(request_id, peer, connection_id, None, bytes)
+                                    .unwrap().unwrap();
+                                assert_eq!(Some(charge.endpoint), expected_socket.take());
+                                assert_eq!(charge.bucket, IpBucket::from_ip(charge.endpoint.ip()));
+                                for (bucket, before) in bucket_windows {
+                                    assert_eq!(guard.prefetch_bucket_window_bytes(bucket),
+                                        before + if bucket == charge.bucket { bytes } else { 0 });
+                                }
+                                served_endpoints.insert(charge.endpoint);
+                                guard.remove_outbound_request(request_id);
+                                break;
+                            }
+                            SwarmEvent::Behaviour(NockchainEvent::RequestResponse(
+                                request_response::Event::OutboundFailure { error, .. }
+                            )) => panic!("range exchange failed: {error}"),
+                            _ => {}
+                        },
+                        event = server.select_next_some() => match event {
+                            SwarmEvent::ConnectionEstablished {
+                                connection_id, endpoint: ConnectedPoint::Listener { local_addr, .. }, ..
+                            } => {
+                                server_sockets.insert(connection_id, quic_socket_addr(&local_addr).unwrap());
+                            }
+                            SwarmEvent::Behaviour(ReqResTestEvent::RequestResponse(request_response::Event::Message {
+                                connection_id, message: request_response::Message::Request { channel, .. }, ..
+                            })) => {
+                                expected_socket = Some(server_sockets[&connection_id]);
+                                let message = NockchainResponse::BatchResult { results: vec![BatchResultItem {
+                                    item_id: 0, status: BatchResultStatus::NotFound, error: None, envelope: None,
+                                }] };
+                                let mut raw = cbor4ii::serde::to_vec(Vec::new(), &message).unwrap();
+                                raw.resize(raw.len() + 257, 0);
+                                raw_response.inject_once(raw);
+                                server.behaviour_mut().request_response.send_response(
+                                    channel, crate::behaviour::TransportResponse::outgoing(message)).unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            assert_eq!(served_endpoints.len(), 2,
+                "both actual SDK-selected streams must be attributed, independent of dial order");
+            for nonce in 2..7 {
+                send_outbound_request_now(&mut client, &state, &metrics,
+                    OutboundRequestContext::new(server_peer, NockchainRequest::BatchRequest {
+                        pow: [0; 16], nonce,
+                        items: vec![BatchRequestItem {
+                            item_id: 0,
+                            message: block_range_with_txs_request_message(42 + nonce, 2).unwrap(),
+                        }],
+                    })).await;
+            }
+            assert_eq!(state.lock().await.inflight_prefetch_count_for_peer(&server_peer), 4,
+                "buffered producer actions cannot exceed the submission-time limit");
+        }).await.expect("local dual-connection exchanges must complete");
+    }
+}
+
+#[tokio::test]
+async fn range_prefetch_is_accounted_separately_from_ordinary_requests() {
+    use crate::messages::{block_with_txs_by_height_request_message, decode_request_item_message};
+    use crate::p2p_state::IpBucket;
+
+    let config = LibP2PConfig::default();
+    let limits = runtime_limits_from_config(&config);
+    let mut client = start_swarm(
+        config.clone(),
+        Keypair::generate_ed25519(),
+        Vec::new(),
+        None,
+        connection_limits::ConnectionLimits::default(),
+        None,
+        PeerExclusions::default(),
+    )
+    .unwrap();
+    let (mut server, _trace, _raw_request, raw_response) =
+        crate::test_support::build_req_res_test_swarm_with_protocol_trace(
+            "accounting-server",
+            config.clone(),
+            Keypair::generate_ed25519(),
+            vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+        )
+        .unwrap();
+    let peer = *server.local_peer_id();
+    let local_peer = *client.local_peer_id();
+    let metrics = isolated_test_metrics();
+    let peer_stats = Arc::new(PeerStatsRegistry::default());
+    let state = Arc::new(Mutex::new(P2PState::with_peer_stats_registry(
+        metrics.clone(),
+        100,
+        peer_stats.clone(),
+    )));
+    let traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        Vec::new(),
+        (0..8).map(|_| PokeResult::Ack).collect(),
+    )
+    .await;
+    let (swarm_tx, _swarm_rx) = tokio::sync::mpsc::channel(32);
+    let mut builder = equix::EquiXBuilder::new();
+    let mut pending = BTreeMap::new();
+    let prefetch = PrefetchConfig {
+        enabled: true,
+        window_initial: 4,
+        window_max: 4,
+        max_inflight_per_peer: 1,
+        kernel_demand_threshold: 8,
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let address = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = server.select_next_some().await {
+                break address;
+            }
+        };
+        client.dial(address).unwrap();
+        loop {
+            tokio::select! {
+                event = client.select_next_some() => match event {
+                    SwarmEvent::ConnectionEstablished { connection_id, peer_id, endpoint, .. } => {
+                        state.lock().await.track_connection(
+                            connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone());
+                        break;
+                    }
+                    SwarmEvent::OutgoingConnectionError { error, .. } => panic!("dial failed: {error}"),
+                    _ => {}
+                },
+                _ = server.select_next_some() => {}
+            }
+        }
+        let endpoints = client.behaviour().recovery.request_endpoints(&peer).unwrap();
+        assert_eq!(endpoints.len(), 1);
+        let endpoint = endpoints[0];
+        let bucket = IpBucket::from_ip(endpoint.endpoint.ip());
+        let mut charged_bytes = 0;
+        let mut received_bytes_total = 0u64;
+        let mut expected_responses = VecDeque::new();
+        for phase in 0..3 {
+            let expected_items = match phase { 0 => 2, 1 => 3, _ => 1 };
+            if phase == 0 {
+                state.lock().await.first_negative = 43;
+                process_queue_kernel_request_action(
+                    peer, block_with_txs_by_height_request_message(40).unwrap(),
+                    &mut client, &state, &metrics, &mut builder, &mut pending, limits,
+                ).await.unwrap();
+                process_queue_kernel_request_action(
+                    peer, block_by_height_message(40), &mut client, &state, &metrics,
+                    &mut builder, &mut pending, limits,
+                ).await.unwrap();
+            } else {
+                if phase == 1 {
+                    let mut guard = state.lock().await;
+                    guard.mark_peer_range_supported(peer);
+                    // A unit boundary cap, not a production-volume profile.
+                    guard.set_prefetch_safety_config(3, Duration::from_secs(60), 1);
+                    drop(guard);
+                    process_queue_kernel_request_action(
+                        peer, block_by_height_message(49), &mut client, &state, &metrics,
+                        &mut builder, &mut pending, limits,
+                    ).await.unwrap();
+                    let range = block_range_with_txs_request_message(50, 4).unwrap();
+                    let range_estimate = outbound_request_message_estimated_response_bytes(
+                        &range, limits, &state).await;
+                    let ordinary_estimate = outbound_request_message_estimated_response_bytes(
+                        &block_by_height_message(50), limits, &state).await;
+                    assert!(range_estimate + 2 * ordinary_estimate < block_batch_response_budget_bytes(limits),
+                        "observed small responses must leave room for ordinary coalescing");
+                }
+                let height = if phase == 1 { 50 } else { 60 };
+                let mut actions = VecDeque::new();
+                handle_effect_with_dispatcher(
+                    request_slab_from_message(block_by_height_message(height).as_ref()).unwrap(),
+                    &mut SwarmActionDispatcher::Buffered(&mut actions), vec![peer], false,
+                    prefetch, limits, state.clone(), metrics.clone(), PeerExclusions::default(),
+                ).await.unwrap();
+                assert_eq!(actions.len(), if phase == 1 { 2 } else { 1 });
+                while let Some(action) = actions.pop_front() {
+                    match action {
+                        SwarmAction::QueueKernelRequest { peer_id, request_message } => {
+                            process_queue_kernel_request_action(
+                                peer_id, request_message, &mut client, &state, &metrics,
+                                &mut builder, &mut pending, limits,
+                            ).await.unwrap();
+                        }
+                        other => panic!("unexpected demand action: {other:?}"),
+                    }
+                }
+            }
+            if let Some(context) = take_pending_batch_request(
+                &mut pending, peer, &local_peer, &mut builder,
+            ).unwrap() {
+                send_outbound_request_now(&mut client, &state, &metrics, context).await;
+            }
+            assert!(pending.is_empty());
+            let mut received_items = 0;
+            let mut received_heights = BTreeSet::new();
+            let mut queued_responses: VecDeque<(
+                request_response::ResponseChannel<crate::behaviour::TransportResponse>,
+                NockchainResponse,
+            )> = VecDeque::new();
+            while received_items < expected_items {
+                // The raw injection hook owns one pending buffer, so serialize only
+                // these test replies while continuing to drive both SDK swarms.
+                if expected_responses.is_empty() {
+                    if let Some((channel, message)) = queued_responses.pop_front() {
+                        let mut raw = cbor4ii::serde::to_vec(Vec::new(), &message).unwrap();
+                        let canonical_bytes = raw.len();
+                        raw.resize(canonical_bytes + 257, 0);
+                        assert!(raw.len() < config.gen2_batch_max_bytes());
+                        expected_responses.push_back((message.clone(), raw.len(), canonical_bytes));
+                        raw_response.inject_once(raw);
+                        server.behaviour_mut().request_response.send_response(
+                            channel, crate::behaviour::TransportResponse::outgoing(message)).unwrap();
+                    }
+                }
+                tokio::select! {
+                    event = server.select_next_some() => {
+                        if let SwarmEvent::Behaviour(ReqResTestEvent::RequestResponse(request_response::Event::Message {
+                            message: request_response::Message::Request { request, channel, .. }, ..
+                        })) = event {
+                            let NockchainRequest::BatchRequest { items, .. } = request else {
+                                panic!("expected batch request");
+                            };
+                            let results = items.into_iter().map(|item| {
+                                let envelope = match decode_request_item_message(&item.message).unwrap() {
+                                    NockchainDataRequest::BlockRangeWithTxs { start_height, len } => {
+                                        ResponseEnvelope::heard_block_range_with_txs(
+                                            (start_height..start_height + u64::from(len)).map(|height| {
+                                                bundled_block_from_fact(&heard_block_fact_with_tx_ids(height, &[]).0)
+                                            }).collect())
+                                    }
+                                    NockchainDataRequest::BlockWithTxsByHeight(height) => {
+                                        let block = bundled_block_from_fact(&heard_block_fact_with_tx_ids(height, &[]).0);
+                                        ResponseEnvelope::heard_block_with_txs(
+                                            block.block_id, &block.block_message, Vec::new(), Vec::new())
+                                    }
+                                    NockchainDataRequest::BlockByHeight(height) => {
+                                        let block = bundled_block_from_fact(&heard_block_fact_with_tx_ids(height, &[]).0);
+                                        ResponseEnvelope::heard_block(block.block_id, block.block_message)
+                                    }
+                                    other => panic!("unexpected request: {other:?}"),
+                                };
+                                envelope.validate().unwrap();
+                                BatchResultItem { item_id: item.item_id, status: BatchResultStatus::Result,
+                                    error: None, envelope: Some(envelope) }
+                            }).collect();
+                            let message = NockchainResponse::BatchResult { results };
+                            queued_responses.push_back((channel, message));
+                        }
+                    },
+                    event = client.select_next_some() => match event {
+                        SwarmEvent::Behaviour(NockchainEvent::RequestResponse(request_response::Event::Message {
+                            peer: response_peer, connection_id,
+                            message: request_response::Message::Response { request_id, response },
+                        })) => {
+                            let bytes = response.received_bytes.expect("codec measurement");
+                            let expected_index = expected_responses.iter().position(|(message, _, _)| message == &response.message).unwrap();
+                            let (expected, raw_bytes, canonical_bytes) = expected_responses.remove(expected_index).unwrap();
+                            assert_eq!(response.message, expected);
+                            assert_eq!(bytes, raw_bytes);
+                            assert!(bytes > canonical_bytes);
+                            let mut guard = state.lock().await;
+                            let context = guard.outbound_request_context(request_id).unwrap();
+                            assert_eq!(context.request_endpoints.len(), 1);
+                            assert_eq!(context.request_endpoints[0].connection_id, endpoint.connection_id);
+                            assert_eq!(context.request_endpoints[0].endpoint, endpoint.endpoint);
+                            let NockchainRequest::BatchRequest { items, .. } = &context.request else {
+                                panic!("expected batch context");
+                            };
+                            received_items += items.len();
+                            let mut has_range = false;
+                            for item in items {
+                                match decode_request_item_message(&item.message).unwrap() {
+                                    NockchainDataRequest::BlockRangeWithTxs { start_height, .. } => {
+                                        has_range = true;
+                                        received_heights.insert(start_height);
+                                    }
+                                    NockchainDataRequest::BlockByHeight(h) |
+                                    NockchainDataRequest::BlockWithTxsByHeight(h) => { received_heights.insert(h); }
+                                    other => panic!("unexpected context: {other:?}"),
+                                }
+                            }
+                            let charge = guard.charge_received_response(
+                                request_id, response_peer, connection_id, None, bytes).unwrap();
+                            if has_range {
+                                charged_bytes += bytes;
+                                let charge = charge.expect("range receipt must create peer and endpoint debt");
+                                assert_eq!(charge.endpoint, endpoint.endpoint);
+                                assert_eq!(charge.bucket, bucket);
+                                assert!(guard.charge_received_response(
+                                    request_id, response_peer, connection_id, None, bytes).unwrap().is_none());
+                            } else {
+                                assert!(charge.is_none());
+                            }
+                            assert_eq!(guard.prefetch_bandwidth_window_bytes(&peer), charged_bytes);
+                            assert_eq!(guard.prefetch_bucket_window_bytes(bucket), charged_bytes);
+                            drop(guard);
+                            handle_request_response(
+                                response_peer, connection_id,
+                                request_response::Message::Response { request_id, response },
+                                swarm_tx.clone(), &mut builder, local_peer, traffic.traffic.clone(),
+                                metrics.clone(), state.clone(), limits, PeerExclusions::default(),
+                            ).await.unwrap();
+                            received_bytes_total += bytes as u64;
+                            let snapshot = peer_stats.snapshot();
+                            let entry = snapshot.peers.iter().find(|entry| entry.peer_id == peer.to_string()).unwrap();
+                            assert_eq!(entry.bytes_received, received_bytes_total);
+                            let mut guard = state.lock().await;
+                            assert!(guard.outbound_request_context(request_id).is_none());
+                            assert!(guard.charge_received_response(request_id, response_peer, connection_id, None, bytes).unwrap().is_none());
+                            assert_eq!(guard.prefetch_bandwidth_window_bytes(&peer), charged_bytes);
+                        }
+                        SwarmEvent::Behaviour(NockchainEvent::RequestResponse(
+                            request_response::Event::OutboundFailure { error, .. }
+                        )) => panic!("exchange failed: {error}"),
+                        _ => {}
+                    }
+                }
+            }
+            assert_eq!(received_items, expected_items);
+            assert_eq!(received_heights, match phase {
+                0 => BTreeSet::from([40]), 1 => BTreeSet::from([49, 50]), _ => BTreeSet::from([60]),
+            });
+            let guard = state.lock().await;
+            assert_eq!(guard.prefetch_bandwidth_window_bytes(&peer), charged_bytes);
+            assert_eq!(guard.prefetch_bucket_window_bytes(bucket), charged_bytes);
+            if phase > 0 {
+                assert!(charged_bytes > guard.prefetch_bandwidth_cap_per_peer_bytes_per_min());
+                assert!(charged_bytes > guard.prefetch_bucket_bandwidth_cap());
+                for height in 51..54 {
+                    assert_eq!(guard.deferred_heard_block_sources_at_height(height), vec![BlockSource::Prefetch]);
+                }
+                assert!(guard.has_deferred_block_at_height(49));
+                assert_eq!(guard.inflight_prefetch_count_for_peer(&peer), 0);
+            }
+        }
+    }).await.expect("local range and ordinary exchanges must complete");
+}
+
+mod response_validation;
+
+#[tokio::test]
+async fn wrong_identity_on_another_socket_preserves_same_identity_service() {
+    let config = LibP2PConfig::default();
+    let keypair = Keypair::generate_ed25519();
+    let mut good = build_req_res_test_swarm(
+        config.clone(),
+        keypair.clone(),
+        vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+    )
+    .unwrap();
+    let mut alternate = build_req_res_test_swarm(
+        config.clone(),
+        keypair,
+        vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+    )
+    .unwrap();
+    let good_peer = *good.local_peer_id();
+    let exclusions = PeerExclusions::default();
+    let mut client = start_swarm(
+        config,
+        Keypair::generate_ed25519(),
+        Vec::new(),
+        None,
+        connection_limits::ConnectionLimits::default(),
+        None,
+        exclusions.clone(),
+    )
+    .unwrap();
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let good_addr = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = good.select_next_some().await { break address; }
+        };
+        let alternate_addr = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = alternate.select_next_some().await { break address; }
+        };
+        assert_eq!(good_addr.ip_addr(), alternate_addr.ip_addr());
+        assert_ne!(good_addr, alternate_addr);
+        client.dial(good_addr.clone()).unwrap();
+        loop {
+            tokio::select! {
+                event = client.select_next_some() => if let SwarmEvent::ConnectionEstablished {
+                    connection_id, peer_id, endpoint, ..
+                } = event {
+                    state.lock().await.track_connection(
+                        connection_id, peer_id, endpoint.get_remote_address(), endpoint.clone());
+                    break;
+                },
+                _ = good.select_next_some() => {}
+            }
+        }
+        let expected = PeerId::random();
+        client.behaviour_mut().kad.add_address(&good_peer, good_addr.clone());
+        client.behaviour_mut().kad.add_address(&good_peer, alternate_addr.clone());
+        client.behaviour_mut().peer_store.store_mut().add_address(&good_peer, &good_addr);
+        client.behaviour_mut().peer_store.store_mut().add_address(&good_peer, &alternate_addr);
+        client.behaviour_mut().peer_store.store_mut().add_address(&expected, &alternate_addr);
+        client.dial(alternate_addr.clone().with_p2p(expected).unwrap()).unwrap();
+        loop {
+            tokio::select! {
+                event = client.select_next_some() => if let SwarmEvent::OutgoingConnectionError { error, .. } = event {
+                    assert!(matches!(&error, DialError::WrongPeerId { obtained, .. } if *obtained == good_peer));
+                    handle_outgoing_connection_error(
+                        &mut client, &state, &exclusions, &metrics, error,
+                        Some(expected), std::slice::from_ref(&alternate_addr), &[],
+                    ).await;
+                    break;
+                },
+                _ = good.select_next_some() => {},
+                _ = alternate.select_next_some() => {}
+            }
+        }
+        assert!(exclusions.is_address_excluded(&alternate_addr, Some(expected)));
+        assert!(!exclusions.is_ip_excluded(&good_addr.ip_addr().unwrap()));
+        assert!(client.is_connected(&good_peer));
+        assert!(state.lock().await.peer_has_connection_at_address(&good_peer, &good_addr));
+        assert!(client.behaviour_mut().peer_store.address_of_peer(&good_peer).unwrap()
+            .any(|address| address == &good_addr));
+        send_outbound_request_now(&mut client, &state, &metrics,
+            OutboundRequestContext::new(good_peer, NockchainRequest::BatchRequest {
+                pow: [0; 16], nonce: 99, items: Vec::new(),
+            })).await;
+        loop {
+            tokio::select! {
+                event = client.select_next_some() => match event {
+                    SwarmEvent::Behaviour(NockchainEvent::RequestResponse(request_response::Event::Message {
+                        peer, message: request_response::Message::Response {
+                            request_id, response: crate::behaviour::TransportResponse { message: NockchainResponse::Ack { acked: true }, .. },
+                        }, ..
+                    })) => {
+                        assert_eq!(peer, good_peer);
+                        state.lock().await.remove_outbound_request(request_id);
+                        break;
+                    }
+                    SwarmEvent::Behaviour(NockchainEvent::RequestResponse(
+                        request_response::Event::OutboundFailure { error, .. }
+                    )) => panic!("preserved endpoint failed to serve: {error}"),
+                    _ => {}
+                },
+                event = good.select_next_some() => {
+                    if let SwarmEvent::Behaviour(ReqResTestEvent::RequestResponse(request_response::Event::Message {
+                        message: request_response::Message::Request { channel, .. }, ..
+                    })) = event {
+                        good.behaviour_mut().request_response.send_response(
+                            channel, crate::behaviour::TransportResponse::outgoing(NockchainResponse::Ack { acked: true })).unwrap();
+                    }
+                }
+            }
+        }
+    }).await.expect("same-IP identity attribution control must complete");
+}
+
+#[test]
+fn encoded_response_size_matches_transport_cbor_without_a_payload_copy() {
+    let response = NockchainResponse::BatchResult {
+        results: vec![BatchResultItem {
+            item_id: 7,
+            status: BatchResultStatus::Result,
+            error: None,
+            envelope: Some(ResponseEnvelope::heard_block(
+                "encoded-block".to_owned(),
+                vec![42; 10_000],
+            )),
+        }],
+    };
+    let mut encoded = Vec::new();
+    cbor4ii::serde::to_writer(&mut encoded, &response).unwrap();
+    assert_eq!(
+        req_res_message_encoded_bytes(&response).unwrap(),
+        encoded.len()
+    );
+}
+
+#[tokio::test]
+async fn late_disconnected_failures_retire_session_metadata_across_peer_churn() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    let mut identifiers =
+        crate::behaviour::build_request_response_behaviour(&LibP2PConfig::default());
+    let local_peer = PeerId::random();
+    let exclusions = PeerExclusions::default();
+    let mut equix_builder = equix::EquiXBuilder::new();
+    let address: Multiaddr = "/ip4/198.51.100.7/udp/6000/quic-v1".parse().unwrap();
+    for index in 0..64 {
+        let peer = PeerId::random();
+        let connection_id = ConnectionId::new_unchecked(40_000 + index);
+        let mut request_ids = Vec::new();
+        {
+            let mut guard = state.lock().await;
+            guard.track_connection(
+                connection_id,
+                peer,
+                &address,
+                libp2p::core::ConnectedPoint::Dialer {
+                    address: address.clone(),
+                    role_override: libp2p::core::Endpoint::Dialer,
+                    port_use: libp2p::core::transport::PortUse::Reuse,
+                },
+            );
+            for nonce in 0..2 {
+                let mut context = OutboundRequestContext::with_attempt(
+                    peer,
+                    NockchainRequest::BatchRequest {
+                        pow: [0; 16],
+                        nonce,
+                        items: vec![BatchRequestItem {
+                            item_id: 0,
+                            message: block_range_with_txs_request_message(42, 2).unwrap(),
+                        }],
+                    },
+                    GEN2_RETRY_MAX_ATTEMPTS,
+                );
+                context.request_endpoints.push(RequestEndpoint {
+                    connection_id,
+                    endpoint: quic_socket_addr(&address).unwrap(),
+                });
+                let request_id = identifiers.send_request(&peer, context.request.clone());
+                guard.record_outbound_request(request_id, context);
+                request_ids.push(request_id);
+            }
+            guard.lost_connection(connection_id);
+            for request_id in &request_ids {
+                assert_eq!(
+                    guard
+                        .outbound_request_context(*request_id)
+                        .unwrap()
+                        .request_endpoints
+                        .len(),
+                    1,
+                    "disconnect must retain issued attribution until terminal failure"
+                );
+            }
+        }
+        let mut buffered = VecDeque::new();
+        for (position, request_id) in request_ids.into_iter().enumerate() {
+            let mut dispatcher = SwarmActionDispatcher::Buffered(&mut buffered);
+            handle_outbound_request_failure_with_dispatcher(
+                &mut dispatcher,
+                state.clone(),
+                metrics.clone(),
+                local_peer,
+                &mut equix_builder,
+                exclusions.clone(),
+                peer,
+                request_id,
+                request_response::OutboundFailure::ConnectionClosed,
+            )
+            .await;
+            let guard = state.lock().await;
+            assert!(guard.outbound_request_context(request_id).is_none());
+            if position == 0 {
+                assert_eq!(guard.total_outbound_request_count(), 1);
+                assert!(
+                    guard.request_session_metadata_count() > 0,
+                    "another retained request still owns this peer's session metadata"
+                );
+            } else {
+                assert_eq!(guard.total_outbound_request_count(), 0);
+                assert_eq!(guard.inflight_prefetch_count_for_peer(&peer), 0);
+                assert_eq!(
+                    guard.request_session_metadata_count(),
+                    0,
+                    "completed late failures cannot leave identity-keyed metadata behind"
+                );
+            }
+        }
+        assert!(
+            buffered.is_empty(),
+            "exhausted retry attempts must not schedule more work"
+        );
+    }
+}
+
+fn heaviest_chain_scry_result(height: u64, block_seed: u64) -> NounSlab {
+    let mut slab = NounSlab::new();
+    let block_id = tip5_tuple(&mut slab, block_seed);
+    let height = Atom::new(&mut slab, height).as_noun();
+    let tip = T(&mut slab, &[height, block_id]);
+    let result = T(&mut slab, &[D(0), D(0), tip]);
+    slab.set_root(result);
+    slab
+}
+
+async fn reconcile_frontier_once(
+    traffic: &traffic_cop::TrafficCop,
+    state: &Arc<Mutex<P2PState>>,
+    metrics: &NockchainP2PMetrics,
+    stall_warn_after: Duration,
+) -> (frontier_reconcile::FrontierReconcileOutcome, bool) {
+    let mut buffered = VecDeque::new();
+    let outcome = frontier_reconcile::reconcile_seen_frontier_with_kernel(
+        frontier_reconcile::FrontierReconcileReason::Periodic,
+        traffic,
+        state,
+        metrics,
+        &mut SwarmActionDispatcher::Buffered(&mut buffered),
+        stall_warn_after,
+    )
+    .await
+    .expect("reconciliation should succeed");
+    let flush = matches!(
+        buffered.pop_front(),
+        Some(SwarmAction::FlushDeferredHeardBlocks)
+    );
+    assert!(buffered.is_empty());
+    (outcome, flush)
+}
+
+#[tokio::test]
+async fn effect_lag_dropping_heighted_seen_resyncs_frontier_and_releases_deferred_block() {
+    use frontier_reconcile::{
+        run_frontier_reconcile_task, triage_kernel_effect_recv, KernelEffectRecv,
+    };
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    state.lock().await.first_negative = 10;
+    let traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        vec![Some(heaviest_chain_scry_result(10, 30_010))],
+        vec![PokeResult::Ack],
+    )
+    .await;
+    let (_temp, app) = setup_nockapp("test-ker.jam").await;
+    let base = app.get_handle();
+    let (sender, receiver) = tokio::sync::broadcast::channel(4);
+    let handle = NockAppHandle {
+        io_sender: base.io_sender.clone(),
+        effect_sender: Arc::new(sender),
+        effect_receiver: Mutex::new(receiver),
+        metrics: base.metrics.clone(),
+        exit: base.exit.clone(),
+    };
+    handle
+        .effect_sender
+        .send(seen_block_effect_slab(30_010, 10))
+        .unwrap();
+    for seed in 0..8 {
+        handle
+            .effect_sender
+            .send(seen_tx_effect_slab(40_000 + seed))
+            .unwrap();
+    }
+    let lag = Arc::new(tokio::sync::Notify::new());
+    assert!(matches!(
+        triage_kernel_effect_recv(handle.next_effect().await, &metrics, &lag),
+        KernelEffectRecv::Lagged
+    ));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    for _ in 0..4 {
+        let KernelEffectRecv::Effect(effect) =
+            triage_kernel_effect_recv(handle.next_effect().await, &metrics, &lag)
+        else {
+            panic!("newest effects should survive");
+        };
+        handle_effect_with_dispatcher(
+            effect,
+            &mut SwarmActionDispatcher::Channel(&tx),
+            vec![],
+            false,
+            PrefetchConfig::disabled(),
+            runtime_limits_from_config(&LIBP2P_CONFIG),
+            state.clone(),
+            metrics.clone(),
+            PeerExclusions::default(),
+        )
+        .await
+        .unwrap();
+    }
+    let (block, _) = heard_block_fact_with_tx_ids(11, &[]);
+    route_response_fact(
+        PeerId::random(),
+        block,
+        &traffic.traffic,
+        &metrics,
+        &state,
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.lock().await.first_negative, 10);
+    assert_eq!(state.lock().await.deferred_heard_block_heights(), vec![11]);
+    assert_eq!(traffic.poke_count.load(Ordering::SeqCst), 0);
+    let task = tokio::spawn(run_frontier_reconcile_task(
+        traffic.traffic.clone(),
+        state.clone(),
+        metrics.clone(),
+        tx.clone(),
+        lag,
+        None,
+    ));
+    let action = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    let _ = task.await;
+    assert!(matches!(action, SwarmAction::FlushDeferredHeardBlocks));
+    assert_eq!(state.lock().await.first_negative, 11);
+    let mut swarm = deferred_flush_test_swarm();
+    let running = Arc::new(AtomicBool::new(false));
+    let mut workers = TrackedJoinSet::new();
+    dispatch_deferred_flush(
+        &mut swarm, &tx, &running, &mut workers, &state, &metrics, &traffic.traffic,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), workers.join_next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(traffic.poke_count.load(Ordering::SeqCst), 1);
+    assert!(state.lock().await.deferred_heard_block_heights().is_empty());
+    assert!(!running.load(Ordering::Acquire));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn frontier_reconcile_only_moves_frontier_forward_and_flushes_ready_blocks() {
+    use frontier_reconcile::FrontierReconcileOutcome;
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 2)));
+    state.lock().await.first_negative = 10;
+    let mut empty = NounSlab::new();
+    let noun = T(&mut empty, &[D(0), D(0)]);
+    empty.set_root(noun);
+    let mut malformed = NounSlab::new();
+    malformed.set_root(D(42));
+    let traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        vec![
+            Some(heaviest_chain_scry_result(10, 30_010)),
+            Some(heaviest_chain_scry_result(10, 30_010)),
+            Some(heaviest_chain_scry_result(5, 30_005)),
+            Some(empty),
+            Some(malformed),
+            None,
+        ],
+        vec![],
+    )
+    .await;
+    let peer = PeerId::random();
+    {
+        let mut guard = state.lock().await;
+        for height in [11, 13] {
+            let (fact, _) = heard_block_fact_with_tx_ids(height, &[]);
+            let NockchainFact::HeardBlock(id, _) = &fact else {
+                unreachable!()
+            };
+            assert!(guard.defer_heard_block(peer, height, id.clone(), fact));
+        }
+    }
+    let (outcome, flush) =
+        reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::from_secs(300)).await;
+    assert!(matches!(
+        outcome,
+        FrontierReconcileOutcome::Advanced {
+            previous_frontier: 10,
+            frontier: 11,
+            kernel_heaviest: 10,
+        }
+    ));
+    assert!(flush);
+    let ready = state.lock().await.take_ready_deferred_heard_block_entries();
+    assert_eq!(ready.len(), 1);
+    for entry in &ready {
+        state
+            .lock()
+            .await
+            .complete_deferred_heard_block_entry(entry);
+    }
+    for height in [10, 5] {
+        assert_eq!(
+            reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::from_secs(300),)
+                .await,
+            (
+                FrontierReconcileOutcome::InSync {
+                    frontier: 11,
+                    kernel_heaviest: height
+                },
+                false
+            )
+        );
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::from_secs(300),)
+                .await,
+            (FrontierReconcileOutcome::Unavailable, false)
+        );
+    }
+    assert_eq!(state.lock().await.first_negative, 11);
+    assert_eq!(metrics.highest_block_height_seen.load(), 10.0);
+    assert_eq!(state.lock().await.deferred_heard_block_heights(), vec![13]);
+}
+
+#[tokio::test]
+async fn frontier_reconcile_flags_frontier_stalled_below_deferred_blocks() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    state.lock().await.first_negative = 11;
+    let (fact, _) = heard_block_fact_with_tx_ids(12, &[]);
+    let NockchainFact::HeardBlock(id, _) = &fact else {
+        unreachable!()
+    };
+    state
+        .lock()
+        .await
+        .defer_heard_block(PeerId::random(), 12, id.clone(), fact);
+    let traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        vec![
+            Some(heaviest_chain_scry_result(10, 30_010)),
+            Some(heaviest_chain_scry_result(10, 30_010)),
+            Some(heaviest_chain_scry_result(12, 30_012)),
+        ],
+        vec![],
+    )
+    .await;
+    reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::from_secs(300)).await;
+    assert_eq!(metrics.deferred_heights_above_stalled_frontier.load(), 0.0);
+    reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::ZERO).await;
+    assert_eq!(metrics.deferred_heights_above_stalled_frontier.load(), 1.0);
+    reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::ZERO).await;
+    assert_eq!(metrics.deferred_heights_above_stalled_frontier.load(), 0.0);
+}
+
+#[tokio::test]
+async fn frontier_reconcile_periodic_only_and_lag_retry_without_periodic() {
+    for periodic in [false, true] {
+        let metrics = isolated_test_metrics();
+        let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+        state.lock().await.first_negative = 10;
+        let mut results = Vec::new();
+        if !periodic {
+            results.push(None);
+        }
+        results.push(Some(heaviest_chain_scry_result(10, 30_010)));
+        let traffic =
+            build_scripted_traffic_cop(DriverTranscript::default(), results, vec![]).await;
+        let (fact, _) = heard_block_fact_with_tx_ids(11, &[]);
+        let NockchainFact::HeardBlock(id, _) = &fact else {
+            unreachable!()
+        };
+        state
+            .lock()
+            .await
+            .defer_heard_block(PeerId::random(), 11, id.clone(), fact);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let lag = Arc::new(tokio::sync::Notify::new());
+        if !periodic {
+            lag.notify_one();
+        }
+        let task = tokio::spawn(frontier_reconcile::run_frontier_reconcile_task(
+            traffic.traffic.clone(),
+            state.clone(),
+            metrics,
+            tx,
+            lag,
+            periodic.then_some(Duration::from_millis(20)),
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap(),
+            Some(SwarmAction::FlushDeferredHeardBlocks)
+        ));
+        task.abort();
+        let _ = task.await;
+        assert_eq!(state.lock().await.first_negative, 11);
+        assert_eq!(
+            traffic.peek_count.load(Ordering::SeqCst),
+            if periodic { 1 } else { 2 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn heaviest_chain_peek_path_is_served_by_kernel() {
+    let live = build_live_traffic_cop(start_nockchain_app().await);
+    let result = live
+        .traffic
+        .peek(None, kernel_io::heaviest_chain_scry_slab())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        kernel_io::heaviest_chain_height_from_scry(&result).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn heaviest_chain_scry_decodes_tip_height() {
+    assert_eq!(
+        kernel_io::heaviest_chain_height_from_scry(&heaviest_chain_scry_result(165_915, 30_010))
+            .unwrap(),
+        Some(165_915),
+    );
+    let mut malformed = NounSlab::new();
+    let result = T(&mut malformed, &[D(0), D(0), D(7)]);
+    malformed.set_root(result);
+    assert!(kernel_io::heaviest_chain_height_from_scry(&malformed).is_err());
+}
+
+/// Keep kernel replies under test control while using the real traffic queues.
+async fn controlled_frontier_traffic() -> (
+    traffic_cop::TrafficCop,
+    tokio::sync::mpsc::Receiver<IOAction>,
+    TrackedJoinSet<Result<(), NockAppError>>,
+) {
+    let (_temp, app) = setup_nockapp("test-ker.jam").await;
+    let base = app.get_handle();
+    let (io_sender, receiver) = tokio::sync::mpsc::channel(16);
+    let handle = NockAppHandle {
+        io_sender,
+        effect_sender: base.effect_sender.clone(),
+        effect_receiver: Mutex::new(base.effect_sender.subscribe()),
+        metrics: base.metrics.clone(),
+        exit: base.exit.clone(),
+    };
+    let mut tasks = TrackedJoinSet::new();
+    let traffic = traffic_cop::TrafficCop::new(handle, &mut tasks, Duration::from_secs(1));
+    (traffic, receiver, tasks)
+}
+
+async fn next_controlled_kernel_action(
+    receiver: &mut tokio::sync::mpsc::Receiver<IOAction>,
+) -> IOAction {
+    tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("kernel action should arrive")
+        .expect("kernel queue should remain open")
+}
+
+#[tokio::test]
+async fn frontier_reconcile_retries_failed_peek_and_retains_inflight_notification() {
+    let (traffic, mut kernel, _tasks) = controlled_frontier_traffic().await;
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    state.lock().await.first_negative = 10;
+    let (fact, _) = heard_block_fact_with_tx_ids(12, &[]);
+    let NockchainFact::HeardBlock(id, _) = &fact else {
+        unreachable!()
+    };
+    state
+        .lock()
+        .await
+        .defer_heard_block(PeerId::random(), 12, id.clone(), fact);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let lag = Arc::new(tokio::sync::Notify::new());
+    let task = tokio::spawn(frontier_reconcile::run_frontier_reconcile_task(
+        traffic,
+        state.clone(),
+        metrics,
+        tx,
+        lag.clone(),
+        None,
+    ));
+    lag.notify_one();
+    let IOAction::Peek { result_channel, .. } = next_controlled_kernel_action(&mut kernel).await
+    else {
+        panic!("expected tip peek");
+    };
+    // A dropped reply is a failed peek, not an empty chain. No second lag or
+    // periodic timer is available to recover the consumed notification.
+    drop(result_channel);
+    let failed_at = tokio::time::Instant::now();
+    let IOAction::Peek { result_channel, .. } = next_controlled_kernel_action(&mut kernel).await
+    else {
+        panic!("expected delayed retry");
+    };
+    assert!(failed_at.elapsed() >= Duration::from_millis(900));
+    assert_eq!(state.lock().await.first_negative, 10);
+    // A new lag while this snapshot is in flight must survive its success.
+    lag.notify_one();
+    result_channel
+        .send(Some(heaviest_chain_scry_result(10, 30_010)))
+        .unwrap();
+    let IOAction::Peek { result_channel, .. } = next_controlled_kernel_action(&mut kernel).await
+    else {
+        panic!("expected another pass for in-flight lag");
+    };
+    result_channel
+        .send(Some(heaviest_chain_scry_result(11, 30_011)))
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap(),
+        Some(SwarmAction::FlushDeferredHeardBlocks)
+    ));
+    assert_eq!(state.lock().await.first_negative, 12);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn frontier_reconcile_full_queue_releases_lock_and_cannot_regress_seen_gauge() {
+    let (traffic, mut kernel, _tasks) = controlled_frontier_traffic().await;
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    state.lock().await.first_negative = 10;
+    let (fact, _) = heard_block_fact_with_tx_ids(11, &[]);
+    let NockchainFact::HeardBlock(id, _) = &fact else {
+        unreachable!()
+    };
+    state
+        .lock()
+        .await
+        .defer_heard_block(PeerId::random(), 11, id.clone(), fact);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.send(SwarmAction::FlushDeferredHeardBlocks)
+        .await
+        .unwrap();
+    let lag = Arc::new(tokio::sync::Notify::new());
+    let task = tokio::spawn(frontier_reconcile::run_frontier_reconcile_task(
+        traffic,
+        state.clone(),
+        metrics.clone(),
+        tx,
+        lag.clone(),
+        None,
+    ));
+    lag.notify_one();
+    let IOAction::Peek { result_channel, .. } = next_controlled_kernel_action(&mut kernel).await
+    else {
+        panic!("expected tip peek");
+    };
+    // Queue our mutex waiter behind reconciliation's acquisition, then prove
+    // the state stays usable while its flush dispatch awaits a full queue.
+    let guard = state.lock().await;
+    result_channel
+        .send(Some(heaviest_chain_scry_result(10, 30_010)))
+        .unwrap();
+    let_worker_park().await;
+    drop(guard);
+    let guard = tokio::time::timeout(Duration::from_secs(5), state.lock())
+        .await
+        .expect("full action queue must not retain state lock");
+    assert_eq!(guard.first_negative, 11);
+    drop(guard);
+    let mut buffered = VecDeque::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        handle_effect_with_dispatcher(
+            seen_block_effect_slab(30_020, 20),
+            &mut SwarmActionDispatcher::Buffered(&mut buffered),
+            vec![],
+            false,
+            PrefetchConfig::disabled(),
+            runtime_limits_from_config(&LIBP2P_CONFIG),
+            state.clone(),
+            metrics.clone(),
+            PeerExclusions::default(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(metrics.highest_block_height_seen.load(), 20.0);
+    assert!(matches!(
+        rx.recv().await,
+        Some(SwarmAction::FlushDeferredHeardBlocks)
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap(),
+        Some(SwarmAction::FlushDeferredHeardBlocks)
+    ));
+    assert_eq!(state.lock().await.first_negative, 21);
+    assert_eq!(metrics.highest_block_height_seen.load(), 20.0);
+    // A stale snapshot arriving after a newer ordinary %seen also stays put.
+    lag.notify_one();
+    let IOAction::Peek { result_channel, .. } = next_controlled_kernel_action(&mut kernel).await
+    else {
+        panic!("expected stale tip peek");
+    };
+    result_channel
+        .send(Some(heaviest_chain_scry_result(5, 30_005)))
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap(),
+        Some(SwarmAction::FlushDeferredHeardBlocks)
+    ));
+    assert_eq!(state.lock().await.first_negative, 21);
+    assert_eq!(metrics.highest_block_height_seen.load(), 20.0);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn frontier_reconcile_does_not_create_prefetch_demand_or_peer_credit() {
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    let peer = PeerId::random();
+    let other = PeerId::random();
+    let (fact, _) = heard_block_fact_with_tx_ids(11, &[]);
+    let NockchainFact::HeardBlock(id, _) = &fact else {
+        unreachable!()
+    };
+    {
+        let mut guard = state.lock().await;
+        guard.first_negative = 10;
+        seed_connected_peer(&mut guard, peer, 900);
+        seed_connected_peer(&mut guard, other, 901);
+        let (tip_fact, _) = heard_block_fact_with_block_seed(20, 30_020, &[]);
+        let NockchainFact::HeardBlock(tip_id, _) = tip_fact else {
+            unreachable!()
+        };
+        guard.track_block_id_str_and_peer(tip_id.clone(), peer);
+        guard.validate_and_untrack_block_sources(tip_id);
+        assert!(guard.defer_heard_block_with_source(
+            peer,
+            11,
+            id.clone(),
+            fact,
+            BlockSource::Prefetch,
+        ));
+    }
+    let traffic = build_scripted_traffic_cop(
+        DriverTranscript::default(),
+        vec![
+            Some(heaviest_chain_scry_result(20, 30_020)),
+            Some(heaviest_chain_scry_result(20, 30_020)),
+        ],
+        vec![],
+    )
+    .await;
+    assert!(
+        !reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::from_secs(300),)
+            .await
+            .1
+    );
+    {
+        let mut guard = state.lock().await;
+        assert_eq!(guard.first_negative, 21);
+        assert!(!guard.has_kernel_block_height_request(11));
+        assert!(!guard.has_ready_deferred_heard_blocks());
+        let selected = (0..2)
+            .map(|_| {
+                guard
+                    .select_block_height_request_peer(vec![peer, other], &PeerExclusions::default())
+                    .unwrap()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            selected,
+            BTreeSet::from([peer, other]),
+            "a height-only snapshot must not give the validated supplier acceptance priority"
+        );
+        guard.note_kernel_block_height_requested(11);
+    }
+    assert!(
+        reconcile_frontier_once(&traffic.traffic, &state, &metrics, Duration::from_secs(300),)
+            .await
+            .1
+    );
+    assert_eq!(traffic.poke_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn deferred_flush_runs_off_driver_loop_and_keeps_height_order() {
+    let (traffic, mut kernel, _tasks) = controlled_frontier_traffic().await;
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    {
+        let mut guard = state.lock().await;
+        guard.first_negative = 11;
+        for height in [11, 12] {
+            let (fact, _) = heard_block_fact_with_tx_ids(height, &[]);
+            let NockchainFact::HeardBlock(id, _) = &fact else {
+                unreachable!()
+            };
+            assert!(guard.defer_heard_block(PeerId::random(), height, id.clone(), fact));
+        }
+    }
+    let mut swarm = deferred_flush_test_swarm();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let running = Arc::new(AtomicBool::new(false));
+    let mut workers = TrackedJoinSet::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch_deferred_flush(
+            &mut swarm, &tx, &running, &mut workers, &state, &metrics, &traffic,
+        ),
+    )
+    .await
+    .expect("action consumer must not wait for the kernel");
+    let IOAction::Poke {
+        poke, ack_channel, ..
+    } = next_controlled_kernel_action(&mut kernel).await
+    else {
+        panic!("expected heard-block 11");
+    };
+    assert_eq!(heard_block_height_from_fact_poke(&poke).unwrap(), 11);
+    let first_ack = ack_channel;
+    let mut buffered = VecDeque::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        handle_effect_with_dispatcher(
+            seen_block_effect_slab(30_011, 11),
+            &mut SwarmActionDispatcher::Buffered(&mut buffered),
+            vec![],
+            false,
+            PrefetchConfig::disabled(),
+            runtime_limits_from_config(&LIBP2P_CONFIG),
+            state.clone(),
+            metrics.clone(),
+            PeerExclusions::default(),
+        ),
+    )
+    .await
+    .expect("effect handling must not wait for the held poke")
+    .unwrap();
+    assert_eq!(state.lock().await.first_negative, 12);
+    assert!(matches!(
+        buffered.pop_front(),
+        Some(SwarmAction::FlushDeferredHeardBlocks)
+    ));
+    assert!(buffered.is_empty());
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch_deferred_flush(
+            &mut swarm, &tx, &running, &mut workers, &state, &metrics, &traffic,
+        ),
+    )
+    .await
+    .expect("coalesced action must remain nonblocking");
+    assert!(
+        kernel.try_recv().is_err(),
+        "height 12 cannot overtake held height 11"
+    );
+    first_ack.send(PokeResult::Ack).unwrap();
+    let IOAction::Poke {
+        poke, ack_channel, ..
+    } = next_controlled_kernel_action(&mut kernel).await
+    else {
+        panic!("expected heard-block 12");
+    };
+    assert_eq!(heard_block_height_from_fact_poke(&poke).unwrap(), 12);
+    ack_channel.send(PokeResult::Ack).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), workers.join_next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        workers.join_next().await.is_none(),
+        "only the release worker owns delivery"
+    );
+    assert!(
+        kernel.try_recv().is_err(),
+        "each height must be delivered once"
+    );
+    assert!(state.lock().await.deferred_heard_block_heights().is_empty());
+    assert!(!running.load(Ordering::Acquire));
+    assert!(rx.try_recv().is_err());
+}
+
+/// Genesis supplies a genuine accepted kernel tip without mining. Its replay
+/// is already frontier-ready at height zero: this checks positive tip repair
+/// and real-kernel flush delivery, not successor-height eligibility.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn frontier_reconcile_live_accepted_genesis_resyncs_and_flushes_replay() {
+    use frontier_reconcile::{FrontierReconcileOutcome, FrontierReconcileReason};
+
+    let live = build_live_traffic_cop(start_nockchain_app().await);
+    seed_fakenet_pre_genesis(&live.effect_handle).await;
+    send_born(&live.effect_handle).await;
+    let metrics = isolated_test_metrics();
+    let state = Arc::new(Mutex::new(P2PState::new(metrics.clone(), 100)));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let peer = PeerId::random();
+    let genesis = fake_genesis_block_message_fact();
+    let NockchainFact::HeardBlock(genesis_id, _) = &genesis else {
+        unreachable!()
+    };
+    let genesis_id = genesis_id.clone();
+    route_response_fact(peer, genesis.clone(), &live.traffic, &metrics, &state, &tx)
+        .await
+        .expect("genuine fakenet genesis should reach the live kernel");
+    assert_eq!(metrics.responses_acked_heard_block.fetch_add(0), 1);
+
+    // No kernel effects are handed to the driver state. Acceptance must be
+    // established by the actual positive scry, rather than inferred from Ack.
+    let tip = live
+        .traffic
+        .peek(None, kernel_io::heaviest_chain_scry_slab())
+        .await
+        .expect("live tip peek should complete")
+        .expect("live scry result");
+    assert_eq!(
+        kernel_io::heaviest_chain_height_from_scry(&tip).unwrap(),
+        Some(0)
+    );
+    {
+        let mut guard = state.lock().await;
+        assert_eq!(guard.first_negative, 0);
+        assert!(guard.defer_heard_block(peer, 0, genesis_id.clone(), genesis));
+        assert!(
+            guard.has_ready_deferred_heard_blocks(),
+            "genesis replay is already eligible; recovery supplies its flush wakeup"
+        );
+    }
+    assert!(rx.try_recv().is_err());
+    let outcome = frontier_reconcile::reconcile_seen_frontier_with_kernel(
+        FrontierReconcileReason::EffectLag,
+        &live.traffic,
+        &state,
+        &metrics,
+        &mut SwarmActionDispatcher::Channel(&tx),
+        Duration::from_secs(300),
+    )
+    .await
+    .expect("real accepted-tip reconciliation should succeed");
+    assert_eq!(
+        outcome,
+        FrontierReconcileOutcome::Advanced {
+            previous_frontier: 0,
+            frontier: 1,
+            kernel_heaviest: 0,
+        }
+    );
+    assert_eq!(metrics.seen_frontier_resync_total.fetch_add(0), 1);
+    let action = rx.recv().await.expect("reconcile should queue a flush");
+    assert!(matches!(action, SwarmAction::FlushDeferredHeardBlocks));
+    let mut swarm = deferred_flush_test_swarm();
+    let running = Arc::new(AtomicBool::new(false));
+    let mut workers = TrackedJoinSet::new();
+    let mut equix_builder = equix::EquiXBuilder::new();
+    let mut pending = BTreeMap::new();
+    process_swarm_action(
+        action,
+        &mut swarm,
+        &tx,
+        &running,
+        &mut workers,
+        &state,
+        &metrics,
+        &PeerExclusions::default(),
+        &mut equix_builder,
+        &mut pending,
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        &live.traffic,
+    )
+    .await
+    .expect("production action consumer should start release flush worker");
+    tokio::time::timeout(Duration::from_secs(30), workers.join_next())
+        .await
+        .expect("live-kernel flush should finish")
+        .expect("one release worker")
+        .expect("worker must not panic")
+        .expect("valid genesis replay must flush without error");
+    assert!(workers.join_next().await.is_none());
+    assert_eq!(
+        metrics.responses_acked_heard_block.fetch_add(0),
+        2,
+        "the release worker must actually poke the real kernel once, not only drain state"
+    );
+    assert!(state.lock().await.deferred_heard_block_heights().is_empty());
+    assert!(!running.load(Ordering::Acquire));
+    assert!(rx.try_recv().is_err());
+    let tip = live
+        .traffic
+        .peek(None, kernel_io::heaviest_chain_scry_slab())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        kernel_io::heaviest_chain_height_from_scry(&tip).unwrap(),
+        Some(0)
+    );
+    assert_eq!(state.lock().await.first_negative, 1);
+    println!(
+        "test_evidence live_accepted_genesis kernel_tip=0 frontier=1 resyncs=1 \
+         real_kernel_block_acks=2 replay_flushes=1 deferred_remaining=0 \
+         successor_eligibility_proven=false"
+    );
 }

@@ -16,9 +16,7 @@ nodes:
     restart_peer_from:
       - node: "node-b"
         listen: "/ip4/127.0.0.1/udp/4402/quic-v1"
-    extra_args:
-      - "--num-threads"
-      - "4"
+    mining_threads: 4
     env:
       NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
       NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"

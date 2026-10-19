@@ -9,9 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use nockapp::noun::slab::NounSlab;
-use nockchain_e2e::grpc::{
-    set_mining_enabled, set_mining_pkh_live, transaction_accepted, wait_for_tx_in_block,
-};
+use nockchain_e2e::grpc::{transaction_accepted, wait_for_tx_in_block};
 use nockchain_e2e::runner;
 use nockchain_e2e::runner::RunOptions;
 use nockchain_e2e::upgrade::{NockchainCluster, UpgradeTestConfig, WalletClient};
@@ -39,6 +37,8 @@ async fn test_bythos_activation_gating() -> Result<()> {
         eprintln!("skipping bythos gating test: wallet binary not available");
         return Ok(());
     };
+    let miner_bin = resolve_miner_bin()
+        .ok_or_else(|| anyhow!("standalone CPU miner unavailable; set NOCKCHAIN_MINER_BIN"))?;
 
     let run_dir = temp_run_dir("bythos-gating");
     std::fs::create_dir_all(&run_dir).context("create bythos run dir")?;
@@ -53,7 +53,8 @@ async fn test_bythos_activation_gating() -> Result<()> {
         base_private_port,
     )
     .await?;
-    let mut config = UpgradeTestConfig::new(activation_height, nockchain_bin, run_dir.clone());
+    let mut config =
+        UpgradeTestConfig::new(activation_height, nockchain_bin, miner_bin, run_dir.clone());
     config.base_grpc_port = base_grpc_port;
     config.base_private_grpc_port = base_private_port;
     config.base_p2p_port = base_p2p_port;
@@ -67,7 +68,10 @@ async fn test_bythos_activation_gating() -> Result<()> {
     let shutdown = cluster.shutdown().await;
     match (result, shutdown) {
         (Ok(()), Ok(())) => Ok(()),
-        (Err(err), _) => Err(err),
+        (Err(err), Err(shutdown)) => {
+            Err(err.context(format!("shutdown also failed: {shutdown:#}")))
+        }
+        (Err(err), Ok(())) => Err(err),
         (Ok(()), Err(err)) => Err(err),
     }
 }
@@ -87,13 +91,15 @@ async fn test_upgrade_activation_scenario() -> Result<()> {
         eprintln!("skipping upgrade scenario: NOCKCHAIN_BIN_OLD/NEW not set");
         return Ok(());
     }
-    if let (Some(old_bin), Some(new_bin)) = (&old_bin, &new_bin) {
-        let old_path = PathBuf::from(old_bin);
-        if !binary_supports_grpc_flags(&old_path) {
-            eprintln!("old binary lacks gRPC flags; using new binary for upgrade scenario",);
-            env::set_var("NOCKCHAIN_BIN_OLD", new_bin);
-        }
+    let old_path = PathBuf::from(old_bin.as_ref().expect("old binary supplied"));
+    if !binary_supports_grpc_flags(&old_path) {
+        return Err(anyhow!(
+            "old node binary '{}' lacks the required public gRPC API",
+            old_path.display(),
+        ));
     }
+    let miner_bin = resolve_miner_bin()
+        .ok_or_else(|| anyhow!("standalone CPU miner unavailable; set NOCKCHAIN_MINER_BIN"))?;
 
     let (base_grpc_port, base_private_port) =
         reserve_distinct_tcp_pairs().context("reserve upgrade gRPC ports")?;
@@ -107,6 +113,7 @@ async fn test_upgrade_activation_scenario() -> Result<()> {
     let options = RunOptions {
         scenario_path,
         nockchain_bin: None,
+        miner_bin: Some(miner_bin),
         wallet_bin: Some(wallet_bin),
         work_dir: run_dir,
         base_grpc_port,
@@ -114,6 +121,8 @@ async fn test_upgrade_activation_scenario() -> Result<()> {
         base_p2p_port,
         docker: false,
         docker_image: None,
+        docker_miner_image: None,
+        docker_miner_bin: None,
         keep_artifacts: false,
     };
 
@@ -137,8 +146,7 @@ async fn run_bythos_gating_steps(
     }
 
     let public_addr = cluster.grpc_public_addr()?.to_string();
-    let private_addr = cluster.grpc_private_addr()?.to_string();
-    set_mining_enabled(&private_addr, false).await?;
+    cluster.set_mining_enabled(false).await?;
 
     let miner_wallet = cluster.wallet("miner", wallet_bin.clone())?;
     let recipient_wallet = cluster.wallet("recipient", wallet_bin)?;
@@ -161,13 +169,13 @@ async fn run_bythos_gating_steps(
             "pre-activation mining target {} reaches activation {}", pre_height, activation_height
         ));
     }
-    set_mining_pkh_live(&private_addr, &miner_pkh).await?;
-    set_mining_enabled(&private_addr, true).await?;
+    cluster.set_mining_pkh(miner_pkh.clone()).await?;
+    cluster.set_mining_enabled(true).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
     cluster
         .mine_to_height(pre_height, Duration::from_secs(180))
         .await?;
-    set_mining_enabled(&private_addr, false).await?;
+    cluster.set_mining_enabled(false).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
 
     let notes = list_notes_with_retry(&miner_wallet, 5, Duration::from_millis(500)).await?;
@@ -277,12 +285,12 @@ async fn run_bythos_gating_steps(
             activation_height
         ));
     }
-    set_mining_enabled(&private_addr, true).await?;
+    cluster.set_mining_enabled(true).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
     cluster
         .mine_to_height(pre_mine_height, Duration::from_secs(180))
         .await?;
-    set_mining_enabled(&private_addr, false).await?;
+    cluster.set_mining_enabled(false).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
 
     let pre_accept_in_block =
@@ -303,12 +311,12 @@ async fn run_bythos_gating_steps(
         ));
     }
 
-    set_mining_enabled(&private_addr, true).await?;
+    cluster.set_mining_enabled(true).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
     cluster
         .mine_to_height(activation_height + 1, Duration::from_secs(180))
         .await?;
-    set_mining_enabled(&private_addr, false).await?;
+    cluster.set_mining_enabled(false).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
 
     let notes_before_post =
@@ -325,12 +333,12 @@ async fn run_bythos_gating_steps(
         .assets
         .saturating_sub(post_amount.saturating_add(post_stub_fee));
 
-    set_mining_enabled(&private_addr, true).await?;
+    cluster.set_mining_enabled(true).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
     cluster
         .mine_to_height(activation_height + 3, Duration::from_secs(180))
         .await?;
-    set_mining_enabled(&private_addr, false).await?;
+    cluster.set_mining_enabled(false).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
 
     let post_stub_in_block =
@@ -361,14 +369,14 @@ async fn run_bythos_gating_steps(
     log_tx_lmp("full", &tx_full.spends);
     let full_id = submit_expect_accepted(&miner_wallet, &public_addr, &tx_full.tx_path).await?;
 
-    set_mining_enabled(&private_addr, true).await?;
+    cluster.set_mining_enabled(true).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
     let current_height = cluster.current_height().await?;
     let target_height = std::cmp::max(activation_height + 5, current_height.saturating_add(4));
     cluster
         .mine_to_height(target_height, Duration::from_secs(180))
         .await?;
-    set_mining_enabled(&private_addr, false).await?;
+    cluster.set_mining_enabled(false).await?;
     cluster.wait_for_grpc(Duration::from_secs(30)).await?;
 
     let full_in_block =
@@ -409,6 +417,22 @@ fn resolve_wallet_bin() -> Option<PathBuf> {
         return Some(release);
     }
     let debug = root.join("target/debug/nockchain-wallet");
+    if debug.exists() {
+        return Some(debug);
+    }
+    None
+}
+
+fn resolve_miner_bin() -> Option<PathBuf> {
+    if let Ok(path) = env::var("NOCKCHAIN_MINER_BIN") {
+        return absolutize_path(PathBuf::from(path));
+    }
+    let root = workspace_root().ok()?;
+    let release = root.join("target/release/zk-pow-mine");
+    if release.exists() {
+        return Some(release);
+    }
+    let debug = root.join("target/debug/zk-pow-mine");
     if debug.exists() {
         return Some(debug);
     }

@@ -502,7 +502,7 @@ reward (the schedule table values are all multiples of 5).
 **Fees never enter the fund slot.** Computing the fund from
 `(emission + fees)` would produce a coinbase that consensus rejects
 as `%improper-fund-split`, since `+check-fund-split` keys on
-`emission` alone — see "Review fixes" below.
+`emission` alone — see "Allocation invariants" below.
 
 The 80/20 split applies uniformly to each newly issued reward from the
 2,048 NOCK activation reward through the 64-NOCK tail floor. These are
@@ -564,29 +564,16 @@ standard coinbase timelock, enforced by the existing
 `+based:coinbase-split` check and the per-output `timelock-intent`
 field on each nnote.
 
-#### Review fixes
+#### Allocation invariants
 
-Two issues caught in review of the initial implementation, both
-addressed in this branch:
-
-- **Fee handling.** The earlier `++ new-with-fund-share` took a
-  single `assets` parameter that callers populated with
-  `emission + fees`, so the fund slot was computed as
-  `(div (emission + fees) 5)` — but consensus expects
-  `(div emission 5)`. Any post-activation block with non-zero fees
-  was self-rejected by the same miner that built it. The builder
-  now takes `emission` and `fees` separately, routing fees entirely
-  to the miner pool.
-- **Multi-miner crash.** The earlier builder asserted exactly one
-  `shares` key and discarded share weights, which crashed candidate
-  construction whenever a closed-miner partner-mode configured two
-  payout PKHs and the chain tip reached `asert-phase`. The builder
-  now distributes the miner pool across `shares` via the same
-  proportional arm as `++ new`, supporting 1- or 2-recipient
-  miner-side configurations. `+check-fund-split` and
-  `+based:coinbase-split:v1` were relaxed to admit the resulting
-  3-entry coinbases (2 miners + fund) while still pinning the
-  fund slot to `(div emission 5)`.
+- **Fee allocation.** `++ new-with-fund-share` takes `emission` and
+  `fees` separately. The protocol-fund slot is `(div emission 5)`;
+  fees go entirely to the miner pool, matching `+check-fund-split`.
+- **Multiple miner recipients.** The builder distributes the miner pool
+  across `shares` through the same proportional arm as `++ new`,
+  supporting one or two miner recipients. `+check-fund-split` and
+  `+based:coinbase-split:v1` admit up to three entries for two miners
+  plus the fund while requiring the fund value `(div emission 5)`.
 
 ## Activation
 
@@ -1016,11 +1003,12 @@ height-16,128 checkpoint.
   `test-phase-2-checkpoint-65500-pinned`,
   `test-phase-2-checkpoint-anchor-and-activation-differ`,
   `test-phase-2-asert-anchor-min-timestamp-pinned` (new, in
-  `closed/hoon/tests/dumb/mod/unit/review-fixes.hoon`) pin the
+  `hoon/tests/dumb/mod/unit/validation-invariants.hoon`) pin the
   three baked values directly so reverting any of them fails CI.
 - `test-phase-2-kernel-state-7-constants-shape-phase-1` (new)
   pins the noun-shape divergence between `kernel-state-7` and
-  `kernel-state-8`, mirroring the existing `test-fix3a` pin for
+  `kernel-state-8`, mirroring the existing
+  `test-kernel-state-6-constants-shape-pre-asert` check for
   `kernel-state-6` ↔ `kernel-state-7`.
 - `test-phase-2-state-7-bc-shape-differs-from-state-8`,
   `test-phase-2-state-8-bc-matches-transact-default`,
@@ -1028,7 +1016,7 @@ height-16,128 checkpoint.
   `closed/hoon/tests/wallet/mod/state-upgrade.hoon`) cover the
   parallel wallet bump.
 - The test bc-* helpers
-  (`bc-asert`, `bc-fund-split`, `bc-pre-activation-v1`, `bc-fix`)
+  (`bc-asert`, `bc-fund-split`, `bc-pre-activation-v1`, `bc-validation`)
   now set
   `asert-anchor-min-timestamp (add (time-in-secs:page:txe *@da) 1.200)`
   — the median-of-11 those test chains actually produce at

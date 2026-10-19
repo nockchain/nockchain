@@ -216,8 +216,8 @@ attempt, a miner:
    `%ai-pow` block. Otherwise it advances the extranonce and repeats.
 
 The proof is a **compact final-layer batch-STARK recursive certificate**
-(Plonky3 over Goldilocks + Tip5 + FRI, recursion via the vendored
-`plonky3-recursion` substrate). It carries only the small final compact body
+(Plonky3 over Goldilocks + Tip5 + FRI, recursion via the exact-commit-pinned
+`nockchain/Plonky3-recursion` fork). It carries only the small final compact body
 plus an explicit verifier-key digest; it binds the opened tile to the
 block-committed `H_A`/`H_B` (dense) or the routing/jackpot commitment (MoE)
 in-circuit, so the matrices are miner-chosen but non-grindable — a proof over any

@@ -729,11 +729,19 @@ async fn initialize_hoonc_inner<J: Jammer + Send + 'static>(
         boot_cli.state_jam = Some(tmp.path().to_string_lossy().into_owned());
         _prewarm_state_file = Some(tmp);
     }
-    let mut nockapp = boot::setup::<J>(KERNEL_JAM, boot_cli.clone(), &[], "hoonc", Some(data_dir))
-        .await
-        .map_err(|err| -> Error {
-            Box::new(std::io::Error::other(format!("boot setup failed: {err}")))
-        })?;
+    // Dat module base58/Tip5/z-map initialization uses the runtime's existing Exact accelerators.
+    let prover_hot_state = zkvm_jetpack::hot::produce_prover_hot_state();
+    let mut nockapp = boot::setup::<J>(
+        KERNEL_JAM,
+        boot_cli.clone(),
+        &prover_hot_state,
+        "hoonc",
+        Some(data_dir),
+    )
+    .await
+    .map_err(|err| -> Error {
+        Box::new(std::io::Error::other(format!("boot setup failed: {err}")))
+    })?;
     nockapp.add_io_driver(nockapp::file_driver()).await;
     nockapp.add_io_driver(nockapp::exit_driver()).await;
 

@@ -1,7 +1,5 @@
-//! Adversarial tests for the MoE routing-consistency binding
-//! (`verify_pearl_moe_routing_binding`), the soundness gate that prevents a
-//! prover from opening arbitrary A-rows and claiming they are an expert's routed
-//! tokens. Every forgery path must be rejected.
+//! MoE routing-consistency tests: opened A-rows must match the selected expert's
+//! authenticated routing data.
 
 #![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::commit::matrix_commitment;
@@ -65,6 +63,158 @@ fn valid_routing_binding_accepts() {
 }
 
 #[test]
+fn consensus_batch_rejects_duplicate_and_missing_token_counts() {
+    use ai_pow::pearl_compat::{
+        verify_pearl_moe_routing_binding_with_limits, PearlAdmissionLimits,
+    };
+    let (config, mut routing, mut moe) = valid();
+    routing.routing_data = vec![0, 2, 4, 6, 0, 1, 3, 5];
+    moe.hash_routing = matrix_commitment(&routing.routing_data_le_bytes(), &KAPPA);
+    assert_eq!(
+        verify_pearl_moe_routing_binding_with_limits(
+            &KAPPA,
+            &config,
+            &moe,
+            M,
+            0,
+            &routing.routing_data,
+            4096,
+            PearlAdmissionLimits::CONSENSUS_BATCH,
+        ),
+        Err(PearlCompatError::MoeRoutingMultiplicityMismatch {
+            token: 0,
+            expected: 1,
+            actual: 2,
+        }),
+    );
+    // Missing tokens are rejected as well as excess occurrences.
+    routing.routing_data = vec![0, 2, 4, 6, 2, 3, 5, 7];
+    moe.hash_routing = matrix_commitment(&routing.routing_data_le_bytes(), &KAPPA);
+    assert_eq!(
+        verify_pearl_moe_routing_binding_with_limits(
+            &KAPPA,
+            &config,
+            &moe,
+            M,
+            0,
+            &routing.routing_data,
+            4096,
+            PearlAdmissionLimits::CONSENSUS_BATCH,
+        ),
+        Err(PearlCompatError::MoeRoutingMultiplicityMismatch {
+            token: 1,
+            expected: 1,
+            actual: 0,
+        }),
+    );
+}
+
+#[test]
+fn consensus_batch_global_counts_match_an_exhaustive_assignment_oracle() {
+    use ai_pow::pearl_compat::{
+        verify_pearl_moe_routing_binding_with_limits, PearlAdmissionLimits,
+    };
+    // Enumerate every 3-token x 3-expert membership matrix. Flatten each expert
+    // in token order independently of the production routing builder. The
+    // oracle checks column membership, not a second implementation of counters.
+    let (mut config, _, _) = valid();
+    config.rows_pattern = PearlPeriodicPattern::from_list(&[0]).unwrap();
+    let mut checked = 0;
+    for top_k in [1u16, 2] {
+        config.reserved = PearlMiningConfig::moe_trailer(3, top_k);
+        for mask in 0..512u32 {
+            if mask.count_ones() != u32::from(top_k) * 3 || mask & 7 == 0 {
+                continue; // length must match; the selected expert needs one row.
+            }
+            let mut routing = RoutingData {
+                num_tokens: 3,
+                top_k: usize::from(top_k),
+                num_experts: 3,
+                slot_indices: vec![],
+                routing_data: vec![],
+                routing_offsets: vec![],
+            };
+            for expert in 0..3 {
+                for token in 0..3 {
+                    if mask & (1 << (expert * 3 + token)) != 0 {
+                        routing.routing_data.push(token);
+                    }
+                }
+                routing
+                    .routing_offsets
+                    .push(routing.routing_data.len() as u32);
+            }
+            let moe = PearlMoeParams {
+                expert_idx: 0,
+                routing_offsets: routing.routing_offsets.clone(),
+                hash_routing: matrix_commitment(&routing.routing_data_le_bytes(), &KAPPA),
+                outer_indices: vec![routing.routing_data[0]],
+            };
+            let canonical = (0..3).all(|token| {
+                (0..3)
+                    .filter(|expert| mask & (1 << (expert * 3 + token)) != 0)
+                    .count()
+                    == usize::from(top_k)
+            });
+            let result = verify_pearl_moe_routing_binding_with_limits(
+                &KAPPA,
+                &config,
+                &moe,
+                3,
+                0,
+                &routing.routing_data,
+                4096,
+                PearlAdmissionLimits::CONSENSUS_BATCH,
+            );
+            assert_eq!(
+                result.is_ok(),
+                canonical,
+                "mask={mask} top_k={top_k}: {result:?}"
+            );
+            if !canonical {
+                assert!(matches!(
+                    result,
+                    Err(PearlCompatError::MoeRoutingMultiplicityMismatch { .. })
+                ));
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 147);
+}
+
+#[test]
+fn multiplicity_check_bounds_memory_before_allocation() {
+    use ai_pow::pearl_compat::{verify_pearl_moe_routing_multiplicity, PearlAdmissionLimits};
+    let (mut config, _, _) = valid();
+    let check = |config: &PearlMiningConfig, m, data: &[u32]| {
+        verify_pearl_moe_routing_multiplicity(
+            config,
+            m,
+            data,
+            PearlAdmissionLimits::CONSENSUS_BATCH,
+        )
+    };
+    assert!(matches!(
+        check(&config, u32::MAX, &[]),
+        Err(PearlCompatError::MoeRoutingEntriesExceedMax { .. })
+    ));
+    assert!(matches!(
+        check(&config, PEARL_MOE_MAX_ROUTING_ENTRIES as u32, &[]),
+        Err(PearlCompatError::MoeRoutingDataLenMismatch { .. })
+    ));
+    assert!(matches!(
+        check(&config, 1, &[1]),
+        Err(PearlCompatError::MoeRoutingTokenOutOfRange { .. })
+    ));
+    config.reserved = PearlMiningConfig::moe_trailer(2, 0);
+    assert_eq!(
+        check(&config, u32::MAX, &[]),
+        Err(PearlCompatError::MoeTopKZero { e: 2 })
+    );
+}
+
+#[test]
 fn forged_outer_indices_rejected() {
     let (config, routing, mut moe) = valid();
     // Prover opens A-rows [4,6] (real A rows, but NOT expert 0's first two tokens).
@@ -83,7 +233,7 @@ fn forged_outer_indices_rejected() {
 }
 
 #[test]
-fn cross_expert_forgery_rejected() {
+fn cross_expert_routing_mismatch_rejected() {
     // expert_idx=0 but claiming expert 1's tokens [1,3] must fail.
     let (config, routing, mut moe) = valid();
     moe.outer_indices = vec![1, 3];
@@ -196,11 +346,10 @@ fn duplicate_expert_tokens_across_tiles_rejected() {
     );
 }
 
-/// Column-within-expert bleed. The opened B-columns for expert
-/// `expert_idx` must stay inside that expert's `[expert_idx·n_e, (expert_idx+1)·n_e)`
-/// block. A `cols_pattern`/`t_cols` reaching `local ≥ n_e` bleeds into a
-/// neighbouring expert's weights (a Pearl fork + a column-grinding lever) — the
-/// downstream global `< n` check does not catch it.
+/// Opened B-columns must stay inside the selected expert's
+/// `[expert_idx·n_e, (expert_idx+1)·n_e)` block.
+/// A `cols_pattern`/`t_cols` value reaching `local ≥ n_e` is rejected
+/// even when its global column index remains below `n`.
 fn cols_config(pattern: &[u32]) -> PearlMiningConfig {
     PearlMiningConfig {
         common_dim: 1024,

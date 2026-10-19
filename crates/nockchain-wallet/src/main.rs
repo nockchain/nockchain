@@ -71,6 +71,7 @@ use wallet_tx_builder::planner::{plan_create_tx, PlanError};
 use wallet_tx_builder::types::{
     CandidateVersionPolicy, ChainContext, PlanRequest, SelectionMode, SelectionOrder,
 };
+use zeroize::Zeroizing;
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
 use crate::public_nockchain::v2::client::BalanceRequest;
@@ -89,6 +90,24 @@ fn multisig_batch_driver(pokes: Vec<NounSlab>) -> IODriverFn {
 
         handle.exit.exit(0).await?;
         Ok(())
+    })
+}
+
+// Kernel effects own successful exit status. Transport rejection must also
+// terminate the one-shot key operation instead of leaving its consumer alive.
+fn key_material_driver(poke: NounSlab) -> IODriverFn {
+    make_driver(|handle| async move {
+        match handle.poke(OnePunchWire::Poke.to_wire(), poke).await {
+            Ok(PokeResult::Ack) => Ok(()),
+            Ok(PokeResult::Nack) => {
+                handle.exit.exit(1).await?;
+                Err(NockAppError::PokeFailed)
+            }
+            Err(err) => {
+                handle.exit.exit(1).await?;
+                Err(err)
+            }
+        }
     })
 }
 
@@ -285,6 +304,7 @@ async fn main() -> Result<(), NockAppError> {
         // or they don't interact with the chain
         Commands::Keygen
         | Commands::DeriveChild { .. }
+        | Commands::RecoverChild { .. }
         | Commands::DeriveChildBatch { .. }
         | Commands::ImportKeys { .. }
         | Commands::ExportKeys
@@ -335,6 +355,14 @@ async fn main() -> Result<(), NockAppError> {
             hardened,
             label,
         } => Wallet::derive_child(*index, *hardened, label),
+        Commands::RecoverChild {
+            index,
+            hardened,
+            key_file,
+        } => {
+            let retained = Wallet::read_extended_key_file(key_file)?;
+            Wallet::recover_child(*index, *hardened, retained.trim())
+        }
         Commands::DeriveChildBatch { .. } => {
             unreachable!("derive-child-batch handled earlier")
         }
@@ -430,6 +458,7 @@ async fn main() -> Result<(), NockAppError> {
         Commands::ImportKeys {
             file,
             key,
+            key_file,
             seedphrase,
             version,
         } => {
@@ -437,18 +466,30 @@ async fn main() -> Result<(), NockAppError> {
                 Wallet::import_keys(file_path)
             } else if let Some(extended_key) = key {
                 Wallet::import_extended(extended_key)
-            } else if let Some(seed) = seedphrase {
+            } else if let Some(path) = key_file {
+                let extended_key = Wallet::read_extended_key_file(path)?;
+                Wallet::import_extended_checked(extended_key.trim())
+            } else if *seedphrase {
                 let version = version.ok_or_else(|| {
                     NockAppError::from(CrownError::Unknown(
                         "--version is required when using --seedphrase".into(),
                     ))
                 })?;
+                // Both the prompted phrase and its normalized copy are wiped
+                // on drop. `split_whitespace` borrows `seed`, so no further
+                // heap copy of the phrase escapes this scope.
+                let seed =
+                    Zeroizing::new(rpassword::prompt_password("Seed phrase: ").map_err(|err| {
+                        NockAppError::from(CrownError::Unknown(format!(
+                            "Failed to read seed phrase: {err}"
+                        )))
+                    })?);
                 // normalize seedphrase to have exactly one space between words
-                let normalized_seed = seed.split_whitespace().collect::<Vec<&str>>().join(" ");
+                let normalized_seed = normalize_seed_phrase(&seed);
                 Wallet::import_seed_phrase(&normalized_seed, version)
             } else {
                 return Err(CrownError::Unknown(
-                    "One of --file, --key, --seedphrase, or --master-privkey must be provided for import-keys".to_string(),
+                    "One of --file, --key, --key-file, or --seedphrase must be provided for import-keys".to_string(),
                 )
                 .into());
             }
@@ -787,10 +828,14 @@ async fn main() -> Result<(), NockAppError> {
         None
     };
 
-    wallet
-        .app
-        .add_io_driver(one_punch_driver(poke.0, poke.1))
-        .await;
+    let command_driver = match &cli.command {
+        Commands::RecoverChild { .. }
+        | Commands::ImportKeys {
+            key_file: Some(_), ..
+        } => key_material_driver(poke.0),
+        _ => one_punch_driver(poke.0, poke.1),
+    };
+    wallet.app.add_io_driver(command_driver).await;
     wallet.app.add_io_driver(file_driver()).await;
     wallet.app.add_io_driver(markdown_driver()).await;
     wallet.app.add_io_driver(exit_driver()).await;
@@ -1033,6 +1078,22 @@ impl Wallet {
         Self::wallet(
             "derive-child",
             &[index_noun, hardened_noun, label_noun],
+            Operation::Poke,
+            &mut slab,
+        )
+    }
+
+    /// Checks retained child identity before any key is stored or exported.
+    fn recover_child(index: u64, hardened: bool, retained: &str) -> CommandNoun<NounSlab> {
+        if index >= (1u64 << 31) {
+            return Err(CrownError::Unknown("Child index must be below 2^31".into()).into());
+        }
+        let mut slab = NounSlab::new();
+        let retained_noun = make_tas(&mut slab, retained).as_noun();
+        let hardened_noun = if hardened { YES } else { NO };
+        Self::wallet(
+            "recover-child",
+            &[D(index), hardened_noun, retained_noun],
             Operation::Poke,
             &mut slab,
         )
@@ -1369,6 +1430,12 @@ impl Wallet {
         Self::wallet("import-keys", &[pubkey_noun], Operation::Poke, &mut slab)
     }
 
+    fn read_extended_key_file(path: &Path) -> Result<Zeroizing<String>, NockAppError> {
+        fs::read_to_string(path).map(Zeroizing::new).map_err(|err| {
+            CrownError::Unknown(format!("Failed to read extended key file: {err}")).into()
+        })
+    }
+
     /// Imports an extended key.
     ///
     /// # Arguments
@@ -1378,6 +1445,17 @@ impl Wallet {
         let mut slab = NounSlab::new();
         let key_noun = make_tas(&mut slab, extended_key).as_noun();
         Self::wallet("import-extended", &[key_noun], Operation::Poke, &mut slab)
+    }
+
+    fn import_extended_checked(extended_key: &str) -> CommandNoun<NounSlab> {
+        let mut slab = NounSlab::new();
+        let key_noun = make_tas(&mut slab, extended_key).as_noun();
+        Self::wallet(
+            "import-extended-checked",
+            &[key_noun],
+            Operation::Poke,
+            &mut slab,
+        )
     }
 
     /// Imports a watch-only public key.
@@ -1964,6 +2042,19 @@ fn confirm_upper_bound_warning() -> Result<(), NockAppError> {
         )
         .into())
     }
+}
+
+/// Collapses whitespace in a prompted seed phrase to single spaces. The result
+/// is the only other heap copy of the phrase and is wiped on drop.
+fn normalize_seed_phrase(seed: &str) -> Zeroizing<String> {
+    let mut normalized = Zeroizing::new(String::with_capacity(seed.len()));
+    for word in seed.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(word);
+    }
+    normalized
 }
 
 /// Normalizes watch input as either schnorr pubkey or hash base58 value.

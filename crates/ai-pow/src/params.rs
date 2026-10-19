@@ -694,13 +694,12 @@ mod tests {
         assert_eq!(p.num_tiles_padded(), 128);
     }
 
-    /// The admission cap lets the FULL Pearl
-    /// stripe band through (`num_stripes ∈ (STRIPE_MAX, PEARL_STRIPE_MAX]`),
-    /// which the historical `> STRIPE_MAX = 64` narrowing rejected. The
-    /// R-b stripe-major path proves these in-circuit.
+    /// Admission includes the full Pearl stripe band
+    /// (`num_stripes ∈ (STRIPE_MAX, PEARL_STRIPE_MAX]`), proved in-circuit by the
+    /// R-b stripe-major path.
     #[test]
     fn validate_prod_envelope_admits_wide_stripe_band() {
-        // num_stripes = 96 > STRIPE_MAX — previously `TooManyStripes`.
+        // num_stripes = 96 > STRIPE_MAX.
         let p96 = MatmulParams {
             m: 8,
             k: 12288, // 96 · 128

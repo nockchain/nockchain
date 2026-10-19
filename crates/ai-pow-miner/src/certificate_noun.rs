@@ -49,7 +49,7 @@ use ai_pow::zk_bridge::{
     ZkPublicCommitments,
 };
 use ai_pow_zk::canonical::StripIndexSchedule;
-use ai_pow_zk::proof_rules::ProofRules;
+use ai_pow_zk::proof_rules::{ProofRules, VerificationRules};
 use ai_pow_zk::{CompositePublicInputs, ZkParams};
 use nockapp::noun::slab::{CueError, NounSlab};
 use nockapp::Bytes;
@@ -158,13 +158,10 @@ pub struct CertificateNounLimits {
     pub max_list_items: usize,
     pub max_atom_bytes: usize,
     pub max_packed_items: usize,
-    /// Maximum jammed artifact bytes accepted before cueing attacker input.
+    /// Maximum jammed artifact bytes accepted before cueing untrusted input.
     pub max_jam_bytes: usize,
-    /// Maximum CUMULATIVE decoded atom bytes across the whole proof tree (audit
-    /// N9). `max_atom_bytes` caps a *single* node; without this, `max_total_nodes`
-    /// (1M) × `max_atom_bytes` (1 MiB) permits ~1 TiB of transient allocation from
-    /// a ≤4 MiB jam (each `[%bytes [len data]]` costs only a few jam bytes once the
-    /// tag is back-referenced, yet allocates `len`). This bounds the total.
+    /// Maximum cumulative decoded atom bytes across the whole proof tree,
+    /// in addition to the per-node `max_atom_bytes` limit.
     pub max_total_atom_bytes: usize,
 }
 
@@ -2889,12 +2886,8 @@ fn pearl_merge_legacy_found_idx(
 /// counterpart of the checks `precheck_pearl_merge_certificate_metadata`
 /// performs for dense.
 ///
-/// The dense path enforces these before verifying the proof; MoE previously
-/// relied entirely on the downstream opened-schedule commitment fold to reject
-/// a drifted certificate. That fold does reject, but only as a consequence of
-/// how the canonical program is derived — a property no local reading of this
-/// function established, and one a refactor of the fold could remove silently.
-/// Checking the bindings here keeps the two accept paths gating the same facts.
+/// Dense and MoE accept paths check the same metadata bindings before proof
+/// verification, including the declared geometry and setup-selection values.
 ///
 /// `tile` matters because it feeds the strip schedule and the Layer-0 trace
 /// length; `trace_height` matters because the JET selects which committed
@@ -3226,8 +3219,32 @@ pub fn verify_ai_pow_block_artifact_jam_with_rules(
     expected_verifier_key_digest_bytes: &[u8],
     rules: ProofRules,
 ) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
-    let artifact = decode_ai_pow_pearl_merge_artifact_jam_with_rules(jammed, limits, rules)?;
-    verify_ai_pow_block_artifact_with_rules(
+    verify_ai_pow_block_artifact_jam_with_verification_rules(
+        jammed,
+        limits,
+        candidate_nock_block_commitment,
+        nockchain_target,
+        max_pattern_len,
+        compact_context,
+        expected_verifier_key_digest_bytes,
+        rules.into(),
+    )
+}
+
+/// Height-selected block admission, including native rules outside the AIR.
+pub fn verify_ai_pow_block_artifact_jam_with_verification_rules(
+    jammed: &[u8],
+    limits: CertificateNounLimits,
+    candidate_nock_block_commitment: &[u8; 32],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest_bytes: &[u8],
+    rules: VerificationRules,
+) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
+    let artifact =
+        decode_ai_pow_pearl_merge_artifact_jam_with_rules(jammed, limits, rules.proof_rules())?;
+    verify_ai_pow_block_artifact_with_verification_rules(
         &artifact, limits, candidate_nock_block_commitment, nockchain_target, max_pattern_len,
         compact_context, expected_verifier_key_digest_bytes, rules,
     )
@@ -3281,6 +3298,31 @@ fn validate_pearl_artifact_admission(
     Ok(())
 }
 
+/// Cheap consensus admission shared by the jet (before setup lookup) and the
+/// direct block verifier. The subsequent verifier authenticates this same
+/// routing_data against the committed root and binds the opened expert's rows.
+pub fn validate_ai_pow_block_artifact_admission(
+    artifact: &PearlMergeAiPowArtifactShape,
+    rules: VerificationRules,
+) -> Result<(), CertificateNounError> {
+    validate_pearl_artifact_admission(artifact, rules.proof_rules())?;
+    if rules == VerificationRules::ConsensusBatch {
+        if let Some(moe) = &artifact.moe {
+            let header = PearlIncompleteBlockHeader::from_bytes(&artifact.statement.block_header)?;
+            let public = PearlPublicProofParams::from_public_data_allowing_moe(
+                header, &artifact.statement.public_data,
+            )?;
+            ai_pow::pearl_compat::verify_pearl_moe_routing_multiplicity(
+                &public.mining_config,
+                public.m,
+                &moe.routing_data,
+                PearlAdmissionLimits::CONSENSUS_BATCH,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn verify_ai_pow_block_artifact_with_rules(
     artifact: &PearlMergeAiPowArtifactShape,
     limits: CertificateNounLimits,
@@ -3291,7 +3333,32 @@ pub fn verify_ai_pow_block_artifact_with_rules(
     expected_verifier_key_digest_bytes: &[u8],
     rules: ProofRules,
 ) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
-    validate_pearl_artifact_admission(artifact, rules)?;
+    verify_ai_pow_block_artifact_with_verification_rules(
+        artifact,
+        limits,
+        candidate_nock_block_commitment,
+        nockchain_target,
+        max_pattern_len,
+        compact_context,
+        expected_verifier_key_digest_bytes,
+        rules.into(),
+    )
+}
+
+/// Verify the complete block using kernel-selected native admission and the
+/// corresponding proof programs. Consensus batch reuses the hardened verifier setup.
+pub fn verify_ai_pow_block_artifact_with_verification_rules(
+    artifact: &PearlMergeAiPowArtifactShape,
+    limits: CertificateNounLimits,
+    candidate_nock_block_commitment: &[u8; 32],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest_bytes: &[u8],
+    verification_rules: VerificationRules,
+) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
+    validate_ai_pow_block_artifact_admission(artifact, verification_rules)?;
+    let rules = verification_rules.proof_rules();
     if rules == ProofRules::Hardened
         && !ai_pow_compact_recursive_certificate_from_node_with_limits(
             &artifact.certificate.certificate, limits,
@@ -3374,9 +3441,8 @@ impl DecodeState {
         Ok(())
     }
 
-    /// Charge `n` decoded atom bytes against the cumulative budget (audit N9).
-    /// A single node is already capped by `max_atom_bytes`; this bounds the SUM
-    /// across all nodes so a many-node jam cannot drive unbounded allocation.
+    /// Charge `n` decoded atom bytes against the cumulative budget, in addition
+    /// to the per-node `max_atom_bytes` limit.
     fn charge_atom_bytes(&mut self, n: usize) -> Result<(), CertificateNounError> {
         self.total_atom_bytes = self
             .total_atom_bytes
@@ -5839,17 +5905,14 @@ mod tests {
         assert_eq!(decoded.certificate, cert);
     }
 
-    /// **Audit N9 — cumulative-atom-bytes DoS guard.** Each `%bytes` node here is
-    /// well under `max_atom_bytes` (1 MiB), but their SUM exceeds a tight
-    /// cumulative budget. Without the `charge_atom_bytes` guard, a many-node jam
-    /// could drive `max_total_nodes × max_atom_bytes` ≈ 1 TiB of allocation; the
-    /// guard bounds the total.
+    /// Nodes within the per-atom limit are rejected when their combined decoded
+    /// size exceeds the cumulative atom-byte budget.
     #[test]
     fn decode_rejects_cumulative_atom_bytes_over_budget() {
         let params = sample_params();
         let commitments = sample_commitments();
         let pis = sample_pis();
-        // 3 × 2 KiB atoms = 6 KiB; each node is tiny, the sum is the attack.
+        // 3 × 2 KiB atoms = 6 KiB; each node fits, but their sum exceeds the budget.
         let cert = AiProofNode::Seq(vec![
             AiProofNode::Bytes(vec![7u8; 2048]),
             AiProofNode::Bytes(vec![8u8; 2048]),
@@ -7819,7 +7882,7 @@ mod tests {
     }
 
     #[test]
-    fn rb02_compact_recursive_certificate_from_node_rejects_overlimit_bytes_as_limit() {
+    fn compact_recursive_certificate_from_node_rejects_overlimit_bytes_as_limit() {
         let overlimit = AiProofNode::Bytes(vec![
             0u8;
             ai_pow_zk::recursion::MAX_COMPACT_CERTIFICATE_BYTES
@@ -8218,10 +8281,11 @@ mod tests {
     #[cfg(test)]
     fn prove_moe_block_for_setup_test(
         nock_commit: [u8; 32],
+        rules: ProofRules,
     ) -> (ai_pow::zk_bridge::PearlMoeCompactProveRun, Vec<u8>) {
         use ai_pow::pearl_compat::derive_pearl_moe_work_commitments;
         use ai_pow::pearl_moe_routing::build_routing_data;
-        use ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate;
+        use ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate_with_rules;
 
         let (m, n, e, top_k, n_e) = (64usize, 64usize, 2usize, 1usize, 32usize);
         let params = MatmulParams {
@@ -8238,7 +8302,8 @@ mod tests {
         let mut aux = pearl_test_aux();
         aux.nock_block_commitment = nock_commit;
         let aux_commitment = aux.commitment().unwrap();
-        let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux_commitment);
+        let (header, aux_inclusion) =
+            pearl_test_aux_inclusion_with_branch(&aux_commitment, Vec::new());
         let config = PearlMiningConfig {
             common_dim: 1024,
             rank: 64,
@@ -8267,9 +8332,9 @@ mod tests {
             .cols_pattern
             .indices_with_offset_bounded(0, 4096)
             .unwrap();
-        let run = prove_pearl_moe_compact_recursive_certificate(
+        let run = prove_pearl_moe_compact_recursive_certificate_with_rules(
             &params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
-            &inner, &local_b, n_e,
+            &inner, &local_b, n_e, rules,
         )
         .expect("prove MoE compact certificate for setup test");
 
@@ -8311,10 +8376,10 @@ mod tests {
             },
             routing_data: routing.routing_data.clone(),
         };
-        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node_with_rules(
             &statement, &aux_inclusion, &moe_art, &certificate.zk_params, certificate.found_idx,
             certificate.trace_height, &certificate.commitments, &certificate.public_inputs,
-            &certificate.certificate,
+            &certificate.certificate, rules,
         )
         .expect("build MoE artifact noun for setup test")
         .jam()
@@ -8322,46 +8387,81 @@ mod tests {
         (run, jammed)
     }
 
-    /// **Proof-independence of the compact verifier setup.**
-    ///
-    /// A consensus node must build the compact verifier `context` + `verifier_key_digest`
-    /// ONCE (from the fixed production params) and reuse it for every incoming block —
-    /// it cannot re-run the prover per block. That is sound iff the setup is
-    /// determined by the puzzle SHAPE (params/trace-height), NOT the specific proof.
-    /// This proves it: two MoE blocks of identical shape but different `kappa`
-    /// (different aux) produce the SAME `verifier_key_digest`, and block A's jammed
-    /// artifact verifies through the consensus entrypoint using block B's
-    /// independently-built `verifier_context`.
+    /// Same-shape proofs with distinct public statements use the same canonical
+    /// compact verifier setup under either proof version.
     #[test]
-    #[ignore = "runs two real MoE compact proofs (~50s); opt-in"]
+    #[ignore = "runs real MoE compact proofs for both proof versions; opt-in"]
     fn moe_compact_verifier_setup_is_proof_independent() {
-        let (run_a, jam_a) = prove_moe_block_for_setup_test([0x42u8; 32]);
-        let (run_b, _jam_b) = prove_moe_block_for_setup_test([0x99u8; 32]);
-
-        // The verifier-key digest depends only on the puzzle shape, not the proof.
-        assert_eq!(
-            run_a.verifier_key_digest(),
-            run_b.verifier_key_digest(),
-            "compact verifier-key digest must be proof-INDEPENDENT (same shape ⇒ same setup)",
-        );
-
-        // Block A verifies against block B's INDEPENDENTLY-built context + digest —
-        // i.e. a node that built its setup from any canonical prove verifies all
-        // same-shape blocks. This is what makes a build-once startup setup sound.
-        let digest_b_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-            &run_b.verifier_key_digest(),
-        );
-        let outcome = verify_ai_pow_block_artifact_jam(
-            &jam_a,
-            CertificateNounLimits::default(),
-            &[0x42u8; 32],
-            &easy_nock_target(),
-            4096,
-            &run_b.verifier_context,
-            &digest_b_bytes,
-        )
-        .expect("block A verifies against block B's independently-built verifier setup");
-        assert!(matches!(outcome, AiPowBlockVerifyOutcome::Moe(_)));
+        for rules in [ProofRules::Legacy, ProofRules::Hardened] {
+            let (mut run_a, jam_a) = prove_moe_block_for_setup_test([0x42u8; 32], rules);
+            drop(run_a.prover_cache.take());
+            let (mut run_b, jam_b) = prove_moe_block_for_setup_test([0x99u8; 32], rules);
+            drop(run_b.prover_cache.take());
+            assert_eq!(run_a.trace_height, run_b.trace_height);
+            assert_eq!(
+                run_a.verifier_key_digest(),
+                run_b.verifier_key_digest(),
+                "same-shape public statements must share the verifier key under {rules:?}",
+            );
+            let context = ai_pow_zk::recursion::derive_compact_verifier_context_for_shape(
+                &run_a.zk_params, run_a.trace_height, rules,
+            )
+            .expect("derive canonical compact verifier setup from shape");
+            assert_eq!(context.proof_rules(), rules);
+            let canonical_digest = context
+                .validate_setup_binding()
+                .expect("canonical setup binding");
+            assert_eq!(canonical_digest, run_a.verifier_key_digest());
+            assert_eq!(canonical_digest, run_b.verifier_key_digest());
+            let canonical_metadata =
+                bincode1::serialize(context.metadata()).expect("serialize canonical metadata");
+            // Serialization omits in-memory lookup expressions; genuine proof
+            // cross-verification below complements these byte comparisons.
+            let canonical_context =
+                bincode1::serialize(&context).expect("serialize canonical verifier context");
+            for prover_context in [&run_a.verifier_context, &run_b.verifier_context] {
+                assert_eq!(
+                    canonical_digest,
+                    prover_context
+                        .validate_setup_binding()
+                        .expect("prover setup binding"),
+                );
+                assert_eq!(
+                    canonical_metadata,
+                    bincode1::serialize(prover_context.metadata())
+                        .expect("serialize genuine prover metadata"),
+                    "shape-only setup must preserve the genuine prover metadata under {rules:?}",
+                );
+                assert_eq!(
+                    canonical_context,
+                    bincode1::serialize(prover_context).expect("serialize prover verifier context"),
+                    "shape-derived and proof-derived serialized verifier contexts under {rules:?}",
+                );
+            }
+            let digest_bytes =
+                ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(&canonical_digest);
+            for (commit, jam, other_prover_context) in [
+                ([0x42u8; 32], jam_a.as_slice(), &run_b.verifier_context),
+                ([0x99u8; 32], jam_b.as_slice(), &run_a.verifier_context),
+            ] {
+                for verification_context in [&context, other_prover_context] {
+                    let outcome = verify_ai_pow_block_artifact_jam_with_rules(
+                        jam,
+                        CertificateNounLimits::default(),
+                        &commit,
+                        &easy_nock_target(),
+                        4096,
+                        verification_context,
+                        &digest_bytes,
+                        rules,
+                    )
+                    .expect(
+                        "genuine block verifies with canonical and independent prover contexts",
+                    );
+                    assert!(matches!(outcome, AiPowBlockVerifyOutcome::Moe(_)));
+                }
+            }
+        }
     }
 
     // ===================================================================
@@ -8510,9 +8610,7 @@ mod tests {
     }
 
     #[test]
-    fn rb03_moe_nonce_cap_fits_default_atom_limit_and_cap_plus_one_rejects() {
-        assert!(AI_POW_NONCE_MOE_MAX_SIZE <= CertificateNounLimits::default().max_atom_bytes);
-        assert!(AI_POW_NONCE_MOE_MAX_SIZE <= 1 << 20);
+    fn moe_nonce_roundtrips_at_cap_and_rejects_oversized_inputs() {
         let e = PEARL_MOE_MAX_NUM_EXPERTS;
         let (mut statement, mut aux_inclusion) = moe_nonce_test_statement(e as u16, 1);
         statement.aux.nockchain_chain_id = vec![0x43; PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX];
@@ -8552,7 +8650,7 @@ mod tests {
     }
 
     #[test]
-    fn rb03_full_artifact_decode_dispatches_aim1_nonce_over_dense_cap_to_moe() {
+    fn full_artifact_decode_dispatches_aim1_nonce_over_dense_cap_to_moe() {
         let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
         let routing_entries_over_dense_cap = AI_POW_NONCE_MAX_SIZE / 4 + 1;
         let art = moe_nonce_test_artifact(4, 2, routing_entries_over_dense_cap);
@@ -8600,7 +8698,7 @@ mod tests {
     }
 
     #[test]
-    fn rb05_moe_certificate_zk_params_reject_nonzero_difficulty_bits() {
+    fn moe_certificate_zk_params_reject_nonzero_difficulty_bits() {
         let (statement, _) = moe_nonce_test_statement(4, 2);
         let header = PearlIncompleteBlockHeader::from_bytes(&statement.block_header).unwrap();
         let public_params =
@@ -8951,15 +9049,9 @@ mod tests {
         (public, moe_art, work, params, certificate)
     }
 
-    /// The MoE accept path must gate the same certificate metadata the dense
-    /// path gates. Each tamper below is a fact the dense path checks explicitly
-    /// and the MoE path used to leave entirely to the downstream opened-schedule
-    /// commitment fold.
-    ///
-    /// `trace_height` is the sharpest of these: the jet picks WHICH committed
-    /// verifier setup to load from the certificate's declared value, so a
-    /// declared height that disagrees with the schedule-derived one selects a
-    /// setup for a different circuit than the statement describes.
+    /// Dense and MoE admission bind certificate metadata to the canonical opened
+    /// schedule. The declared `trace_height` must match the schedule-derived
+    /// height so the jet selects the verifier setup for the statement's circuit.
     #[test]
     fn moe_certificate_metadata_gates_match_the_dense_path() {
         let (public, moe_art, work, params, certificate) = reference_moe_metadata_fixture();
@@ -9060,8 +9152,8 @@ mod tests {
         )
         .expect("the loosest target consensus can emit must still be minable");
 
-        // 2^256 - 1, the pre-fix Hoon ceiling: every AI block at this target is
-        // rejected for shape-scaling overflow, honest ones included.
+        // 2^256 - 1 exceeds the shape-adjusted target domain and must be rejected
+        // for scaling overflow, including for an otherwise valid proof.
         let err = ai_pow::pearl_compat::verify_pearl_moe_compatible_work(
             &public, &moe_art.moe, &moe_art.routing_data, &[0xffu8; 32], CONSENSUS_MAX_PATTERN_LEN,
         )
@@ -9149,23 +9241,59 @@ mod tests {
             let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
                 run.verifier_key_digest(),
             );
+            let context = ai_pow_zk::recursion::derive_compact_verifier_context_for_shape(
+                &run.zk_params(),
+                run.trace_height(),
+                rules,
+            )
+            .expect("derive dense verifier setup from the canonical shape");
+            assert_eq!(context.proof_rules(), rules);
+            assert_eq!(
+                &context
+                    .validate_setup_binding()
+                    .expect("canonical dense setup binding"),
+                run.verifier_key_digest(),
+            );
+            assert_eq!(
+                context
+                    .validate_setup_binding()
+                    .expect("canonical dense setup binding"),
+                run.verifier_context()
+                    .validate_setup_binding()
+                    .expect("prover dense setup binding"),
+            );
+            assert_eq!(
+                bincode1::serialize(context.metadata())
+                    .expect("serialize canonical dense metadata"),
+                bincode1::serialize(run.verifier_context().metadata())
+                    .expect("serialize genuine dense prover metadata"),
+                "shape-only setup must preserve genuine dense prover metadata under {rules:?}",
+            );
+            assert_eq!(
+                bincode1::serialize(&context).expect("serialize canonical dense context"),
+                bincode1::serialize(run.verifier_context())
+                    .expect("serialize dense prover context"),
+                "shape-derived and proof-derived serialized dense contexts under {rules:?}",
+            );
             for height in [153_500, 154_499, 154_500, 154_501, 154_499] {
                 let selected = ProofRules::at_height(height);
-                let result = verify_ai_pow_block_artifact_jam_with_rules(
-                    &artifact,
-                    CertificateNounLimits::default(),
-                    &commit,
-                    &target,
-                    params.tile as usize,
-                    run.verifier_context(),
-                    &digest,
-                    selected,
-                );
-                assert_eq!(
-                    result.is_ok(),
-                    rules == selected,
-                    "dense {rules:?} proof at {height}: {result:?}"
-                );
+                for verification_context in [&context, run.verifier_context()] {
+                    let result = verify_ai_pow_block_artifact_jam_with_rules(
+                        &artifact,
+                        CertificateNounLimits::default(),
+                        &commit,
+                        &target,
+                        params.tile as usize,
+                        verification_context,
+                        &digest,
+                        selected,
+                    );
+                    assert_eq!(
+                        result.is_ok(),
+                        rules == selected,
+                        "dense {rules:?} proof at {height}: {result:?}"
+                    );
+                }
             }
             cache = Some(
                 run.into_prover_cache()

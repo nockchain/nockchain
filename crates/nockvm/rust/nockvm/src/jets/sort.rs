@@ -48,13 +48,10 @@ pub mod util {
     use crate::noun::{Noun, NounSpace, NO, YES};
 
     pub fn dor(stack: &mut NockStack, a: Noun, b: Noun, space: &NounSpace) -> Noun {
-        // Hoon ++dor answers =(a b) first, and =(a b) is deep equality: two
-        // separately-allocated indirect atoms with the same value are
-        // equal, so dor must answer YES for them (GHSA-56v6-q5vp-wf6c).
-        // A raw pointer compare misses that case and falls through to
-        // +lth, which answers NO for equal values — breaking the total
-        // order under every z-set/z-map. heads_equal gives the deep
-        // semantics with a pointer fast path and cached-mug pre-filter.
+        // Hoon ++dor uses deep value equality first: separately allocated
+        // nouns with equal values must compare YES to preserve the total order.
+        // heads_equal supplies deep equality with a pointer fast path and
+        // cached-mug pre-filter.
         if heads_equal(stack, a, b, space) {
             YES
         } else {
@@ -250,14 +247,9 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_dor_equal_pointer_distinct_indirect_atoms() {
-        // GHSA-56v6-q5vp-wf6c: dor's top-level equality check was a raw
-        // pointer compare, so two separately-allocated indirect atoms with
-        // the SAME value compared unequal and fell through to +lth, which
-        // answers NO for equal values — dor said "neither a<=b nor b<=a"
-        // for equal elements, breaking the total order underneath every
-        // z-set/z-map. Hoon ++dor answers =(a b) first (deep equality), so
-        // the jet must answer YES in both directions here. gor/mor route
-        // mug-equal (value-equal) pairs through dor, so they must agree.
+        // Equal-valued indirect atoms must compare YES in both directions,
+        // regardless of allocation identity. gor/mor route mug-equal pairs
+        // through dor and must agree with its deep-value-equality ordering.
         let c = &mut init_context();
 
         // 2^63 = DIRECT_MAX+1: the first value that must be allocated

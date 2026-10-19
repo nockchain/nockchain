@@ -1,16 +1,34 @@
 use std::convert::Infallible;
 
-use libp2p::request_response::cbor;
 use libp2p::swarm::behaviour::toggle::Toggle;
-use libp2p::swarm::NetworkBehaviour;
+use libp2p::swarm::{ConnectionId, NetworkBehaviour};
 use libp2p::{
     allow_block_list, connection_limits, identify, kad, memory_connection_limits, ping,
-    request_response,
+    request_response, Multiaddr, PeerId,
 };
 
 use crate::config::LibP2PConfig;
 use crate::ip_block::{self, PeerExclusions};
 use crate::messages::{NockchainRequest, NockchainResponse};
+
+pub(crate) mod codec;
+mod recovery;
+
+/// Application response with local-only accounting for a successfully decoded stream.
+#[derive(Debug, Clone)]
+pub struct TransportResponse {
+    pub message: NockchainResponse,
+    pub received_bytes: Option<usize>,
+}
+
+impl TransportResponse {
+    pub fn outgoing(message: NockchainResponse) -> Self {
+        Self {
+            message,
+            received_bytes: None,
+        }
+    }
+}
 
 pub(crate) fn request_response_protocols(
     _libp2p_config: &LibP2PConfig,
@@ -23,11 +41,11 @@ pub(crate) fn request_response_protocols(
 
 pub(crate) fn build_request_response_behaviour(
     libp2p_config: &LibP2PConfig,
-) -> cbor::Behaviour<NockchainRequest, NockchainResponse> {
+) -> request_response::Behaviour<codec::NockchainCodec> {
     let request_response_config = request_response::Config::default()
         .with_max_concurrent_streams(libp2p_config.request_response_max_concurrent_streams())
         .with_request_timeout(libp2p_config.request_response_timeout());
-    let request_response_codec = cbor::codec::Codec::default()
+    let request_response_codec = codec::NockchainCodec::default()
         .set_request_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64)
         .set_response_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64);
 
@@ -42,6 +60,7 @@ pub(crate) fn build_request_response_behaviour(
 #[behaviour(to_swarm = "NockchainEvent")]
 /** Composed [NetworkBehaviour] implementation for Nockchain */
 pub(crate) struct NockchainBehaviour {
+    pub recovery: recovery::RecoverySlot,
     /// Allows nodes to connect via just IP and port and exchange pubkeys
     identify: identify::Behaviour,
     /// Connectivity testing
@@ -60,8 +79,9 @@ pub(crate) struct NockchainBehaviour {
     memory_connection_limits: Toggle<memory_connection_limits::Behaviour>,
     /// Peer store for tracking peer information (including addresses)
     pub peer_store: libp2p::peer_store::Behaviour<libp2p::peer_store::memory_store::MemoryStore>,
-    /// Actual comms with custom connection handler that keeps connections alive
-    pub request_response: cbor::Behaviour<NockchainRequest, NockchainResponse>,
+    /// Keep request-response after all admission gates: its established hook
+    /// records a connection before returning the handler.
+    pub request_response: request_response::Behaviour<codec::NockchainCodec>,
 }
 
 impl NockchainBehaviour {
@@ -80,7 +100,7 @@ impl NockchainBehaviour {
                 keypair.public(),
             )
             .with_interval(libp2p_config.identify_interval())
-            .with_hide_listen_addrs(true); // Only send externally confirmed addresses so we don't send loopback addresses
+            .with_hide_listen_addrs(true); // Advertise only externally corroborated addresses.
             let identify_behaviour = identify::Behaviour::new(identify_config);
 
             let memory_store = kad::store::MemoryStore::new(peer_id);
@@ -108,6 +128,7 @@ impl NockchainBehaviour {
 
             let peer_store_behaviour = libp2p::peer_store::Behaviour::new(peer_store_memory);
             NockchainBehaviour {
+                recovery: recovery::RecoverySlot::new(libp2p_config.connection_timeout()),
                 ping: ping::Behaviour::default(),
                 identify: identify_behaviour,
                 kad: ip_block::IpFilteredKad::new(kad_behaviour, peer_exclusions.clone()),
@@ -136,9 +157,15 @@ pub enum NockchainEvent {
     /// DHT state changes
     Kad(kad::Event),
     /// Request or response received from peer
-    RequestResponse(request_response::Event<NockchainRequest, NockchainResponse>),
+    RequestResponse(request_response::Event<NockchainRequest, TransportResponse>),
     /// Peer store events
     PeerStore(libp2p::peer_store::memory_store::Event),
+    /// Transport resolved or changed the remote connection endpoint.
+    ConnectionAddressChanged {
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        address: Multiaddr,
+    },
 }
 
 impl From<identify::Event> for NockchainEvent {
@@ -165,8 +192,18 @@ impl From<Infallible> for NockchainEvent {
     }
 }
 
-impl From<request_response::Event<NockchainRequest, NockchainResponse>> for NockchainEvent {
-    fn from(event: request_response::Event<NockchainRequest, NockchainResponse>) -> Self {
+impl From<recovery::ConnectionAddressChange> for NockchainEvent {
+    fn from(event: recovery::ConnectionAddressChange) -> Self {
+        Self::ConnectionAddressChanged {
+            peer_id: event.peer_id,
+            connection_id: event.connection_id,
+            address: event.address,
+        }
+    }
+}
+
+impl From<request_response::Event<NockchainRequest, TransportResponse>> for NockchainEvent {
+    fn from(event: request_response::Event<NockchainRequest, TransportResponse>) -> Self {
         Self::RequestResponse(event)
     }
 }

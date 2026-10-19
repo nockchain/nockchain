@@ -32,6 +32,7 @@ rust_library(
     deps = [
         "//crates/nockapp",
         "//crates/nockvm/rust/nockvm",
+        "//crates/zkvm-jetpack",
     ] + all_crate_deps(),
 )
 
@@ -56,6 +57,7 @@ rust_binary(
         ":hoonc_lib",
         "//crates/nockapp",
         "//crates/nockvm/rust/nockvm",
+        "//crates/zkvm-jetpack",
     ] + all_crate_deps(),
 )
 

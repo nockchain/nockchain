@@ -733,30 +733,31 @@ mod tests {
 
     #[test]
     fn artifact_round_trip_and_structural_diff() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("create artifact round-trip test directory");
         let left_jam = temp.path().join("left.jam");
         let right_jam = temp.path().join("right.jam");
-        fs::write(&left_jam, jam(&noun![[1 2] [1 2]])).unwrap();
-        fs::write(&right_jam, jam(&noun![[1 3] [1 2]])).unwrap();
+        fs::write(&left_jam, jam(&noun![[1 2] [1 2]])).expect("write left jam fixture");
+        fs::write(&right_jam, jam(&noun![[1 3] [1 2]])).expect("write right jam fixture");
         let artifact = temp.path().join("left.nockasm");
-        export(&left_jam, &artifact, false).unwrap();
-        verify(&artifact).unwrap();
+        export(&left_jam, &artifact, false).expect("export left jam artifact");
+        verify(&artifact).expect("verify exported left artifact");
         let diff_dir = temp.path().join("diff");
-        diff(&artifact, &right_jam, &diff_dir, 8).unwrap();
-        let summary = fs::read_to_string(diff_dir.join("summary.tsv")).unwrap();
+        diff(&artifact, &right_jam, &diff_dir, 8).expect("diff artifact against right jam fixture");
+        let summary =
+            fs::read_to_string(diff_dir.join("summary.tsv")).expect("read structural diff summary");
         assert!(summary.contains("reported-changes\t1"));
     }
 
     #[test]
     fn rejects_corrupt_graph() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("create corrupt artifact test directory");
         let jam_path = temp.path().join("kernel.jam");
-        fs::write(&jam_path, jam(&noun![[1 2] [1 2]])).unwrap();
+        fs::write(&jam_path, jam(&noun![[1 2] [1 2]])).expect("write kernel jam fixture");
         let artifact = temp.path().join("kernel.nockasm");
-        export(&jam_path, &artifact, false).unwrap();
-        let mut bytes = fs::read(artifact.join(GRAPH_FILE)).unwrap();
+        export(&jam_path, &artifact, false).expect("export kernel artifact before corruption");
+        let mut bytes = fs::read(artifact.join(GRAPH_FILE)).expect("read exported artifact graph");
         bytes[0] ^= 1;
-        fs::write(artifact.join(GRAPH_FILE), bytes).unwrap();
+        fs::write(artifact.join(GRAPH_FILE), bytes).expect("write corrupted artifact graph");
         assert!(verify(&artifact).is_err());
     }
 }

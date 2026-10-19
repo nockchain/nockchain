@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use nockapp::driver::{make_driver, IODriverFn, NockAppHandle};
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::{WireRepr, WireTag as AppWireTag};
@@ -11,7 +9,7 @@ use noun_serde::NounDecodeError;
 use tracing::{error, info};
 
 use super::client::PrivateNockAppGrpcClient;
-use super::server::PrivateNockAppGrpcServer;
+use super::server::{PrivateGrpcServerConfig, PrivateNockAppGrpcServer};
 use crate::wire_conversion::create_grpc_wire;
 
 /// Create a gRPC server driver for NockApp
@@ -24,17 +22,14 @@ use crate::wire_conversion::create_grpc_wire;
 /// remote server. This is also intended to be a demonstration of how to extend
 /// NockApp with custom I/O drivers.
 ///
-/// # Example
-/// ```rust,ignore
-/// use nockapp_grpc::driver::grpc_server_driver;
-/// // in an async context with a NockApp instance:
-/// // app.add_io_driver(grpc_server_driver("127.0.0.1:5555".parse().unwrap())).await;
-/// ```
-pub fn grpc_server_driver(addr: SocketAddr) -> IODriverFn {
+/// Resolve and validate [`PrivateGrpcServerConfig::from_env`] before kernel
+/// startup, then pass that snapshot here. This driver never rereads credentials
+/// or policy from the environment.
+pub fn grpc_server_driver(config: PrivateGrpcServerConfig) -> IODriverFn {
     make_driver(move |handle: NockAppHandle| async move {
+        let addr = config.addr();
         info!("Starting private gRPC server on {}", addr);
-
-        let server = PrivateNockAppGrpcServer::new(handle);
+        let server = PrivateNockAppGrpcServer::new(handle).with_config(config);
 
         match server.serve(addr).await {
             Ok(_) => {

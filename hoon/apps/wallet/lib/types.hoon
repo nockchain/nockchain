@@ -476,8 +476,10 @@
   +$  cause
     $%  [%keygen entropy=byts salt=byts]
         [%derive-child i=@ hardened=? label=(unit @tas)]
+        [%recover-child i=@ hardened=? extended-key=@t]
         [%import-keys keys=(list (pair trek *))]
         [%import-extended extended-key=@t]                ::  extended key string
+        [%import-extended-checked extended-key=@t]
         [%watch-address address=@t]                ::  imports base58-encoded pubkey
         [%watch-address-multisig m=@ participants=(list @t)]
         ::[%watch-first-name first-name=@t lock=(unit lock:transact)]

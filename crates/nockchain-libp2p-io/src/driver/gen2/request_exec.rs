@@ -189,9 +189,7 @@ pub(crate) async fn execute_request_item(
             };
             if !cache_hit {
                 let mut state_guard = driver_state.lock().await;
-                state_guard
-                    .block_cache
-                    .insert(height, scry_res_slab.clone());
+                state_guard.cache_block_response(height, scry_res_slab.clone());
             }
             response_result?
         }
@@ -212,7 +210,7 @@ pub(crate) async fn execute_request_item(
             };
             if !cache_hit {
                 let mut state_guard = driver_state.lock().await;
-                state_guard.elders_cache.insert(id, scry_res_slab.clone());
+                state_guard.cache_elders_response(id, scry_res_slab.clone());
             }
             response_result?
         }
@@ -232,9 +230,7 @@ pub(crate) async fn execute_request_item(
             if !cache_hit {
                 let mut state_guard = driver_state.lock().await;
                 trace!("cacheing tx request by id={:?}", id);
-                state_guard
-                    .tx_cache
-                    .insert(id.clone(), scry_res_slab.clone());
+                state_guard.cache_tx_response(id.clone(), scry_res_slab.clone());
             }
             response_result?
         }
@@ -274,7 +270,16 @@ pub(crate) async fn execute_request_item(
                 .await;
         }
         NockchainDataRequest::BlockRangeWithTxs { start_height, len } => {
-            let prepared_entries = {
+            // Build and budget each response entry before serializing the
+            // next. A short response must never require encoding the whole
+            // requested range first.
+            let item_cap = limits.gen2_item_max_bytes;
+            let mut bundles: Vec<BundledBlockWithTxs> = Vec::new();
+            let mut range_budget = RangeResponseBudget::new()?;
+            let mut block_cache_entries: Vec<(u64, NounSlab)> = Vec::new();
+            let mut tx_cache_entries: Vec<(String, NounSlab)> = Vec::new();
+            let mut total_response_bytes: usize = 0;
+            {
                 let range_space = scry_res_slab.noun_space();
                 let scry_res = unsafe { scry_res_slab.root() };
                 let entries =
@@ -322,7 +327,6 @@ pub(crate) async fn execute_request_item(
                     return Ok(RequestExecutionOutcome::NotFound);
                 }
 
-                let mut prepared_entries = Vec::with_capacity(contiguous.len());
                 for entry in contiguous {
                     let mut entry_block_slab = NounSlab::new();
                     let block_response = create_response_result_from_payload(
@@ -337,60 +341,49 @@ pub(crate) async fn execute_request_item(
                         .into_iter()
                         .map(|(tx_id, raw_tx)| prepare_bundled_tx(tx_id, raw_tx, "block-range"))
                         .collect();
-                    prepared_entries.push(PreparedRangeEntry {
+                    let prepared = PreparedRangeEntry {
                         height: entry.height,
                         block_id_base58: entry.block_id_base58,
                         block_message,
                         block_cache_slab,
                         raw_txs,
-                    });
-                }
-                prepared_entries
-            };
+                    };
+                    let candidate = prepare_range_bundle_candidate(prepared, item_cap);
+                    let projected = range_budget.project(&candidate.block)?;
+                    let projected_bytes = projected.encoded_bytes;
+                    let budget_bytes = if bundles.is_empty() {
+                        limits.gen2_batch_max_bytes
+                    } else {
+                        block_batch_response_budget_bytes(limits)
+                    };
+                    if !range_budget.accepts(&projected, budget_bytes) {
+                        trace!(
+                            accepted_blocks = bundles.len(),
+                            candidate_height = candidate.height,
+                            projected_bytes,
+                            budget_bytes,
+                            "Block-range response budget filled; returning contiguous prefix"
+                        );
+                        break;
+                    }
+                    if projected_bytes > budget_bytes {
+                        warn!(
+                            candidate_height = candidate.height,
+                            projected_bytes,
+                            budget_bytes,
+                            "First block-range entry exceeds response budget; returning it alone"
+                        );
+                    }
 
-            // Per-block bundle assembly. Mirrors the single-bundle path,
-            // packing each block under the per-item byte cap and packing
-            // the range itself under the block-batch response byte budget.
-            let item_cap = limits.gen2_item_max_bytes;
-            let mut bundles: Vec<BundledBlockWithTxs> = Vec::with_capacity(prepared_entries.len());
-            let mut block_cache_entries: Vec<(u64, NounSlab)> = Vec::new();
-            let mut tx_cache_entries: Vec<(String, NounSlab)> = Vec::new();
-            let mut total_response_bytes: usize = 0;
-
-            for entry in prepared_entries {
-                let candidate = prepare_range_bundle_candidate(entry, item_cap);
-                let projected_bytes = projected_range_batch_result_bytes(&bundles, &candidate)?;
-                let budget_bytes = if bundles.is_empty() {
-                    limits.gen2_batch_max_bytes
-                } else {
-                    block_batch_response_budget_bytes(limits)
-                };
-                if projected_bytes > budget_bytes && !bundles.is_empty() {
-                    trace!(
-                        accepted_blocks = bundles.len(),
-                        candidate_height = candidate.height,
-                        projected_bytes,
-                        budget_bytes,
-                        "Block-range response budget filled; returning contiguous prefix"
-                    );
-                    break;
+                    range_budget = projected;
+                    if !cache_hit {
+                        block_cache_entries.push((candidate.height, candidate.block_cache_slab));
+                        tx_cache_entries.extend(candidate.tx_cache_entries);
+                    }
+                    total_response_bytes =
+                        total_response_bytes.saturating_add(candidate.message_bytes_hint);
+                    bundles.push(candidate.block);
                 }
-                if projected_bytes > budget_bytes {
-                    warn!(
-                        candidate_height = candidate.height,
-                        projected_bytes,
-                        budget_bytes,
-                        "First block-range entry exceeds response budget; returning it alone"
-                    );
-                }
-
-                if !cache_hit {
-                    block_cache_entries.push((candidate.height, candidate.block_cache_slab));
-                    tx_cache_entries.extend(candidate.tx_cache_entries);
-                }
-                total_response_bytes =
-                    total_response_bytes.saturating_add(candidate.message_bytes_hint);
-                bundles.push(candidate.block);
             }
 
             let envelope = ResponseEnvelope::heard_block_range_with_txs(bundles);
@@ -409,10 +402,10 @@ pub(crate) async fn execute_request_item(
             if !cache_hit {
                 let mut state_guard = driver_state.lock().await;
                 for (height, block_cache_slab) in block_cache_entries {
-                    state_guard.block_cache.insert(height, block_cache_slab);
+                    state_guard.cache_block_response(height, block_cache_slab);
                 }
                 for (tx_id, tx_cache_slab) in tx_cache_entries {
-                    state_guard.tx_cache.insert(tx_id, tx_cache_slab);
+                    state_guard.cache_tx_response(tx_id, tx_cache_slab);
                 }
             }
 
@@ -528,13 +521,58 @@ fn block_range_batch_result_encoded_bytes(
     }])
 }
 
-fn projected_range_batch_result_bytes(
-    accepted: &[BundledBlockWithTxs],
-    candidate: &RangeBundleCandidate,
-) -> Result<usize, NockAppError> {
-    let mut projected = accepted.to_vec();
-    projected.push(candidate.block.clone());
-    block_range_batch_result_encoded_bytes(projected)
+// The empty wire response supplies all fixed envelope/result framing. Only the
+// range array header and its block payload change as entries are accepted.
+#[derive(Clone, Copy)]
+struct RangeResponseBudget {
+    fixed_bytes: usize,
+    payload_bytes: usize,
+    block_count: usize,
+    encoded_bytes: usize,
+}
+
+impl RangeResponseBudget {
+    fn new() -> Result<Self, NockAppError> {
+        let encoded_bytes = block_range_batch_result_encoded_bytes(Vec::new())?;
+        Ok(Self {
+            fixed_bytes: encoded_bytes - req_res_message_encoded_bytes(&0usize)?,
+            payload_bytes: 0,
+            block_count: 0,
+            encoded_bytes,
+        })
+    }
+
+    fn accepts(&self, projected: &Self, budget_bytes: usize) -> bool {
+        self.block_count == 0 || projected.encoded_bytes <= budget_bytes
+    }
+
+    fn project(&self, block: &impl serde::Serialize) -> Result<Self, NockAppError> {
+        self.project_bytes(req_res_message_encoded_bytes(block)?)
+    }
+
+    fn project_bytes(&self, block_bytes: usize) -> Result<Self, NockAppError> {
+        let overflow =
+            || NockAppError::OtherError(String::from("block-range response size overflow"));
+        let block_count = self.block_count.checked_add(1).ok_or_else(overflow)?;
+        let payload_bytes = self
+            .payload_bytes
+            .checked_add(block_bytes)
+            .ok_or_else(overflow)?;
+        // A definite CBOR array length and an unsigned integer use the same
+        // additional-information width, including the 23/24 and 255/256 edges.
+        let header_bytes = req_res_message_encoded_bytes(&block_count)?;
+        let encoded_bytes = self
+            .fixed_bytes
+            .checked_add(payload_bytes)
+            .and_then(|bytes| bytes.checked_add(header_bytes))
+            .ok_or_else(overflow)?;
+        Ok(Self {
+            fixed_bytes: self.fixed_bytes,
+            payload_bytes,
+            block_count,
+            encoded_bytes,
+        })
+    }
 }
 
 fn prepare_bundle_response_from_heavy_txs(
@@ -652,7 +690,7 @@ async fn complete_bundle_response(
 
     if !cache_hit {
         let mut state_guard = driver_state.lock().await;
-        state_guard.block_cache.insert(height, block_cache_slab);
+        state_guard.cache_block_response(height, block_cache_slab);
     }
 
     let bundle_cap = limits.gen2_item_max_bytes;
@@ -690,7 +728,7 @@ async fn complete_bundle_response(
         }
 
         let mut state_guard = driver_state.lock().await;
-        state_guard.tx_cache.insert(tx_id.clone(), cache_slab);
+        state_guard.cache_tx_response(tx_id.clone(), cache_slab);
         drop(state_guard);
 
         total_bytes = total_bytes
@@ -1063,13 +1101,12 @@ fn scry_some_slab(payload: NounHandle<'_>) -> NounSlab {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use nockapp::noun::slab::NounSlab;
     use serde_bytes::ByteBuf;
 
-    use crate::driver::gen2::request_exec::{
-        clamp_block_range_request, projected_range_batch_result_bytes, RangeBundleCandidate,
-    };
-    use crate::messages::{BundledBlockWithTxs, NockchainDataRequest};
+    use super::*;
 
     fn range_candidate(height: u64, block_bytes: usize) -> RangeBundleCandidate {
         RangeBundleCandidate {
@@ -1086,20 +1123,141 @@ mod tests {
         }
     }
 
+    fn canonical_range_bytes(blocks: Vec<BundledBlockWithTxs>) -> usize {
+        let response = NockchainResponse::BatchResult {
+            results: vec![BatchResultItem {
+                item_id: 0,
+                status: BatchResultStatus::Result,
+                error: None,
+                envelope: Some(ResponseEnvelope::heard_block_range_with_txs(blocks)),
+            }],
+        };
+        cbor4ii::serde::to_vec(Vec::new(), &response)
+            .expect("canonical CBOR")
+            .len()
+    }
+
     #[test]
-    fn range_projection_tracks_encoded_prefix_growth() {
+    fn range_budget_accepts_first_oversized_then_exact_contiguous_prefix() {
+        let empty = RangeResponseBudget::new().expect("framing");
         let first = range_candidate(10, 512);
         let second = range_candidate(11, 512);
-        let first_bytes =
-            projected_range_batch_result_bytes(&[], &first).expect("first range should encode");
-        let accepted = vec![first.block.clone()];
-        let second_bytes = projected_range_batch_result_bytes(&accepted, &second)
-            .expect("second range should encode");
+        let accepted = empty.project(&first.block).expect("first");
+        assert!(empty.accepts(&accepted, accepted.encoded_bytes - 1));
+        let projected = accepted.project(&second.block).expect("second");
+        let actual = canonical_range_bytes(vec![first.block, second.block]);
+        assert_eq!(projected.encoded_bytes, actual);
+        assert!(!accepted.accepts(&projected, actual - 1));
+        assert!(accepted.accepts(&projected, actual));
+        assert!(accepted.accepts(&projected, actual + 1));
+        // Rejecting a candidate does not advance the accepted sizing state.
+        assert_eq!(accepted.block_count, 1);
+        assert_eq!(projected.block_count, 2);
+    }
 
-        assert!(second_bytes > first_bytes);
-        let midpoint_budget = first_bytes + ((second_bytes - first_bytes) / 2);
-        assert!(first_bytes <= midpoint_budget);
-        assert!(second_bytes > midpoint_budget);
+    #[test]
+    fn range_incremental_size_matches_canonical_array_boundaries() {
+        let mut budget = RangeResponseBudget::new().expect("empty framing");
+        let mut blocks = Vec::new();
+        assert_eq!(budget.encoded_bytes, canonical_range_bytes(Vec::new()));
+        for count in 1..=257 {
+            let mut block = range_candidate(count, (count as usize % 5) * 256).block;
+            block.tx_envelopes.push(BundledTxEnvelope {
+                tx_id: format!("tx-{count}"),
+                message: ByteBuf::from(vec![0xCD; count as usize % 25]),
+            });
+            block.unincluded_tx_ids.push(format!("missing-{count}"));
+            budget = budget.project(&block).expect("projection");
+            blocks.push(block);
+            if [1, 22, 23, 24, 25, 254, 255, 256, 257].contains(&count) {
+                let actual = canonical_range_bytes(blocks.clone());
+                assert_eq!(budget.encoded_bytes, actual, "count={count}");
+                for limit in [actual - 1, actual, actual + 1] {
+                    assert_eq!(budget.encoded_bytes <= limit, actual <= limit);
+                }
+            }
+        }
+    }
+
+    // This observer delegates to the real serializer; it records actual block
+    // traversals and payload bytes presented during sizing, not elapsed time.
+    struct ObservedBlock<'a> {
+        block: &'a BundledBlockWithTxs,
+        visits: &'a Cell<usize>,
+        payload: &'a Cell<usize>,
+    }
+
+    impl serde::Serialize for ObservedBlock<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.visits.set(self.visits.get() + 1);
+            self.payload.set(
+                self.payload.get()
+                    + self.block.block_message.len()
+                    + self
+                        .block
+                        .tx_envelopes
+                        .iter()
+                        .map(|tx| tx.message.len())
+                        .sum::<usize>(),
+            );
+            serde::Serialize::serialize(self.block, serializer)
+        }
+    }
+
+    #[test]
+    fn range_sizing_visits_payload_once_at_one_n_and_two_n() {
+        for count in [1, 32, 64] {
+            let visits = Cell::new(0);
+            let payload = Cell::new(0);
+            let mut budget = RangeResponseBudget::new().expect("framing");
+            for height in 0..count {
+                let candidate = prepare_range_bundle_candidate(
+                    PreparedRangeEntry {
+                        height: height as u64,
+                        block_id_base58: format!("block-{height}"),
+                        block_message: ByteBuf::from(vec![0xAB; 512]),
+                        block_cache_slab: NounSlab::new(),
+                        raw_txs: vec![
+                            PreparedBundledTx::Candidate {
+                                tx_id: format!("tx-{height}"),
+                                message: ByteBuf::from(vec![0xCD; 128]),
+                                cache_slab: NounSlab::new(),
+                            },
+                            PreparedBundledTx::Unincluded {
+                                tx_id: format!("missing-{height}"),
+                            },
+                        ],
+                    },
+                    4096,
+                );
+                assert_eq!(candidate.block.tx_envelopes.len(), 1);
+                assert_eq!(
+                    candidate.block.unincluded_tx_ids,
+                    vec![format!("missing-{height}")]
+                );
+                assert_eq!(candidate.tx_cache_entries.len(), 1);
+                budget = budget
+                    .project(&ObservedBlock {
+                        block: &candidate.block,
+                        visits: &visits,
+                        payload: &payload,
+                    })
+                    .expect("observed projection");
+            }
+            assert_eq!(visits.get(), count);
+            assert_eq!(payload.get(), count * (512 + 128));
+        }
+    }
+
+    #[test]
+    fn range_size_overflow_is_an_error() {
+        let budget = RangeResponseBudget::new().expect("framing");
+        assert!(budget.project_bytes(usize::MAX).is_err());
+        let full = RangeResponseBudget {
+            block_count: usize::MAX,
+            ..budget
+        };
+        assert!(full.project_bytes(1).is_err());
     }
 
     #[test]

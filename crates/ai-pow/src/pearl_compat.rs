@@ -120,6 +120,14 @@ pub enum PearlCompatError {
     MoeExpertSpanExceedsTokens { expert: usize, span: u32, m: u32 },
     #[error("Pearl MoE routing_data must be strictly increasing within every expert span")]
     MoeRoutingNotStrictlyIncreasing,
+    #[error(
+        "Pearl MoE token {token} occurs {actual} times in routing_data; expected top_k={expected}"
+    )]
+    MoeRoutingMultiplicityMismatch {
+        token: u32,
+        expected: u16,
+        actual: u32,
+    },
     #[error("Pearl MoE local column {local} reaches outside expert {expert_idx}'s block (n_e={n_e}); would bleed into a neighbouring expert's weights")]
     MoeColumnOutsideExpert {
         local: u32,
@@ -756,6 +764,7 @@ pub struct PearlAdmissionLimits {
     max_merkle_branch: usize,
     max_routing_entries: usize,
     canonical_aux_serialization: bool,
+    exact_moe_multiplicity: bool,
 }
 
 impl PearlAdmissionLimits {
@@ -763,11 +772,17 @@ impl PearlAdmissionLimits {
         max_merkle_branch: PEARL_AUX_INCLUSION_LEGACY_MAX_MERKLE_BRANCH,
         max_routing_entries: PEARL_MOE_LEGACY_MAX_ROUTING_ENTRIES,
         canonical_aux_serialization: false,
+        exact_moe_multiplicity: false,
     };
     pub const HARDENED: Self = Self {
         max_merkle_branch: PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH,
         max_routing_entries: PEARL_MOE_MAX_ROUTING_ENTRIES,
         canonical_aux_serialization: true,
+        exact_moe_multiplicity: false,
+    };
+    pub const CONSENSUS_BATCH: Self = Self {
+        exact_moe_multiplicity: true,
+        ..Self::HARDENED
     };
 
     pub const fn max_merkle_branch(self) -> usize {
@@ -796,6 +811,17 @@ impl From<ai_pow_zk::proof_rules::ProofRules> for PearlAdmissionLimits {
         match rules {
             ai_pow_zk::proof_rules::ProofRules::Legacy => Self::LEGACY,
             ai_pow_zk::proof_rules::ProofRules::Hardened => Self::HARDENED,
+        }
+    }
+}
+
+#[cfg(feature = "zk")]
+impl From<ai_pow_zk::proof_rules::VerificationRules> for PearlAdmissionLimits {
+    fn from(rules: ai_pow_zk::proof_rules::VerificationRules) -> Self {
+        match rules {
+            ai_pow_zk::proof_rules::VerificationRules::Legacy => Self::LEGACY,
+            ai_pow_zk::proof_rules::VerificationRules::Hardened => Self::HARDENED,
+            ai_pow_zk::proof_rules::VerificationRules::ConsensusBatch => Self::CONSENSUS_BATCH,
         }
     }
 }
@@ -1984,6 +2010,61 @@ pub fn verify_pearl_moe_routing_binding(
     )
 }
 
+/// Require every token to occur exactly `top_k` times globally. In combination
+/// with strict ordering inside each expert, this means `top_k` distinct experts
+/// per token. Consensus-batch admission requires this global routing invariant.
+pub fn verify_pearl_moe_routing_multiplicity(
+    mining_config: &PearlMiningConfig,
+    m: u32,
+    routing_data: &[u32],
+    limits: PearlAdmissionLimits,
+) -> Result<(), PearlCompatError> {
+    let cfg = mining_config
+        .moe()
+        .ok_or(PearlCompatError::MoePublicMissingConfig)?;
+    if cfg.top_k == 0 {
+        return Err(PearlCompatError::MoeTopKZero { e: cfg.e as usize });
+    }
+    if cfg.top_k >= cfg.e {
+        return Err(PearlCompatError::MoeTopKNotLessThanExperts {
+            top_k: cfg.top_k as usize,
+            e: cfg.e as usize,
+        });
+    }
+    let numel = u64::from(m) * u64::from(cfg.top_k);
+    if numel > limits.max_routing_entries() as u64 {
+        return Err(PearlCompatError::MoeRoutingEntriesExceedMax {
+            numel,
+            max: limits.max_routing_entries(),
+        });
+    }
+    if routing_data.len() as u64 != numel {
+        return Err(PearlCompatError::MoeRoutingDataLenMismatch {
+            expected: numel,
+            actual: routing_data.len(),
+        });
+    }
+    // top_k > 0 and m*top_k is capped, so m is also capped before allocation.
+    // u32 counters cannot overflow: even malformed inputs have <=235,626 slots.
+    let mut counts = vec![0u32; m as usize];
+    for (slot, &token) in routing_data.iter().enumerate() {
+        if token >= m {
+            return Err(PearlCompatError::MoeRoutingTokenOutOfRange { slot, token, m });
+        }
+        counts[token as usize] += 1;
+    }
+    for (token, actual) in counts.into_iter().enumerate() {
+        if actual != u32::from(cfg.top_k) {
+            return Err(PearlCompatError::MoeRoutingMultiplicityMismatch {
+                token: token as u32,
+                expected: cfg.top_k,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Verify routing using the same admission limits as the enclosing nonce.
 pub fn verify_pearl_moe_routing_binding_with_limits(
     kappa: &[u8; 32],
@@ -2133,6 +2214,9 @@ pub fn verify_pearl_moe_routing_binding_with_limits(
         if moe.outer_indices[u] != routing_data[pos as usize] {
             return Err(PearlCompatError::MoeOuterIndicesMismatch);
         }
+    }
+    if limits.exact_moe_multiplicity {
+        verify_pearl_moe_routing_multiplicity(mining_config, m, routing_data, limits)?;
     }
     Ok(())
 }
@@ -2363,7 +2447,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rb03_moe_routing_cap_fits_single_atom_budget() {
+    fn moe_routing_cap_fits_single_atom_budget() {
         let max_nonce_bytes = PEARL_MOE_NONCE_DENSE_ENVELOPE_MAX_BYTES
             + PEARL_MOE_NONCE_TAIL_FIXED_MAX_BYTES
             + PEARL_MOE_MAX_ROUTING_ENTRIES * 4;
@@ -2436,7 +2520,7 @@ mod tests {
     }
 
     #[test]
-    fn rb05_moe_expert_columns_reject_bleed_and_overflow() {
+    fn moe_expert_columns_reject_bleed_and_overflow() {
         assert_eq!(
             moe_expert_b_cols_from_local(&[0, 7], 3, 8).unwrap(),
             vec![24, 31]

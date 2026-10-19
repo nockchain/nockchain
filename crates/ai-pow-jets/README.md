@@ -44,7 +44,7 @@ Consensus safety relies on:
 - setup generation being deterministic and the committed verifier-key digests covering every verifier-used parameter;
 - the Hoon kernel independently enforcing activation, puzzle-specific ASERT, exact target equality, fork-choice work, and coinbase rules.
 
-This crate reduces malformed-input and setup-divergence risks; it does not replace an independent cryptographic review of the composite AIR and recursion stack. See [`../ai-pow/docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md`](../ai-pow/docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md).
+This crate reduces malformed-input and setup-divergence risks; it does not replace an independent cryptographic review of the composite AIR and recursion stack. See the maintained [`ai-pow-zk` security model](../ai-pow-zk/docs/SECURITY.md).
 
 ## Verifier setup
 
@@ -59,3 +59,24 @@ cargo test -p roswell
 ```
 
 Hoon or jet-registration changes additionally require rebuilding `assets/roswell.jam` before rebuilding and running `roswell`.
+
+### Hoon consumer gate
+
+`hoon/tests/ai-pow-consensus-batch-jet-abi.hoon` uses the standard compiler
+entrypoint: its outer gate accepts the dependency hash (`@uvI`), and evaluating
+the compiled trap returns the consumer gate with sample
+`[height=@ud artifact=* commit=* target=@]`. The consumer selects production
+verification rules from `height` and calls the mandatory verifier jet with
+the artifact, structured commitment, and target. Compile this fixture in
+standard mode, not with `--arbitrary`; `--vet` enables strict type checking.
+
+From the repository root:
+
+```sh
+env RUST_LOG=warn target/release/honk --cache-dir target/honk-cache --vet --output target/ai-pow-consensus-batch-jet-abi.jam --prelude hoon/common/hoon.hoon hoon/tests/ai-pow-consensus-batch-jet-abi.hoon hoon
+env AI_POW_CONSENSUS_BATCH_VERIFY_GATE_JAM=$PWD/target/ai-pow-consensus-batch-jet-abi.jam cargo test --release --locked -j 2 -p ai-pow-jets --test verifier_jet_abi consensus_batch_honest_consumer_contract -- --ignored --exact --nocapture --test-threads=1
+```
+
+The ignored consumer test uses a genuine Hardened setup and proof, checks
+height-selected acceptance and rejection, and requires a missing verifier jet
+to fail rather than fall back to Hoon acceptance. Run it in a fresh process.

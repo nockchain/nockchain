@@ -185,7 +185,7 @@ docs-check:
 	./scripts/docs/check_nous_validation_entrypoints.sh
 
 .PHONY: build-hoonc
-build-hoonc: nuke-hoonc-data ## Build hoonc from this repo
+build-hoonc: ## Build hoonc from this repo without clearing compiler data
 	$(call show_env_vars)
 	cargo build --release --locked --bin hoonc
 
@@ -225,7 +225,14 @@ install-nockchain-peek: assets/peek.jam
 	cargo install --locked --force --path crates/nockchain-peek --bin nockchain-peek
 
 
-HOONC ?= hoonc
+# Only the default compiler needs a local build; explicit commands/paths are used as-is.
+hoonc_build_prerequisite :=
+ifeq ($(origin HOONC),undefined)
+HOONC := $(CURDIR)/target/release/hoonc
+hoonc_build_prerequisite := build-hoonc
+# Recursive Make invocations must also check freshness for the default compiler.
+unexport HOONC
+endif
 HOONC_FLAGS ?=
 
 # Optional root for a single kernel build's data/PMA directory. Leave empty for
@@ -240,13 +247,16 @@ ensure-dirs:
 	mkdir -p assets/native
 
 .PHONY: build-trivial
-build-trivial: ensure-dirs
+build-trivial: ensure-dirs | $(hoonc_build_prerequisite)
 	$(call show_env_vars)
 	echo '%trivial' > hoon/trivial.hoon
 	$(HOONC) $(HOONC_FLAGS) --arbitrary hoon/trivial.hoon
 
 HOON_TARGETS=assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
 HONK_HOON_TARGETS=assets/native/dumb.jam assets/native/wal.jam assets/native/miner.jam assets/native/peek.jam assets/native/bridge.jam
+
+# Share one Cargo freshness check and wait for it before any default hoonc recipe.
+$(HOON_TARGETS): | $(hoonc_build_prerequisite)
 
 
 HOON_SRCS := $(find hoon -type file -name '*.hoon')
@@ -316,11 +326,11 @@ nuke-assets:
 	rm -f assets/*.jam
 
 .PHONY: build-hoon-all
-build-hoon-all: nuke-assets update-hoonc ensure-dirs build-trivial $(HOON_TARGETS)
+build-hoon-all: nuke-assets ensure-dirs build-trivial $(HOON_TARGETS)
 	$(call show_env_vars)
 
 .PHONY: build-hoon
-build-hoon: ensure-dirs update-hoonc $(HOON_TARGETS)
+build-hoon: ensure-dirs $(HOON_TARGETS)
 	$(call show_env_vars)
 
 .PHONY: build-assets

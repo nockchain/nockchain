@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Format or check only root-owned workspace packages. Package-scoped formatting
 # avoids formatting dependency sources outside the root workspace.
+# Both write and --check modes support macOS system Bash 3.2 with nounset.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-MODE_ARGS=()
 case "${1:-}" in
   "") ;;
-  --check) MODE_ARGS=(--check) ;;
+  --check) ;;
   *)
     printf 'usage: %s [--check]\n' "$0" >&2
     exit 2
@@ -39,5 +39,10 @@ fi
 
 printf 'Formatting %s root workspace package(s).\n' "${#PACKAGES[@]}"
 for package in "${PACKAGES[@]}"; do
-  cargo fmt --package "$package" "${MODE_ARGS[@]}"
+  # Bash 3.2 with nounset cannot expand an empty argument array.
+  if [[ "${1:-}" == --check ]]; then
+    cargo fmt --package "$package" --check
+  else
+    cargo fmt --package "$package"
+  fi
 done

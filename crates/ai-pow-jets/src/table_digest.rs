@@ -36,16 +36,14 @@ use crate::{AiPowVerifierSetup, VerifierSetupShapeKey};
 type BucketDigest = [u8; AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES];
 
 /// Original framing retained to verify that historical keys do not change.
-#[cfg(test)]
 const TABLE_DIGEST_DOMAIN_V0: &[u8] = b"ai-pow-v0-verifier-setup-table-digest\0";
 
 /// The committed BLAKE3 digest of the canonical **v0** AI-PoW verifier-setup table
 /// (the reachable `(trace_height, sx_bound)` keys produced by
 /// [`crate::setup::production_verifier_setup_buckets`]).
 ///
-/// Historical reference. Do not change this when adding new proof rules. The
-/// release test fingerprints the Legacy subset using its original framing and
-/// compares it with this value; boot pins the combined v1 table below.
+/// The Legacy subset must match this original framing at startup and cache load,
+/// independently of the combined versioned table fingerprint below.
 pub const AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST: [u8; 32] = [
     // Measured by `boot_generate_full_production_table` on the reference build
     // (generate the production shape-key table -> cache -> rebuild -> hash). Re-running
@@ -113,8 +111,12 @@ pub fn verifier_setup_table_digest(table: &[AiPowVerifierSetup]) -> Result<[u8; 
     let mut seen: Vec<VerifierSetupShapeKey> = Vec::with_capacity(table.len());
     for s in table {
         let key = s.shape_key();
-        let ctx_digest =
-            compact_batch_verifier_key_digest_to_bytes(s.context.verifier_key_digest());
+        let binding = s.context.validate_setup_binding().map_err(|error| {
+            SetupError(format!(
+                "verifier setup at {key:?} failed binding: {error:?}"
+            ))
+        })?;
+        let ctx_digest = compact_batch_verifier_key_digest_to_bytes(&binding);
         if s.digest_bytes.as_slice() != ctx_digest.as_slice() {
             return Err(SetupError(format!(
                 "verifier-setup bucket {:?}: cached digest disagrees with the rebuilt context \
@@ -134,120 +136,143 @@ pub fn verifier_setup_table_digest(table: &[AiPowVerifierSetup]) -> Result<[u8; 
     Ok(hash_table_fingerprints(&fps))
 }
 
-/// Compute the consensus fingerprint of a SEED table WITHOUT rebuilding — using each
-/// seed's cached verifier-key digest. Because a seed's cached digest equals the digest
-/// its context rebuilds to (checked on every rebuild), this equals
-/// [`verifier_setup_table_digest`] of the rebuilt table. This is the boot-time check
-/// for lazy residency: it validates the whole seed set against the pinned constant
-/// with no proving and no rebuild. blake3 collision-resistance means a cache whose
-/// cached digests hash to the committed value cannot carry forged digests.
-pub fn verifier_setup_seed_table_digest(
-    seeds: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed],
-) -> Result<[u8; 32], SetupError> {
-    if seeds.is_empty() {
+fn descriptor_fingerprints(
+    descriptors: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor],
+) -> Result<Vec<(VerifierSetupShapeKey, BucketDigest)>, SetupError> {
+    if descriptors.is_empty() {
         return Err(SetupError(
-            "cannot fingerprint an empty verifier-setup seed table".to_string(),
+            "cannot fingerprint an empty verifier-setup descriptor table".to_string(),
         ));
     }
-    let mut fps: Vec<(VerifierSetupShapeKey, BucketDigest)> = Vec::with_capacity(seeds.len());
-    let mut seen: Vec<VerifierSetupShapeKey> = Vec::with_capacity(seeds.len());
-    for s in seeds {
-        let mut key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
-            .ok_or_else(|| SetupError("seed table has zero noise_rank".to_string()))?;
-        key.rules = s.rules;
-        if seen.contains(&key) {
+    let mut fps = Vec::with_capacity(descriptors.len());
+    for descriptor in descriptors {
+        descriptor
+            .validate_shape()
+            .map_err(|error| SetupError(format!("invalid verifier setup shape: {error:?}")))?;
+        let mut key =
+            VerifierSetupShapeKey::from_zk_params(&descriptor.zk_params, descriptor.trace_height())
+                .ok_or_else(|| SetupError("descriptor has zero noise rank".to_string()))?;
+        key.rules = descriptor.rules;
+        if fps.iter().any(|(prior, _)| *prior == key) {
             return Err(SetupError(format!(
-                "seed table has duplicate verifier-setup shape key {:?}",
-                key,
+                "duplicate verifier setup shape {key:?}"
             )));
         }
-        seen.push(key);
-        let d: BucketDigest = s
+        let digest = descriptor
             .verifier_key_digest_bytes
             .as_slice()
             .try_into()
-            .map_err(|_| {
-                SetupError(format!(
-                    "seed at {:?}: cached verifier-key digest is not {} bytes",
-                    key, AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES,
-                ))
-            })?;
-        fps.push((key, d));
+            .map_err(|_| SetupError(format!("verifier digest at {key:?} must be 40 bytes")))?;
+        fps.push((key, digest));
     }
-    Ok(hash_table_fingerprints(&fps))
+    Ok(fps)
 }
 
-/// Fingerprint just the historical subset with the original framing. Release
-/// validation compares this with V0 to guard all historical verifier keys.
-#[cfg(test)]
-pub(crate) fn legacy_verifier_setup_seed_table_digest(
-    seeds: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed],
-) -> [u8; 32] {
-    let mut legacy: Vec<_> = seeds
+/// Fingerprint shape descriptors. A context load or rebuild must independently
+/// recompute and match each descriptor's digest before using it.
+pub fn verifier_setup_descriptor_table_digest(
+    descriptors: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor],
+) -> Result<[u8; 32], SetupError> {
+    Ok(hash_table_fingerprints(&descriptor_fingerprints(
+        descriptors,
+    )?))
+}
+
+fn hash_legacy_fingerprints(fps: &[(VerifierSetupShapeKey, BucketDigest)]) -> [u8; 32] {
+    let mut legacy = fps
         .iter()
-        .filter(|s| s.rules == ProofRules::Legacy)
-        .collect();
-    legacy.sort_by_key(|s| {
-        VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height()).unwrap()
-    });
+        .filter(|(key, _)| key.rules == ProofRules::Legacy)
+        .collect::<Vec<_>>();
+    legacy.sort_by_key(|(key, _)| *key);
     let mut hasher = blake3::Hasher::new();
     hasher.update(TABLE_DIGEST_DOMAIN_V0);
     hasher.update(&(legacy.len() as u64).to_le_bytes());
-    for s in legacy {
-        let key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height()).unwrap();
+    for (key, digest) in legacy {
         hasher.update(&(key.trace_height as u64).to_le_bytes());
         hasher.update(&[u8::from(key.sx_bound)]);
-        hasher.update(&s.verifier_key_digest_bytes);
+        hasher.update(digest);
     }
     *hasher.finalize().as_bytes()
 }
 
-/// Verify a SEED table matches the committed **v1** consensus digest (boot-time,
-/// no rebuild). Same fatal semantics as [`verify_verifier_setup_table_digest`].
-pub fn verify_verifier_setup_seed_table_digest(
-    seeds: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed],
+pub fn legacy_verifier_setup_descriptor_table_digest(
+    descriptors: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor],
 ) -> Result<[u8; 32], SetupError> {
-    if !v1_digest_is_pinned() {
+    Ok(hash_legacy_fingerprints(&descriptor_fingerprints(
+        descriptors,
+    )?))
+}
+
+pub(crate) fn verify_production_fingerprints(
+    fps: &[(VerifierSetupShapeKey, BucketDigest)],
+) -> Result<[u8; 32], SetupError> {
+    if fps.len() != 28
+        || [ProofRules::Legacy, ProofRules::Hardened]
+            .into_iter()
+            .any(|rules| {
+                (13..=19).any(|log2| {
+                    [false, true].into_iter().any(|sx| {
+                        !fps.iter().any(|(key, _)| {
+                            *key == VerifierSetupShapeKey::with_rules(1 << log2, sx, rules)
+                        })
+                    })
+                })
+            })
+    {
         return Err(SetupError(
-            "AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST is the all-zero placeholder".to_string(),
+            "verifier table must contain all 28 canonical rule/shape keys".to_string(),
         ));
     }
-    let got = verifier_setup_seed_table_digest(seeds)?;
-    if got != AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST {
+    let historical = hash_legacy_fingerprints(fps);
+    if historical != AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST {
         return Err(SetupError(format!(
-            "verifier-setup SEED table digest mismatch: got {} but consensus v1 pins {} — corrupt \
-             or format-incompatible cache",
-            hex32(&got),
+            "historical verifier table digest mismatch: {} != {}",
+            hex32(&historical),
+            hex32(&AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST),
+        )));
+    }
+    let current = hash_table_fingerprints(fps);
+    if current != AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST {
+        return Err(SetupError(format!(
+            "versioned verifier table digest mismatch: {} != {}",
+            hex32(&current),
             hex32(&AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST),
         )));
     }
-    Ok(got)
+    Ok(current)
 }
 
-/// Verify a built table matches the committed **v1** consensus digest.
-///
-/// Returns the (matching) digest on success. On mismatch returns a `SetupError` the
-/// boot installer treats as fatal — the node must not run a divergent verifier.
+/// Require complete canonical coverage and both committed fingerprints.
+pub fn verify_verifier_setup_descriptor_table_digest(
+    descriptors: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor],
+) -> Result<[u8; 32], SetupError> {
+    let representatives = crate::setup::production_verifier_setup_geometries()?;
+    if descriptors.iter().any(|descriptor| {
+        !representatives.contains(&(descriptor.zk_params, descriptor.trace_height()))
+    }) {
+        return Err(SetupError(
+            "cache contains noncanonical production geometry".to_string(),
+        ));
+    }
+    verify_production_fingerprints(&descriptor_fingerprints(descriptors)?)
+}
+
+/// Validate every native binding, complete canonical coverage, and both
+/// committed fingerprints before installing a generated table.
 pub fn verify_verifier_setup_table_digest(
     table: &[AiPowVerifierSetup],
 ) -> Result<[u8; 32], SetupError> {
-    if !v1_digest_is_pinned() {
-        return Err(SetupError(
-            "AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST is the all-zero placeholder — this build was \
-             shipped without pinning the consensus verifier-setup digest"
-                .to_string(),
-        ));
-    }
-    let got = verifier_setup_table_digest(table)?;
-    if got != AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST {
-        return Err(SetupError(format!(
-            "verifier-setup table digest mismatch: built {} but consensus v1 pins {} — refusing to \
-             run a divergent verifier",
-            hex32(&got),
-            hex32(&AI_POW_V1_VERIFIER_SETUP_TABLE_DIGEST),
-        )));
-    }
-    Ok(got)
+    verifier_setup_table_digest(table)?;
+    let fps = table
+        .iter()
+        .map(|setup| {
+            (
+                setup.shape_key(),
+                compact_batch_verifier_key_digest_to_bytes(setup.context.verifier_key_digest()),
+            )
+        })
+        .collect::<Vec<_>>();
+    verify_production_fingerprints(&fps)
 }
 
 /// Lowercase-hex a 32-byte digest for error messages.
@@ -326,10 +351,11 @@ mod tests {
         let err = verifier_setup_table_digest(&empty_setup).expect_err("empty setup table rejects");
         assert!(err.0.contains("empty verifier-setup table"));
 
-        let empty_seeds: Vec<ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed> = Vec::new();
-        let err =
-            verifier_setup_seed_table_digest(&empty_seeds).expect_err("empty seed table rejects");
-        assert!(err.0.contains("empty verifier-setup seed table"));
+        let empty_descriptors: Vec<ai_pow_zk::recursion::AiPowCompactVerifierSetupDescriptor> =
+            Vec::new();
+        let err = verifier_setup_descriptor_table_digest(&empty_descriptors)
+            .expect_err("empty descriptor table rejects");
+        assert!(err.0.contains("empty verifier-setup descriptor table"));
     }
 
     /// A shipping build MUST have the consensus digest pinned to a real (non-zero)

@@ -856,4 +856,91 @@
     %+  expect-fail
       |.((txb:hel names orders fee default-sign-keys:hel default-refund-unit:hel (get-note-from:hel notes) %.y %desc))
   ~
+:::
+++  prebroadcast-maturity-case
+  |=  [tip=@ age=@]
+  ^-  ?
+  =/  pkh  (make-pkh-from-sig:spend-condition:t p:default-keys-1:dhel)
+  =/  timing=lock-primitive:t  [%tim [[`100 ~] [~ ~]]]
+  =/  timed=spend-condition:t  ~[timing]
+  =/  sc=spend-condition:t  (combine:spend-condition:t form.pkh timed)
+  =/  lk=lock:t  sc
+  =/  root=hash:t  (hash:lock:t lk)
+  =/  note=nnote-1:v1:t
+    %*  .  *nnote-1:v1:t
+      version  %1
+      origin-page  (sub +(tip) age)
+      name  (new-v1:nname:t root [*hash:t %.n])
+      assets  1.000.000
+    ==
+  =/  sed=seed:v1:t
+    (simple:seed-v1:t root 999.744 (hash:nnote:t note))
+  =/  sp=spend-1:v1:t
+    %*  .  *spend-1:v1:t
+      witness  *witness:t
+      seeds  (~(put z-in:zo *seeds:v1:t) sed)
+      fee  256
+    ==
+  =.  sp  sp(witness witness.sp(lmp (build-lock-merkle-proof-stub:lock:t lk 1)))
+  =.  sp  (sign:spend-1:v1:t sp s:default-keys-1:dhel)
+  =/  sps=spends:t  (~(put z-by:zo *spends:t) name.note [%1 sp])
+  =/  dat=transaction:wt
+    [%1 'candidate-maturity' sps *metadata:wt [%1 (~(put z-by:zo *(z-map:zo nname:t witness:t)) name.note witness.sp)]]
+  =/  state=state:wt  gen-spend-test-state:hel
+  =.  state
+    state(balance [tip *hash:t (~(put z-by:zo *(z-map:zo nname:t nnote:t)) name.note note)])
+  =/  loaded  (lod:hel state wal:hel)
+  =/  [effs=(list effect:hel) sent=_wal:hel]
+    (pok:hel 0 [%send-tx dat] loaded)
+  %+  lien  effs
+  |=  e=effect:wt
+  ?=(%grpc -.e)
+:::
+++  test-send-tx-next-candidate-maturity
+  =/  h=@  (need consensus-batch-phase:page:t)
+  =/  results=(list ?)
+    %+  turn  ~[(sub h 2) (dec h) h (sub h 2)]
+    |=  tip=@
+    ?&  !(prebroadcast-maturity-case tip 99)
+        (prebroadcast-maturity-case tip 100)
+    ==
+  %+  expect-eq  !>((reap 4 %.y))
+  !>  results
+::::
+++  fund-policy-scry-case
+  |=  minimum=@
+  ^-  tang
+  =/  h=@  (need consensus-batch-phase:page:t)
+  =/  state=state:wt  *state:wt
+  =.  state  state(bc bc.state(coinbase-timelock-min minimum))
+  =/  loaded  (lod:hel state wal:hel)
+  =/  results=(list ?)
+    %+  turn  ~[(dec h) h +(h) (dec h)]
+    |=  height=@
+    =/  decimal=@ta
+      (crip (skip (scow %ud height) |=(c=@tD =(c '.'))))
+    =/  effective=(unit @)  ?:((lth height h) ~ `minimum)
+    =/  expected=(unit (unit *))
+      ``[height protocol-fund-address:t fund-note-firstname:t effective]
+    =(expected (peek:loaded [%fund-spend-policy decimal ~]))
+  %+  expect-eq  !>((reap 4 %.y))
+  !>  results
+::::
+++  test-fund-policy-scry-configured-and-backwards
+  ;:  weld
+    (fund-policy-scry-case 100)
+    (fund-policy-scry-case 2)
+    (fund-policy-scry-case 0)
+  ==
+::::
+++  test-fund-policy-scry-malformed-and-nested-absence
+  =/  loaded  wal:hel
+  ;:  weld
+    (expect-eq !>(~) !>((peek:loaded /fund-spend-policy/not-decimal)))
+    (expect-eq !>(~) !>((peek:loaded [%fund-spend-policy '-1' ~])))
+    (expect-eq !>(~) !>((peek:loaded [%fund-spend-policy '1.0' ~])))
+    (expect-eq !>(~) !>((peek:loaded /fund-spend-policy)))
+    (expect-eq !>(~) !>((peek:loaded /fund-spend-policy/0/extra)))
+    (expect-eq !>(``[0 protocol-fund-address:t fund-note-firstname:t ~]) !>((peek:loaded /fund-spend-policy/0)))
+  ==
 --

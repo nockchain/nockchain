@@ -312,14 +312,10 @@ fn reject_wrong_a_strip_length() {
     );
 }
 
-/// `verifier::verify` MUST reject a `params` whose
-/// `spot_checks` exceeds the hard DoS cap (`SPOT_CHECKS_MAX = 256`)
-/// *at validate time*, before entering the per-opening loop. The
-/// pre-fix verifier would have looped `spot_checks` times re-hashing
-/// up-to-2-MiB strips — a CPU-time DoS unbounded by the proof format
-/// (it's the *params* that drive the loop count, not the proof).
+/// `verifier::verify` rejects parameters with `spot_checks` above
+/// `SPOT_CHECKS_MAX = 256` during validation, before the per-opening loop.
 #[test]
-fn reject_spot_checks_above_dos_cap() {
+fn reject_spot_checks_above_limit() {
     let (mut params, block, nonce, proof) = fresh_proof();
     params.spot_checks = SPOT_CHECKS_MAX + 1;
     let r = verify(block, nonce, &params, &proof);

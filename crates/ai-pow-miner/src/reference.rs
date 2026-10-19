@@ -2,17 +2,16 @@
 //!
 //! The production `--pearl-gateway` path fetches Pearl work from an external
 //! gateway and proves a recursive certificate merging that Pearl proof. For a
-//! self-contained fakenet run (no gateway), the miner instead proves a REFERENCE
-//! MoE block directly on the CPU, bound to the node's block commitment. This is
-//! the exact block the boot-time verifier-setup builder and the
-//! `ai_pow_accept_e2e` integration test prove — the setup is height-keyed and
-//! proof-independent, so a node's boot-installed production setup verifies it.
+//! self-contained fakenet run (no gateway), the miner instead proves a reference
+//! MoE block directly on the CPU, bound to the node's block commitment. The
+//! `ai_pow_accept_e2e` integration test uses the same reference block shape.
+//! Verifier setup is selected by the proof rules and canonical shape, not the
+//! block's public commitments.
 //!
-//! These functions are copied from `ai-pow-jets::setup` (they use only `ai-pow`,
-//! `ai-pow-zk`, and this crate's `certificate_noun` — nothing from `ai-pow-jets`),
-//! because `ai-pow-jets` already depends on this crate, so this crate cannot
-//! depend back on it. Keep them in sync with the jets copy (the node's setup
-//! builder must prove the same shape it later verifies).
+//! These helpers use only `ai-pow`, `ai-pow-zk`, and this crate's
+//! `certificate_noun`. `ai-pow-jets` depends on this crate, so the miner cannot
+//! depend back on it. Keep the shared reference geometry aligned with the jets
+//! setup's canonical trace-height predictor.
 
 use std::sync::Arc;
 
@@ -93,8 +92,8 @@ fn setup_aux(commit: [u8; 32]) -> PearlNockchainAux {
     }
 }
 
-/// Base header timestamp; `extranonce == 0` reproduces the exact block the boot
-/// verifier-setup builder and `ai_pow_accept_e2e` prove (byte-stable).
+/// Base header timestamp; `extranonce == 0` preserves the deterministic reference
+/// block used by honest-proof consumers and `ai_pow_accept_e2e`.
 const REFERENCE_BASE_TIMESTAMP: u32 = 0x6677_8899;
 
 /// `nbits` for the synthetic Pearl header.
@@ -893,8 +892,7 @@ pub fn evaluate_reference_moe_jackpot(
 }
 
 /// Prove a single canonical MoE block bound to `nock_commit` at `extranonce == 0`.
-/// Byte-stable back-compat wrapper (the boot setup builder / e2e prove this exact
-/// block).
+/// Deterministic reference wrapper for honest-proof consumers.
 pub fn prove_reference_moe_block(
     params: &MatmulParams,
     hw: u32,

@@ -1944,6 +1944,7 @@
         sig-hash=(sig-hash:spend-1:v1:t +.sen)
         witness=witness.+.sen
         bythos-phase=bythos-phase.constants
+        fund-minimum=~
     ==
   %+  expect-eq
     !>(%.n)
@@ -2072,6 +2073,7 @@
         sig-hash=sig-hb
         witness=witness.sp1b
         bythos-phase=bythos-phase.constants
+        fund-minimum=~
     ==
   ::  expect: lock check returns %.n (false) for unauthorized key
   %+  expect-eq
@@ -2118,6 +2120,7 @@
         sig-hash=(sig-hash:spend-1:v1:t +.sen)
         witness=witness.+.sen
         bythos-phase=bythos-phase.constants
+        fund-minimum=~
     ==
   %+  expect-eq
     !>(%.n)
@@ -3977,15 +3980,25 @@
       sig-ha
       ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2]]
     ==
+  =/  full-wit=witness:t  wit
+  =/  stub=lock-merkle-proof-stub:v1:t
+    (build-lock-merkle-proof-stub:lock:t sc 1)
+  ?>  ?=(^ spend-condition.stub)
+  =/  wit=witness:t  wit(lmp stub(axis 7))
+  =/  sp=spend-1:v1:t  sp(witness wit)
+  =/  sps=spends:v1:t
+    (~(put z-by *spends:v1:t) [fund-note-firstname:t *hash:t ~] [%1 sp])
+  ?>  (valid-stub-axes:spends:v1:t sps)
   =/  ctx=check-context:t
     :*  now=1
         since=0
         sig-hash=sig-ha
         witness=wit
         bythos-phase=bythos-phase.constants
+        fund-minimum=~
     ==
-  %+  expect-eq  !>(%.y)
-  !>  (check-multisig-lock:check-context:t root ctx)
+  %+  expect-eq  !>([%.y %.y])
+  !>  [(check-multisig-lock:check-context:t root ctx) (check-multisig-lock:check-context:t root ctx(witness full-wit))]
 ::
 ::  +test-fund-multisig-spend-insufficient-sigs: fewer than m signatures is
 ::    rejected (check:pkh requires exactly m).
@@ -4009,15 +4022,21 @@
       sig-ha
       ~[[s:default-keys-1:h pk1]]
     ==
+  =/  full-wit=witness:t  wit
+  =/  stub=lock-merkle-proof-stub:v1:t
+    (build-lock-merkle-proof-stub:lock:t sc 1)
+  ?>  ?=(^ spend-condition.stub)
+  =/  wit=witness:t  wit(lmp stub(axis 7))
   =/  ctx=check-context:t
     :*  now=1
         since=0
         sig-hash=sig-ha
         witness=wit
         bythos-phase=bythos-phase.constants
+        fund-minimum=~
     ==
-  %+  expect-eq  !>(%.n)
-  !>  (check-multisig-lock:check-context:t root ctx)
+  %+  expect-eq  !>([%.n %.n])
+  !>  [(check-multisig-lock:check-context:t root ctx) (check-multisig-lock:check-context:t root ctx(witness full-wit))]
 ::
 ::  +test-fund-multisig-spend-wrong-target: a valid multisig witness whose
 ::    revealed spend-condition does NOT hash to the target is rejected (the
@@ -4043,14 +4062,138 @@
       sig-ha
       ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2]]
     ==
+  =/  full-wit=witness:t  wit
+  =/  stub=lock-merkle-proof-stub:v1:t
+    (build-lock-merkle-proof-stub:lock:t sc 1)
+  ?>  ?=(^ spend-condition.stub)
+  =/  wit=witness:t  wit(lmp stub(axis 7))
   =/  ctx=check-context:t
     :*  now=1
         since=0
         sig-hash=sig-ha
         witness=wit
         bythos-phase=bythos-phase.constants
+        fund-minimum=~
     ==
   ::  target is the zero hash, not (hash:lock sc) -> binding fails
-  %+  expect-eq  !>(%.n)
-  !>  (check-multisig-lock:check-context:t *hash:t ctx)
+  %+  expect-eq  !>([%.n %.n])
+  !>  [(check-multisig-lock:check-context:t *hash:t ctx) (check-multisig-lock:check-context:t *hash:t ctx(witness full-wit))]
+:::
+::  Controlled targets exercise the composed recovery arm, not production keys.
+++  fund-recovery-case
+  |=  [now=page-number:t since=page-number:t minimum=(unit page-number:t) fault=@]
+  ^-  ?
+  =/  pk1=schnorr-pubkey:t  (head ~(tap z-in pubkeys.p:default-keys-1:h))
+  =/  pk2=schnorr-pubkey:t  (head ~(tap z-in pubkeys.p:default-keys-2:h))
+  =/  pk3=schnorr-pubkey:t  (head ~(tap z-in pubkeys.p:default-keys-3:h))
+  ::  Scalar one supplies a fourth deterministic public test key.
+  =/  sk4=schnorr-seckey:t  (from-atom:schnorr-seckey:t 0x1)
+  =/  pk4=schnorr-pubkey:t  (from-seckey:schnorr-pubkey:t sk4)
+  =/  outsider-sk=schnorr-seckey:t  (from-atom:schnorr-seckey:t 0x2)
+  =/  outsider=schnorr-pubkey:t  (from-seckey:schnorr-pubkey:t outsider-sk)
+  =/  [root=hash:t sc=spend-condition:v1:t *]
+    (make-pkh-lock:v1:h 3 ~[pk1 pk2 pk3 pk4])
+  =/  msg=hash:t  (sig-hash:spend-1:v1:t *spend-1:v1:t)
+  =/  signers=(list [schnorr-seckey:t schnorr-pubkey:t])
+    ?+  fault  ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2] [s:default-keys-3:h pk3]]
+      %1  ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2]]
+      %2  ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2] [s:default-keys-3:h pk3] [sk4 pk4]]
+      %3  ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2] [outsider-sk outsider]]
+    ==
+  =/  wit=witness:t
+    (make-pkh-witness:v1:h root sc msg signers)
+  =/  stub=lock-merkle-proof-stub:v1:t
+    (build-lock-merkle-proof-stub:lock:t sc 1)
+  ?>  ?=(^ spend-condition.stub)
+  =/  wit=witness:t  wit(lmp stub(axis 7))
+  =?  wit  =(fault 6)
+    wit(pkh (~(put z-by pkh.wit) (hash:schnorr-pubkey:t pk1) [pk1 *schnorr-signature:t]))
+  =?  wit  =(fault 7)
+    wit(lmp [%full sc 1 [root ~]])
+  =?  wit  =(fault 8)
+    wit(lmp [%full ~ 1 [root ~]])
+  =?  wit  =(fault 9)
+    wit(lmp [~ 1 [root ~]])
+  =/  ctx=check-context:t
+    [now since ?:(=(fault 4) *hash:t msg) wit bythos-phase.constants minimum]
+  (check-fund-lock:check-context:t ?:(=(fault 5) *hash:t root) ctx)
+:::
+++  test-fund-recovery-maturity-boundaries
+  =/  h=@  (need consensus-batch-phase:page:t)
+  =/  results=(list ?)
+    :~  (fund-recovery-case (dec h) (sub h 2) ~ 0)
+        (fund-recovery-case h (dec h) `100 0)
+        (fund-recovery-case h (sub h 99) `100 0)
+        (fund-recovery-case h (sub h 100) `100 0)
+        (fund-recovery-case h (sub h 101) `100 0)
+        (fund-recovery-case +(h) (sub h 99) `100 0)
+        (fund-recovery-case (dec h) (sub h 2) ~ 0)
+        (fund-recovery-case h +(h) `100 0)
+        (fund-recovery-case h (dec h) `2 0)
+        (fund-recovery-case h (sub h 2) `2 0)
+        (fund-recovery-case h h `0 0)
+        (fund-recovery-case h +(h) `0 0)
+    ==
+  %+  expect-eq  !>(~[%.y %.n %.n %.y %.y %.y %.y %.n %.n %.y %.y %.n])
+  !>  results
+:::
+++  test-fund-recovery-authorization-both-sides
+  =/  results=(list ?)
+    %+  turn  ~[1 2 3 4 5 6]
+    |=  fault=@
+    ?|  (fund-recovery-case 99 98 ~ fault)
+        (fund-recovery-case 100 0 `100 fault)
+    ==
+  %+  expect-eq  !>(~[%.n %.n %.n %.n %.n %.n])
+  !>  results
+:::
+++  test-fund-recovery-facade-policy
+  =/  h=@  (need consensus-batch-phase:page:t)
+  %+  expect-eq
+    !>  [~ `coinbase-timelock-min.constants `coinbase-timelock-min.constants ~]
+  !>  :*  (fund-minimum-at:t (dec h))
+          (fund-minimum-at:t h)
+          (fund-minimum-at:t +(h))
+          (fund-minimum-at:t (dec h))
+      ==
+:::
+++  test-fund-recovery-configured-facade-composition
+  =/  h=@  (need consensus-batch-phase:page:t)
+  =/  configured=blockchain-constants:tx-engine
+    constants(coinbase-timelock-min 100)
+  =/  policy  ~(. tx-engine configured)
+  =/  results=(list ?)
+    %+  turn  ~[[(dec h) (sub h 2)] [h (dec h)] [h (sub h 99)] [h (sub h 100)] [h (sub h 101)] [+(h) (sub h 99)] [(dec h) (sub h 2)]]
+    |=  [height=@ origin=@]
+    (fund-recovery-case height origin (fund-minimum-at:policy height) 0)
+  =/  two  ~(. tx-engine configured(coinbase-timelock-min 2))
+  =/  zero  ~(. tx-engine configured(coinbase-timelock-min 0))
+  ;:  weld
+    (expect-eq !>(~[%.y %.n %.n %.y %.y %.y %.y]) !>(results))
+    (expect-eq !>(%.n) !>((fund-recovery-case h (dec h) (fund-minimum-at:two h) 0)))
+    (expect-eq !>(%.y) !>((fund-recovery-case h (sub h 2) (fund-minimum-at:two h) 0)))
+    (expect-eq !>(%.y) !>((fund-recovery-case h h (fund-minimum-at:zero h) 0)))
+    (expect-eq !>([~ 0]) !>((fund-minimum-at:zero h)))
+  ==
+:::
+++  test-fund-recovery-full-witness-composition
+  ;:  weld
+    (expect-eq !>(%.y) !>((fund-recovery-case 1 0 ~ 7)))
+    (expect-eq !>(%.n) !>((fund-recovery-case 99 0 `100 7)))
+    (expect-eq !>(%.y) !>((fund-recovery-case 100 0 `100 7)))
+  ==
+::::
+++  test-fund-recovery-empty-witnesses
+  ::  Maturity is satisfied in every case, so rejection must inspect the reveal.
+  =/  results=(list ?)
+    %+  turn  ~[8 9]
+    |=  fault=@
+    ?|  (fund-recovery-case 99 0 ~ fault)
+        (fund-recovery-case 100 0 `100 fault)
+    ==
+  ;:  weld
+    (expect-eq !>(~[%.n %.n]) !>(results))
+    (expect-eq !>(%.y) !>((fund-recovery-case 100 0 `100 0)))
+    (expect-eq !>(%.y) !>((fund-recovery-case 100 0 `100 7)))
+  ==
 --

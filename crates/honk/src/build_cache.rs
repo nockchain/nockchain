@@ -547,18 +547,18 @@ mod tests {
             noun: &noun,
             mode: DagMode::Noun,
         }])
-        .unwrap()
+        .expect("lift cache graph fixture")
         .to_bytes()
     }
 
     #[test]
     fn atomic_cache_round_trip_and_fresh_bypass() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("create cache round-trip test directory");
         let key = blake3::hash(b"key");
         let mut cache = BuildCache::new(temp.path().to_path_buf(), false);
         assert!(cache
             .read(key, CacheObjectKind::DependencyVase)
-            .unwrap()
+            .expect("read absent dependency vase")
             .is_none());
         let root_name = key.to_hex().to_string();
         let graph = graph(&root_name);
@@ -573,27 +573,27 @@ mod tests {
                 }],
                 &graph,
             )
-            .unwrap();
+            .expect("write dependency vase pack");
         let cached = cache
             .read(key, CacheObjectKind::DependencyVase)
-            .unwrap()
-            .unwrap();
+            .expect("read cached dependency vase")
+            .expect("written dependency vase must be present");
         assert_eq!(
             cached.bundle.lower_root(&cached.root_name),
             nockasm::NasmBundle::from_bytes(&graph)
-                .unwrap()
+                .expect("decode cache graph fixture")
                 .lower_root(&root_name)
         );
         let mut fresh = BuildCache::new(temp.path().to_path_buf(), true);
         assert!(fresh
             .read(key, CacheObjectKind::DependencyVase)
-            .unwrap()
+            .expect("read dependency vase with fresh bypass")
             .is_none());
     }
 
     #[test]
     fn prebuilt_pack_round_trips_like_the_parsing_path() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("create prebuilt pack test directory");
         let key = blake3::hash(b"prebuilt");
         let root_name = key.to_hex().to_string();
         let noun = noun![[7 8] [7 8]];
@@ -602,7 +602,7 @@ mod tests {
             noun: &noun,
             mode: DagMode::Noun,
         }])
-        .unwrap();
+        .expect("lift prebuilt pack fixture");
         let graph = bundle.to_bytes();
         let mut cache = BuildCache::new(temp.path().to_path_buf(), false);
         cache
@@ -617,22 +617,22 @@ mod tests {
                 Rc::new(bundle),
                 &graph,
             )
-            .unwrap();
+            .expect("write prebuilt entry product pack");
         assert_eq!(cache.stats().writes, 1);
         // A fresh cache instance must read the prebuilt pack from disk exactly
         // as it reads packs written through the parsing path.
         let mut fresh = BuildCache::new(temp.path().to_path_buf(), false);
         let cached = fresh
             .read(key, CacheObjectKind::EntryProduct)
-            .unwrap()
-            .unwrap();
+            .expect("read prebuilt entry product from disk")
+            .expect("written prebuilt entry product must be present");
         assert_eq!(cached.bundle.lower_root(&cached.root_name), Some(noun));
         assert_eq!(fresh.stats().hits, 1);
     }
 
     #[test]
     fn corrupt_object_is_a_miss() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("create corrupt cache test directory");
         let key = blake3::hash(b"key");
         let root_name = key.to_hex().to_string();
         let graph = graph(&root_name);
@@ -648,22 +648,22 @@ mod tests {
                 }],
                 &graph,
             )
-            .unwrap();
+            .expect("write dependency vase pack before corruption");
         let pack = cache
             .pack_path(blake3::hash(&graph).to_hex().as_str())
-            .unwrap();
-        fs::write(pack, b"broken").unwrap();
+            .expect("resolve fixture pack path");
+        fs::write(pack, b"broken").expect("write corrupted cache pack");
         let mut cache = BuildCache::new(temp.path().to_path_buf(), false);
         assert!(cache
             .read(key, CacheObjectKind::DependencyVase)
-            .unwrap()
+            .expect("read corrupted dependency vase as a miss")
             .is_none());
         assert_eq!(cache.stats().corrupt, 1);
     }
 
     #[test]
     fn stats_and_gc_remove_expired_objects_and_unreferenced_packs() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("create cache garbage collection test directory");
         let key = blake3::hash(b"key");
         let root_name = key.to_hex().to_string();
         let graph = graph(&root_name);
@@ -679,15 +679,18 @@ mod tests {
                 }],
                 &graph,
             )
-            .unwrap();
-        let stats = disk_stats(temp.path()).unwrap();
+            .expect("write dependency vase pack before garbage collection");
+        let stats =
+            disk_stats(temp.path()).expect("read cache disk stats before garbage collection");
         assert_eq!(stats.objects, 1);
         assert_eq!(stats.packs, 1);
         assert_eq!(stats.pack_bytes, graph.len() as u64);
-        let (removed, bytes) = gc(temp.path(), Duration::ZERO).unwrap();
+        let (removed, bytes) =
+            gc(temp.path(), Duration::ZERO).expect("collect expired cache objects and packs");
         assert_eq!(removed, 1);
         assert!(bytes >= graph.len() as u64);
-        let stats = disk_stats(temp.path()).unwrap();
+        let stats =
+            disk_stats(temp.path()).expect("read cache disk stats after garbage collection");
         assert_eq!(stats.objects, 0);
         assert_eq!(stats.packs, 0);
     }

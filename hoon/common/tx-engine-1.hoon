@@ -189,9 +189,8 @@
 ::    The 1-arg wrappers in /common/tx-engine close over the kernel's
 ::    blockchain-constants; this 2-arg form is for callers (like
 ::    +new-candidate below) that already have the asert-phase as a separate
-::    parameter rather than via blockchain-constants. SINGLE source of
-::    truth for the boundary semantics — see
-::    014-aletheia-emissions-audit.md finding #3.
+::    parameter rather than via blockchain-constants. Both forms share
+::    the same inclusive activation boundary.
 ++  post-asert-activation
   |=  [height=@ asert-phase=@]
   ^-  ?
@@ -1225,6 +1224,7 @@
             bythos-phase=page-number
             ::  first page whose %1 spends bind seeds to their input note
             parent-hash-phase=page-number
+            fund-minimum=(unit page-number)
         ==
     ^-  (reason ~)
     ?:  (note-data-exceeds-max sps max-size)
@@ -1261,6 +1261,7 @@
             (sig-hash:spend-1 +.sp)
             witness.+.sp
             bythos-phase
+            fund-minimum
         ==
       ?.  %+  check:check-context  ctx
           (lock-hash:nnote-1 note)
@@ -1268,6 +1269,28 @@
       ?.  (check-gifts-and-fee:spend sp note)
         [%.n %v1-spend-1-gifts-failed]
       [%.y ~]
+    ==
+  ::
+  ++  valid-stub-axis
+    |=  [nam=nname sp=spend]
+    ^-  ?
+    ?-  -.sp
+      %0  %.y
+      %1
+        ?:  =(-.nam fund-note-firstname)  %.y
+        =/  sen=spend-1  +.sp
+        =/  proof=lock-merkle-proof  lmp.witness.sen
+        ?@  -.proof  %.y
+        =+  [sc=* ax=@ mp=*]=proof
+        =(1 ax)
+    ==
+  ++  valid-stub-axes
+    |=  sps=form
+    ^-  ?
+    ?@  sps  %.y
+    ?&  (valid-stub-axis n.sps)
+        $(sps l.sps)
+        $(sps r.sps)
     ==
   ++  validate
     |=  =form
@@ -1484,6 +1507,11 @@
           ==
       ==
     --
+  ++  valid-stub-axes
+    |=  raw=form
+    ^-  ?
+    (valid-stub-axes:spends spends.raw)
+  ::
   ++  validate
     |=  =form
     ^-  ?
@@ -1859,6 +1887,7 @@
   ++  check
     |=  [=form parent-firstname=^hash]
     ^-  ?
+    ?~  spend-condition.form  %.n
     ?.  =(1 axis.form)
       ~>  %slog.[0 'stub lmp axis must be 1']
       %.n
@@ -1914,16 +1943,45 @@
     %-  hash-hashable:tip5
     (hashable form)
   ::
+  ::  A full proof selects a whole condition, either the single lock or
+  ::  a leaf of a tagged balanced OR tree. Paths run from leaf to root;
+  ::  their final sibling must authenticate the arity at that depth.
+  ++  authorization-leaf
+    |=  [axis=@ path=(list ^hash)]
+    ^-  ?
+    ?:  =(axis 1)  %.y
+    =/  arity=@
+      ?:  &((gte axis 6) (lte axis 7))  2
+      ?:  &((gte axis 12) (lte axis 15))  4
+      ?:  &((gte axis 24) (lte axis 31))  8
+      ?:  &((gte axis 48) (lte axis 63))  16
+      0
+    ?:  =(arity 0)  %.n
+    ?~  path  %.n
+    =/  tag=^hash
+      ?+  arity  !!
+        %2   ^~((hash-hashable:tip5 leaf+2))
+        %4   ^~((hash-hashable:tip5 leaf+4))
+        %8   ^~((hash-hashable:tip5 leaf+8))
+        %16  ^~((hash-hashable:tip5 leaf+16))
+      ==
+    |-  ^-  ?
+    ?~  t.path  =(i.path tag)
+    $(path t.path)
+  ::
   ++  check
     |=  [=form parent-firstname=^hash]
     ^-  ?
+    ?~  spend-condition.form  %.n
     =/  spend-firstname
       (hash-hashable:tip5 [leaf+& hash+root.merk-proof.form])
     ?.  =(spend-firstname parent-firstname)
       ~>  %slog.[0 'spend first name does not match parent note first name']
       %.n
     =/  leaf-hash  (hash:spend-condition spend-condition.form)
-    (verify-merk-proof:merkle leaf-hash axis.form merk-proof.form)
+    ?&  (verify-merk-proof:merkle leaf-hash axis.form merk-proof.form)
+        (authorization-leaf axis.form path.merk-proof.form)
+    ==
   --
 ++  lock-merkle-proof
   =<  form
@@ -1994,19 +2052,11 @@
     |=  [=form parent-firstname=^hash]
     ^-  ?
     ?:  ?=([%full * * *] form)
-      =+  [ver=%full sc=* ax=@ mp=*]=form
-      =/  =spend-condition  sc
-      =/  mp=merk-proof:merkle  mp
-      =/  spend-firstname
-        (hash-hashable:tip5 [leaf+& hash+root.mp])
-      ?.  =(spend-firstname parent-firstname)
-        ~>  %slog.[0 'spend first name does not match parent note first name']
-        %.n
-      =/  leaf-hash  (hash:^spend-condition spend-condition)
-      (verify-merk-proof:merkle leaf-hash ax mp)
+      (check:lock-merkle-proof-full form parent-firstname)
     =+  [sc=* ax=@ mp=*]=form
     =/  =spend-condition  sc
     =/  mp=merk-proof:merkle  mp
+    ?~  spend-condition  %.n
     ?.  =(1 ax)
       ~>  %slog.[0 'stub lmp axis must be 1']
       %.n
@@ -2206,6 +2256,7 @@
 ::    .sig-hash: signature to be hashed for a spend
 ::    .witness: witness to spend conditions
 ::    .bythos-phase: height at which bythos activates (for full LMP gating)
+:::    .fund-minimum: optional configured recovery maturity at spending height
 ++  check-context
   =<  form
   |%
@@ -2215,6 +2266,7 @@
         sig-hash=hash
         =witness
         bythos-phase=page-number
+        fund-minimum=(unit page-number)
     ==
   ::
   ++  check
@@ -2228,7 +2280,7 @@
     ::  firstname); recover spendability by routing it to the true multisig
     ::  check. See /scripts/generate-fund-note-name.hoon.
     ?:  =(lock fund-note-firstname)
-      (check-multisig-lock protocol-fund-address form)
+      (check-fund-lock protocol-fund-address form)
     =/  bythos-ok=?
       ?:  ?=([%full * * *] lmp.witness.form)
         (gte now.form bythos-phase.form)
@@ -2256,6 +2308,15 @@
       ==
     ==
   ::
+  ++  check-fund-lock
+    |=  [target=hash =form]
+    ^-  ?
+    ?&
+      ?~  fund-minimum.form  %.y
+      (gte now.form (add since.form u.fund-minimum.form))
+      (check-multisig-lock target form)
+    ==
+  ::
   ::  +check-multisig-lock: spend rule for a note whose committed lock is an
   ::  unsatisfiable %pkh wrapper around a lock-root (the protocol-fund case --
   ::  see +fund-note-firstname). Rather than the note's own (broken) merkle
@@ -2276,11 +2337,12 @@
         msc
       =+  [msc ax mp]=lmp.witness.form
       msc
+    ?~  sc  %.n
     ?&
     ::  the revealed spend-condition must BE the spend-condition `target` commits
       =(target (hash:lock sc))
     ::  ...and the witness must satisfy it (e.g. 3 of the 4 fund signatures)
-      %+  levy  sc
+      %+  levy  `spend-condition`sc
       |=  p=lock-primitive
       ^-  ?
       ?-  -.p

@@ -108,6 +108,7 @@ RUST_LOG="${NODE_RUST_LOG:-info}" \
     --fakenet \
     --data-dir "$DATA_DIR" \
     --bind-private-grpc-port "$PRIV_PORT" \
+    --allow-unauthenticated-private-grpc \
     --fakenet-pow-len "$FAKENET_POW_LEN" \
     --fakenet-log-difficulty "$FAKENET_LOG_DIFF" \
     --no-default-peers \

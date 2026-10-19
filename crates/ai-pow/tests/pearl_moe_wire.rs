@@ -218,7 +218,7 @@ fn decode_rejects_dense_core() {
 }
 
 #[test]
-fn pearl_moe_exploit_wire_is_not_nockchain_statement_data() {
+fn pearl_moe_wire_is_not_nockchain_statement_data() {
     let core = moe_core(2, 1);
     let moe = moe_params(2, 0, 0);
     let pearl_wire = core.to_wire_bytes_moe(&moe).unwrap();

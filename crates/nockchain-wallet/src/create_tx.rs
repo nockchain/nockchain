@@ -6,6 +6,7 @@ use nockchain_math::zoon::zmap::ZMap;
 use nockchain_types::tx_engine::common::Signature;
 use nockvm::noun::NounSpace;
 use wallet_tx_builder::types::{CandidateNote, CreateTxPlanningMode, PlanResult};
+use wallet_tx_builder::FundMaturity;
 
 use super::*;
 
@@ -271,6 +272,43 @@ impl NounDecode for PlannerBlockchainConstantsNoun {
             coinbase_timelock_min,
         })
     }
+}
+
+/// Effective recovery policy for one explicit candidate height. Fund identity is
+/// immutable even when the configured recovery minimum changes.
+#[derive(Debug, Clone, NounEncode, NounDecode)]
+pub(crate) struct FundSpendPolicyNoun {
+    pub(crate) candidate_height: u64,
+    pub(crate) fund_lock_root: Hash,
+    pub(crate) fund_first_name: Hash,
+    pub(crate) minimum: Option<u64>,
+}
+
+pub(crate) fn fund_candidate_height(tip_height: u64) -> Result<u64, NockAppError> {
+    tip_height.checked_add(1).ok_or_else(|| {
+        NockAppError::OtherError("fund policy candidate height overflows snapshot tip".to_string())
+    })
+}
+
+pub(crate) fn decode_fund_spend_policy(
+    noun: &Noun,
+    space: &NounSpace,
+    candidate_height: u64,
+) -> Result<FundSpendPolicyNoun, NockAppError> {
+    let policy = Option::<Option<FundSpendPolicyNoun>>::from_noun(noun, space)?
+        .flatten()
+        .ok_or_else(|| {
+            NockAppError::OtherError(
+                "wallet fund-spend-policy peek returned no payload".to_string(),
+            )
+        })?;
+    if policy.candidate_height != candidate_height {
+        return Err(NockAppError::OtherError(format!(
+            "wallet fund-spend-policy height mismatch: requested {candidate_height}, returned {}",
+            policy.candidate_height
+        )));
+    }
+    Ok(policy)
 }
 
 #[derive(Debug, Clone, NounEncode, NounDecode, PartialEq, Eq)]
@@ -564,6 +602,7 @@ impl LockMatcher for SigningKeyLockMatcher {
                         source: LockResolutionSource::NoteData,
                         spend_condition: Some(spend_condition.clone()),
                         spend_condition_count: None,
+                        fund_maturity: None,
                     };
                 }
             }
@@ -576,6 +615,7 @@ impl LockMatcher for SigningKeyLockMatcher {
                     source: LockResolutionSource::ReconstructedSimplePkh,
                     spend_condition: Some(simple),
                     spend_condition_count: None,
+                    fund_maturity: None,
                 };
             }
         }
@@ -588,6 +628,7 @@ impl LockMatcher for SigningKeyLockMatcher {
                         source: LockResolutionSource::ReconstructedCoinbasePkh,
                         spend_condition: Some(coinbase),
                         spend_condition_count: None,
+                        fund_maturity: None,
                     };
                 }
             }
@@ -719,11 +760,34 @@ impl Wallet {
         Ok(constants)
     }
 
-    /// Normalizes signer key ordering and removes duplicates.
-    fn planner_signer_keys(mut signer_keys: Vec<Hash>) -> Vec<Hash> {
-        signer_keys.sort_by_key(Hash::to_array);
-        signer_keys.dedup_by(|left, right| left.to_array() == right.to_array());
-        signer_keys
+    /// Queries the policy for the normalized snapshot's next block, not the
+    /// wallet kernel's possibly different stored balance height.
+    pub(crate) async fn peek_fund_spend_policy(
+        &mut self,
+        candidate_height: u64,
+    ) -> Result<FundSpendPolicyNoun, NockAppError> {
+        let mut slab = NounSlab::new();
+        let path =
+            vec!["fund-spend-policy".to_string(), candidate_height.to_string()].to_noun(&mut slab);
+        slab.set_root(path);
+        let result = self.app.peek(slab).await?;
+        let space = result.noun_space();
+        unsafe { decode_fund_spend_policy(result.root(), &space, candidate_height) }
+    }
+
+    /// Remove duplicates while preserving CLI order. The kernel uses the
+    /// first explicit signer when choosing the create-tx sender.
+    fn planner_signer_keys(signer_keys: Vec<Hash>) -> Vec<Hash> {
+        let mut unique = Vec::with_capacity(signer_keys.len());
+        for signer in signer_keys {
+            if !unique
+                .iter()
+                .any(|existing: &Hash| existing.to_array() == signer.to_array())
+            {
+                unique.push(signer);
+            }
+        }
+        unique
     }
 
     /// Reads the master signer pubkey-hash from wallet tracked state.
@@ -744,28 +808,6 @@ impl Wallet {
         })
     }
 
-    /// Reads signer pubkey-hashes from wallet tracked state for lock matching.
-    async fn peek_signing_keys(&mut self) -> Result<Vec<Hash>, NockAppError> {
-        let signer_keys = self.peek_signing_keys_at_path("signing-keys").await?;
-        Ok(Self::planner_signer_keys(signer_keys))
-    }
-
-    async fn peek_signing_keys_at_path(
-        &mut self,
-        path_tag: &str,
-    ) -> Result<Vec<Hash>, NockAppError> {
-        let mut slab = NounSlab::new();
-        let tracked_tag = make_tas(&mut slab, path_tag).as_noun();
-        let path = T(&mut slab, &[tracked_tag, SIG]);
-        slab.set_root(path);
-
-        let result = self.app.peek(slab).await?;
-        let space = result.noun_space();
-        let maybe_signing_keys: Option<Option<Vec<Hash>>> =
-            unsafe { <Option<Option<Vec<Hash>>>>::from_noun(result.root(), &space)? };
-        Ok(maybe_signing_keys.flatten().unwrap_or_default())
-    }
-
     fn signer_pkh_from_active_signer(signer: &ActiveSignerEntryNoun) -> Result<Hash, NockAppError> {
         Hash::from_base58(&signer.address_b58).map_err(|err| {
             NockAppError::OtherError(format!(
@@ -775,63 +817,18 @@ impl Wallet {
         })
     }
 
-    async fn peek_active_signer_keys(&mut self) -> Result<Vec<Hash>, NockAppError> {
-        let mut signer_keys = Vec::new();
-        for signer in self.peek_active_signers().await? {
-            match Self::signer_pkh_from_active_signer(&signer) {
-                Ok(signer_pkh) => signer_keys.push(signer_pkh),
-                Err(err) => {
-                    warn!(
-                        "create-tx planner skipped active signer {} while resolving PKH signer keys: {}",
-                        signer.label(),
-                        err
-                    );
-                }
-            }
-        }
-        Ok(Self::planner_signer_keys(signer_keys))
-    }
-
     /// Resolves the planner's effective signer key set.
-    async fn resolve_planner_signer_keys(
+    pub(crate) async fn resolve_planner_signer_keys(
         &mut self,
         sign_keys: &[(u64, bool)],
     ) -> Result<Vec<Hash>, NockAppError> {
-        let mut signer_keys = match self.peek_signing_keys().await {
-            Ok(keys) => keys,
-            Err(err) => {
-                warn!(
-                    "create-tx planner could not read signing keys from wallet state: {}",
-                    err
-                );
-                Vec::new()
-            }
-        };
-
-        if signer_keys.is_empty() {
-            match self.peek_active_signer_keys().await {
-                Ok(keys) => signer_keys = keys,
-                Err(err) => {
-                    warn!(
-                        "create-tx planner could not read active signer entries from wallet state: {}",
-                        err
-                    );
-                }
-            }
+        // The wallet kernel defaults to the active master when --sign-key is
+        // absent. Do not plan a child-owned note that this default cannot sign.
+        if sign_keys.is_empty() {
+            return Ok(vec![self.resolve_master_signer_pkh(&[]).await?]);
         }
 
-        if signer_keys.is_empty() {
-            match self.peek_master_signing_key().await {
-                Ok(master_signer_pkh) => signer_keys.push(master_signer_pkh),
-                Err(err) => {
-                    warn!(
-                        "create-tx planner could not read master signing key from wallet state: {}",
-                        err
-                    );
-                }
-            }
-        }
-
+        let mut signer_keys = Vec::with_capacity(sign_keys.len());
         for &(index, hardened) in sign_keys {
             let (poke, _) = Self::derive_child(index, hardened, &None)?;
             let effects = self.app.poke(OnePunchWire::Poke.to_wire(), poke).await?;
@@ -1473,17 +1470,14 @@ impl Wallet {
         let signer_pkh_for_planner = if candidate_version_policy == CandidateVersionPolicy::V0Only {
             None
         } else {
-            let master_signer_pkh = match self.resolve_master_signer_pkh(&signer_keys).await {
-                Ok(key) => key,
-                Err(err) => {
-                    return planner_error(err.to_string());
-                }
+            let Some(effective_signer_pkh) = signer_keys.first().cloned() else {
+                return planner_error("wallet has no create-tx signer".to_string());
             };
             info!(
-                "create-tx planner master-signer-pkh={}",
-                master_signer_pkh.to_base58()
+                "create-tx planner effective-signer-pkh={}",
+                effective_signer_pkh.to_base58()
             );
-            Some(master_signer_pkh)
+            Some(effective_signer_pkh)
         };
         info!(
             "create-tx planner signer-keys entries={} signer-pkhs={:?}",
@@ -1569,6 +1563,22 @@ impl Wallet {
             coinbase_relative_min
         );
         let order_direction = Self::planner_order_direction(note_selection);
+        let fund_policy = if multisig_lock.is_some() {
+            let candidate_height = match fund_candidate_height((snapshot.metadata.height.0).0) {
+                Ok(height) => height,
+                Err(err) => return planner_error(err.to_string()),
+            };
+            match self.peek_fund_spend_policy(candidate_height).await {
+                Ok(policy) => Some(policy),
+                Err(err) => {
+                    return planner_error(format!(
+                        "unable to read fund spend policy from wallet state: {err}"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
 
         let request = PlanRequest {
             planning_mode: CreateTxPlanningMode::Standard,
@@ -1596,11 +1606,8 @@ impl Wallet {
         let plan_result = if let Some(ctx) = multisig_lock.as_ref() {
             // Multisig spend: resolve inputs by the multisig lock-root's first-name
             // and carry the reconstructed spend-condition for fee/witness planning.
-            // Also accept protocol-fund coinbase notes, whose committed lock wraps
-            // the multisig lock-root in `[%pkh m=1 {lock_root}]` plus the coinbase
-            // relative timelock before the first-name is taken (the on-chain notes
-            // share `+fund-note-firstname`, not `from_lock_root(lock_root)`). This
-            // mirrors the `+check:check-context` routing to `+check-multisig-lock`.
+            // Historical fund notes use the authoritative pinned first-name.
+            // Recovery maturity is separate from the bare multisig reveal.
             let matcher = match LockRootLockMatcher::from_lock_root(&ctx.lock_root) {
                 Ok(matcher) => matcher.with_spend_condition(ctx.spend_condition.clone()),
                 Err(err) => {
@@ -1610,15 +1617,17 @@ impl Wallet {
                     ));
                 }
             };
-            let matcher = match matcher.with_coinbase_fund_notes(coinbase_relative_min) {
-                Ok(matcher) => matcher,
-                Err(err) => {
-                    return planner_error(format!(
-                        "unable to derive coinbase fund first-name for multisig lock root {}: {err}",
-                        ctx.lock_root.to_base58()
-                    ));
-                }
-            };
+            let policy = fund_policy
+                .as_ref()
+                .expect("multisig planning requires a fetched fund policy");
+            let matcher = matcher.with_fund_notes(
+                &policy.fund_lock_root,
+                &policy.fund_first_name,
+                FundMaturity {
+                    candidate_height: policy.candidate_height,
+                    minimum: policy.minimum,
+                },
+            );
             info!(
                 "create-multisig-tx planner using multisig lock-root={} threshold={} participants={}",
                 ctx.lock_root.to_base58(),

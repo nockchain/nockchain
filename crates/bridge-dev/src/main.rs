@@ -1414,8 +1414,11 @@ async fn run_up(
         )
         .await?,
     );
-    wait_for_port(SocketTarget::PrivateNodeGrpc, Duration::from_secs(20)).await?;
-    wait_for_private_node_blockchain_constants(NODE_STARTUP_TIMEOUT).await?;
+    wait_for_node_ready(
+        children.last_mut().context("node child missing")?,
+        NODE_STARTUP_TIMEOUT,
+    )
+    .await?;
     for (node_id, config_path) in bridge_configs.bridge_paths.iter().enumerate() {
         children.push(spawn_bridge(
             &paths, node_id, config_path, needs_fresh_state, args.start,
@@ -3038,6 +3041,17 @@ async fn spawn_node(
         args.push("--fakenet-bythos-phase".to_string());
         args.push(bythos_phase.to_string());
     }
+    // Only credential/policy-free single-user development launches opt out.
+    // Supplied values, even empty ones, remain authoritative.
+    if [
+        "NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN", "NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN",
+        "NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC",
+    ]
+    .iter()
+    .all(|name| std::env::var_os(name).is_none())
+    {
+        args.push("--allow-unauthenticated-private-grpc".to_string());
+    }
     if fresh_state {
         args.insert(0, "--new".to_string());
     }
@@ -3271,14 +3285,24 @@ async fn update_component(
                     stop_managed_child(&mut children[index]).await?;
                 }
                 children[index] = spawn_component(paths, manifest, target, false, true).await?;
-                wait_for_component(target, component_startup_timeout(target)).await?;
+                wait_for_component(
+                    target,
+                    component_startup_timeout(target),
+                    &mut children[index],
+                )
+                .await?;
                 children[index].status()
             }
         }
         ComponentAction::Restart => {
             stop_managed_child(&mut children[index]).await?;
             children[index] = spawn_component(paths, manifest, target, false, true).await?;
-            wait_for_component(target, component_startup_timeout(target)).await?;
+            wait_for_component(
+                target,
+                component_startup_timeout(target),
+                &mut children[index],
+            )
+            .await?;
             children[index].status()
         }
     }
@@ -3437,18 +3461,8 @@ async fn wait_for_children_exit(children: &mut [ManagedChild], timeout: Duration
     }
 }
 
-enum SocketTarget {
-    PrivateNodeGrpc,
-    BridgeIngress(usize),
-}
-
-async fn wait_for_port(target: SocketTarget, timeout: Duration) -> Result<()> {
-    let addr = match target {
-        SocketTarget::PrivateNodeGrpc => node_private_grpc_addr()?,
-        SocketTarget::BridgeIngress(node_id) => {
-            format!("127.0.0.1:{}", bridge_ingress_port(node_id)?)
-        }
-    };
+async fn wait_for_bridge_port(node_id: usize, timeout: Duration) -> Result<()> {
+    let addr = format!("127.0.0.1:{}", bridge_ingress_port(node_id)?);
     let deadline = Instant::now() + timeout;
     loop {
         match TcpStream::connect(&addr).await {
@@ -3457,6 +3471,21 @@ async fn wait_for_port(target: SocketTarget, timeout: Duration) -> Result<()> {
             Err(err) => {
                 return Err(err).with_context(|| format!("timed out waiting for {addr}"));
             }
+        }
+    }
+}
+
+async fn wait_for_node_ready(child: &mut ManagedChild, timeout: Duration) -> Result<()> {
+    // Authentication and a successful kernel Peek, not an open TCP port, define
+    // readiness. Configuration failure must not wait out the startup deadline.
+    tokio::select! {
+        result = wait_for_private_node_blockchain_constants(timeout) => result,
+        status = child.child.wait() => {
+            bail!(
+                "node exited before private gRPC readiness ({}); see {}",
+                status?,
+                child.stderr_log.display(),
+            )
         }
     }
 }
@@ -3479,12 +3508,14 @@ async fn wait_for_private_node_blockchain_constants(timeout: Duration) -> Result
     }
 }
 
-async fn wait_for_component(target: ComponentTarget, timeout: Duration) -> Result<()> {
+async fn wait_for_component(
+    target: ComponentTarget,
+    timeout: Duration,
+    child: &mut ManagedChild,
+) -> Result<()> {
     match target {
-        ComponentTarget::Node => wait_for_port(SocketTarget::PrivateNodeGrpc, timeout).await,
-        ComponentTarget::Bridge(node_id) => {
-            wait_for_port(SocketTarget::BridgeIngress(node_id), timeout).await
-        }
+        ComponentTarget::Node => wait_for_node_ready(child, timeout).await,
+        ComponentTarget::Bridge(node_id) => wait_for_bridge_port(node_id, timeout).await,
     }
 }
 

@@ -17,47 +17,52 @@
 ~%  %dumb-inner-lib  ..ut  ~
 |%
 ++  moat  (keep kernel-state:dk)
-::  Recheck retained post-cutover history on every boot. The preceding load
-::  repair discards side branches; this also audits any page retained by a
-::  future repair policy. There is no local rollback or implicit fresh state.
-++  check-hardened-history
-  |=  k=kernel-state:dk
+::  Reconstruct branch-local ASERT metadata from accepted pages.
+++  reconstruct-asert-caches
+  |=  [migrating=? k=kernel-state:dk]
   ^-  kernel-state:dk
   =/  t  ~(. c-transact constants.k)
-  ::  A saved suffix can carry pre-reset ASERT caches. Validate parents first
-  ::  and rebuild their derived lineage before checking each child.
+  ::  Migrations derive earlier metadata; current state keeps earlier caches.
+  ::  Seed scheduled predecessors before propagating their child caches.
   =/  pages=(list [block-id:t local-page:t])
     %-  sort
     :_  |=  [a=[block-id:t local-page:t] b=[block-id:t local-page:t]]
         (lth ~(height get:local-page:t +.a) ~(height get:local-page:t +.b))
+    ?:  migrating
+      ~(tap h-by blocks.c.k)
     %+  skim  ~(tap h-by blocks.c.k)
     |=  entry=[block-id:t local-page:t]
     (gte ~(height get:local-page:t +.entry) (dec harden-phase:page:t))
   |-
   ?~  pages  k
   =/  pag=page:t  (to-page:local-page:t +.i.pages)
-  ::  The predecessor may still cache the old schedule's anchor timestamp.
-  ::  Seed the new anchor even when no post-cutover block has been stored yet.
-  ?:  (lth ~(height get:page:t pag) harden-phase:page:t)
-    =.  c.k
-      (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %zk pag)
-    =.  c.k
-      (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %ai pag)
-    $(pages t.pages)
+  =/  height=@  ~(height get:page:t pag)
   =/  con  ~(. dumb-consensus c.k d.k constants.k)
-  =/  header-valid
-    (validate-page-without-txs:con pag ~(timestamp get:page:t pag))
-  ?.  ?&  -.header-valid
-          (verify-page-pow constants.k pag 0)
+  =/  zk-anchor=(unit asert-anchor:dumb-consensus)
+    (active-asert-anchor:con %zk +(height))
+  =/  ai-anchor=(unit asert-anchor:dumb-consensus)
+    (active-asert-anchor:con %ai +(height))
+  =?  c.k
+      ?&  ?=(^ zk-anchor)
+          (gte height (dec activation-height.u.zk-anchor))
       ==
-    ~&  hardening-load-rejected-block+-.i.pages
-    ~|  'load: Incompatible post-hardening history; preserving state. Restore a pre-cutover archive and replay with this release.'
-    !!
-  =.  c.k
     (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %zk pag)
-  =.  c.k
+  =?  c.k
+      ?&  ?=(^ ai-anchor)
+          (gte height (dec activation-height.u.ai-anchor))
+      ==
     (~(update-asert-anchor-min-timestamps dumb-consensus c.k d.k constants.k) %ai pag)
-  =.  d.k
+  ?:  ?|  =(height 0)
+          (lth height ai-pow-activation-height.constants.k)
+      ==
+    $(pages t.pages)
+  =/  bid=block-id:t  ~(digest get:page:t pag)
+  =?  block-versions.c.k  ?!((~(has h-by block-versions.c.k) bid))
+    (~(put h-by block-versions.c.k) bid (pow-artifact-to-proof-version:con (need ~(pow get:page:t pag))))
+  =?  d.k
+      ?|  (gte height harden-phase:page:t)
+          ?!((~(has h-by puzzle-asert-states.d.k) bid))
+      ==
     (~(update-puzzle-asert-state dumb-derived d.k constants.k) c.k pag)
   $(pages t.pages)
 ::
@@ -101,7 +106,6 @@
   ==
 ::
   ++  check-pow-puzzle
-    ~/  %check-pow-puzzle
     |=  [pow=proof:sp pag=page:t]
     ^-  ?
     ?:  =((lent objects.pow) 0)
@@ -139,12 +143,13 @@
     ::  each stage is named before it runs so that the %bout durations, which
     ::  print unlabelled, are attributable
     ~>  %slog.[0 'load: begin']
+    =/  migrating=?  ?!(?=(%12 -.arg))
     =/  ks=kernel-state:dk
       ~>  %slog.[0 'load: [1/5] state-n-to-12: migrating state to version 12']
       ~>  %bout  (state-n-to-12 arg)
     =.  ks
-      ~>  %slog.[0 'load: [2/5] check-checkpoints: verifying checkpointed digests']
-      ~>  %bout  (check-checkpoints ks)
+      ~>  %slog.[0 'load: [2/5] check-chain-storage: checking chain storage']
+      ~>  %bout  (check-chain-storage ks)
     =.  k
       ~>  %slog.[0 'load: [3/5] update-constants']
       ~>  %bout  (update-constants ks)
@@ -152,16 +157,15 @@
       ~>  %slog.[0 'load: [4/5] check-and-repair: validating consensus state']
       ~>  %bout  check-and-repair:con
     =/  repaired=[consensus-state:dk derived-state:dk]
-      ~>  %slog.[0 'load: [5/5] repair-orphaned-claims: releasing txs stranded by past reorgs']
+      ~>  %slog.[0 'load: [5/5] repair-orphaned-claims: reconciling orphan transaction claims']
       ~>  %bout  repair-orphaned-claims:con
     =.  c.k  -.repaired
     =.  d.k  +.repaired
     ::  Require fresh admission for pending headers after every load, using
     ::  normal pending rejection to release their dependencies.
     =.  c.k  discard-pending-blocks:con
-    ::  Stored admission and mining work must use this executable's rules,
-    ::  even when the persisted schema was already %12.
-    =.  k  (check-hardened-history k)
+    ::  Refresh derived schedules and lineage while preserving accepted pages.
+    =.  k  (reconstruct-asert-caches migrating k)
     =.  m.k  m.k(candidate-block *page:t, candidate-acc *tx-acc:t)
     =.  m.k  (rebuild-mining-candidate c.k d.k m.k constants.k)
     ~|  %v1-phase-must-be-lte-zk-asert-phase
@@ -216,8 +220,8 @@
         ==
       arg
     ::
-    ::  State 11 applies Zoe's proof and ASERT cutover. A version-10 state
-    ::  can be preserved only before that cutover with readable anchor data.
+    ::  State 10 retains the pages and median timestamps needed to derive the
+    ::  current caches. Require readable accepted state, not a policy height.
     ++  state-10-to-11
       |=  arg=kernel-state-10:dk
       ^-  kernel-state-11:dk
@@ -242,28 +246,11 @@
       =/  accepted-state-readable=?
         ?~  heaviest-block.c.arg  %.y
         ?=(^ accepted-tip-height)
-      =/  crossed-zoe=?
-        ?~  accepted-tip-height  %.n
-        (gte u.accepted-tip-height proof-version-3-start:con)
       =/  min-timestamp-ready=?
         ?~  heaviest-block.c.arg  %.y
         (~(has h-by min-timestamps.c.arg) u.heaviest-block.c.arg)
-      =/  dynamic-cache-ready=?
-        ?~  accepted-tip-height  %.y
-        ?:  (lth u.accepted-tip-height asert-phase.constants.arg)
-          %.y
-        =/  timestamps=(unit (h-map block-id:t @))
-          (~(get by asert-anchor-min-timestamps.c.arg) %zk)
-        ?~  timestamps  %.n
-        (~(has h-by u.timestamps) (need heaviest-block.c.arg))
-      =/  before-ai=?
-        ?~  accepted-tip-height  %.y
-        (lth u.accepted-tip-height ai-pow-activation-height.current-constants)
       ?:  ?&  accepted-state-readable
-              !crossed-zoe
               min-timestamp-ready
-              dynamic-cache-ready
-              before-ai
           ==
         upgraded
       ~|  'load: Version-10 state cannot be migrated safely; preserving checkpoint and refusing to boot'
@@ -332,8 +319,8 @@
           half-life.zk-asert.current
           anchor-min-timestamp.zk-asert.current
       ==
-    ::  State 12 records proof and per-puzzle metadata. Valid state 11 is
-    ::  represented by the version-12 schema without reapplying Zoe's boundary.
+    ::  State 12 records proof and per-puzzle metadata. The load pipeline
+    ::  derives those caches after storage recovery and rebuilds mining work.
     ++  state-11-to-12
       |=  zoe=kernel-state-11:dk
       ^-  kernel-state-12:dk
@@ -369,7 +356,7 @@
             d=new-d
             constants=constants.zoe
         ==
-      upgraded(m (rebuild-mining-candidate c.upgraded d.upgraded m.upgraded constants.zoe))
+      upgraded
     ::
     ::  upgrade kernel state 9 to kernel state 10 with typed dynamic anchor timestamps
     ++  state-9-to-10
@@ -744,11 +731,9 @@
       =.  pending-blocks.c  (~(del h-by pending-blocks.c) ~(digest get:page:t pag))
       c
     ::
-    ++  check-checkpoints
+    ++  check-chain-storage
       |=  arg=kernel-state:dk
-      ::  Validation failures abort +load instead of returning a fresh state.
-      ::  NockApp installs the new root only after +load succeeds, so this
-      ::  preserves the checkpoint for explicit operator recovery.
+      ::  Reject unreadable or partial chain storage without replacing it.
       =/  chain-empty=?
         ?&  =(~ heaviest-block.c.arg)
             =(0 ~(wyt h-by blocks.c.arg))
@@ -756,14 +741,11 @@
             =(0 ~(wyt z-by heaviest-chain.d.arg))
         ==
       =/  mainnet=(unit ?)  (~(is-mainnet dumb-derived d.arg constants.arg) c.arg)
-      ~&  check-checkpoints-mainnet+mainnet
       ?~  mainnet
         ?:  chain-empty
           arg
         ~|  'load: Ambiguous nonempty chain has no network identity; preserving state and refusing to boot'
         !!
-      =/  arg-t  ~(. c-transact constants.arg)
-      =/  require-stored-proof=?  ?|(u.mainnet check-pow-flag:arg-t)
       =/  genesis-id  (~(get z-by heaviest-chain.d.arg) 0)
       ?~  genesis-id
         ::  A born node may restart while it is still waiting for genesis.
@@ -787,60 +769,8 @@
       =/  indexed-tip  (~(get z-by heaviest-chain.d.arg) tip-height)
       ?.  ?&  ?=(^ indexed-tip)
               =(u.indexed-tip u.tip-id)
-              %-  persisted-page-valid:con
-              [require-stored-proof tip-height u.tip-id tip-page]
           ==
-        ~|  'load: Invalid stored heaviest block proof; preserving state and refusing to boot'
-        !!
-      ::  Every pinned checkpoint at or below the tip must have both its
-      ::  expected ID and a canonical stored proof envelope.  ID-only checks
-      ::  cannot detect legacy proof-version or stream-bookkeeping retags.
-      =/  checkpoints-valid=?
-        ::  Custom networks have no realnet checkpoint IDs, but they still run
-        ::  the generic tip and Zoe activation-page audits below.
-        ?.  u.mainnet
-          %.y
-        =/  checkpoints  ~(tap z-by checkpointed-digests:con)
-        |-
-        ?~  checkpoints  %.y
-        =/  checkpoint-height=page-number:t  -.i.checkpoints
-        ?:  (gth checkpoint-height tip-height)
-          $(checkpoints t.checkpoints)
-        =/  expected-id=block-id:t  +.i.checkpoints
-        =/  checkpoint-id
-          (~(get z-by heaviest-chain.d.arg) checkpoint-height)
-        ?~  checkpoint-id  %.n
-        =/  checkpoint-local  (~(get h-by blocks.c.arg) u.checkpoint-id)
-        ?~  checkpoint-local  %.n
-        ?.  ?&  =(u.checkpoint-id expected-id)
-                %-  checkpoint-page-valid:con
-                [checkpoint-height expected-id (to-page:local-page:t u.checkpoint-local)]
-            ==
-          %.n
-        $(checkpoints t.checkpoints)
-      ?.  checkpoints-valid
-        ~|  'load: Invalid or missing checkpoint page; preserving state and refusing to boot'
-        !!
-      ::  A node upgraded from pre-Zoe software may already have accepted %2
-      ::  pages at the %3 boundary.  Audit the boundary page whenever the tip
-      ::  has crossed it; auditing the tip above also catches the ordinary
-      ::  old-software chain, whose whole post-boundary suffix is %2.
-      =/  activation-valid=?
-        ?:  (lth tip-height proof-version-3-start:con)
-          %.y
-        =/  activation-id
-          (~(get z-by heaviest-chain.d.arg) proof-version-3-start:con)
-        ?~  activation-id  %.n
-        =/  activation-local  (~(get h-by blocks.c.arg) u.activation-id)
-        ?~  activation-local  %.n
-        %-  persisted-page-valid:con
-        :*  require-stored-proof
-            proof-version-3-start:con
-            u.activation-id
-            (to-page:local-page:t u.activation-local)
-        ==
-      ?.  activation-valid
-        ~|  'load: Invalid Zoe activation page; preserving state and refusing to boot'
+        ~|  'load: Heaviest block index is inconsistent; preserving state and refusing to boot'
         !!
       arg
     --
@@ -1018,14 +948,14 @@
       ^-  (unit (unit (z-map nname:t nnote:t)))
       :-  ~
       %+  bind
-      %-  ~(get h-by balance.c.k)
+      %-  get-block-balance:con
       (from-b58:hash:t bid.pole)
       hz-molt
     ::
         [%h-balance bid=@ ~]
       ^-  (unit (unit (h-map nname:t nnote:t)))
       :-  ~
-      %-  ~(get h-by balance.c.k)
+      %-  get-block-balance:con
       (from-b58:hash:t bid.pole)
     ::
         [%heaviest-block ~]
@@ -1044,7 +974,7 @@
         [~ ~]
       :-  ~
       %+  bind
-      %-  ~(get h-by balance.c.k)
+      %-  get-block-balance:con
       u.heaviest-block.c.k
       hz-molt
     ::
@@ -1055,7 +985,7 @@
       ?.  (~(has h-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
       :-  ~
-      %-  ~(get h-by balance.c.k)
+      %-  get-block-balance:con
       u.heaviest-block.c.k
     ::
         [%balance-by-first-name first-name=@t ~]
@@ -1065,7 +995,7 @@
         [~ ~]
       ?~  lp=(~(get h-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
-      ?~  bal=(~(get h-by balance.c.k) u.heaviest-block.c.k)
+      ?~  bal=(get-block-balance:con u.heaviest-block.c.k)
         [~ ~]
       %-  some
       %-  some
@@ -1084,7 +1014,7 @@
         [~ ~]
       ?~  lp=(~(get h-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
-      ?~  bal=(~(get h-by balance.c.k) u.heaviest-block.c.k)
+      ?~  bal=(get-block-balance:con u.heaviest-block.c.k)
         [~ ~]
       %-  some
       %-  some
@@ -1400,7 +1330,7 @@
         ?:  %+  compare-heaviness:page:t  pag
             (~(got h-by blocks.c.k) (need heaviest-block.c.k))
           ~>  %slog.[0 'heard-block: Gossiping new heaviest block (transactions pending validation)']
-          :-  [%gossip %0 %heard-block pag]
+          :-  [%gossip (gossip-context-for wir %pending-head) %0 %heard-block pag]
           block-effs
         block-effs
       ::
@@ -1599,15 +1529,8 @@
         :_  k
         [(liar-effect wir %raw-tx-not-based)]~
       ::
-      ::  reject transactions too large to ever fit in a block. this closes
-      ::  the pre-packing / block-creation asymmetry: mempool acceptance did
-      ::  not bound tx size, so an oversize tx passed here, was gossiped, and
-      ::  then could never be mined -- consensus +check-size rejected any
-      ::  block that included it. we mirror that accounting here (a block is
-      ::  +compute-size-without-txs plus the size of every included tx) using
-      ::  an empty page as the block-overhead floor, so a tx that would not
-      ::  fit even in an otherwise-empty block is discarded on receipt rather
-      ::  than propagated.
+      ::  Mempool admission includes the empty-page overhead in the transaction
+      ::  size and rejects transactions that cannot fit within max-block-size.
       =/  tx-size=@  ~(size get:raw-tx:t raw)
       ?:  %+  gth
             (add tx-size (compute-size-without-txs:page:t *page:t))
@@ -1630,6 +1553,29 @@
         ~>  %slog.[1 log-message]
         :_  k
         [(liar-effect wir %tx-id-invalid)]~
+      ?.  (valid-stub-axes:raw-tx:t raw)
+        `k
+      =/  body-valid=?
+        ?^  -.raw
+          (validate:raw-tx:t raw)
+        ::  Basedness and ID were checked above; validate the v1 spends once.
+        (validate:spends:v1:t spends.raw)
+      ?.  body-valid
+        ~>  %slog.[1 'heard-tx: Transaction invalid, discarding']
+        `k
+      =/  cand-height=page-number:t
+        +(get-cur-height:con)
+      ::  Merged output sources depend only on the body's seeds, not the
+      ::  input balance, activation height, or output origin-page.
+      =/  outputs-valid=?
+        ?^  -.raw
+          %.y
+        =/  built=tx:t  (new:tx:t raw cand-height)
+        (validate:outputs:t ~(outputs get:tx:t built))
+      ?.  outputs-valid
+        ~>  %slog.[1 'heard-tx: Transaction outputs invalid, discarding']
+        `k
+      ::
       =/  id-b58  (to-b58:hash:t computed-id)
       ~>  %slog.[0 (cat 3 'heard-tx: Raw transaction id: ' id-b58)]
       ::
@@ -1652,7 +1598,7 @@
           [%seen %tx computed-id]~
         :_  k
         ?.  re-gossip  seen
-        [[%gossip %0 %heard-tx raw] seen]
+        [[%gossip [%local %local-resend ~] %0 %heard-tx raw] seen]
       ::
       ::  v0 transactions are unmineable when the next candidate height is
       ::  at/after the v1 cutover (tx-acc rejects them with
@@ -1681,23 +1627,7 @@
       ::
       ?:  (needed-by-block:con ~(id get:raw-tx:t raw))
         ::  pending blocks are waiting on tx
-        ?.  (validate:raw-tx:t raw)
-          ::  raw-tx doesn't validate.
-          ::  remove blocks containing bad tx from pending state. note that since
-          ::  we already checked that the id of the transaction was valid, we
-          ::  won't accidentally throw out a block that contained a valid tx-id
-          ::  just because we received a tx that claimed the same id as the valid
-          ::  one.
-          =/  tx-pending-blocks  (~(get h-ju blocks-needed-by.c.k) ~(id get:raw-tx:t raw))
-          =.  c.k
-            %-  ~(rep h-in tx-pending-blocks)
-            |=  [id=block-id:t c=_c.k]
-            =.  c.k  c
-            (reject-pending-block:con id)
-          ::
-          ~>  %slog.[1 'heard-tx: Pending blocks waiting on invalid transaction!']
-          :_  k
-          [(liar-effect wir %page-pending-raw-tx-invalid) ~]
+        ::  Body-local validation precedes all shared-ID state changes.
         =^  work  c.k  (add-raw-tx:con raw)
         ~>  %slog.[0 'heard-tx: Processing ready blocks']
         (process-ready-blocks now eny work raw)
@@ -1716,12 +1646,6 @@
         ~>  %slog.[1 'heard-tx: Inputs present in spent-by, discarding transaction']
         `k
       ::  inputs not present in spent-by
-      ?.  (validate:raw-tx:t raw)
-        ::  raw-tx doesn't validate.
-        ~>  %slog.[1 'heard-tx: Transaction invalid, discarding']
-        :_  k
-        [(liar-effect wir %tx-inputs-not-in-spent-by-and-invalid)]~
-      ::
       ::  for v1 transactions, validate against current context so
       ::  timelocks and lock requirements are enforced at receipt
       =/  ctx-valid=(reason:t ~)
@@ -1730,7 +1654,7 @@
         %-  validate-with-context:spends:t
         :*  get-cur-balance:con
             spends.raw
-            get-cur-height:con
+            cand-height
             max-size.data.constants.k
             bythos-phase.constants.k
         ==
@@ -1738,25 +1662,13 @@
         ~>  %slog.[1 (cat 3 'heard-tx: Transaction context invalid: ' +.ctx-valid)]
         `k
       ::
-      ::  Validate merged v1 outputs before admitting the transaction. Build
-      ::  them as the miner does; output validation does not use origin-page.
-      =/  cand-height=page-number:t
-        +(get-cur-height:con)
-      =/  built=tx:t  (new:tx:t raw cand-height)
-      =/  outputs-valid=?
-        ?^  -.raw
-          %.y
-        (validate:outputs:t ~(outputs get:tx:t built))
-      ?.  outputs-valid
-        ~>  %slog.[1 'heard-tx: Transaction outputs invalid, discarding']
-        `k
       =^  work  c.k
         (add-raw-tx:con raw)
       :: no blocks were depending on this so work should be empty
       ?>  =(~ work)
       ::
       ~>  %slog.[0 'heard-tx: Heard new valid transaction']
-      :-  ~[[%seen %tx ~(id get:raw-tx:t raw)] [%gossip %0 %heard-tx raw]]
+      :-  ~[[%seen %tx ~(id get:raw-tx:t raw)] [%gossip (gossip-context-for wir %initial-acceptance) %0 %heard-tx raw]]
       k
     ::
     ::  +process-ready-blocks: process blocks no longer waitings on txs
@@ -1894,7 +1806,7 @@
               'heaviest_block_digest'^s+(to-b58:hash:t ~(digest get:page:t pag))
               'block_target'^s+(scot %ux (merge:bignum:t ~(target get:page:t pag)))
           ==
-        :*  [%gossip %0 %heard-block pag]
+        :*  [%gossip [%chain %new-head ~] %0 %heard-block pag]
             span
             effs
         ==
@@ -1939,17 +1851,9 @@
       ::  site reads d.k -- so it is safe to hoist.
       =.  d.k  (update:der c.k pag)
       ::
-      ::  The reorg above abandoned the branch ending at .old-heavy. Hand that
-      ::  branch's transactions back to the mempool. +accept-block claimed every
-      ::  tx for the block that carried it, and until now nothing ever released
-      ::  an ACCEPTED block's claim (only +reject-pending-block, for pending
-      ::  ones) -- so every tx on an orphaned branch was stranded for good:
-      ::  invisible to the miner, never re-gossiped, never garbage collected,
-      ::  and with its inputs pinned in spent-by so no replacement tx could
-      ::  spend those notes either. Releasing here (rather than waiting for
-      ::  +sweep-orphan-blocks) is what makes an orphaned tx promptly mineable
-      ::  again. The blocks themselves stay in .blocks until the sweep retires
-      ::  them, so a chain that reorgs back is unaffected.
+      ::  On reorg, release the abandoned branch's transaction claims against
+      ::  the updated canonical index. Unclaimed retained transactions return
+      ::  to the mempool; accepted block records remain available for a reorg back.
       =?  c.k  is-reorg
         ?~  old-heavy  c.k
         (release-orphaned-branch:con u.old-heavy heaviest-chain.d.k)
@@ -2016,6 +1920,17 @@
         ~|  'liar-effect: ATTN: received an unknown bad poke!'
         !!
       ==
+    ::
+    ::  Context belongs to this effect, not to the retained transaction.
+    ++  gossip-context-for
+      |=  [wir=wire phase=gossip-phase:dk]
+      ^-  gossip-context:dk
+      =/  source=(unit peer-id:dk)  (get-peer-id wir)
+      ?~  source
+        ?:  (local-tx-submission wir)
+          [%local phase ~]
+        [%kernel phase ~]
+      [%peer phase source]
     ::
     ++  get-peer-id
       ~/  %get-peer-id
@@ -2420,7 +2335,7 @@
       %-  ~(rep h-in excluded-txs.c.k)
       |=  [=tx-id:t effects=(list effect:dk)]
       ^-  (list effect:dk)
-      [[%gossip %0 %heard-tx (got-raw-tx:con tx-id)] effects]
+      [[%gossip [%chain %new-head ~] %0 %heard-tx (got-raw-tx:con tx-id)] effects]
     ::
     ::  only if mining: re-gossip transactions included in block when block is fully validated
     ::  transactions can be absent after candidate filtering or block acceptance
@@ -2434,7 +2349,7 @@
       ^-  (list effect:dk)
       =/  tx  (~(get h-by raw-txs.c.k) tx-id)
       ?~  tx  effects
-      =/  fec=effect:dk  [%gossip %0 %heard-tx raw-tx.u.tx]
+      =/  fec=effect:dk  [%gossip [%mining %mining-regossip ~] %0 %heard-tx raw-tx.u.tx]
       [fec effects]
     ::
     ::  only if mining: regossip transactions included in candidate block

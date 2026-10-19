@@ -237,6 +237,15 @@ where
     fn op_type(&self) -> NpoTypeId {
         NpoTypeId::tip5_perm(Tip5Config::GOLDILOCKS_W16)
     }
+
+    fn plan_table_entry(
+        &self,
+        logical_ops: usize,
+        packing: &TablePacking,
+    ) -> Result<NonPrimitiveTableEntry<SC>, String> {
+        <Tip5Prover as TableProver<SC>>::plan_table_entry(&self.0, logical_ops, packing)
+    }
+
     delegate_instance!(batch_instance_d1, Val<SC>, 1);
     delegate_instance!(batch_instance_d2, BinomialExtensionField<Val<SC>, 2>, 2);
     delegate_instance!(batch_instance_d4, BinomialExtensionField<Val<SC>, 4>, 4);

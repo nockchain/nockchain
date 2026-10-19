@@ -5,7 +5,7 @@
 //! | Family | AIR | Prover | Use |
 //! |---|---|---|---|
 //! | [`composite_prove`] / [`composite_verify`] | `CompositeFullAir` (unpinned) | uni-stark | unit / constraint-logic dev only — **not sound for PoW** (a prover can zero selectors) |
-//! | [`composite_prove_pinned`] / [`composite_verify_pinned`] / [`composite_verify_pow_pinned`] | `CompositeFullAirPinned` | uni-stark | program-pinned, **no LogUp**. Lighter; backs the `crit1_*` / `high2_*` constraint-logic regression suite. Not the production path (matmul reads unbound). |
+//! | [`composite_prove_pinned`] / [`composite_verify_pinned`] / [`composite_verify_pow_pinned`] | `CompositeFullAirPinned` | uni-stark | program-pinned, **no LogUp**. Constraint-logic tests only; not the production path (matmul reads unbound). |
 //! | [`composite_prove_pinned_logup`] / [`composite_verify_pinned_logup`] / [`composite_verify_pow_pinned_logup`] | `CompositeFullAirWithLookupsPinned` | **batch-stark** | Layer-0 Route A. The canonical-program pin **and** the `noised_packed`/range/i8u8/cv-routing LogUp enforced in one proof. Used by [`ai-pow::zk_bridge`] and as the inner proof for the recursive certificate. ≈1.23x the uni-stark pinned cost. |
 //!
 //! New Layer-0 callers should use the **`*_pinned_logup`** family.
@@ -256,8 +256,7 @@ pub fn composite_setup(
         .expect("CompositeFullAirPinned always has preprocessed columns")
 }
 
-/// Program-pinned prove (uni-stark, **no LogUp** — lighter
-/// variant + the `crit1_*`/`high2_*` constraint-logic harness).
+/// Program-pinned prove (uni-stark, **no LogUp**) for constraint-logic tests.
 /// **Production should call [`composite_prove_pinned_logup`]**
 /// (Route A) so the `noised_packed` matrix binding is enforced.
 ///
@@ -377,9 +376,32 @@ pub fn composite_prove_pinned_logup_sx(
 
 pub fn composite_prove_pinned_logup_sx_with_common(
     config: &AiPowStarkConfig,
+    trace: CompositeTrace,
+    public_inputs: &CompositePublicInputs,
+    sx_bound: bool,
+) -> (
+    p3_batch_stark::BatchProof<AiPowStarkConfig>,
+    Program,
+    p3_batch_stark::CommonData<AiPowStarkConfig>,
+) {
+    #[cfg(any(test, feature = "test-support"))]
+    let hook = POST_POPULATE_HOOK.with(|h| h.borrow().clone());
+    crate::runtime::install(move || {
+        composite_prove_pinned_logup_sx_with_common_impl(
+            config, trace, public_inputs, sx_bound,
+            #[cfg(any(test, feature = "test-support"))]
+            hook,
+        )
+    })
+}
+
+#[inline(never)]
+fn composite_prove_pinned_logup_sx_with_common_impl(
+    config: &AiPowStarkConfig,
     mut trace: CompositeTrace,
     public_inputs: &CompositePublicInputs,
     sx_bound: bool,
+    #[cfg(any(test, feature = "test-support"))] hook: Option<PostPopulateHook>,
 ) -> (
     p3_batch_stark::BatchProof<AiPowStarkConfig>,
     Program,
@@ -393,11 +415,9 @@ pub fn composite_prove_pinned_logup_sx_with_common(
     // free witness columns (e.g. lookup frequency cells) after the honest
     // population, without touching the proving algorithm itself.
     #[cfg(any(test, feature = "test-support"))]
-    POST_POPULATE_HOOK.with(|h| {
-        if let Some(f) = h.borrow().as_ref() {
-            f(&mut trace);
-        }
-    });
+    if let Some(f) = hook {
+        f(&mut trace);
+    }
     let program = extract_program(&trace.matrix);
     let air =
         crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with_rules(
@@ -430,6 +450,16 @@ pub(crate) fn logup_common_for(
 }
 
 pub(crate) fn logup_common_for_with_rules(
+    config: &AiPowStarkConfig,
+    program: &Program,
+    sx_bound: bool,
+    rules: ProofRules,
+) -> p3_batch_stark::ProverData<AiPowStarkConfig> {
+    crate::runtime::install(|| logup_common_for_with_rules_impl(config, program, sx_bound, rules))
+}
+
+#[inline(never)]
+fn logup_common_for_with_rules_impl(
     config: &AiPowStarkConfig,
     program: &Program,
     sx_bound: bool,
@@ -691,25 +721,12 @@ mod tests {
         composite_verify(&cfg, &proof, &pis).expect("composite proof must verify");
     }
 
-    // ───── Regression: non-zero JACKPOT_MSG ─────
-    //
-    // A latent JackpotChip bug (the JACKPOT_MSG RAM recurrence
-    // `nxt = SLOT_SEL·rotl13_xor + (1−SLOT_SEL)·cur` was
-    // `when_transition` but **not** gated by `is_active`) forced
-    // JACKPOT_MSG constant across all inactive rows, so the
-    // inactive→active(finalize) boundary forbade a freshly-placed
-    // non-zero JACKPOT_MSG. Latent for years because every
-    // jackpot placement hashed an all-zero JACKPOT_MSG (0 == 0);
-    // surfaced by the first non-zero JACKPOT_MSG placement — the
-    // real folded `M`. Fixed by gating the recurrence with
-    // `is_active` (`chips::jackpot::chip`). These two tests pin
-    // the fix; bisection scaffolding removed post-fix.
+    // Nonzero jackpot messages must satisfy the active-row RAM recurrence,
+    // including the inactive-to-finalize boundary.
 
-    /// `place_jackpot_hash_block` with a **non-zero** message
-    /// must satisfy the (unit) composite AIR — the minimal
-    /// regression for the JackpotChip `is_active`-gating fix.
+    /// `place_jackpot_hash_block` with a nonzero message satisfies the unit AIR.
     #[test]
-    fn high2_2_jackpot_nonzero_msg_unit() {
+    fn jackpot_nonzero_msg_unit() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let ch: [u32; 8] = core::array::from_fn(|i| 0x5EED_0000 + i as u32);
         let msg: [u32; 16] = core::array::from_fn(|i| 0xABCD_0001u32.wrapping_mul(i as u32 + 1));
@@ -729,9 +746,9 @@ mod tests {
     /// the cheap unit prover. Isolates witness/chip-wiring bugs in
     /// seconds before the ~minutes Route-A pinned path below. (The
     /// pinned jackpot/fold keystones are exercised by
-    /// `high2_2_fold_chain_pinned_logup`.)
+    /// `fold_chain_pinned_logup`.)
     #[test]
-    fn high2_2_useful_work_chain_unit() {
+    fn useful_work_chain_unit() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let ch: [u32; 8] = core::array::from_fn(|i| 0x1234_0000 + i as u32);
         let mut trace = CompositeTrace::baseline_min();
@@ -1587,7 +1604,7 @@ mod tests {
     /// (cross-crate parity vs `compute_tile_trace` is asserted from
     /// the `ai-pow` side).
     #[test]
-    fn high2_2_fold_chain_pinned_logup() {
+    fn fold_chain_pinned_logup() {
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
 
@@ -1821,17 +1838,10 @@ mod tests {
         assert!(p1.len() >= deduped.len());
     }
 
-    /// **Adversarial**: the sweep input is
-    /// genuinely *bound* to the declared `noised_packed` store. A
-    /// prover that sweeps a tile whose noised micro-tiles are NOT
-    /// the published store (here: store built from the canonical
-    /// `a_prime`/`b_prime`, but the sweep run on a *different*,
-    /// cheaper tile) leaves the bus unbalanced ⇒ Route-A MUST
-    /// reject. (This is the non-vacuity proof for the whole-
-    /// micro-tile binding; store ↔ committed-matrix `HASH_A` is a
-    /// separately-scoped residual.)
+    /// Sweeping a tile different from the declared `noised_packed` store leaves
+    /// the lookup bus unbalanced and must be rejected by Route A.
     #[test]
-    fn high2_2_swept_tile_not_in_store_rejects() {
+    fn swept_tile_not_in_store_rejects() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let ch: [u32; 8] = core::array::from_fn(|i| 0x5EED_0000 + i as u32);
         let mut trace = CompositeTrace::baseline_min();
@@ -1878,7 +1888,7 @@ mod tests {
     /// `noised_packed` producer store no longer matches the matmul sweep's
     /// consumed A/B chunks.
     #[test]
-    fn high2_2_logup_tampered_positioned_store_rejects() {
+    fn logup_tampered_positioned_store_rejects() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let ch: [u32; 8] = core::array::from_fn(|i| 0x5EED_0000 + i as u32);
         let mut trace = CompositeTrace::baseline_min();
@@ -1946,7 +1956,7 @@ mod tests {
     /// Σ_s FOLD_STRIPE_SEL[s] · (FOLD_XSTEP − SX_XR[s]) = 0   (sx_bound=true)
     /// ```
     ///
-    /// Positive control: `high2_2_fold_chain_pinned_logup` — the happy
+    /// Positive control: `fold_chain_pinned_logup` — the happy
     /// path where `FOLD_XSTEP == SX_XR[slot]` at every fold-active row.
     /// This test builds the *same* trace, then tampers fold-row 0's
     /// `FOLD_XSTEP` cell to point at `SX_XR[1]` (a DIFFERENT lane than
@@ -1955,10 +1965,9 @@ mod tests {
     /// rejection at
     /// `composite_verify_pinned_logup`.
     ///
-    /// This is the explicit keystone regression for stripe-pin binding: a wrong
-    /// selected lane must reject at `composite_verify_pinned_logup`.
+    /// A wrong selected lane must reject at `composite_verify_pinned_logup`.
     #[test]
-    fn high2_2_g2_xstep_stripe_pin_rejects() {
+    fn xstep_stripe_pin_rejects() {
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
 
@@ -2069,7 +2078,7 @@ mod tests {
     /// Cross-AIR composition test.
     /// The keystone binds FoldChip's `FOLD_XSTEP` (consumer side)
     /// to StripeXorChip's `SX_XR[stripe]` (producer side). The
-    /// consumer-side test `high2_2_g2_xstep_stripe_pin_rejects`
+    /// consumer-side test `xstep_stripe_pin_rejects`
     /// tampers `FOLD_XSTEP`. This test exercises the *opposite*
     /// direction: tamper `SX_XR[0]` at the fold row while leaving
     /// `FOLD_XSTEP` honest. The keystone constraint
@@ -2087,7 +2096,7 @@ mod tests {
     /// reject, demonstrating the bidirectional integrity of the
     /// FoldChip ↔ StripeXorChip soundness boundary.
     #[test]
-    fn high2_2_g2_sx_xr_producer_side_tamper_rejects() {
+    fn stripe_xor_producer_side_tamper_rejects() {
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
 
@@ -2152,14 +2161,8 @@ mod tests {
         );
     }
 
-    // ───────────── Malicious-prover regression suite ─────────────
-    //
-    // A malicious prover can zero every
-    // selector to vacate the C1/C3/C4 PI bindings and forge a
-    // winning proof with no work. These tests assert the
-    // program-pinned API closes that: a proof only verifies against
-    // the *canonical* program's verifying key (rebuilt by the
-    // verifier from the trusted shape, never from the proof).
+    // Canonical-program binding tests: proofs verify only against the program
+    // derived by the verifier from trusted geometry, not a proof-supplied program.
 
     /// Build a representative honest/canonical trace: matrix-hash
     /// A/B (C3) + key-pin rows (C1) + final jackpot-hash block
@@ -2213,7 +2216,7 @@ mod tests {
     /// Honest pinned round-trip verifies; the difficulty check is
     /// real (a 0 target rejects the non-zero keyed digest).
     #[test]
-    fn crit1_honest_pinned_roundtrip() {
+    fn honest_pinned_roundtrip() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let trace = honest_trace();
         let canonical = extract_program(&trace.matrix);
@@ -2234,44 +2237,39 @@ mod tests {
         }
     }
 
-    /// The zeroed-selector exploit, blocked by pinning. A malicious prover submits
-    /// an all-zero-selector trace (no matmul, no hashing, no work)
-    /// with a forged winning `HASH_JACKPOT = 0`. It is
-    /// self-consistent against its *own* (all-zero) program, but
-    /// the verifier uses the **canonical** program's VK — the
-    /// preprocessed commitment differs, so verification fails.
+    /// A proof built for a different selector program must fail against the
+    /// verifier's canonical preprocessing commitment.
     #[test]
-    fn crit1_zeroed_selector_forgery_rejected() {
+    fn zeroed_selector_program_mismatch_rejected() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
 
         // Canonical program the honest verifier trusts.
         let canonical = extract_program(&honest_trace().matrix);
 
-        // Malicious: baseline (all selectors 0) + forged zero PIs
-        // (HASH_JACKPOT = 0 ≤ any target).
+        // Alternate program: a baseline trace with all selectors zero and
+        // zero public inputs.
         let evil = CompositeTrace::baseline_min();
         let forged = CompositePublicInputs::zero();
         let (evil_proof, evil_prog) = composite_prove_pinned(&cfg, evil, &forged);
         assert_ne!(
             evil_prog.values, canonical.values,
-            "attacker's program differs from canonical"
+            "alternate program differs from canonical"
         );
 
-        // Self-consistent against the attacker's own program
-        // (the AIR is satisfied for an all-zero schedule) — this
-        // is exactly why pinning to a *trusted* program matters.
+        // Positive control: the baseline trace satisfies its own program,
+        // independently of the verifier's canonical program.
         composite_verify_pinned(&cfg, &evil_prog, &evil_proof, &forged)
-            .expect("attacker proof is self-consistent vs its own program");
+            .expect("alternate proof must verify against its own program");
 
-        // Against the canonical (trusted) program: REJECTED.
+        // Verification against the canonical program must reject.
         assert!(
             composite_verify_pinned(&cfg, &canonical, &evil_proof, &forged).is_err(),
-            "forged proof must fail against the canonical program VK"
+            "alternate-program proof must fail against the canonical program VK"
         );
         assert!(
             composite_verify_pow_pinned(&cfg, &canonical, &evil_proof, &forged, &[0xFFu8; 32])
                 .is_err(),
-            "forged winning PoW must be rejected"
+            "alternate-program PoW proof must be rejected"
         );
     }
 
@@ -2279,7 +2277,7 @@ mod tests {
     /// changes the prover's committed program; verification
     /// against the canonical program rejects it.
     #[test]
-    fn crit1_tampered_program_col_rejected() {
+    fn tampered_program_col_rejected() {
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
 
@@ -2311,7 +2309,7 @@ mod tests {
     /// CV_OUT == PI_HASH_JACKPOT (the real non-zero keyed digest),
     /// so a swapped-to-zero PI violates the constraint.
     #[test]
-    fn crit1_forged_hash_jackpot_with_canonical_program_rejected() {
+    fn mismatched_hash_jackpot_with_canonical_program_rejected() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let trace = honest_trace();
         let canonical = extract_program(&trace.matrix);
@@ -2325,25 +2323,19 @@ mod tests {
         );
     }
 
-    /// The C4-hashed `JACKPOT_MSG` is no longer
-    /// prover-free — the pinned AIR forces last-row
-    /// `JACKPOT_MSG[0..4] == CUMSUM_TILE[0..4]` (matmul-bound) and
-    /// `JACKPOT_MSG[4..16] == 0`. An attacker who grinds an
-    /// arbitrary winning jackpot message (the old hashcash attack,
-    /// no matmul) is rejected: the planted message no longer
-    /// equals the bound accumulator.
+    /// The pinned AIR binds the C4-hashed last-row jackpot message to matmul:
+    /// `JACKPOT_MSG[0..4] == CUMSUM_TILE[0..4]` and `JACKPOT_MSG[4..16] == 0`.
+    /// A planted message differing from the accumulator must be rejected.
     #[test]
-    fn high2_free_jackpot_message_rejected() {
+    fn free_jackpot_message_rejected() {
         use p3_field::integers::QuotientMap;
 
         use crate::composite_layout::{JACKPOT_MSG_START, TOTAL_TRACE_WIDTH};
 
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
 
-        // Honest baseline: CUMSUM = 0, JACKPOT_MSG = 0 on the last
-        // row ⇒ keystone holds (0 == 0); HASH_JACKPOT =
-        // BLAKE3(0, key=jackpot_key), a fixed value the attacker cannot
-        // grind. Sanity: verifies.
+        // Honest baseline: CUMSUM and JACKPOT_MSG are both zero on the last row,
+        // so the accumulator binding holds and HASH_JACKPOT is BLAKE3(0, key).
         let ok = honest_trace();
         let canonical = extract_program(&ok.matrix);
         let pis_ok = CompositePublicInputs::derive_from_trace(&ok);
@@ -2351,10 +2343,8 @@ mod tests {
         composite_verify_pinned(&cfg, &canonical, &p_ok, &pis_ok)
             .expect("zero-CUMSUM honest trace satisfies the keystone");
 
-        // Attack: plant a "winning" free jackpot message on the
-        // last row while CUMSUM stays 0 — exactly the pre-keystone
-        // hashcash forge (no matmul). Keystone JACKPOT_MSG ==
-        // CUMSUM is violated ⇒ must be rejected.
+        // Plant a nonzero jackpot message while CUMSUM stays zero.
+        // The accumulator binding is violated and the proof must be rejected.
         let mut evil = honest_trace();
         let h = evil.height();
         let last = (h - 1) * TOTAL_TRACE_WIDTH;
@@ -2368,15 +2358,8 @@ mod tests {
         );
     }
 
-    // ───────── Route-A production suite ─────────
-    //
-    // The malicious-prover / free-jackpot adversarial regressions,
-    // re-run against
-    // the batch-stark pinned+LogUp path (`*_pinned_logup`). These
-    // prove the production Route-A binding keeps the canonical-program
-    // pin and the jackpot keystone *while additionally enforcing the
-    // noised_packed/range LogUp*. The noised_packed matmul-input
-    // binding is non-vacuous only when the statement places matmul rows.
+    // Route-A tests exercise canonical-program and jackpot bindings together with
+    // noised_packed/range LogUp on the production batch-STARK path.
 
     /// Honest pinned+LogUp round-trip verifies; the C2 difficulty
     /// check is real (0 target rejects the non-zero keyed digest,
@@ -2714,11 +2697,10 @@ mod tests {
         ));
     }
 
-    /// Pinning under Route A: a zeroed-selector forgery is
-    /// self-consistent vs its own program but REJECTED vs the
-    /// canonical program's preprocessed commitment.
+    /// A zeroed-selector program is self-consistent but does not match the
+    /// canonical program's preprocessed commitment under Route A.
     #[test]
-    fn routea_crit1_zeroed_selector_forgery_rejected() {
+    fn routea_zeroed_selector_program_mismatch_rejected() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let canonical = extract_program(&honest_trace().matrix);
 
@@ -2728,24 +2710,24 @@ mod tests {
         assert_ne!(evil_prog.values, canonical.values);
 
         composite_verify_pinned_logup(&cfg, &evil_prog, &evil_proof, &forged)
-            .expect("evil proof self-consistent vs its own program");
+            .expect("alternate proof must verify against its own program");
         assert!(
             composite_verify_pinned_logup(&cfg, &canonical, &evil_proof, &forged).is_err(),
-            "Route A: forged proof must fail vs canonical program"
+            "Route A: alternate-program proof must fail against the canonical program"
         );
         assert!(
             composite_verify_pow_pinned_logup(
                 &cfg, &canonical, &evil_proof, &forged, &[0xFFu8; 32]
             )
             .is_err(),
-            "Route A: forged winning PoW rejected"
+            "Route A: alternate-program PoW proof must be rejected"
         );
     }
 
     /// Tampering any PROGRAM_COL is rejected vs the canonical
     /// program under Route A (full coverage of all PROGRAM_COLS).
     #[test]
-    fn routea_crit1_tampered_program_col_rejected() {
+    fn routea_tampered_program_col_rejected() {
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
 
@@ -2785,7 +2767,7 @@ mod tests {
     /// `MAT_FREQ` *after* that step — exactly what a malicious
     /// prover, controlling its own frequency pass, would do.
     #[test]
-    fn sec_4c10_mat_freq_planted_producer_rejected() {
+    fn mat_freq_planted_producer_rejected() {
         use p3_batch_stark::{prove_batch, ProverData, StarkInstance};
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
@@ -2801,9 +2783,8 @@ mod tests {
         composite_verify_pinned_logup(&cfg, &ok_prog, &ok_proof, &pis)
             .expect("honest trace must verify");
 
-        // Attack: run the honest `populate_lookup_freq`, then plant a
-        // phantom producer by bumping `MAT_FREQ[0]`; prove WITHOUT
-        // re-populating (the malicious prover keeps its forged freq).
+        // Populate lookup frequencies, then increase MAT_FREQ[0] without adding
+        // the matching consumer. Prove without repopulating the modified count.
         let mut t = honest_trace();
         t.populate_lookup_freq();
         let cur = t.matrix.values[MAT_FREQ].as_canonical_u64();
@@ -2834,7 +2815,7 @@ mod tests {
     /// The keystone holds under Route A: a free (non-CUMSUM)
     /// winning jackpot message is rejected.
     #[test]
-    fn routea_high2_free_jackpot_message_rejected() {
+    fn routea_free_jackpot_message_rejected() {
         use p3_field::integers::QuotientMap;
 
         use crate::composite_layout::{JACKPOT_MSG_START, TOTAL_TRACE_WIDTH};
@@ -3142,14 +3123,17 @@ mod tests {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+type PostPopulateHook = std::sync::Arc<dyn Fn(&mut CompositeTrace) + Send + Sync>;
+
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    static POST_POPULATE_HOOK: std::cell::RefCell<Option<Box<dyn Fn(&mut CompositeTrace)>>> =
+    static POST_POPULATE_HOOK: std::cell::RefCell<Option<PostPopulateHook>> =
         std::cell::RefCell::new(None);
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_post_populate_hook(f: Box<dyn Fn(&mut CompositeTrace)>) {
-    POST_POPULATE_HOOK.with(|h| *h.borrow_mut() = Some(f));
+pub fn set_post_populate_hook(f: Box<dyn Fn(&mut CompositeTrace) + Send + Sync>) {
+    POST_POPULATE_HOOK.with(|h| *h.borrow_mut() = Some(f.into()));
 }
 
 #[cfg(any(test, feature = "test-support"))]

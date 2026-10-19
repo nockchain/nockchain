@@ -1074,16 +1074,10 @@ mod tests {
         b
     }
 
-    /// **D1 finding (the latent-gap hypothesis is DISPROVEN).**
-    /// `place_matrix_hash`'s bottom-up *pair-adjacent /
-    /// promote-odd* parent reduction is structurally identical to
-    /// BLAKE3's top-down *largest-power-of-two-left* tree — for
-    /// **every** chunk count, power-of-two AND non-power-of-two.
-    /// Swept exhaustively over `1..=31` (incl. all the non-pow2
-    /// counts the design feared); `place_matrix_hash` ==
-    /// true-tree walker == real `blake3::Hasher`. ⇒ the in-circuit
-    /// `place_matrix_hash` needs no realignment; its correctness
-    /// reduces to *this* equivalence verification.
+    /// The in-circuit bottom-up pair-adjacent/promote-odd reduction agrees
+    /// with the tree walker and keyed `blake3::Hasher` for chunk counts
+    /// `1..=31`, covering power-of-two and non-power-of-two trees and a
+    /// partially filled final chunk.
     #[test]
     fn place_matrix_hash_equals_true_tree_and_blake3_all_counts() {
         let k = kappa();
@@ -1098,17 +1092,14 @@ mod tests {
             assert_eq!(
                 in_circuit_root(&raw, &k, crate::composite_layout::MIN_STARK_LEN),
                 blake,
-                "place_matrix_hash != blake3 @ {nc} chunks \
-                 (pairwise ≡ largest-pow2-left — no latent gap)"
+                "place_matrix_hash must equal blake3 @ {nc} chunks"
             );
         }
     }
 
-    /// The decisive **large non-power-of-two** case the D1
-    /// concern was really about (GEMMA/QWEN-class chunk counts):
-    /// 100 chunks (= 0b1100100, very much not a power of two).
-    /// `place_matrix_hash` still equals real `blake3::Hasher` —
-    /// definitively no scale-dependent fidelity gap.
+    /// Equivalence at 100 chunks exercises a larger non-power-of-two tree.
+    /// Both the in-circuit reduction and tree walker must match the keyed
+    /// `blake3::Hasher` root.
     #[test]
     fn place_matrix_hash_equals_blake3_large_nonpow2() {
         let k = kappa();

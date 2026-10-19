@@ -66,9 +66,42 @@ ZK_POW_CUDA_ARCH=89 cargo run --release -p zk-pow-miner \
 
 ## Network deployment
 
-The private gRPC endpoint is a trusted, unauthenticated control plane. Keep it on loopback or a private network and reach remote miners through SSH forwarding or a VPN; never expose it directly to the public internet. Use `--rpc-timeout-ms` to bound node calls and `--worker-shutdown-timeout-ms` to bound cooperative worker drain.
+The private gRPC listener is loopback-only, even with tokens. The node requires
+`NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN` with at least 32 characters, and may configure
+a distinct `NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN` of at least 32 characters. Missing
+policy, weak/equal role tokens, a miner token without an operator token, and
+non-loopback binds reject node startup before consensus preparation or kernel
+side effects. Credentials are snapshotted at startup; restart the node and
+workers to rotate them.
 
-Multiple miners may connect to one node, but they must use the same `--mining-pkh`: mining configuration is node-global. Each miner enables mining when it subscribes and deliberately does not disable the shared flag when it disconnects, so one miner shutting down cannot stop its peers.
+For restricted mining, export only `NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN` in the
+worker environment. This automatically selects operator-managed mode: the
+worker subscribes to ZK mining candidates and submits proofs but cannot Peek,
+change payout keys, or enable/disable mining. An operator must first configure
+approved payees and enable ZK mining using `configure_mining ... zk ...`; see
+[the deployment guide](../../docs/AI_POW_CUTOVER.md#private-grpc-operator-and-miner-access).
+`--mining-pkh` remains a required CLI input, but does not override the
+operator-approved payout in restricted mode.
+
+A trusted self-managed worker instead receives
+`NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN` and no miner token. That grants full operator
+authority and permits the usual startup mining configuration. Pass credentials
+through the environment, never command arguments or logs.
+
+For single-user local development only, explicitly opt the node out with
+`--allow-unauthenticated-private-grpc` or
+`NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC=1`, then run the worker without
+tokens. Every local caller has operator authority in that mode. The opt-out
+never bypasses configured credentials.
+
+Reach remote nodes through an authenticated encrypted tunnel terminating at the
+node's loopback listener, for example
+`ssh -N -L 127.0.0.1:15555:127.0.0.1:5555 node-host`, and connect the worker to
+`http://127.0.0.1:15555`. Do not expose the private listener on a private network
+or public internet; bearer HTTP is not encrypted. Use `--rpc-timeout-ms` to bound
+node calls and `--worker-shutdown-timeout-ms` to bound cooperative worker drain.
+
+Multiple self-managed miners may connect to one node, but they must use the same `--mining-pkh`: mining configuration is node-global. Each self-managed miner enables mining when it subscribes and deliberately does not disable the shared flag when it disconnects, so one miner shutting down cannot stop its peers. Restricted miners leave mining configuration entirely under operator control.
 
 ## Validation
 

@@ -118,10 +118,8 @@ mod tests {
 
     #[test]
     fn num_of_leaves_rejects_dag_bomb_expansion() {
-        // GHSA-6vmg-7vh9-fc55: a shared DAG `a_k = [a_(k-1) a_(k-1)]` of a
-        // few dozen physical nodes implies 2^k logical leaves. The count is
-        // defined over the logical tree, so the walk is budget-bounded and
-        // errors instead of expanding unbounded work.
+        // Leaf counting is defined over the logical tree of a shared DAG.
+        // The walk must reject expansions that exceed its logical-leaf budget.
         let c = &mut init_context();
         let mut noun = D(0);
         for _ in 0..40 {

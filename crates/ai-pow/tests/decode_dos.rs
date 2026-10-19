@@ -1,20 +1,9 @@
-//! The two memory-DoS paths in `ai-pow` whose
-//! allocations were proportional to an *attacker-controlled* value
-//! rather than to actual input size.
+//! Allocation-budget tests for proof decoding and challenge sampling.
 //!
-//! * `MatmulProof::decode` / `decode_path_list` did
-//!   `Vec::with_capacity(untrusted_count)` after a *loose* cap check.
-//!   A ~200-byte blob declaring `MAX_SPOT = 2^20` and truncating
-//!   triggered ~100 MiB up-front allocation per decode (~500,000×
-//!   amplification).
-//! * `fiat_shamir::challenge_indices` did
-//!   `vec![false; range]` where `range = num_tiles`. With
-//!   `num_tiles` capped at `u32::MAX`, a call with `range = 2^32`
-//!   would burn ~4 GiB; a `HashSet` sized to `O(count)` tracks the
-//!   taken indices regardless of `range`.
-//!
-//! This test installs a counting global allocator (scoped to this
-//! test binary) and asserts both allocation paths are bounded.
+//! Decoding allocation is bounded by actual input, not declared collection
+//! lengths. Challenge sampling allocation scales with the requested count,
+//! not the tile range. A counting allocator scoped to this test binary measures
+//! these bounds.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -45,10 +34,8 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static A: CountingAlloc = CountingAlloc;
 
-/// Build a tiny malicious blob: a valid header + empty `found`
-/// opening + a `spot` length-prefix declaring `declared_n` entries
-/// — and no actual spot bytes after. The pre-fix `decode` would
-/// `Vec::with_capacity(declared_n)` of `TileOpening`s up-front.
+/// Build a truncated blob with a valid header, empty `found` opening, and a
+/// `spot` length prefix declaring `declared_n` entries without entry bytes.
 fn malicious_spot_blob(declared_n: u32) -> Vec<u8> {
     let mut b = Vec::new();
     // 6 × 32-byte commitment fields (zeros).
@@ -114,23 +101,21 @@ fn measure_alloc_peak<R>(f: impl FnOnce() -> R) -> (R, usize) {
     (r, peak.saturating_sub(before))
 }
 
-/// Bomb threshold: with the bug, decode allocates ~100 MiB (spot)
-/// or ~25 MiB (path-list) for a ~200-byte blob. The fix makes
-/// allocation proportional to input — a few KiB at most for these
-/// blobs. 4 MiB sits comfortably in the gap and tolerates parallel
-/// test-harness noise.
+/// Peak-allocation budget for truncated collection inputs and challenge sampling.
+/// Allocation must remain bounded by actual input or requested sample count.
+/// The 4 MiB budget allows test-harness allocation noise.
 const AMPLIFICATION_LIMIT: usize = 4 << 20;
 
 #[test]
 fn decode_does_not_amplify_attacker_declared_counts() {
-    // (a) The `spot` count bomb.
+    // (a) Truncated `spot` collection with a policy-maximum declared count.
     //
     // `MAX_SPOT = 1 << 20` (private const, mirrored here as the
     // worst-case policy-allowed value).
     let spot_blob = malicious_spot_blob(1 << 20);
     assert!(
         spot_blob.len() < 256,
-        "blob is tiny ({} bytes), the bug amplifies it to ~100 MiB",
+        "truncated spot fixture must remain below 256 bytes (got {} bytes)",
         spot_blob.len()
     );
     let (res, peak) = measure_alloc_peak(|| MatmulProof::decode(&spot_blob));
@@ -138,22 +123,19 @@ fn decode_does_not_amplify_attacker_declared_counts() {
     assert!(
         peak < AMPLIFICATION_LIMIT,
         "decode of a {}-byte blob declaring 2^20 spot entries allocated {} bytes — \
-         must be proportional to input, not to the untrusted count \
-         (pre-fix bomb was ~100 MiB)",
+         allocation must be bounded by actual input",
         spot_blob.len(),
         peak,
     );
 
-    // (b) The `decode_path_list` count bomb (inside the `found`
-    // opening; `MAX_STRIP_COUNT = 1 << 20`).
+    // (b) Truncated path list with `MAX_STRIP_COUNT = 1 << 20`.
     let path_blob = malicious_path_list_blob(1 << 20);
     assert!(path_blob.len() < 256);
     let (res, peak) = measure_alloc_peak(|| MatmulProof::decode(&path_blob));
     assert!(res.is_err());
     assert!(
         peak < AMPLIFICATION_LIMIT,
-        "decode_path_list of a {}-byte blob declaring 2^20 paths allocated {} bytes \
-         (pre-fix bomb was ~25 MiB)",
+        "decode_path_list of a {}-byte blob declaring 2^20 paths allocated {} bytes",
         path_blob.len(),
         peak,
     );
@@ -168,12 +150,10 @@ fn decode_does_not_amplify_attacker_declared_counts() {
         "u32::MAX-count blob allocated {peak} bytes",
     );
 
-    // (d) H2: `challenge_indices` allocation must be `O(count)`, not
-    // `O(range)`. Pre-fix: `vec![false; range]` allocated ~4 GiB for
-    // `range = 2^32`. Post-fix uses a `HashSet` sized to `count`.
+    // (d) Challenge sampling allocation must be O(count), not O(range).
     let seed = [0xA5u8; 32];
     let count: u32 = 80; // Pearl-class
-    let range: u64 = 1u64 << 32; // == H1's tile-count ceiling
+    let range: u64 = 1u64 << 32; // Full u32 tile-index range.
     let (out, peak) = measure_alloc_peak(|| {
         challenge_indices(&seed, count, range).expect("valid challenge bounds")
     });
@@ -185,7 +165,7 @@ fn decode_does_not_amplify_attacker_declared_counts() {
     assert!(
         peak < AMPLIFICATION_LIMIT,
         "challenge_indices(count=80, range=2^32) allocated {peak} bytes — \
-         must be O(count) not O(range) (pre-fix bomb was ~4 GiB)",
+         must be O(count), not O(range)",
     );
 
     // (e) Verifier-facing parameter-aware decode must reject shape-impossible

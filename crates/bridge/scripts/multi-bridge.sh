@@ -38,6 +38,10 @@ BIN_DIR="$BRIDGE_BIN_DIR"
 TEST_DATA_DIR="${BRIDGE_DIR}/test_run_data"
 
 NODE_PRIVATE_GRPC_PORT="${NODE_PRIVATE_GRPC_PORT:-5002}"
+# Export NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN before starting this zellij session
+# for an authenticated node. Panes inherit it without writing it into runner
+# scripts or configs. An existing zellij server must have the same environment;
+# restart that server when changing credentials. Miner tokens cannot run bridges.
 
 to_ws_url() {
     local url="$1"

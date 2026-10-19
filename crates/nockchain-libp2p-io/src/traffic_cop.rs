@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use libp2p::PeerId;
@@ -11,7 +11,7 @@ use nockapp::wire::WireRepr;
 use nockapp::NockAppError;
 use tokio::select;
 use tokio::sync::oneshot;
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::key_fair_queue;
 use crate::tracked_join_set::TrackedJoinSet;
@@ -22,17 +22,50 @@ const HIGH_PRIORITY_QUEUE_MAX_PER_KEY: usize = 512;
 const LOW_PRIORITY_QUEUE_MAX_TOTAL: usize = 8_192;
 const LOW_PRIORITY_QUEUE_MAX_PER_KEY: usize = 256;
 
+/// A shared process-local monotonic clock for native service, queue and flush events.
+///
+/// Values share one epoch within this process only, not across processes or restarts.
+pub fn observation_time_us() -> u64 {
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+    START.elapsed().as_micros() as u64
+}
+
+#[derive(Clone, Copy)]
+struct DispatchContext {
+    sequence: u64,
+    priority: &'static str,
+    peer: Option<PeerId>,
+    peer_high_since_low: usize,
+}
+
+fn log_kernel_service(
+    dispatch: DispatchContext,
+    operation: &'static str,
+    queued_at: Instant,
+    started_at: Instant,
+    outcome: &'static str,
+) {
+    debug!(
+        target: "nockchain::kernel_queue",
+        monotonic_us = observation_time_us(),
+        dispatch_seq = dispatch.sequence,
+        priority = dispatch.priority,
+        peer = ?dispatch.peer,
+        peer_high_since_low = dispatch.peer_high_since_low,
+        operation,
+        queue_wait_ms = started_at.duration_since(queued_at).as_secs_f64() * 1_000.0,
+        kernel_ms = started_at.elapsed().as_secs_f64() * 1_000.0,
+        outcome,
+        "Completed queued kernel operation"
+    );
+}
+
 /// Timestamp (seconds since UNIX epoch) of the last successful TrafficCop
 /// kernel operation. Bumped after high/low-priority pokes return from
 /// `handle.poke` and after low-priority peeks return from `handle.peek`. The
-/// libp2p-watchdog thread reads this in parallel with the driver heartbeat
-/// counter and dumps thread stacks if it stops advancing, which is the precise
-/// signal that was missing on the 2026-04-18 LAX1 stall (heartbeat kept ticking
-/// because it's an independent task; only the kernel side wedged). Consensus
-/// pokes are no longer bounded by a wall-clock timeout (so that a slow host
-/// cannot turn "still validating" into a Nack/timeout), which means a genuine
-/// kernel livelock now freezes this counter rather than masking itself as a
-/// stream of timeout returns — exactly what the watchdog is there to catch.
+/// watchdog compares kernel-completion progress with the independent driver
+/// heartbeat and dumps thread stacks if progress stops. Consensus pokes have
+/// no wall-clock timeout, so slow validation is not converted into a Nack.
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -44,11 +77,13 @@ enum TrafficCopAction {
     Poke(TrafficCopPoke),
     Peek {
         path: NounSlab,
+        queued_at: Instant,
         result: oneshot::Sender<Result<Option<NounSlab>, NockAppError>>,
     },
 }
 
 struct TrafficCopPoke {
+    queued_at: Instant,
     wire: WireRepr,
     cause: NounSlab,
     timing: Option<oneshot::Sender<Duration>>,
@@ -135,7 +170,9 @@ impl TrafficCop {
         timing: Option<oneshot::Sender<std::time::Duration>>,
     ) -> Result<PokeResult, NockAppError> {
         let (result_tx, result_rx) = oneshot::channel();
+        let queued_at = Instant::now();
         let action = TrafficCopPoke {
+            queued_at,
             wire,
             cause,
             timing,
@@ -152,6 +189,14 @@ impl TrafficCop {
                 .send((), action)
                 .map_err(key_fair_queue_error_to_nockapp)?,
         }
+        debug!(
+            target: "nockchain::kernel_queue",
+            monotonic_us = observation_time_us(),
+            priority = if peer_id.is_some() { "peer_high" } else { "system_high" },
+            peer = ?peer_id,
+            operation = "poke",
+            "Queued kernel operation"
+        );
         result_rx.await?
     }
 
@@ -165,7 +210,9 @@ impl TrafficCop {
         timing: Option<oneshot::Sender<std::time::Duration>>,
     ) -> Result<PokeResult, NockAppError> {
         let (result_tx, result_rx) = oneshot::channel();
+        let queued_at = Instant::now();
         let action = TrafficCopAction::Poke(TrafficCopPoke {
+            queued_at,
             wire,
             cause,
             timing,
@@ -175,6 +222,14 @@ impl TrafficCop {
         self.low_priority
             .send(peer_id, action)
             .map_err(key_fair_queue_error_to_nockapp)?;
+        debug!(
+            target: "nockchain::kernel_queue",
+            monotonic_us = observation_time_us(),
+            priority = "low",
+            peer = ?peer_id,
+            operation = "poke",
+            "Queued kernel operation"
+        );
         result_rx.await?
     }
 
@@ -186,11 +241,20 @@ impl TrafficCop {
         let (result_tx, result_rx) = oneshot::channel();
         let action = TrafficCopAction::Peek {
             path,
+            queued_at: Instant::now(),
             result: result_tx,
         };
         self.low_priority
             .send(peer_id, action)
             .map_err(key_fair_queue_error_to_nockapp)?;
+        debug!(
+            target: "nockchain::kernel_queue",
+            monotonic_us = observation_time_us(),
+            priority = "low",
+            peer = ?peer_id,
+            operation = "peek",
+            "Queued kernel operation"
+        );
         result_rx.await?
     }
 }
@@ -215,89 +279,114 @@ async fn traffic_cop_task(
     let mut system_high_open = true;
     let mut peer_high_open = true;
     let mut low_open = true;
-    let mut consecutive_peer_high = 0usize;
+    let mut peer_high_since_low = 0usize;
+    let mut dispatch_sequence = 0u64;
     loop {
         if !system_high_open && !peer_high_open && !low_open {
             error!("Traffic cop channels closed");
             break Err(NockAppError::ChannelClosedError);
         }
 
-        if consecutive_peer_high >= PEER_HIGH_BURST_BEFORE_LOW {
+        // System work does not replenish the peer burst allowance. Once it
+        // is spent, queued low-priority work precedes both high queues.
+        if peer_high_since_low >= PEER_HIGH_BURST_BEFORE_LOW {
             select! { biased;
+                low_priority_action = low.recv(), if low_open => match low_priority_action {
+                    Some((peer, action)) => {
+                        dispatch_sequence += 1;
+                        let dispatch = DispatchContext {
+                            sequence: dispatch_sequence,
+                            priority: "low",
+                            peer,
+                            peer_high_since_low,
+                        };
+                        peer_high_since_low = 0;
+                        process_low_priority_action(
+                            &handle, peek_timeout, action, dispatch, &last_poke_completed_at,
+                        ).await;
+                    }
+                    None => low_open = false,
+                },
                 system_high_priority_poke = system_high.recv(), if system_high_open => match system_high_priority_poke {
                     Some((_, poke)) => {
-                        consecutive_peer_high = 0;
-                        process_poke(&handle, poke, "system high priority", &last_poke_completed_at).await;
-                    }
-                    None => {
-                        system_high_open = false;
-                    }
-                },
-                low_priority_action = low.recv(), if low_open => match low_priority_action {
-                    Some((_peer_id, action)) => {
-                        consecutive_peer_high = 0;
-                        process_low_priority_action(
-                            &handle,
-                            peek_timeout,
-                            action,
+                        dispatch_sequence += 1;
+                        process_poke(
+                            &handle, poke,
+                            DispatchContext {
+                                sequence: dispatch_sequence, priority: "system_high",
+                                peer: None, peer_high_since_low,
+                            },
                             &last_poke_completed_at,
-                        )
-                        .await;
+                        ).await;
                     }
-                    None => {
-                        low_open = false;
-                    }
+                    None => system_high_open = false,
                 },
                 peer_high_priority_poke = peer_high.recv(), if peer_high_open => match peer_high_priority_poke {
-                    Some((_peer_id, poke)) => {
-                        consecutive_peer_high = consecutive_peer_high.saturating_add(1);
-                        process_poke(&handle, poke, "peer high priority", &last_poke_completed_at).await;
+                    Some((peer, poke)) => {
+                        dispatch_sequence += 1;
+                        peer_high_since_low = peer_high_since_low.saturating_add(1);
+                        process_poke(
+                            &handle, poke,
+                            DispatchContext {
+                                sequence: dispatch_sequence, priority: "peer_high",
+                                peer: Some(peer), peer_high_since_low,
+                            },
+                            &last_poke_completed_at,
+                        ).await;
                     }
-                    None => {
-                        peer_high_open = false;
-                    }
+                    None => peer_high_open = false,
                 },
                 _ = handle.next_effect() => {
-                    // We have to do this to prevent the broadcast channel from lagging
+                    // Drain the broadcast channel so it does not lag.
                 }
             }
         } else {
             select! { biased;
                 system_high_priority_poke = system_high.recv(), if system_high_open => match system_high_priority_poke {
                     Some((_, poke)) => {
-                        consecutive_peer_high = 0;
-                        process_poke(&handle, poke, "system high priority", &last_poke_completed_at).await;
+                        dispatch_sequence += 1;
+                        process_poke(
+                            &handle, poke,
+                            DispatchContext {
+                                sequence: dispatch_sequence, priority: "system_high",
+                                peer: None, peer_high_since_low,
+                            },
+                            &last_poke_completed_at,
+                        ).await;
                     }
-                    None => {
-                        system_high_open = false;
-                    }
+                    None => system_high_open = false,
                 },
                 peer_high_priority_poke = peer_high.recv(), if peer_high_open => match peer_high_priority_poke {
-                    Some((_peer_id, poke)) => {
-                        consecutive_peer_high = consecutive_peer_high.saturating_add(1);
-                        process_poke(&handle, poke, "peer high priority", &last_poke_completed_at).await;
+                    Some((peer, poke)) => {
+                        dispatch_sequence += 1;
+                        peer_high_since_low = peer_high_since_low.saturating_add(1);
+                        process_poke(
+                            &handle, poke,
+                            DispatchContext {
+                                sequence: dispatch_sequence, priority: "peer_high",
+                                peer: Some(peer), peer_high_since_low,
+                            },
+                            &last_poke_completed_at,
+                        ).await;
                     }
-                    None => {
-                        peer_high_open = false;
-                    }
+                    None => peer_high_open = false,
                 },
                 low_priority_action = low.recv(), if low_open => match low_priority_action {
-                    Some((_peer_id, action)) => {
-                        consecutive_peer_high = 0;
+                    Some((peer, action)) => {
+                        dispatch_sequence += 1;
+                        let dispatch = DispatchContext {
+                            sequence: dispatch_sequence, priority: "low", peer,
+                            peer_high_since_low,
+                        };
+                        peer_high_since_low = 0;
                         process_low_priority_action(
-                            &handle,
-                            peek_timeout,
-                            action,
-                            &last_poke_completed_at,
-                        )
-                        .await;
+                            &handle, peek_timeout, action, dispatch, &last_poke_completed_at,
+                        ).await;
                     }
-                    None => {
-                        low_open = false;
-                    }
+                    None => low_open = false,
                 },
                 _ = handle.next_effect() => {
-                    // We have to do this to prevent the broadcast channel from lagging
+                    // Drain the broadcast channel so it does not lag.
                 }
             }
         }
@@ -307,52 +396,75 @@ async fn traffic_cop_task(
 async fn process_poke(
     handle: &NockAppHandle,
     TrafficCopPoke {
+        queued_at,
         wire,
         cause,
         timing,
         enable,
         result,
     }: TrafficCopPoke,
-    label: &str,
+    dispatch: DispatchContext,
     last_poke_completed_at: &Arc<AtomicU64>,
 ) {
+    if result.is_closed() {
+        if let Some(timing) = timing {
+            let _ = timing.send(Duration::ZERO);
+        }
+        log_kernel_service(dispatch, "poke", queued_at, Instant::now(), "cancelled");
+        return;
+    }
     let enabled = enable.await;
+    let started_at = Instant::now();
+    debug!(
+        target: "nockchain::kernel_queue",
+        monotonic_us = observation_time_us(),
+        dispatch_seq = dispatch.sequence,
+        priority = dispatch.priority,
+        peer = ?dispatch.peer,
+        peer_high_since_low = dispatch.peer_high_since_low,
+        operation = "poke",
+        queue_wait_ms = started_at.duration_since(queued_at).as_secs_f64() * 1_000.0,
+        enabled,
+        "Dispatching queued kernel operation"
+    );
     if !enabled {
         trace!(
-            label,
+            priority = dispatch.priority,
             had_timing_channel = timing.is_some(),
-            "Traffic cop gated high priority poke before dispatch"
+            "Traffic cop gated poke before dispatch"
         );
-        // Close the timing channel explicitly so callers awaiting `timing_rx`
-        // wake with Ok(zero) rather than Err(RecvError). Dropping the Sender
-        // silently here is what produced the ~16 k/hr "Background req-res
-        // task lost a oneshot response" warn storm observed on LAX1 prior
-        // to the 2026-04-17 freeze.
         if let Some(timing) = timing {
-            let _ = timing.send(Duration::from_nanos(0));
+            let _ = timing.send(Duration::ZERO);
         }
         let _ = result.send(Ok(PokeResult::Nack)).inspect_err(|_e| {
-            error!("Failed to send {label} poke result");
+            error!(priority = dispatch.priority, "Failed to send poke result");
         });
-        // Intentionally NOT bumping `last_poke_completed_at` here; a gated
-        // Nack does not constitute a kernel-side round trip. If every
-        // poke is gated we want the watchdog to eventually trip.
+        // A gated Nack is not a kernel round trip.
+        log_kernel_service(dispatch, "poke", queued_at, started_at, "gated");
+        return;
+    }
+    if result.is_closed() {
+        if let Some(timing) = timing {
+            let _ = timing.send(Duration::ZERO);
+        }
+        log_kernel_service(dispatch, "poke", queued_at, started_at, "cancelled");
         return;
     }
 
-    let now = Instant::now();
-    // No wall-clock timeout: a consensus poke runs to completion so that a slow
-    // host cannot turn "still validating" into a Nack/timeout.
-    // Recording progress here means the await actually returned; a genuine
-    // kernel livelock now leaves this un-bumped, which is the signal the
-    // libp2p-watchdog watches for (see the `unix_now` docstring).
+    // No wall-clock timeout: slow consensus validation runs to completion.
     let res = handle.poke(wire, cause).await;
     last_poke_completed_at.store(unix_now(), Ordering::Relaxed);
+    let outcome = match &res {
+        Ok(PokeResult::Ack) => "ack",
+        Ok(PokeResult::Nack) => "nack",
+        Err(_) => "error",
+    };
+    log_kernel_service(dispatch, "poke", queued_at, started_at, outcome);
     if let Some(timing) = timing {
-        let _ = timing.send(now.elapsed());
+        let _ = timing.send(started_at.elapsed());
     }
     let _ = result.send(res).inspect_err(|_e| {
-        error!("Failed to send {label} poke result");
+        error!(priority = dispatch.priority, "Failed to send poke result");
     });
 }
 
@@ -360,51 +472,32 @@ async fn process_low_priority_action(
     handle: &NockAppHandle,
     peek_timeout: Duration,
     action: TrafficCopAction,
+    dispatch: DispatchContext,
     last_poke_completed_at: &Arc<AtomicU64>,
 ) {
     match action {
-        TrafficCopAction::Poke(TrafficCopPoke {
-            wire,
-            cause,
-            result,
-            enable,
-            timing,
-        }) => {
-            let enabled = enable.await;
-            if !enabled {
-                trace!(
-                    had_timing_channel = timing.is_some(),
-                    "Traffic cop gated low priority poke before dispatch"
-                );
-                // Mirror of the fix in `process_poke`: close the timing
-                // oneshot on the gated path, letting callers awaiting
-                // `timing_rx` wake with Ok(zero) rather than Err(RecvError).
-                if let Some(timing) = timing {
-                    let _ = timing.send(Duration::from_nanos(0));
-                }
-                let _ = result.send(Ok(PokeResult::Nack)).inspect_err(|_e| {
-                    error!("Failed to send low priority poke result");
-                });
-                // See `process_poke`: gated Nack is not kernel progress.
-                return;
-            }
-            let now = Instant::now();
-            // No wall-clock timeout on consensus pokes; see
-            // `process_poke`.
-            let res = handle.poke(wire, cause).await;
-            last_poke_completed_at.store(unix_now(), Ordering::Relaxed);
-            if let Some(timing) = timing {
-                let _ = timing.send(now.elapsed());
-            }
-            let _ = result.send(res).inspect_err(|_e| {
-                error!("Failed to send low priority poke result");
-            });
+        TrafficCopAction::Poke(poke) => {
+            process_poke(handle, poke, dispatch, last_poke_completed_at).await;
         }
-        TrafficCopAction::Peek { path, result } => {
+        TrafficCopAction::Peek {
+            path,
+            queued_at,
+            result,
+        } => {
+            let started_at = Instant::now();
+            debug!(
+                target: "nockchain::kernel_queue",
+                monotonic_us = observation_time_us(),
+                dispatch_seq = dispatch.sequence,
+                priority = dispatch.priority,
+                peer = ?dispatch.peer,
+                peer_high_since_low = dispatch.peer_high_since_low,
+                operation = "peek",
+                queue_wait_ms = started_at.duration_since(queued_at).as_secs_f64() * 1_000.0,
+                "Dispatching queued kernel operation"
+            );
             let res = match tokio::time::timeout(peek_timeout, handle.peek(path)).await {
                 Ok(res) => {
-                    // Peeks are read-only kernel round trips; they still prove
-                    // the serf thread is alive, so bump the liveness counter.
                     last_poke_completed_at.store(unix_now(), Ordering::Relaxed);
                     res
                 }
@@ -416,9 +509,166 @@ async fn process_low_priority_action(
                     Err(NockAppError::Timeout)
                 }
             };
+            let outcome = match &res {
+                Ok(Some(_)) => "some",
+                Ok(None) => "none",
+                Err(NockAppError::Timeout) => "timeout",
+                Err(_) => "error",
+            };
+            log_kernel_service(dispatch, "peek", queued_at, started_at, outcome);
             let _ = result.send(res).inspect_err(|_e| {
                 error!("Failed to send low priority peek result");
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nockapp::driver::IOAction;
+    use nockapp::nockapp::test::setup_nockapp;
+    use nockapp::wire::{SystemWire, Wire};
+    use nockvm::noun::{NounAllocator, D};
+
+    use super::*;
+
+    fn slab(value: u64) -> NounSlab {
+        let mut slab = NounSlab::new();
+        slab.set_root(D(value));
+        slab
+    }
+
+    fn poke(
+        value: u64,
+    ) -> (
+        TrafficCopPoke,
+        oneshot::Receiver<Result<PokeResult, NockAppError>>,
+    ) {
+        let (result, receiver) = oneshot::channel();
+        (
+            TrafficCopPoke {
+                queued_at: Instant::now(),
+                wire: SystemWire.to_wire(),
+                cause: slab(value),
+                timing: None,
+                enable: Box::pin(async { true }),
+                result,
+            },
+            receiver,
+        )
+    }
+
+    async fn queued_low_work_survives_interleaved_system_work(low_is_peek: bool) {
+        let (_home, app) = setup_nockapp("test-ker.jam").await;
+        let base = app.get_handle();
+        let (io_sender, mut io_receiver) = tokio::sync::mpsc::channel(16);
+        let handle = NockAppHandle {
+            io_sender,
+            effect_sender: base.effect_sender.clone(),
+            effect_receiver: tokio::sync::Mutex::new(base.effect_sender.subscribe()),
+            metrics: base.metrics.clone(),
+            exit: base.exit.clone(),
+        };
+        let (system_tx, system_rx) = key_fair_queue::channel();
+        let (peer_tx, peer_rx) = key_fair_queue::channel();
+        let (low_tx, low_rx) = key_fair_queue::channel();
+        let mut receipts = Vec::new();
+        let peer = PeerId::random();
+        for _ in 0..12 {
+            let (action, receipt) = poke(2);
+            receipts.push(receipt);
+            peer_tx.send(peer, action).expect("peer work should queue");
+        }
+        let (peek_result, peek_receipt) = oneshot::channel();
+        let (low_poke, low_poke_receipt) = poke(3);
+        if low_is_peek {
+            low_tx
+                .send(
+                    Some(peer),
+                    TrafficCopAction::Peek {
+                        path: slab(0),
+                        queued_at: Instant::now(),
+                        result: peek_result,
+                    },
+                )
+                .expect("peek should queue");
+        } else {
+            low_tx
+                .send(Some(peer), TrafficCopAction::Poke(low_poke))
+                .expect("low poke should queue");
+        }
+        let worker = tokio::spawn(traffic_cop_task(
+            handle,
+            system_rx,
+            peer_rx,
+            low_rx,
+            Duration::from_secs(2),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let mut peer_dispatches = 0;
+        loop {
+            let action = tokio::time::timeout(Duration::from_secs(2), io_receiver.recv())
+                .await
+                .expect("queued work should reach its consumer")
+                .expect("kernel channel should stay open");
+            match action {
+                IOAction::Poke {
+                    poke: cause,
+                    ack_channel,
+                    ..
+                } => {
+                    let space = cause.noun_space();
+                    let value = unsafe { *cause.root() }
+                        .in_space(&space)
+                        .as_atom()
+                        .expect("fixture cause should be an atom")
+                        .as_u64()
+                        .expect("fixture cause should fit u64");
+                    if value == 3 {
+                        assert!(!low_is_peek);
+                        assert_eq!(peer_dispatches, 8);
+                        ack_channel
+                            .send(PokeResult::Ack)
+                            .expect("low consumer should be waiting");
+                        assert!(matches!(low_poke_receipt.await, Ok(Ok(PokeResult::Ack))));
+                        break;
+                    }
+                    if value == 2 {
+                        peer_dispatches += 1;
+                        // Timer/system work is available after every peer
+                        // completion. It must not reset the peer allowance.
+                        let (system, receipt) = poke(1);
+                        receipts.push(receipt);
+                        system_tx
+                            .send((), system)
+                            .expect("system work should queue");
+                    }
+                    ack_channel
+                        .send(PokeResult::Ack)
+                        .expect("poke consumer should be waiting");
+                }
+                IOAction::Peek { result_channel, .. } => {
+                    assert!(low_is_peek);
+                    assert_eq!(peer_dispatches, 8);
+                    result_channel
+                        .send(Some(slab(99)))
+                        .expect("peek consumer should be waiting");
+                    assert!(matches!(peek_receipt.await, Ok(Ok(Some(_)))));
+                    break;
+                }
+            }
+        }
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    #[tokio::test]
+    async fn queued_peek_is_served_after_eight_peer_pokes_despite_system_pokes() {
+        queued_low_work_survives_interleaved_system_work(true).await;
+    }
+
+    #[tokio::test]
+    async fn queued_low_poke_is_served_after_eight_peer_pokes_despite_system_pokes() {
+        queued_low_work_survives_interleaved_system_work(false).await;
     }
 }

@@ -9,8 +9,8 @@ use tracing::{debug, info, trace, warn};
 
 use crate::driver::gen2::*;
 use crate::driver::{
-    record_local_peer_abuse, LocalPeerAbuseKind, LocalPeerAbuseSeverity, SwarmAction,
-    SwarmActionDispatcher,
+    record_local_peer_abuse, LocalPeerAbuseAddress, LocalPeerAbuseKind, LocalPeerAbuseSeverity,
+    SwarmAction, SwarmActionDispatcher,
 };
 use crate::ip_block::PeerExclusions;
 use crate::messages::{
@@ -18,7 +18,7 @@ use crate::messages::{
     NockchainDataRequest, NockchainFact, NockchainRequest, NockchainResponse, ResponseEnvelope,
 };
 use crate::metrics::NockchainP2PMetrics;
-use crate::p2p_state::P2PState;
+use crate::p2p_state::{OutboundRequestContext, P2PState};
 use crate::traffic_cop;
 
 #[allow(clippy::too_many_arguments)]
@@ -26,6 +26,7 @@ pub(super) async fn handle_outbound_response(
     peer: PeerId,
     request_id: request_response::OutboundRequestId,
     response: NockchainResponse,
+    response_bytes: usize,
     swarm_tx: mpsc::Sender<SwarmAction>,
     equix_builder: &mut equix::EquiXBuilder,
     local_peer_id: PeerId,
@@ -37,18 +38,6 @@ pub(super) async fn handle_outbound_response(
     let request_context = {
         let state_guard = driver_state.lock().await;
         state_guard.outbound_request_context(request_id).cloned()
-    };
-    let response_bytes = match req_res_message_encoded_bytes(&response) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(
-                peer = %peer,
-                request_id = %request_id,
-                error = %err,
-                "Failed to encode req-res response for peer stats"
-            );
-            0
-        }
     };
     let response_item_count = match &response {
         NockchainResponse::BatchResult { results } => results.len(),
@@ -85,6 +74,7 @@ pub(super) async fn handle_outbound_response(
         );
     }
 
+    let mut useful_response = false;
     let response_result: Result<u64, NockAppError> = async {
                 let mut semantic_failure_count = 0u64;
                 if let Err(err) = response.validate() {
@@ -94,6 +84,8 @@ pub(super) async fn handle_outbound_response(
                         &metrics,
                         &peer_exclusions,
                         peer,
+                        request_id,
+                        request_context.as_ref(),
                     )
                     .await?;
                     if let Some(request_context) = request_context.as_ref() {
@@ -138,6 +130,8 @@ pub(super) async fn handle_outbound_response(
                         &metrics,
                         &peer_exclusions,
                         peer,
+                        request_id,
+                        request_context.as_ref(),
                     )
                     .await?;
                     if let Some(request_context) = request_context.as_ref() {
@@ -173,6 +167,7 @@ pub(super) async fn handle_outbound_response(
                         if !acked {
                             warn!("Peer {} did not acknowledge the response", peer);
                         }
+                        useful_response = acked;
                     }
                     NockchainResponse::BatchResult { results } => {
                         record_batch_result_item_errors(&metrics, &results);
@@ -207,6 +202,16 @@ pub(super) async fn handle_outbound_response(
                             }
                             observed_item_ids.insert(result.item_id);
 
+                            // Ack, NotFound and Error are terminal answers for the item.
+                            // An elders item must free the peer's slot on any of them, not
+                            // only on a decoded HeardElders (which route_response_fact
+                            // releases), or an honest NotFound holds the slot for its TTL.
+                            if result.status != BatchResultStatus::Result
+                                && elders_batch_item(request_context.as_ref(), result.item_id)
+                            {
+                                driver_state.lock().await.clear_elders_inflight(&peer);
+                            }
+
                             match result.status {
                                 BatchResultStatus::Result => {
                                     let Some(envelope) = result.envelope.as_ref() else {
@@ -235,6 +240,8 @@ pub(super) async fn handle_outbound_response(
                                                 &metrics,
                                                 &peer_exclusions,
                                                 peer,
+                                                request_id,
+                                                request_context.as_ref(),
                                             )
                                             .await?;
                                             warn!(
@@ -368,6 +375,8 @@ pub(super) async fn handle_outbound_response(
                                                         &metrics,
                                                         &peer_exclusions,
                                                         peer,
+                                                        request_id,
+                                                        request_context.as_ref(),
                                                     )
                                                     .await?;
                                                     warn!(
@@ -419,24 +428,11 @@ pub(super) async fn handle_outbound_response(
                                         };
 
                                     match route_outcome {
-                                        Ok(()) => {
-                                            if let Some((height, _)) = block_height_batch_item_message(
-                                                request_context.as_ref(),
-                                                result.item_id,
-                                            ) {
-                                                trace!(
-                                                    peer = %peer,
-                                                    request_id = %request_id,
-                                                    item_id = result.item_id,
-                                                    height,
-                                                    "Clearing block-height attempted peers after successful batch item"
-                                                );
-                                                driver_state
-                                                    .lock()
-                                                    .await
-                                                    .clear_block_height_attempted_peers(height);
-                                            }
-                                        }
+                                        // A kernel Ack means it handled the response, even when
+                                        // it rejected the block. Only the height-bearing %seen
+                                        // %block effect proves acceptance and clears this height's
+                                        // attempted-peer history.
+                                        Ok(()) => useful_response = true,
                                         Err(NockAppError::MPSCFullError(_)) => {
                                             semantic_failure_count =
                                                 semantic_failure_count.saturating_add(1);
@@ -459,6 +455,8 @@ pub(super) async fn handle_outbound_response(
                                                 &metrics,
                                                 &peer_exclusions,
                                                 peer,
+                                                request_id,
+                                                request_context.as_ref(),
                                             )
                                             .await?;
                                             warn!(
@@ -501,6 +499,7 @@ pub(super) async fn handle_outbound_response(
                                         let queued_retry = queue_block_height_retry_to_alternate_peer(
                                             &swarm_tx,
                                             &driver_state,
+                                            &peer_exclusions,
                                             height,
                                             request_message,
                                         )
@@ -617,17 +616,21 @@ pub(super) async fn handle_outbound_response(
         Err(_) => response_failure_count,
     };
     if response_result.is_ok() {
-        peer_exclusions.record_peer_request_success(&peer);
+        if useful_response {
+            peer_exclusions.record_peer_request_success(&peer);
+        }
         if let Some(request_context) = request_context.as_ref() {
             let mut state_guard = driver_state.lock().await;
-            state_guard.record_request_success(peer);
+            if useful_response {
+                state_guard.record_request_success(peer);
+            }
             state_guard.record_outbound_response(
                 request_context,
                 response_bytes,
                 request_context.started_at.elapsed(),
                 recorded_failure_count,
             );
-        } else {
+        } else if useful_response {
             driver_state.lock().await.record_request_success(peer);
         }
     }
@@ -853,15 +856,30 @@ async fn record_response_validation_abuse(
     metrics: &NockchainP2PMetrics,
     peer_exclusions: &PeerExclusions,
     peer: PeerId,
+    request_id: request_response::OutboundRequestId,
+    request_context: Option<&OutboundRequestContext>,
 ) -> Result<(), NockAppError> {
-    let address = driver_state.lock().await.peer_first_address(&peer);
+    let selected = request_context.and_then(|context| context.response_endpoint);
+    debug!(monotonic_us = traffic_cop::observation_time_us(), peer = %peer,
+        request_id = %request_id, connection_id = ?selected.map(|endpoint| endpoint.connection_id),
+        endpoint = ?selected.map(|endpoint| endpoint.endpoint),
+        "Response validation failure attribution");
+    let address = selected.map_or(LocalPeerAbuseAddress::Unattributed, |selected| {
+        let mut address = libp2p::Multiaddr::empty();
+        address.push(match selected.endpoint.ip() {
+            std::net::IpAddr::V4(ip) => libp2p::multiaddr::Protocol::Ip4(ip),
+            std::net::IpAddr::V6(ip) => libp2p::multiaddr::Protocol::Ip6(ip),
+        });
+        address.push(libp2p::multiaddr::Protocol::Udp(selected.endpoint.port()));
+        address.push(libp2p::multiaddr::Protocol::QuicV1);
+        LocalPeerAbuseAddress::Address(address)
+    });
     record_local_peer_abuse(
         swarm_tx,
         driver_state,
         metrics,
         peer_exclusions,
         peer,
-        None,
         address,
         LocalPeerAbuseKind::ResponseValidationMismatch,
         LocalPeerAbuseSeverity::Strong,

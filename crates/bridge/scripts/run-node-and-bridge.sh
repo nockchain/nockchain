@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 # Simple script to start a nockchain node and bridge together
 # Usage: ./run-node-and-bridge.sh [--clean] [--base-start-height N] [--nockchain-start-height N]
@@ -54,6 +54,14 @@ fi
 : "${NOCK_CONTRACT_ADDRESS:?NOCK_CONTRACT_ADDRESS must be set.}"
 BRIDGE_ETH_KEY="${BRIDGE_ETH_KEY:-0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318}"
 BRIDGE_NOCK_KEY="${BRIDGE_NOCK_KEY:-5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8T}"
+
+# Single-user development only: opt out explicitly when no auth policy was
+# supplied. Presence (including an empty value) means the user's policy wins.
+if [ "${NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN+x}" != x ] &&
+   [ "${NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN+x}" != x ] &&
+   [ "${NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC+x}" != x ]; then
+    export NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC=1
+fi
 
 echo "============================================"
 echo "Environment: $BRIDGE_ENV"

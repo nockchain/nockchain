@@ -24,9 +24,7 @@ nodes:
     fakenet_log_difficulty: 1
     fakenet_v1_phase: 3
     no_default_peers: true
-    extra_args:
-      - "--num-threads"
-      - "4"
+    mining_threads: 4
     peers:
       - "/ip4/127.0.0.1/udp/4301/quic-v1"
 steps:

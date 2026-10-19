@@ -79,4 +79,4 @@ The Hoon kernel must enforce one activation boundary, puzzle-specific branch-loc
 
 ## Assurance status
 
-The dated [dual-puzzle audit](2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md) records implemented findings and regression evidence.
+The maintained invariants and tests do not replace an independent cryptographic review of the composite AIR, recursive verifier, and consensus integration. Passing tests alone does not establish end-to-end soundness.

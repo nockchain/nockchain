@@ -277,8 +277,8 @@ mod bus_emit {
     /// `irange7p1` bus — i7+1 range check `[-64, 64]`.
     ///
     /// Table: (IRANGE7P1_TABLE, −IRANGE7P1_FREQ).
-    /// Queries: NOISE_UNPACK[0..64] every row (Pearl's signed
-    /// noise bytes).
+    /// Queries: NOISE_UNPACK[0..64] and MAT_UNPACK[0..64] every row;
+    /// both signed operands are in [-64,64].
     pub fn irange7p1<AB: AirBuilder + InteractionBuilder>(builder: &mut AB) {
         let main = builder.main();
         let cur = main.current_slice();
@@ -294,12 +294,9 @@ mod bus_emit {
                 Count::bounded(<AB::Expr as p3_field::PrimeCharacteristicRing>::ONE, 1),
             );
         }
-        // Pearl parity (audit N2): the PLAIN matrix operand `MAT_UNPACK` is
-        // int7 `[-64,64]`, range-checked here alongside `NOISE_UNPACK` — exactly
-        // Pearl `pearl_stark.rs` (`MAT_UNPACK_RANGE.chain(NOISE_UNPACK_RANGE)` →
-        // IRANGE7P1, "// Signal is in [-64, 64]"). The tighter int7 bound (vs a
-        // plain i8 `[-128,127]`) is what keeps the accept-set identical to Pearl.
-        // `i8u8` bridges these i8 cells to `UINT8_DATA`.
+        // The plain matrix operand `MAT_UNPACK` and noise operand
+        // `NOISE_UNPACK` share the signed range `[-64,64]`.
+        // `i8u8` connects the matrix cells to their `UINT8_DATA` representation.
         for i in 0..MAT_UNPACK_WIN {
             builder.push_interaction(
                 BUS_IRANGE7P1,
@@ -312,9 +309,9 @@ mod bus_emit {
     /// `irange8` bus — i8 range check `[-128, 127]`.
     ///
     /// Table: (IRANGE8_TABLE, −IRANGE8_FREQ).
-    /// Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32] every row (the
-    /// NOISED operands, genuinely i8). `MAT_UNPACK` moved to IRANGE7P1 `[-64,64]`
-    /// for Pearl parity (audit N2) — matches Pearl's IRANGE8 = A_NOISED ⧺ B_NOISED.
+    /// Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32] every row.
+    /// These noised operands are i8; the plain `MAT_UNPACK` operand uses
+    /// IRANGE7P1 `[-64,64]`.
     pub fn irange8<AB: AirBuilder + InteractionBuilder>(builder: &mut AB) {
         let main = builder.main();
         let cur = main.current_slice();
@@ -986,17 +983,15 @@ mod tests {
         let res = run_batch(cfg, &trace.matrix);
         assert!(
             res.is_err(),
-            "MAT_UNPACK/UINT8_DATA split view at byte {byte_idx} must reject; got {:?}",
+            "inconsistent MAT_UNPACK/UINT8_DATA operands at byte {byte_idx} must reject; got {:?}",
             res
         );
     }
 
-    /// Regression for the split-view gap. The attack leaves the
-    /// unsigned BLAKE3-facing view unchanged, mutates the signed
-    /// matmul-facing view, and recomputes the matching `NOISED_PACKED`
-    /// cell so the input chip still accepts. Full 64-byte i8/u8 lookup
-    /// activation must reject it in every later sub-slice, not only at
-    /// byte 8.
+    /// Signed and unsigned matrix operands must agree across all 64 bytes.
+    /// Keeping the unsigned BLAKE3-facing operand unchanged while modifying
+    /// the signed matmul-facing operand and its matching `NOISED_PACKED` cell
+    /// must reject in every later sub-slice, not only at byte 8.
     #[test]
     fn non_first_subslice_split_view_rejected_by_i8u8_logup() {
         let cfg = build_stark_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
@@ -1005,9 +1000,8 @@ mod tests {
         }
     }
 
-    /// Cheap full-position coverage for the frequency side of the
-    /// split-view fix. A single matrix-message row must populate
-    /// one I8U8 multiplicity for each of its 64 paired
+    /// Full-position lookup-frequency coverage: a single matrix-message row
+    /// must populate one I8U8 multiplicity for each of its 64 paired
     /// MAT_UNPACK/UINT8_DATA cells.
     #[test]
     fn full_msg_mat_row_populates_i8u8_freq_for_all_64_bytes() {
@@ -1593,11 +1587,9 @@ mod tests {
         }
 
         /// URange8 bus (gated): place a valid u8 query at row 0 via
-        /// place_urange8_query. `place_urange8_query` couples UINT8_DATA to
-        /// MAT_UNPACK's i8 view through the i8u8 bus, and MAT_UNPACK is now
-        /// int7-constrained to [-64,64] (audit N2, Pearl parity). So the reachable
-        /// (and honest) UINT8_DATA values are exactly the u8 view of [-64,64] =
-        /// {0..=64} ∪ {192..=255}; those must verify.
+        /// place_urange8_query. The i8u8 bus couples UINT8_DATA to MAT_UNPACK's
+        /// signed view, which is constrained to [-64,64]. The corresponding
+        /// unsigned values are {0..=64} ∪ {192..=255}; those must verify.
         #[test]
         fn prop_urange8_valid_query_verifies(v in prop_oneof![0u32..=64, 192u32..=255]) {
             let cfg = build_stark_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
@@ -1608,14 +1600,10 @@ mod tests {
                 .expect("valid u8 query must verify");
         }
 
-        /// **Audit N2 — Pearl parity (the fix's teeth).** A CONSISTENT staging row
-        /// (MAT_UNPACK = i8(u8), matching NOISED_PACKED / UINT8_DATA) whose
-        /// MAT_UNPACK i8 view is OUT of int7 `[-64,64]` — i.e. u8 ∈ [65,191] →
-        /// i8 ∈ [65,127]∪[-128,-65] — is now REJECTED by the `irange7p1` range bus.
-        /// Before the fix, MAT_UNPACK was range-checked to full i8 `[-128,127]`
-        /// (`irange8`), so this exact row VERIFIED — an accept-set divergence from
-        /// Pearl (`pearl_stark.rs`: "// Signal is in [-64, 64]"). This is the
-        /// regression that pins the fix.
+        /// A consistent staging row with matching MAT_UNPACK, NOISED_PACKED,
+        /// and UINT8_DATA must still reject when MAT_UNPACK is outside
+        /// [-64,64]. Unsigned values in [65,191] represent signed values in
+        /// [65,127] ∪ [-128,-65], which have no `irange7p1` table entry.
         #[test]
         fn prop_mat_unpack_out_of_int7_rejects(u in prop_oneof![65u32..=127, 128u32..=191]) {
             let cfg = build_stark_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);

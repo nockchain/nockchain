@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -15,19 +16,29 @@ use tokio::time::{sleep, timeout, Instant};
 use tracing::info;
 
 use crate::grpc::{
-    fetch_constants_private, fetch_head, fetch_heaviest_private, wait_for_height,
-    wait_for_height_private, wait_for_ready, HeadInfo, PrivateHeadInfo,
+    configure_mining_payout, fetch_constants_private, fetch_head, fetch_heaviest_private,
+    set_mining_enabled, wait_for_height, wait_for_height_private, wait_for_ready, HeadInfo,
+    PrivateHeadInfo,
 };
 
 const PEER_ID_FILENAME: &str = ".nockchain_identity.peerid";
 const DOCKER_WORKDIR: &str = "/var/nockchain";
 const PEER_ID_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+const MINER_SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+// Mandatory verifier setup can take several minutes on a fresh node. Match
+// the established standalone CPU smoke's boot bound, not post-start RPC waits.
+const NODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[derive(Clone, Debug)]
 pub enum NodeMode {
     Process,
-    Docker { image: String, network: String },
+    Docker {
+        image: String,
+        network: String,
+        miner_image: String,
+        miner_binary: PathBuf,
+    },
 }
 
 pub struct NodeManager {
@@ -41,6 +52,7 @@ impl NodeManager {
         specs: &[NodeSpec],
         run_dir: &Path,
         nockchain_bin: Option<PathBuf>,
+        miner_bin: Option<PathBuf>,
         base_grpc_port: u16,
         base_private_grpc_port: u16,
         base_p2p_port: u16,
@@ -71,6 +83,18 @@ impl NodeManager {
                 spec,
                 nockchain_bin.as_ref(),
             ))?)?;
+            let miner_binary = match &mode {
+                NodeMode::Process => absolutize_binary(expand_env_path(
+                    spec.miner_binary
+                        .as_ref()
+                        .or(miner_bin.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| PathBuf::from("target/release/zk-pow-mine")),
+                )?)?,
+                NodeMode::Docker { miner_binary, .. } => {
+                    expand_env_path(spec.miner_binary.as_ref().unwrap_or(miner_binary).clone())?
+                }
+            };
 
             let supports_bythos_phase = match &mode {
                 NodeMode::Process => binary_supports_flag(&binary, "--fakenet-bythos-phase")?,
@@ -86,8 +110,13 @@ impl NodeManager {
                 grpc_private_port,
                 grpc_private_host_port: None,
                 p2p_port,
+                miner_work_dir: work_dir.join("miner"),
                 work_dir,
                 binary,
+                miner_binary,
+                miner_supports_cpu_flag: None,
+                operator_token: effective_auth_env(spec, PRIVATE_GRPC_AUTH_TOKEN_ENV),
+                miner_token: effective_auth_env(spec, PRIVATE_GRPC_MINER_TOKEN_ENV),
                 supports_bythos_phase,
             };
             configs.insert(spec.id.clone(), config);
@@ -106,101 +135,150 @@ impl NodeManager {
 
     pub async fn start_nodes(&mut self, ids: &[String]) -> Result<()> {
         self.ensure_ports_available(ids)?;
-        match &self.mode {
-            NodeMode::Process => {
-                let mut started = Vec::new();
-                for id in ids {
-                    if self.handles.contains_key(id) {
-                        continue;
-                    }
-                    let config = self
-                        .configs
-                        .get(id)
-                        .ok_or_else(|| anyhow!("unknown node id '{id}'"))?
-                        .clone();
-
-                    let peer_from = self.resolve_peer_from(&config.spec).await?;
-                    let handle = spawn_process_node(&config, &peer_from).await?;
-                    self.handles.insert(id.clone(), handle);
-                    started.push(id.clone());
-                    if let Some(config) = self.configs.get_mut(id) {
-                        config.spec.new_state = false;
-                    }
+        let mut started = Vec::new();
+        if let Err(error) = self.start_nodes_inner(ids, &mut started).await {
+            return match self.stop_nodes(&started).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => {
+                    Err(error.context(format!("startup cleanup also failed: {cleanup:#}")))
                 }
-                self.ensure_process_nodes_running(&started).await?;
-                Ok(())
+            };
+        }
+        Ok(())
+    }
+
+    async fn start_nodes_inner(&mut self, ids: &[String], started: &mut Vec<String>) -> Result<()> {
+        let port_map = match &self.mode {
+            NodeMode::Docker { .. } => Some(build_p2p_port_map(&self.configs)?),
+            NodeMode::Process => None,
+        };
+        for id in ids {
+            if self.handles.contains_key(id) {
+                self.ensure_node_running(id).await?;
+                continue;
             }
-            NodeMode::Docker { image, network } => {
-                let mut started = Vec::new();
-                let port_map = build_p2p_port_map(&self.configs)?;
-                for id in ids {
-                    if self.handles.contains_key(id) {
-                        continue;
-                    }
-                    let config = self
-                        .configs
-                        .get(id)
-                        .ok_or_else(|| anyhow!("unknown node id '{id}'"))?
-                        .clone();
-
-                    let peer_from = self.resolve_peer_from(&config.spec).await?;
-                    let docker_peers = self
-                        .rewrite_peers_for_docker(&config.spec, &port_map, network)
+            let config = self
+                .configs
+                .get_mut(id)
+                .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
+            config.refresh_credentials();
+            let config = self.configs.get(id).expect("known node config");
+            let grpc_enabled = config.spec.grpc_enabled;
+            let mine = config.spec.mine;
+            let public_port = config.grpc_public_port;
+            let private_port = config.grpc_private_port;
+            let peer_from = self.resolve_peer_from(&config.spec).await?;
+            let node = match &self.mode {
+                NodeMode::Process => spawn_process_node(config, &peer_from).await?,
+                NodeMode::Docker { image, network, .. } => {
+                    let peers = self
+                        .rewrite_peers_for_docker(
+                            &config.spec,
+                            port_map.as_ref().expect("Docker port map"),
+                            network,
+                        )
                         .await?;
-                    let container =
-                        spawn_docker_node(&config, image, network, &peer_from, &docker_peers)
-                            .await?;
-                    let host = container.get_host().await?;
-                    let grpc_public_host_port = container
-                        .get_host_port_ipv4(config.grpc_public_port.tcp())
-                        .await?;
-                    let grpc_private_host_port = container
-                        .get_host_port_ipv4(config.grpc_private_port.tcp())
-                        .await?;
-                    let config_mut = self
-                        .configs
-                        .get_mut(id)
-                        .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
-                    config_mut.grpc_public_addr = format!("{host}:{grpc_public_host_port}");
-                    config_mut.grpc_private_addr = format!("{host}:{grpc_private_host_port}");
-                    config_mut.grpc_private_host_port = Some(grpc_private_host_port);
-                    self.handles
-                        .insert(id.clone(), NodeHandle::Docker(container));
-                    config_mut.spec.new_state = false;
-                    started.push(id.clone());
+                    ChildHandle::Docker(
+                        spawn_docker_node(config, image, network, &peer_from, &peers).await?,
+                    )
                 }
-                self.ensure_docker_nodes_running(&started).await?;
-                Ok(())
+            };
+            // Register ownership before any fallible port, relay, or RPC setup.
+            self.handles
+                .insert(id.clone(), NodeHandle { node, miner: None });
+            started.push(id.clone());
+            self.configs
+                .get_mut(id)
+                .expect("known node config")
+                .spec
+                .new_state = false;
+            if grpc_enabled {
+                if let ChildHandle::Docker(container) =
+                    &self.handles.get(id).expect("owned node").node
+                {
+                    let host = container.get_host().await?;
+                    let public_host_port = container.get_host_port_ipv4(public_port.tcp()).await?;
+                    let private_host_port =
+                        container.get_host_port_ipv4(private_port.tcp()).await?;
+                    if let NodeMode::Docker { network, .. } = &self.mode {
+                        start_private_grpc_forwarder(
+                            &docker_container_name(network, id),
+                            network,
+                            private_port,
+                        )?;
+                    }
+                    let config = self.configs.get_mut(id).expect("known node config");
+                    config.grpc_public_addr = format!("{host}:{public_host_port}");
+                    config.grpc_private_addr = format!("{host}:{private_host_port}");
+                    config.grpc_private_host_port = Some(private_host_port);
+                }
+                self.while_node_running(
+                    id,
+                    wait_for_height_private(
+                        self.grpc_private_addr(id)?,
+                        self.operator_token(id)?,
+                        0,
+                        NODE_STARTUP_TIMEOUT,
+                    ),
+                )
+                .await?;
+            }
+            if mine {
+                self.start_miner(id).await?;
             }
         }
+        self.ensure_running().await
     }
 
     pub async fn stop_nodes(&mut self, ids: &[String]) -> Result<()> {
+        let mut errors = Vec::new();
+        // Stop all selected proof workers while their nodes are still available.
+        for id in ids {
+            if let Err(error) = self.stop_miner(id).await {
+                errors.push(format!("stop miner '{id}': {error:#}"));
+            }
+        }
         for id in ids {
             if let Some(handle) = self.handles.remove(id) {
-                match handle {
-                    NodeHandle::Process(mut handle) => {
-                        stop_process_child(&mut handle.child).await;
-                    }
-                    NodeHandle::Docker(container) => {
-                        if let Some(config) = self.configs.get(id) {
-                            let _ = persist_docker_logs(config, &container).await;
+                let config = self.configs.get(id).expect("owned node config");
+                if let NodeMode::Docker { network, .. } = &self.mode {
+                    if config.spec.grpc_enabled {
+                        let forwarder =
+                            private_grpc_forwarder_name(&docker_container_name(network, id));
+                        if let Err(error) = persist_forwarder_logs(&config.work_dir, &forwarder) {
+                            errors.push(format!("capture relay '{id}': {error:#}"));
                         }
-                        let _ = container.stop().await;
+                        if let Err(error) = remove_stale_docker_container(&forwarder) {
+                            errors.push(format!("remove relay '{id}': {error:#}"));
+                        }
                     }
+                }
+                if let Err(error) = stop_owned_child(handle.node, &config.work_dir, false).await {
+                    errors.push(format!("stop node '{id}': {error:#}"));
                 }
             }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(errors.join("; ")))
+        }
     }
 
     pub async fn shutdown_all(&mut self) -> Result<()> {
         let ids: Vec<String> = self.handles.keys().cloned().collect();
-        self.stop_nodes(&ids).await?;
-        if let NodeMode::Docker { network, .. } = &self.mode {
-            let _ = remove_docker_network(network);
+        let stop = self.stop_nodes(&ids).await;
+        let network = match &self.mode {
+            NodeMode::Docker { network, .. } => remove_docker_network(network),
+            NodeMode::Process => Ok(()),
+        };
+        match (stop, network) {
+            (Err(error), Err(network)) => {
+                Err(error.context(format!("network cleanup also failed: {network:#}")))
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
         }
-        Ok(())
     }
 
     pub async fn restart_nodes(&mut self, ids: &[String]) -> Result<()> {
@@ -219,7 +297,10 @@ impl NodeManager {
 
     pub async fn wait_for_grpc(&self, id: &str, timeout: std::time::Duration) -> Result<()> {
         let addr = self.grpc_public_addr(id)?;
-        match wait_for_ready(addr, timeout).await {
+        match self
+            .while_node_running(id, wait_for_ready(addr, timeout))
+            .await
+        {
             Ok(()) => Ok(()),
             Err(err) => {
                 if let Some(diagnostics) = self.capture_docker_diagnostics(id).await? {
@@ -230,56 +311,62 @@ impl NodeManager {
         }
     }
 
-    async fn ensure_process_nodes_running(&mut self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        sleep(Duration::from_millis(200)).await;
-        for id in ids {
-            let Some(handle) = self.handles.get_mut(id) else {
-                continue;
-            };
-            if let NodeHandle::Process(handle) = handle {
-                if let Some(status) = handle.child.try_wait()? {
-                    let log_path = self
-                        .configs
-                        .get(id)
-                        .map(|config| config.work_dir.join("stderr.log"))
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "<unknown>".to_string());
-                    return Err(anyhow!(
-                        "node '{}' exited early with status {} (see {})", id, status, log_path
-                    ));
-                }
-            }
+    pub async fn ensure_running(&self) -> Result<()> {
+        for id in self.handles.keys() {
+            self.ensure_node_running(id).await?;
         }
         Ok(())
     }
 
-    async fn ensure_docker_nodes_running(&self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
+    pub async fn wait_for_duration(&self, duration: Duration) -> Result<()> {
+        if self.handles.is_empty() {
+            sleep(duration).await;
             return Ok(());
         }
+        self.ensure_running().await?;
+        tokio::select! {
+            _ = sleep(duration) => self.ensure_running().await,
+            error = self.wait_for_owned_exit() => Err(error),
+        }
+    }
 
-        sleep(Duration::from_millis(200)).await;
-        for id in ids {
-            let Some(handle) = self.handles.get(id) else {
-                continue;
-            };
-            if let NodeHandle::Docker(container) = handle {
-                if !container.is_running().await? {
-                    let diagnostics = self
-                        .capture_docker_diagnostics(id)
-                        .await?
-                        .unwrap_or_else(|| format!("docker node '{}' is not running", id));
-                    return Err(anyhow!(
-                        "docker node '{}' exited early: {}", id, diagnostics
-                    ));
-                }
-            }
+    async fn ensure_node_running(&self, id: &str) -> Result<()> {
+        let config = self
+            .configs
+            .get(id)
+            .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
+        let handle = self
+            .handles
+            .get(id)
+            .ok_or_else(|| anyhow!("node '{id}' is not running"))?;
+        ensure_handle_running(&handle.node, id, "node", &config.work_dir).await?;
+        if let Some(miner) = &handle.miner {
+            ensure_handle_running(miner, id, "miner", &config.miner_work_dir).await?;
         }
         Ok(())
+    }
+
+    async fn wait_for_owned_exit(&self) -> anyhow::Error {
+        loop {
+            if let Err(error) = self.ensure_running().await {
+                return error;
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn while_node_running<T>(
+        &self,
+        id: &str,
+        future: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.ensure_node_running(id).await?;
+        let result = tokio::select! {
+            result = future => result,
+            error = self.wait_for_owned_exit() => Err(error),
+        };
+        self.ensure_running().await?;
+        result
     }
 
     pub async fn wait_for_height(
@@ -290,41 +377,36 @@ impl NodeManager {
     ) -> Result<HeadInfo> {
         let private_addr = self.grpc_private_addr(id)?;
         let public_addr = self.grpc_public_addr(id)?;
-        let start = Instant::now();
-        match wait_for_height_private(private_addr, height, timeout).await {
-            Ok(private_head) => match self.fetch_head(id).await {
-                Ok(head) => Ok(head),
-                Err(_) => Ok(head_info_from_private(private_head)),
-            },
-            Err(err) => {
-                let remaining = timeout.saturating_sub(start.elapsed());
-                let public_result = if remaining.is_zero() {
-                    Err(err)
-                } else {
-                    wait_for_height(public_addr, height, remaining).await
-                };
-                match public_result {
+        self.while_node_running(id, async {
+            let start = Instant::now();
+            match wait_for_height_private(private_addr, self.operator_token(id)?, height, timeout)
+                .await
+            {
+                Ok(private_head) => match self.fetch_head(id).await {
                     Ok(head) => Ok(head),
-                    Err(err) => {
-                        if let Some(diagnostics) = self.capture_docker_diagnostics(id).await? {
-                            Err(err.context(diagnostics))
-                        } else {
-                            Err(err)
-                        }
+                    Err(_) => Ok(head_info_from_private(private_head)),
+                },
+                Err(error) => {
+                    let remaining = timeout.saturating_sub(start.elapsed());
+                    if remaining.is_zero() {
+                        return Err(error);
                     }
+                    wait_for_height(public_addr, height, remaining).await
                 }
             }
-        }
+        })
+        .await
     }
 
     pub async fn fetch_head(&self, id: &str) -> Result<HeadInfo> {
         let addr = self.grpc_public_addr(id)?;
-        fetch_head(addr).await
+        self.while_node_running(id, fetch_head(addr)).await
     }
 
     pub async fn fetch_private_head(&self, id: &str) -> Result<PrivateHeadInfo> {
         let addr = self.grpc_private_addr(id)?;
-        fetch_heaviest_private(addr).await
+        self.while_node_running(id, fetch_heaviest_private(addr, self.operator_token(id)?))
+            .await
     }
 
     pub async fn fetch_private_head_if_current(
@@ -339,7 +421,8 @@ impl NodeManager {
 
     pub async fn fetch_constants(&self, id: &str) -> Result<Vec<u8>> {
         let addr = self.grpc_private_addr(id)?;
-        fetch_constants_private(addr).await
+        self.while_node_running(id, fetch_constants_private(addr, self.operator_token(id)?))
+            .await
     }
 
     pub fn grpc_private_port(&self, id: &str) -> Result<u16> {
@@ -359,9 +442,10 @@ impl NodeManager {
             .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
         match &self.mode {
             NodeMode::Process => {
-                config.binary = absolutize_binary(binary)?;
-                config.supports_bythos_phase =
-                    binary_supports_flag(&config.binary, "--fakenet-bythos-phase")?;
+                let binary = absolutize_binary(expand_env_path(binary)?)?;
+                let supports = binary_supports_flag(&binary, "--fakenet-bythos-phase")?;
+                config.binary = binary;
+                config.supports_bythos_phase = supports;
             }
             NodeMode::Docker { .. } => {
                 config.spec.binary = Some(binary);
@@ -373,36 +457,193 @@ impl NodeManager {
     }
 
     pub async fn set_mining_pkh(&mut self, id: &str, mining_pkh: String) -> Result<()> {
+        self.configs
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("unknown node id '{id}'"))?
+            .spec
+            .mine = false;
+        self.stop_miner(id).await?;
         let config = self
             .configs
             .get_mut(id)
             .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
         config.spec.mining_pkh = Some(mining_pkh);
-        if !config.spec.mine {
-            config.spec.mine = true;
-        }
+        config.spec.mine = true;
         if self.handles.contains_key(id) {
-            let ids = vec![id.to_string()];
-            self.restart_nodes(&ids).await?;
+            self.start_miner(id).await?;
         }
         Ok(())
     }
 
     pub async fn disable_mining(&mut self, id: &str) -> Result<()> {
+        self.set_mining_enabled(id, false).await
+    }
+
+    pub async fn set_mining_enabled(&mut self, id: &str, enabled: bool) -> Result<()> {
         let config = self
             .configs
             .get_mut(id)
             .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
+        config.spec.mine = enabled;
+        if !self.handles.contains_key(id) {
+            return Ok(());
+        }
+        if enabled {
+            if self
+                .handles
+                .get(id)
+                .is_some_and(|handle| handle.miner.is_some())
+            {
+                self.ensure_node_running(id).await?;
+                return set_mining_enabled(
+                    self.grpc_private_addr(id)?,
+                    self.operator_token(id)?,
+                    true,
+                )
+                .await;
+            }
+            self.start_miner(id).await
+        } else {
+            let stop = self.stop_miner(id).await;
+            let disable =
+                set_mining_enabled(self.grpc_private_addr(id)?, self.operator_token(id)?, false)
+                    .await;
+            match (stop, disable) {
+                (Err(error), Err(disable)) => {
+                    Err(error.context(format!("disable mining also failed: {disable:#}")))
+                }
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Ok(()), Ok(())) => Ok(()),
+            }
+        }
+    }
+
+    pub async fn upgrade_miner(&mut self, id: &str, binary: PathBuf) -> Result<()> {
+        let config = self
+            .configs
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
+        let enabled = config.spec.mine;
         config.spec.mine = false;
-        config.spec.mining_pkh = None;
-        if self.handles.contains_key(id) {
-            let ids = vec![id.to_string()];
-            self.restart_nodes(&ids).await?;
+        self.stop_miner(id).await?;
+        let config = self
+            .configs
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
+        match &self.mode {
+            NodeMode::Process => config.miner_binary = absolutize_binary(expand_env_path(binary)?)?,
+            NodeMode::Docker { .. } => {
+                config.spec.miner_image = Some(expand_env_vars(&binary.to_string_lossy())?);
+            }
+        }
+        config.miner_supports_cpu_flag = None;
+        config.spec.mine = enabled;
+        if config.spec.mine && self.handles.contains_key(id) {
+            self.start_miner(id).await?;
         }
         Ok(())
     }
 
+    async fn start_miner(&mut self, id: &str) -> Result<()> {
+        if let Err(error) = self.start_miner_inner(id).await {
+            self.configs
+                .get_mut(id)
+                .expect("known mining node")
+                .spec
+                .mine = false;
+            return match self.stop_miner(id).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => {
+                    Err(error.context(format!("miner startup cleanup also failed: {cleanup:#}")))
+                }
+            };
+        }
+        Ok(())
+    }
+
+    async fn start_miner_inner(&mut self, id: &str) -> Result<()> {
+        self.ensure_node_running(id).await?;
+        let config = self
+            .configs
+            .get(id)
+            .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
+        if self
+            .handles
+            .get(id)
+            .is_some_and(|handle| handle.miner.is_some())
+        {
+            return Ok(());
+        }
+        if config.spec.mining_pkh.is_none() {
+            return Err(anyhow!("node '{id}' requests mining without mining_pkh"));
+        }
+        if config.miner_supports_cpu_flag.is_none() {
+            let supports = match &self.mode {
+                NodeMode::Process => binary_supports_flag(&config.miner_binary, "--cpu")?,
+                NodeMode::Docker { miner_image, .. } => {
+                    docker_miner_supports_cpu_flag(config, miner_image).await?
+                }
+            };
+            self.configs
+                .get_mut(id)
+                .expect("known mining node")
+                .miner_supports_cpu_flag = Some(supports);
+        }
+        let config = self.configs.get(id).expect("known mining node");
+        configure_mining_payout(
+            self.grpc_private_addr(id)?,
+            self.operator_token(id)?,
+            config.spec.mining_pkh.as_deref().expect("mining payout"),
+        )
+        .await?;
+        let miner = match &self.mode {
+            NodeMode::Process => spawn_process_miner(config).await?,
+            NodeMode::Docker {
+                miner_image,
+                network,
+                ..
+            } => ChildHandle::Docker(spawn_docker_miner(config, miner_image, network).await?),
+        };
+        // The real child is reachable by every failure-cleanup path immediately.
+        self.handles.get_mut(id).expect("owned mining node").miner = Some(miner);
+        if self
+            .configs
+            .get(id)
+            .expect("known mining node")
+            .miner_token
+            .is_some()
+        {
+            // Restricted miners deliberately leave payout/enable to the operator.
+            set_mining_enabled(self.grpc_private_addr(id)?, self.operator_token(id)?, true).await?;
+        }
+        sleep(Duration::from_millis(200)).await;
+        self.ensure_node_running(id).await
+    }
+
+    async fn stop_miner(&mut self, id: &str) -> Result<()> {
+        let miner = self
+            .handles
+            .get_mut(id)
+            .and_then(|handle| handle.miner.take());
+        if let Some(miner) = miner {
+            let config = self.configs.get(id).expect("owned mining node config");
+            stop_owned_child(miner, &config.miner_work_dir, true).await?;
+        }
+        Ok(())
+    }
+
+    pub fn operator_token(&self, id: &str) -> Result<Option<&str>> {
+        let config = self
+            .configs
+            .get(id)
+            .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
+        Ok(config.operator_token.as_deref())
+    }
+
     fn ensure_ports_available(&self, ids: &[String]) -> Result<()> {
+        if matches!(&self.mode, NodeMode::Docker { .. }) {
+            return Ok(());
+        }
         for id in ids {
             if self.handles.contains_key(id) {
                 continue;
@@ -430,12 +671,12 @@ impl NodeManager {
     }
 
     async fn node_handle_is_live(&mut self, id: &str) -> Result<bool> {
-        let Some(handle) = self.handles.get_mut(id) else {
+        let Some(handle) = self.handles.get(id) else {
             return Ok(false);
         };
-        match handle {
-            NodeHandle::Process(handle) => Ok(handle.child.try_wait()?.is_none()),
-            NodeHandle::Docker(container) => container.is_running().await.map_err(Into::into),
+        match &handle.node {
+            ChildHandle::Process(handle) => Ok(handle.child.lock().await.try_wait()?.is_none()),
+            ChildHandle::Docker(container) => container.is_running().await.map_err(Into::into),
         }
     }
 
@@ -552,6 +793,9 @@ impl NodeManager {
     }
 
     pub fn grpc_private_addr(&self, id: &str) -> Result<&str> {
+        if !self.handles.contains_key(id) {
+            return Err(anyhow!("node '{id}' is not running"));
+        }
         let config = self
             .configs
             .get(id)
@@ -600,12 +844,12 @@ impl NodeManager {
             .get(id)
             .ok_or_else(|| anyhow!("unknown node id '{id}'"))?;
 
-        let (stdout, stderr) = match self.handles.get(id) {
-            Some(NodeHandle::Process(_)) => (
+        let (stdout, stderr) = match self.handles.get(id).map(|handle| &handle.node) {
+            Some(ChildHandle::Process(_)) => (
                 read_log_file(&config.work_dir.join("stdout.log"))?,
                 read_log_file(&config.work_dir.join("stderr.log"))?,
             ),
-            Some(NodeHandle::Docker(container)) => {
+            Some(ChildHandle::Docker(container)) => {
                 let (_, _, stdout, stderr) = persist_docker_logs(config, container).await?;
                 (stdout, stderr)
             }
@@ -616,7 +860,11 @@ impl NodeManager {
     }
 
     async fn capture_docker_diagnostics(&self, id: &str) -> Result<Option<String>> {
-        let Some(NodeHandle::Docker(container)) = self.handles.get(id) else {
+        let Some(NodeHandle {
+            node: ChildHandle::Docker(container),
+            ..
+        }) = self.handles.get(id)
+        else {
             return Ok(None);
         };
         let config = self
@@ -663,7 +911,6 @@ impl NodeManager {
     }
 }
 
-#[derive(Clone)]
 struct NodeConfig {
     base_spec: NodeSpec,
     spec: NodeSpec,
@@ -674,16 +921,33 @@ struct NodeConfig {
     grpc_private_host_port: Option<u16>,
     p2p_port: u16,
     work_dir: PathBuf,
+    miner_work_dir: PathBuf,
     binary: PathBuf,
+    miner_binary: PathBuf,
+    miner_supports_cpu_flag: Option<bool>,
+    operator_token: Option<String>,
+    miner_token: Option<String>,
     supports_bythos_phase: bool,
 }
 
+impl NodeConfig {
+    fn refresh_credentials(&mut self) {
+        self.operator_token = effective_auth_env(&self.spec, PRIVATE_GRPC_AUTH_TOKEN_ENV);
+        self.miner_token = effective_auth_env(&self.spec, PRIVATE_GRPC_MINER_TOKEN_ENV);
+    }
+}
+
 struct ProcessHandle {
-    child: Child,
+    child: tokio::sync::Mutex<Child>,
+}
+
+struct NodeHandle {
+    node: ChildHandle,
+    miner: Option<ChildHandle>,
 }
 
 #[allow(clippy::large_enum_variant)]
-enum NodeHandle {
+enum ChildHandle {
     Process(ProcessHandle),
     Docker(testcontainers::ContainerAsync<GenericImage>),
 }
@@ -693,41 +957,142 @@ struct DockerPeers {
     force_peers: Vec<String>,
 }
 
-async fn stop_process_child(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
+async fn ensure_handle_running(
+    handle: &ChildHandle,
+    id: &str,
+    role: &str,
+    work_dir: &Path,
+) -> Result<()> {
+    match handle {
+        ChildHandle::Process(handle) => {
+            if let Some(status) = handle.child.lock().await.try_wait()? {
+                return Err(anyhow!(
+                    "{role} '{id}' exited with status {status} (see {})",
+                    work_dir.join("stderr.log").display(),
+                ));
+            }
+        }
+        ChildHandle::Docker(container) => {
+            if !container.is_running().await? {
+                let status = container.exit_code().await?;
+                let error = anyhow!(
+                    "docker {role} '{id}' exited with status {status:?} (see {})",
+                    work_dir.join("stderr.log").display(),
+                );
+                return match persist_docker_child_logs(work_dir, container).await {
+                    Ok(_) => Err(error),
+                    Err(logs) => Err(error.context(format!("log capture also failed: {logs:#}"))),
+                };
+            }
+        }
     }
+    Ok(())
+}
 
-    if request_process_shutdown(child)
-        && matches!(
-            timeout(PROCESS_SHUTDOWN_GRACE, child.wait()).await,
-            Ok(Ok(_))
-        )
-    {
-        return;
+async fn stop_owned_child(handle: ChildHandle, work_dir: &Path, miner: bool) -> Result<()> {
+    match handle {
+        ChildHandle::Process(handle) => {
+            stop_process_child(&mut handle.child.into_inner(), miner).await
+        }
+        ChildHandle::Docker(container) => {
+            let mut errors = Vec::new();
+            if miner {
+                // The standalone CPU executable watches SIGINT, not SIGTERM.
+                let stop = Command::new("docker")
+                    .args(["stop", "--signal", "SIGINT", "--timeout"])
+                    .arg(MINER_SHUTDOWN_GRACE.as_secs().to_string())
+                    .arg(container.id())
+                    .output()
+                    .await;
+                match stop {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => errors.push(format!(
+                        "stop miner container: {}",
+                        String::from_utf8_lossy(&output.stderr).trim(),
+                    )),
+                    Err(error) => errors.push(format!("stop miner container: {error}")),
+                }
+            } else if let Err(error) = container
+                .stop_with_timeout(Some(PROCESS_SHUTDOWN_GRACE.as_secs() as i32))
+                .await
+            {
+                errors.push(format!("stop node container: {error}"));
+            }
+            if let Err(error) = persist_docker_child_logs(work_dir, &container).await {
+                errors.push(format!("capture container logs: {error:#}"));
+            }
+            // Await removal rather than relying on asynchronous Drop before
+            // releasing the node namespace or the fixture network.
+            if let Err(error) = container.rm().await {
+                errors.push(format!("remove owned container: {error}"));
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!(errors.join("; ")))
+            }
+        }
     }
+}
 
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+async fn stop_process_child(child: &mut Child, miner: bool) -> Result<()> {
+    let mut earlier_error: Option<anyhow::Error> = match child.try_wait() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => None,
+        Err(error) => Some(error.into()),
+    };
+    let grace = if miner {
+        MINER_SHUTDOWN_GRACE
+    } else {
+        PROCESS_SHUTDOWN_GRACE
+    };
+    if request_process_shutdown(child, miner) {
+        match timeout(grace, child.wait()).await {
+            Ok(Ok(_)) => return earlier_error.map_or(Ok(()), Err),
+            Ok(Err(error)) => {
+                earlier_error = Some(match earlier_error {
+                    Some(earlier) => earlier.context(format!("graceful wait also failed: {error}")),
+                    None => error.into(),
+                });
+            }
+            Err(_) => {}
+        }
+    }
+    // A status/wait error must not bypass forced termination and reaping.
+    let kill = child.start_kill().context("kill owned child");
+    let reap = child.wait().await.context("reap owned child");
+    let forced = match (kill, reap) {
+        (Err(error), Err(reap)) => Err(error.context(format!("reap also failed: {reap:#}"))),
+        (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
+        (Ok(()), Ok(_)) => Ok(()),
+    };
+    match (earlier_error, forced) {
+        (Some(error), Err(forced)) => {
+            Err(error.context(format!("forced cleanup also failed: {forced:#}")))
+        }
+        (Some(error), Ok(())) | (None, Err(error)) => Err(error),
+        (None, Ok(())) => Ok(()),
+    }
 }
 
 #[cfg(unix)]
-fn request_process_shutdown(child: &Child) -> bool {
+fn request_process_shutdown(child: &Child, miner: bool) -> bool {
     let Some(pid) = child.id() else {
         return false;
     };
-
-    // SAFETY: pid comes from the live child process handle and SIGTERM is a valid signal.
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 }
+    let signal = if miner { libc::SIGINT } else { libc::SIGTERM };
+    // SAFETY: pid belongs to the owned child and both signals are valid.
+    unsafe { libc::kill(pid as libc::pid_t, signal) == 0 }
 }
 
 #[cfg(not(unix))]
-fn request_process_shutdown(_: &Child) -> bool {
+fn request_process_shutdown(_: &Child, _: bool) -> bool {
     false
 }
 
-async fn spawn_process_node(config: &NodeConfig, peer_from: &[String]) -> Result<NodeHandle> {
+async fn spawn_process_node(config: &NodeConfig, peer_from: &[String]) -> Result<ChildHandle> {
     std::fs::create_dir_all(&config.work_dir)?;
+    archive_previous_logs(&config.work_dir)?;
 
     let stdout_path = config.work_dir.join("stdout.log");
     let stderr_path = config.work_dir.join("stderr.log");
@@ -748,13 +1113,20 @@ async fn spawn_process_node(config: &NodeConfig, peer_from: &[String]) -> Result
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .args(&args);
+    command.kill_on_drop(true);
+    if let Some((key, value)) = private_grpc_auth_env(&config.spec) {
+        command.env(key, value);
+    }
     for (key, value) in &config.spec.env {
         command.env(key, value);
     }
+    apply_process_credentials(&mut command, config, false);
 
     let child = command.spawn().context("spawn nockchain")?;
 
-    Ok(NodeHandle::Process(ProcessHandle { child }))
+    Ok(ChildHandle::Process(ProcessHandle {
+        child: tokio::sync::Mutex::new(child),
+    }))
 }
 
 async fn spawn_docker_node(
@@ -765,6 +1137,7 @@ async fn spawn_docker_node(
     docker_peers: &DockerPeers,
 ) -> Result<testcontainers::ContainerAsync<GenericImage>> {
     std::fs::create_dir_all(&config.work_dir)?;
+    archive_previous_logs(&config.work_dir)?;
 
     let image_ref = resolve_docker_image(config, default_image)?;
     let image = parse_image_ref(&image_ref);
@@ -800,17 +1173,352 @@ async fn spawn_docker_node(
         .with_container_name(&container_name)
         .with_working_dir(DOCKER_WORKDIR)
         .with_mount(mount);
+    if config.spec.grpc_enabled {
+        let private_port = config.grpc_private_port;
+        request = request.with_host_config_modifier(move |host_config| {
+            // Override only private publication; public gRPC/P2P retain their
+            // existing publication. The operator relay must be host-loopback-only.
+            host_config
+                .port_bindings
+                .get_or_insert_with(HashMap::new)
+                .insert(
+                    format!("{private_port}/tcp"),
+                    Some(vec![testcontainers::bollard::models::PortBinding {
+                        host_ip: Some("127.0.0.1".to_string()),
+                        host_port: Some("0".to_string()),
+                    }]),
+                );
+        });
+    }
 
     #[cfg(unix)]
     {
         request = request.with_user(current_host_user());
     }
 
+    if let Some((key, value)) = private_grpc_auth_env(&config.spec) {
+        request = request.with_env_var(key, value);
+    }
     for (key, value) in &config.spec.env {
         request = request.with_env_var(key, value);
     }
+    if let Some(token) = &config.operator_token {
+        request = request.with_env_var(PRIVATE_GRPC_AUTH_TOKEN_ENV, token);
+    }
+    if let Some(token) = &config.miner_token {
+        request = request.with_env_var(PRIVATE_GRPC_MINER_TOKEN_ENV, token);
+    }
 
     request.start().await.map_err(Into::into)
+}
+
+fn effective_auth_env(spec: &NodeSpec, key: &str) -> Option<String> {
+    spec.env
+        .get(key)
+        .cloned()
+        .or_else(|| std::env::var(key).ok())
+        .filter(|token| !token.is_empty())
+}
+
+fn apply_process_credentials(command: &mut Command, config: &NodeConfig, miner: bool) {
+    if miner && config.miner_token.is_some() {
+        command.env_remove(PRIVATE_GRPC_AUTH_TOKEN_ENV);
+    } else if let Some(token) = &config.operator_token {
+        command.env(PRIVATE_GRPC_AUTH_TOKEN_ENV, token);
+    } else {
+        command.env_remove(PRIVATE_GRPC_AUTH_TOKEN_ENV);
+    }
+    if let Some(token) = &config.miner_token {
+        command.env(PRIVATE_GRPC_MINER_TOKEN_ENV, token);
+    } else {
+        command.env_remove(PRIVATE_GRPC_MINER_TOKEN_ENV);
+    }
+}
+
+fn build_miner_args(config: &NodeConfig, node_addr: String) -> Result<Vec<String>> {
+    let pkh =
+        config.spec.mining_pkh.as_ref().ok_or_else(|| {
+            anyhow!("node '{}' requests mining without mining_pkh", config.spec.id)
+        })?;
+    let mut args = vec![
+        "--node-addr".to_string(),
+        node_addr,
+        "--mining-pkh".to_string(),
+        pkh.clone(),
+        "--num-threads".to_string(),
+        config.spec.mining_threads.to_string(),
+    ];
+    // CPU-only builds reject --cpu; CUDA-capable builds need it to select CPU.
+    if config.miner_supports_cpu_flag == Some(true) {
+        args.push("--cpu".to_string());
+    }
+    Ok(args)
+}
+
+async fn spawn_process_miner(config: &NodeConfig) -> Result<ChildHandle> {
+    std::fs::create_dir_all(&config.miner_work_dir)?;
+    archive_previous_logs(&config.miner_work_dir)?;
+    let stdout = std::fs::File::create(config.miner_work_dir.join("stdout.log"))?;
+    let stderr = std::fs::File::create(config.miner_work_dir.join("stderr.log"))?;
+    let args = build_miner_args(config, format!("http://{}", config.grpc_private_addr))?;
+    info!(
+        "spawning miner {}: {} {}",
+        config.spec.id,
+        config.miner_binary.display(),
+        args.join(" ")
+    );
+    let mut command = Command::new(&config.miner_binary);
+    command
+        .current_dir(&config.miner_work_dir)
+        .args(args)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .kill_on_drop(true);
+    for (key, value) in &config.spec.env {
+        command.env(key, value);
+    }
+    apply_process_credentials(&mut command, config, true);
+    let child = command.spawn().context("spawn standalone CPU miner")?;
+    Ok(ChildHandle::Process(ProcessHandle {
+        child: tokio::sync::Mutex::new(child),
+    }))
+}
+
+fn miner_image<'a>(config: &'a NodeConfig, default_image: &'a str) -> &'a str {
+    config.spec.miner_image.as_deref().unwrap_or(default_image)
+}
+
+async fn docker_miner_supports_cpu_flag(config: &NodeConfig, default_image: &str) -> Result<bool> {
+    let output = Command::new("docker")
+        .args(["run", "--rm", "--entrypoint"])
+        .arg(&config.miner_binary)
+        .arg(miner_image(config, default_image))
+        .arg("--help")
+        .output()
+        .await
+        .context("read standalone miner CLI capabilities")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "miner image '{}' executable '{}' --help failed: {}",
+            miner_image(config, default_image),
+            config.miner_binary.display(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).contains("--cpu")
+        || String::from_utf8_lossy(&output.stderr).contains("--cpu"))
+}
+
+async fn spawn_docker_miner(
+    config: &NodeConfig,
+    default_image: &str,
+    network: &str,
+) -> Result<testcontainers::ContainerAsync<GenericImage>> {
+    std::fs::create_dir_all(&config.miner_work_dir)?;
+    archive_previous_logs(&config.miner_work_dir)?;
+    let image_ref = miner_image(config, default_image);
+    let image = parse_image_ref(image_ref);
+    let args = build_miner_args(
+        config,
+        format!("http://127.0.0.1:{}", config.grpc_private_port),
+    )?;
+    let name = format!("{}-{}-miner", network, config.spec.id);
+    remove_stale_docker_container(&name)?;
+    info!(
+        "spawning docker miner {}: {} {} {}",
+        config.spec.id,
+        image_ref,
+        config.miner_binary.display(),
+        args.join(" ")
+    );
+    let mount = Mount::bind_mount(
+        config.miner_work_dir.display().to_string(),
+        "/var/nockchain-miner",
+    )
+    .with_access_mode(AccessMode::ReadWrite);
+    let mut request = GenericImage::new(image.name, image.tag)
+        .with_wait_for(WaitFor::Nothing)
+        .with_entrypoint(&config.miner_binary.to_string_lossy())
+        .with_cmd(args)
+        .with_network(format!(
+            "container:{}",
+            docker_container_name(network, &config.spec.id)
+        ))
+        .with_container_name(name)
+        .with_working_dir("/var/nockchain-miner")
+        .with_mount(mount);
+    #[cfg(unix)]
+    {
+        request = request.with_user(current_host_user());
+    }
+    for (key, value) in &config.spec.env {
+        if key == PRIVATE_GRPC_AUTH_TOKEN_ENV || key == PRIVATE_GRPC_MINER_TOKEN_ENV {
+            continue;
+        }
+        request = request.with_env_var(key, value);
+    }
+    if let Some(token) = &config.miner_token {
+        request = request.with_env_var(PRIVATE_GRPC_MINER_TOKEN_ENV, token);
+    } else if let Some(token) = &config.operator_token {
+        request = request.with_env_var(PRIVATE_GRPC_AUTH_TOKEN_ENV, token);
+    }
+    request.start().await.map_err(Into::into)
+}
+
+fn archive_previous_logs(work_dir: &Path) -> Result<()> {
+    let mut previous = Vec::new();
+    for name in [
+        "stdout.log", "stderr.log", "private-grpc-forwarder.stdout.log",
+        "private-grpc-forwarder.stderr.log",
+    ] {
+        let path = work_dir.join(name);
+        if path.try_exists()? {
+            previous.push((name, path));
+        }
+    }
+    if previous.is_empty() {
+        return Ok(());
+    }
+    let logs_dir = work_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir)?;
+    let mut generation = 1u64;
+    let archive = loop {
+        let archive = logs_dir.join(format!("launch-{generation:03}"));
+        match std::fs::create_dir(&archive) {
+            Ok(()) => break archive,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => generation += 1,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    for (name, path) in previous {
+        std::fs::rename(path, archive.join(name))?;
+    }
+    Ok(())
+}
+
+fn persist_forwarder_logs(work_dir: &Path, name: &str) -> Result<()> {
+    let output = std::process::Command::new("docker")
+        .args(["logs", name])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such container") {
+            return Ok(());
+        }
+        return Err(anyhow!("read private gRPC relay logs: {}", stderr.trim()));
+    }
+    std::fs::write(
+        work_dir.join("private-grpc-forwarder.stdout.log"),
+        output.stdout,
+    )?;
+    std::fs::write(
+        work_dir.join("private-grpc-forwarder.stderr.log"),
+        output.stderr,
+    )?;
+    Ok(())
+}
+
+const PRIVATE_GRPC_AUTH_TOKEN_ENV: &str = "NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN";
+const PRIVATE_GRPC_MINER_TOKEN_ENV: &str = "NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN";
+const PRIVATE_GRPC_ALLOW_UNAUTHENTICATED_ENV: &str = "NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC";
+
+/// Harness nodes run without private gRPC bearer tokens, and the node refuses
+/// to start in that state unless the unauthenticated opt-out is set. Use the
+/// environment form rather than the CLI flag so older binaries and images that
+/// predate the flag still start (they ignore the variable). A scenario that
+/// provisions an operator token or sets the opt-out itself is left alone.
+fn private_grpc_auth_env(spec: &NodeSpec) -> Option<(&'static str, &'static str)> {
+    if spec.env.contains_key(PRIVATE_GRPC_AUTH_TOKEN_ENV)
+        || spec
+            .env
+            .contains_key(PRIVATE_GRPC_ALLOW_UNAUTHENTICATED_ENV)
+    {
+        return None;
+    }
+    Some((PRIVATE_GRPC_ALLOW_UNAUTHENTICATED_ENV, "1"))
+}
+
+const PRIVATE_GRPC_FORWARDER_IMAGE_ENV: &str = "NOCKCHAIN_E2E_FORWARDER_IMAGE";
+const DEFAULT_PRIVATE_GRPC_FORWARDER_IMAGE: &str = "alpine/socat:1.8.0.3";
+
+fn private_grpc_forwarder_name(container_name: &str) -> String {
+    format!("{container_name}-private-grpc-fwd")
+}
+
+/// Relay the node's loopback-only private gRPC listener to its published port.
+///
+/// The node binds the private listener to 127.0.0.1 inside the container and
+/// refuses any other address. Docker's published-port proxy targets the
+/// container's network address, not its loopback, so the published port alone
+/// cannot reach the listener. A socat sidecar joined to the node's network
+/// namespace (`--network container:<node>`) listens on the container's address
+/// at the same port and relays to 127.0.0.1. Only the harness-controlled
+/// sidecar is reachable from the published port; the node's own listener stays
+/// loopback-only, matching the production requirement. The image can be
+/// overridden with `NOCKCHAIN_E2E_FORWARDER_IMAGE`.
+fn start_private_grpc_forwarder(container_name: &str, network: &str, port: u16) -> Result<()> {
+    let ip = docker_container_network_ip(container_name, network)?.ok_or_else(|| {
+        anyhow!("docker node {container_name} has no address on network {network}")
+    })?;
+    let forwarder_name = private_grpc_forwarder_name(container_name);
+    remove_stale_docker_container(&forwarder_name)?;
+    let image = std::env::var(PRIVATE_GRPC_FORWARDER_IMAGE_ENV)
+        .ok()
+        .filter(|image| !image.is_empty())
+        .unwrap_or_else(|| DEFAULT_PRIVATE_GRPC_FORWARDER_IMAGE.to_string());
+    let output = std::process::Command::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            &forwarder_name,
+            "--network",
+            &format!("container:{container_name}"),
+            &image,
+            &format!("TCP-LISTEN:{port},bind={ip},fork,reuseaddr"),
+            &format!("TCP:127.0.0.1:{port}"),
+        ])
+        .output()
+        .context("start private gRPC forwarder")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "failed to start private gRPC forwarder {} ({}): {}",
+            forwarder_name,
+            image,
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+fn docker_container_network_ip(container_name: &str, network: &str) -> Result<Option<String>> {
+    let format = format!(
+        "{{{{with index .NetworkSettings.Networks {:?}}}}}{{{{.IPAddress}}}}{{{{end}}}}",
+        network
+    );
+    let output = std::process::Command::new("docker")
+        .args(["inspect", "--format", &format, container_name])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such object") {
+            return Ok(None);
+        }
+        return Err(anyhow!(
+            "docker inspect for {} failed: {}",
+            container_name,
+            stderr.trim()
+        ));
+    }
+
+    let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if ip.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ip))
 }
 
 #[cfg(unix)]
@@ -840,15 +1548,6 @@ fn build_node_args(config: &NodeConfig, peer_from: &[String]) -> Result<Vec<Stri
 
     if spec.new_state {
         args.push("--new".to_string());
-    }
-
-    if spec.mine {
-        args.push("--mine".to_string());
-    }
-
-    if let Some(pkh) = &spec.mining_pkh {
-        args.push("--mining-pkh".to_string());
-        args.push(pkh.clone());
     }
 
     if spec.no_default_peers {
@@ -927,8 +1626,13 @@ fn build_node_args_docker(
     if spec.grpc_enabled {
         args.push("--bind-public-grpc-addr".to_string());
         args.push(format!("0.0.0.0:{}", config.grpc_public_port));
-        args.push("--bind-private-grpc-addr".to_string());
-        args.push(format!("0.0.0.0:{}", config.grpc_private_port));
+        // The node refuses any non-loopback private gRPC bind, so the private
+        // listener stays on 127.0.0.1 inside the container. The published
+        // port is served by the socat sidecar started in
+        // `start_private_grpc_forwarder`, which relays the container's network
+        // address to this loopback port.
+        args.push("--bind-private-grpc-port".to_string());
+        args.push(config.grpc_private_port.to_string());
     }
 
     if spec.fakenet {
@@ -937,15 +1641,6 @@ fn build_node_args_docker(
 
     if spec.new_state {
         args.push("--new".to_string());
-    }
-
-    if spec.mine {
-        args.push("--mine".to_string());
-    }
-
-    if let Some(pkh) = &spec.mining_pkh {
-        args.push("--mining-pkh".to_string());
-        args.push(pkh.clone());
     }
 
     if spec.no_default_peers {
@@ -1121,27 +1816,41 @@ fn absolutize_path(path: &Path) -> Result<PathBuf> {
     Ok(cwd.join(path))
 }
 
-fn read_docker_log_bytes(result: Result<Vec<u8>, TestcontainersError>) -> String {
-    match result {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(err) => format!("<failed to read docker logs: {err}>"),
-    }
+fn read_docker_log_bytes(result: Result<Vec<u8>, TestcontainersError>) -> Result<String> {
+    let bytes = result?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    })
 }
 
 async fn persist_docker_logs(
     config: &NodeConfig,
     container: &testcontainers::ContainerAsync<GenericImage>,
 ) -> Result<(PathBuf, PathBuf, String, String)> {
-    std::fs::create_dir_all(&config.work_dir)?;
+    persist_docker_child_logs(&config.work_dir, container).await
+}
 
+async fn persist_docker_child_logs(
+    work_dir: &Path,
+    container: &testcontainers::ContainerAsync<GenericImage>,
+) -> Result<(PathBuf, PathBuf, String, String)> {
+    std::fs::create_dir_all(work_dir)?;
     let stdout = read_docker_log_bytes(container.stdout_to_vec().await);
     let stderr = read_docker_log_bytes(container.stderr_to_vec().await);
-
-    let stdout_path = config.work_dir.join("stdout.log");
-    let stderr_path = config.work_dir.join("stderr.log");
-    persist_log_bytes(&stdout_path, &stderr_path, &stdout, &stderr)?;
-
-    Ok((stdout_path, stderr_path, stdout, stderr))
+    let stdout_path = work_dir.join("stdout.log");
+    let stderr_path = work_dir.join("stderr.log");
+    if let (Ok(stdout), Ok(stderr)) = (&stdout, &stderr) {
+        persist_log_bytes(&stdout_path, &stderr_path, stdout, stderr)?;
+    } else {
+        if let Ok(stdout) = &stdout {
+            std::fs::write(&stdout_path, stdout.as_bytes())?;
+        }
+        if let Ok(stderr) = &stderr {
+            std::fs::write(&stderr_path, stderr.as_bytes())?;
+        }
+    }
+    Ok((stdout_path, stderr_path, stdout?, stderr?))
 }
 
 fn persist_log_bytes(
@@ -1337,9 +2046,15 @@ fn create_docker_network(name: &str) -> Result<()> {
 }
 
 fn remove_docker_network(name: &str) -> Result<()> {
-    let _ = std::process::Command::new("docker")
+    let output = std::process::Command::new("docker")
         .args(["network", "rm", name])
-        .output();
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("No such network") {
+            return Err(anyhow!("docker network rm failed: {}", stderr.trim()));
+        }
+    }
     Ok(())
 }
 
@@ -1415,36 +2130,15 @@ impl NodeManager {
     }
 
     fn docker_node_ip(&self, node_id: &str, network: &str) -> Result<Option<String>> {
-        let Some(NodeHandle::Docker(_)) = self.handles.get(node_id) else {
+        let Some(NodeHandle {
+            node: ChildHandle::Docker(_),
+            ..
+        }) = self.handles.get(node_id)
+        else {
             return Ok(None);
         };
 
-        let container_name = docker_container_name(network, node_id);
-        let format = format!(
-            "{{{{with index .NetworkSettings.Networks {:?}}}}}{{{{.IPAddress}}}}{{{{end}}}}",
-            network
-        );
-        let output = std::process::Command::new("docker")
-            .args(["inspect", "--format", &format, &container_name])
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("No such object") {
-                return Ok(None);
-            }
-            return Err(anyhow!(
-                "docker inspect for {} failed: {}",
-                container_name,
-                stderr.trim()
-            ));
-        }
-
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if ip.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(ip))
+        docker_container_network_ip(&docker_container_name(network, node_id), network)
     }
 
     async fn try_resolve_peer_id(&self, node_id: &str) -> Result<Option<String>> {
@@ -1583,7 +2277,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use anyhow::{Context, Result};
+    use anyhow::{anyhow, Context, Result};
     use tokio::time::{timeout, Duration};
 
     #[test]
@@ -1623,106 +2317,6 @@ mod tests {
     #[test]
     fn log_tail_preview_handles_empty_logs() {
         assert_eq!(crate::node::log_tail_preview("", 4), "");
-    }
-
-    #[test]
-    fn node_args_keep_existing_peer_id() {
-        let config = dummy_node_config();
-
-        let args = crate::node::build_node_args(&config, &Vec::new()).expect("build process args");
-        let docker_args = crate::node::build_node_args_docker(
-            &config,
-            &Vec::new(),
-            &crate::node::DockerPeers {
-                peers: Vec::new(),
-                force_peers: Vec::new(),
-            },
-        )
-        .expect("build docker args");
-
-        assert!(args.iter().any(|arg| arg == "--no-new-peer-id"));
-        assert!(docker_args.iter().any(|arg| arg == "--no-new-peer-id"));
-    }
-
-    #[test]
-    fn node_args_use_initial_topology_peers_for_new_state() {
-        let mut config = dummy_node_config();
-        let peer_from = vec![String::from("/ip4/127.0.0.1/udp/4100/quic-v1/p2p/from")];
-        config.spec.peers = vec![String::from("/ip4/127.0.0.1/udp/4101/quic-v1/p2p/static")];
-        config.spec.force_peers = vec![String::from("/ip4/127.0.0.1/udp/4102/quic-v1/p2p/force")];
-
-        let args = crate::node::build_node_args(&config, &peer_from).expect("build process args");
-        let docker_args = crate::node::build_node_args_docker(
-            &config,
-            &peer_from,
-            &crate::node::DockerPeers {
-                peers: vec![String::from("/dns4/static/udp/4101/quic-v1/p2p/static")],
-                force_peers: vec![String::from("/dns4/force/udp/4102/quic-v1/p2p/force")],
-            },
-        )
-        .expect("build docker args");
-
-        assert_eq!(
-            flag_values(&args, "--peer"),
-            vec![
-                "/ip4/127.0.0.1/udp/4100/quic-v1/p2p/from",
-                "/ip4/127.0.0.1/udp/4101/quic-v1/p2p/static",
-            ]
-        );
-        assert_eq!(
-            flag_values(&args, "--force-peer"),
-            vec!["/ip4/127.0.0.1/udp/4102/quic-v1/p2p/force"]
-        );
-        assert_eq!(
-            flag_values(&docker_args, "--peer"),
-            vec![
-                "/ip4/127.0.0.1/udp/4100/quic-v1/p2p/from",
-                "/dns4/static/udp/4101/quic-v1/p2p/static",
-            ]
-        );
-        assert_eq!(
-            flag_values(&docker_args, "--force-peer"),
-            vec!["/dns4/force/udp/4102/quic-v1/p2p/force"]
-        );
-    }
-
-    #[test]
-    fn node_args_use_force_topology_peers_after_restart() {
-        let mut config = dummy_node_config();
-        config.spec.new_state = false;
-        let peer_from = vec![String::from("/ip4/127.0.0.1/udp/4100/quic-v1/p2p/from")];
-        config.spec.peers = vec![String::from("/ip4/127.0.0.1/udp/4101/quic-v1/p2p/static")];
-        config.spec.force_peers = vec![String::from("/ip4/127.0.0.1/udp/4102/quic-v1/p2p/force")];
-
-        let args = crate::node::build_node_args(&config, &peer_from).expect("build process args");
-        let docker_args = crate::node::build_node_args_docker(
-            &config,
-            &peer_from,
-            &crate::node::DockerPeers {
-                peers: vec![String::from("/dns4/static/udp/4101/quic-v1/p2p/static")],
-                force_peers: vec![String::from("/dns4/force/udp/4102/quic-v1/p2p/force")],
-            },
-        )
-        .expect("build docker args");
-
-        assert!(flag_values(&args, "--peer").is_empty());
-        assert_eq!(
-            flag_values(&args, "--force-peer"),
-            vec![
-                "/ip4/127.0.0.1/udp/4100/quic-v1/p2p/from",
-                "/ip4/127.0.0.1/udp/4101/quic-v1/p2p/static",
-                "/ip4/127.0.0.1/udp/4102/quic-v1/p2p/force",
-            ]
-        );
-        assert!(flag_values(&docker_args, "--peer").is_empty());
-        assert_eq!(
-            flag_values(&docker_args, "--force-peer"),
-            vec![
-                "/ip4/127.0.0.1/udp/4100/quic-v1/p2p/from",
-                "/dns4/static/udp/4101/quic-v1/p2p/static",
-                "/dns4/force/udp/4102/quic-v1/p2p/force",
-            ]
-        );
     }
 
     #[test]
@@ -1901,7 +2495,12 @@ mod tests {
             configs: HashMap::from([(String::from("node-a"), config)]),
             handles: HashMap::from([(
                 String::from("node-a"),
-                crate::node::NodeHandle::Process(crate::node::ProcessHandle { child }),
+                crate::node::NodeHandle {
+                    node: crate::node::ChildHandle::Process(crate::node::ProcessHandle {
+                        child: tokio::sync::Mutex::new(child),
+                    }),
+                    miner: None,
+                },
             )]),
         };
 
@@ -1986,8 +2585,330 @@ mod tests {
     }
 
     #[test]
-    fn peer_id_wait_timeout_covers_slow_node_startup() {
-        assert!(crate::node::PEER_ID_WAIT_TIMEOUT >= Duration::from_secs(120));
+    fn restarting_preserves_previous_child_logs() -> Result<()> {
+        let run_dir = actual_run_dir("log-retention")?;
+        std::fs::write(run_dir.join("stdout.log"), "first launch stdout")?;
+        std::fs::write(run_dir.join("stderr.log"), "first launch stderr")?;
+        crate::node::archive_previous_logs(&run_dir)?;
+        assert!(!run_dir.join("stdout.log").try_exists()?);
+        assert!(!run_dir.join("stderr.log").try_exists()?);
+        std::fs::write(run_dir.join("stdout.log"), "second launch")?;
+        crate::node::archive_previous_logs(&run_dir)?;
+        std::fs::write(run_dir.join("stdout.log"), "current launch")?;
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("stdout.log"))?,
+            "current launch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("logs/launch-001/stdout.log"))?,
+            "first launch stdout",
+        );
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("logs/launch-001/stderr.log"))?,
+            "first launch stderr",
+        );
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("logs/launch-002/stdout.log"))?,
+            "second launch",
+        );
+        std::fs::remove_dir_all(run_dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires real NOCKCHAIN_BIN_NEW and NOCKCHAIN_MINER_BIN binaries"]
+    async fn genuine_process_miner_lifecycle() -> Result<()> {
+        let node_bin = actual_binary("NOCKCHAIN_BIN_NEW")?;
+        let miner_bin = actual_binary("NOCKCHAIN_MINER_BIN")?;
+        exercise_actual_miner(
+            crate::node::NodeMode::Process,
+            Some(node_bin),
+            Some(miner_bin),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local Docker and real NOCKCHAIN_E2E_IMAGE/NOCKCHAIN_E2E_MINER_IMAGE CPU images"]
+    async fn genuine_docker_miner_lifecycle() -> Result<()> {
+        let mode = crate::node::NodeMode::Docker {
+            image: std::env::var("NOCKCHAIN_E2E_IMAGE").context("set NOCKCHAIN_E2E_IMAGE")?,
+            network: format!("nockchain-e2e-miner-{}", actual_nonce()?),
+            miner_image: std::env::var("NOCKCHAIN_E2E_MINER_IMAGE")
+                .context("set NOCKCHAIN_E2E_MINER_IMAGE")?,
+            miner_binary: PathBuf::from("/usr/local/bin/zk-pow-mine"),
+        };
+        exercise_actual_miner(mode, None, None).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a real NOCKCHAIN_BIN_NEW binary"]
+    async fn genuine_missing_miner_startup_releases_owned_children() -> Result<()> {
+        let node_bin = actual_binary("NOCKCHAIN_BIN_NEW")?;
+        let config = dummy_node_config();
+        let mut spec = actual_node_spec();
+        spec.mine = true;
+        let run_dir = actual_run_dir("missing-miner-startup")?;
+        let miner_bin = run_dir.join("missing-zk-pow-mine");
+        eprintln!("missing-miner startup artifacts: {}", run_dir.display());
+        let mut manager = crate::node::NodeManager::new(
+            &[spec],
+            &run_dir,
+            Some(node_bin),
+            Some(miner_bin),
+            config.grpc_public_port,
+            config.grpc_private_port,
+            config.p2p_port,
+            crate::node::NodeMode::Process,
+        )?;
+        let start = manager.start_nodes(&["node-a".to_string()]).await;
+        let released = manager.handles.is_empty();
+        let public = TcpListener::bind(("127.0.0.1", config.grpc_public_port));
+        let private = TcpListener::bind(("127.0.0.1", config.grpc_private_port));
+        let p2p = UdpSocket::bind(("127.0.0.1", config.p2p_port));
+        manager.shutdown_all().await?;
+        let failure = start
+            .err()
+            .context("startup must fail when its miner executable is absent")?;
+        assert!(
+            matches!(
+                failure.downcast_ref::<std::io::Error>(),
+                Some(error) if error.kind() == std::io::ErrorKind::NotFound,
+            ),
+            "unexpected startup failure: {failure:#}"
+        );
+        assert!(
+            released,
+            "failed startup must release its children before shutdown"
+        );
+        let (_public, _private, _p2p) = (public?, private?, p2p?);
+        Ok(())
+    }
+
+    async fn exercise_actual_miner(
+        mode: crate::node::NodeMode,
+        node_bin: Option<PathBuf>,
+        miner_bin: Option<PathBuf>,
+    ) -> Result<()> {
+        let config = dummy_node_config();
+        let upgrade = match &mode {
+            crate::node::NodeMode::Process => miner_bin.clone().context("actual miner binary")?,
+            crate::node::NodeMode::Docker { miner_image, .. } => PathBuf::from(miner_image),
+        };
+        let run_dir = actual_run_dir("real-miner-lifecycle")?;
+        eprintln!("real-miner lifecycle artifacts: {}", run_dir.display());
+        let mut manager = crate::node::NodeManager::new(
+            &[actual_node_spec()],
+            &run_dir,
+            node_bin,
+            miner_bin,
+            config.grpc_public_port,
+            config.grpc_private_port,
+            config.p2p_port,
+            mode,
+        )?;
+        let result = exercise_actual_miner_steps(&mut manager, upgrade).await;
+        let shutdown = manager.shutdown_all().await;
+        match (result, shutdown) {
+            (Err(error), Err(shutdown)) => {
+                return Err(error.context(format!("shutdown also failed: {shutdown:#}")))
+            }
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
+            (Ok((public_port, private_port)), Ok(())) => {
+                let _public = TcpListener::bind(("127.0.0.1", public_port))?;
+                let _private = TcpListener::bind(("127.0.0.1", private_port))?;
+            }
+        }
+        assert!(manager.handles.is_empty());
+        let config = manager
+            .configs
+            .get("node-a")
+            .context("actual node config")?;
+        assert_actual_logs(&config.work_dir)?;
+        assert_actual_logs(&config.miner_work_dir)?;
+        assert_actual_logs(&config.work_dir.join("logs/launch-001"))?;
+        assert_actual_logs(&config.miner_work_dir.join("logs/launch-001"))?;
+        if matches!(&manager.mode, crate::node::NodeMode::Process) {
+            let _p2p = UdpSocket::bind(("127.0.0.1", config.p2p_port))?;
+        }
+        Ok(())
+    }
+
+    async fn exercise_actual_miner_steps(
+        manager: &mut crate::node::NodeManager,
+        upgrade: PathBuf,
+    ) -> Result<(u16, u16)> {
+        let id = "node-a";
+        manager.start_nodes(&[id.to_string()]).await?;
+        assert!(manager
+            .handles
+            .get(id)
+            .context("owned node")?
+            .miner
+            .is_none());
+        let private_addr = manager.grpc_private_addr(id)?.to_string();
+        let denied = crate::grpc::fetch_heaviest_private(&private_addr, None)
+            .await
+            .err()
+            .context("private RPC without credentials must fail")?;
+        assert!(
+            matches!(
+                denied.downcast_ref::<crate::grpc::PrivateRpcError>(),
+                Some(crate::grpc::PrivateRpcError::Status(status))
+                    if status.code() == tonic::Code::Unauthenticated,
+            ),
+            "unexpected unauthenticated RPC failure: {denied:#}"
+        );
+        let initial = manager.fetch_private_head(id).await?;
+        assert_eq!(initial.height, 0);
+        if let crate::node::NodeMode::Docker { network, .. } = &manager.mode {
+            let output = tokio::process::Command::new("docker")
+                .args(["inspect", &crate::node::docker_container_name(network, id)])
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "inspect actual node: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            let details: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            let internal_port = manager
+                .configs
+                .get(id)
+                .context("node config")?
+                .grpc_private_port;
+            let key = format!("{internal_port}/tcp");
+            let bindings = details[0]["NetworkSettings"]["Ports"][&key]
+                .as_array()
+                .context("actual private port bindings")?;
+            assert!(!bindings.is_empty());
+            assert!(bindings
+                .iter()
+                .all(|binding| binding["HostIp"].as_str() == Some("127.0.0.1")));
+        }
+        manager.set_mining_enabled(id, true).await?;
+        // Phase three requires genuine v0 proofs before the v1 reward transition.
+        manager
+            .wait_for_height(id, 2, Duration::from_secs(300))
+            .await?;
+        manager.set_mining_enabled(id, false).await?;
+        assert!(manager
+            .handles
+            .get(id)
+            .context("owned node")?
+            .miner
+            .is_none());
+        let paused = manager.fetch_private_head(id).await?.height;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(manager.fetch_private_head(id).await?.height, paused);
+        manager.restart_nodes(&[id.to_string()]).await?;
+        assert_eq!(manager.fetch_private_head(id).await?.height, paused);
+        assert!(manager
+            .handles
+            .get(id)
+            .context("restarted node")?
+            .miner
+            .is_none());
+        let payout = manager
+            .configs
+            .get(id)
+            .context("node config")?
+            .spec
+            .mining_pkh
+            .clone()
+            .context("retained actual payout")?;
+        manager.set_mining_pkh(id, payout).await?;
+        manager
+            .wait_for_height(id, paused + 2, Duration::from_secs(300))
+            .await?;
+        manager.upgrade_miner(id, upgrade).await?;
+        let before_upgrade = manager.fetch_private_head(id).await?.height;
+        manager
+            .wait_for_height(id, before_upgrade + 1, Duration::from_secs(300))
+            .await?;
+        let miner = manager
+            .handles
+            .get(id)
+            .context("owned node")?
+            .miner
+            .as_ref()
+            .context("owned real miner")?;
+        let wait = timeout(
+            Duration::from_secs(5),
+            manager.wait_for_height(id, u64::MAX, Duration::from_secs(30)),
+        );
+        let crash = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            match miner {
+                crate::node::ChildHandle::Process(handle) => {
+                    handle.child.lock().await.kill().await?
+                }
+                crate::node::ChildHandle::Docker(container) => {
+                    container.stop_with_timeout(Some(0)).await?
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        let (wait, crash) = tokio::join!(wait, crash);
+        crash?;
+        assert!(wait
+            .context("owned miner crash did not promptly interrupt height wait")?
+            .is_err());
+        assert!(manager.node_handle_is_live(id).await?);
+        let public_port = manager
+            .grpc_public_addr(id)?
+            .rsplit(':')
+            .next()
+            .context("actual public port")?
+            .parse()?;
+        Ok((public_port, manager.grpc_private_port(id)?))
+    }
+
+    fn actual_node_spec() -> nockchain_testkit::NodeSpec {
+        let mut spec = dummy_node_spec("node-a");
+        spec.mining_pkh =
+            Some("9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string());
+        spec.no_default_peers = true;
+        spec.fakenet_pow_len = Some(2);
+        spec.fakenet_log_difficulty = Some(1);
+        spec.fakenet_v1_phase = Some(3);
+        spec.fakenet_update_candidate_interval_secs = Some(1);
+        spec.env.insert(
+            "NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN".to_string(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        );
+        spec.env.insert(
+            "NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN".to_string(),
+            "abcdef0123456789abcdef0123456789".to_string(),
+        );
+        spec
+    }
+
+    fn actual_binary(key: &str) -> Result<PathBuf> {
+        std::env::var_os(key)
+            .map(PathBuf::from)
+            .with_context(|| format!("set {key} to a real binary"))
+    }
+
+    fn actual_nonce() -> Result<u128> {
+        Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())
+    }
+
+    fn actual_run_dir(name: &str) -> Result<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("nockchain-e2e-{name}-{}", actual_nonce()?));
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    fn assert_actual_logs(work_dir: &std::path::Path) -> Result<()> {
+        let stdout = std::fs::read(work_dir.join("stdout.log"))?;
+        let stderr = std::fs::read(work_dir.join("stderr.log"))?;
+        assert!(
+            !stdout.is_empty() || !stderr.is_empty(),
+            "real child logs must be retained"
+        );
+        Ok(())
     }
 
     fn dummy_node_spec(id: &str) -> nockchain_testkit::NodeSpec {
@@ -2000,6 +2921,9 @@ mod tests {
             fakenet: true,
             mine: false,
             mining_pkh: None,
+            mining_threads: 1,
+            miner_binary: None,
+            miner_image: None,
             peers: Vec::new(),
             peer_from: Vec::new(),
             restart_peer_from: Vec::new(),
@@ -2041,20 +2965,14 @@ mod tests {
             grpc_private_host_port: None,
             p2p_port,
             work_dir: std::env::temp_dir().join("nockchain-e2e-node-args-test"),
+            miner_work_dir: std::env::temp_dir().join("nockchain-e2e-miner-tests"),
             binary: PathBuf::from("nockchain"),
+            miner_binary: PathBuf::from("zk-pow-mine"),
+            miner_supports_cpu_flag: None,
+            operator_token: None,
+            miner_token: None,
             supports_bythos_phase: true,
         }
-    }
-
-    fn flag_values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
-        let mut values = Vec::new();
-        let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            if arg == flag {
-                values.push(iter.next().expect("flag value").as_str());
-            }
-        }
-        values
     }
 
     fn allocate_tcp_port() -> u16 {

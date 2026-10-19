@@ -1,0 +1,4 @@
+**
+!target/
+!target/release/
+!target/release/zk-pow-mine

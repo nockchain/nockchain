@@ -30,7 +30,7 @@ use libp2p::swarm::{
 };
 
 use crate::config::PeerExclusionConfig;
-use crate::p2p_util::MultiaddrExt;
+use crate::p2p_util::{canonical_ip, MultiaddrExt};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub(crate) enum TransportKind {
@@ -191,7 +191,8 @@ impl Default for PeerExclusions {
 }
 
 impl PeerExclusions {
-    pub(crate) fn new(config: PeerExclusionConfig) -> Self {
+    pub(crate) fn new(mut config: PeerExclusionConfig) -> Self {
+        config.allow_ips = config.allow_ips.into_iter().map(canonical_ip).collect();
         Self {
             inner: Arc::new(RwLock::new(ExclusionState::default())),
             config: Arc::new(config),
@@ -219,12 +220,13 @@ impl PeerExclusions {
     }
 
     pub(crate) fn is_ip_excluded_at(&self, ip: &IpAddr, now: Instant) -> bool {
-        if !self.config.enabled || self.config.allow_ips.contains(ip) {
+        let ip = canonical_ip(*ip);
+        if !self.config.enabled || self.config.allow_ips.contains(&ip) {
             return false;
         }
         read_state(&self.inner)
             .ips
-            .get(ip)
+            .get(&ip)
             .is_some_and(|entry| entry.expires_at > now)
     }
 
@@ -485,6 +487,7 @@ impl PeerExclusions {
     }
 
     pub(crate) fn record_positive_ip(&self, ip: IpAddr) {
+        let ip = canonical_ip(ip);
         if !self.config.enabled || self.config.allow_ips.contains(&ip) {
             return;
         }
@@ -573,6 +576,7 @@ impl PeerExclusions {
         port_count: usize,
         now: Instant,
     ) -> Option<IpExclusionOutcome> {
+        let ip = canonical_ip(ip);
         if !self.config.enabled || self.config.allow_ips.contains(&ip) {
             return None;
         }
@@ -882,7 +886,7 @@ fn address_key(addr: &Multiaddr, expected_peer: Option<PeerId>) -> Option<Addres
     for protocol in addr.iter() {
         match protocol {
             Protocol::Ip4(addr) => ip = Some(IpAddr::V4(addr)),
-            Protocol::Ip6(addr) => ip = Some(IpAddr::V6(addr)),
+            Protocol::Ip6(addr) => ip = Some(canonical_ip(IpAddr::V6(addr))),
             Protocol::Tcp(p) => {
                 transport = TransportKind::Tcp;
                 port = Some(p);
@@ -1181,7 +1185,7 @@ impl NetworkBehaviour for Behaviour {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use libp2p::swarm::NetworkBehaviour;
 
@@ -1292,6 +1296,40 @@ mod tests {
         assert!(second.ip_exclusion.is_none());
         assert!(third.ip_exclusion.is_some());
         assert!(exclusions.is_ip_excluded_at(&IpAddr::V4(ip), now + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_shares_exclusion_and_allowlist_identity() {
+        let v4 = Ipv4Addr::new(15, 235, 216, 78);
+        let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0feb, 0xd84e);
+        let direct = quic_addr(v4, 3602);
+        let mapped_addr: Multiaddr = format!("/ip6/{mapped}/udp/3602/quic-v1")
+            .parse()
+            .expect("valid mapped multiaddr");
+        assert_eq!(address_key(&direct, None), address_key(&mapped_addr, None));
+        assert_eq!(direct.ip_addr(), mapped_addr.ip_addr());
+
+        let exclusions = PeerExclusions::new(config());
+        let now = Instant::now();
+        for port in 3602..=3604 {
+            exclusions.record_wrong_peer_id_at(
+                &quic_addr(v4, port),
+                Some(PeerId::random()),
+                PeerId::random(),
+                now,
+            );
+        }
+        assert!(exclusions.is_ip_excluded_at(&IpAddr::V6(mapped), now));
+        assert!(exclusions.is_address_excluded_at(&mapped_addr, None, now));
+
+        let allowlisted = PeerExclusions::new(PeerExclusionConfig {
+            allow_ips: HashSet::from([IpAddr::V6(mapped)]),
+            ..config()
+        });
+        assert!(allowlisted
+            .record_wrong_peer_id(&direct, Some(PeerId::random()), PeerId::random())
+            .address_cooldown
+            .is_none());
     }
 
     #[test]
@@ -1721,5 +1759,135 @@ mod tests {
         assert!(!returned
             .iter()
             .any(|addr| addr.ip_addr() == bad_addr.ip_addr()));
+    }
+
+    // ---- IPv4-mapped IPv6 shares exclusion and allowlist keys ----
+
+    fn ipv4_edge_cases() -> [Ipv4Addr; 6] {
+        [
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(255, 255, 255, 255),
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(15, 235, 216, 78),
+            Ipv4Addr::new(203, 0, 113, 44),
+            Ipv4Addr::new(224, 0, 0, 1),
+        ]
+    }
+
+    fn mapped_quic_addr(ip: Ipv4Addr, port: u16) -> Multiaddr {
+        format!("/ip6/{}/udp/{port}/quic-v1", ip.to_ipv6_mapped())
+            .parse()
+            .expect("valid mapped multiaddr")
+    }
+
+    #[test]
+    fn address_keys_agree_between_ipv4_and_mapped_ipv6_forms() {
+        let peer = PeerId::random();
+        for ip in ipv4_edge_cases() {
+            let v4_key = address_key(&quic_addr(ip, 3602), Some(peer)).expect("ipv4 key");
+            let mapped_key =
+                address_key(&mapped_quic_addr(ip, 3602), Some(peer)).expect("mapped key");
+            assert_eq!(v4_key, mapped_key, "{ip}: keys must agree");
+            assert_eq!(v4_key.ip, IpAddr::V4(ip));
+            assert_eq!(quic_addr(ip, 3602).ip_addr(), Some(IpAddr::V4(ip)));
+            assert_eq!(mapped_quic_addr(ip, 3602).ip_addr(), Some(IpAddr::V4(ip)));
+            // Port is still part of the address key.
+            let other_port = address_key(&mapped_quic_addr(ip, 3603), Some(peer)).expect("key");
+            assert_ne!(v4_key, other_port);
+        }
+
+        let plain: Multiaddr = "/ip6/2001:db8::1/udp/3602/quic-v1"
+            .parse()
+            .expect("valid ipv6 multiaddr");
+        let plain_key = address_key(&plain, Some(peer)).expect("plain ipv6 key");
+        assert_eq!(plain_key.ip, "2001:db8::1".parse::<IpAddr>().expect("ipv6"));
+        for ip in ipv4_edge_cases() {
+            assert_ne!(
+                address_key(&quic_addr(ip, 3602), Some(peer)),
+                Some(plain_key)
+            );
+        }
+    }
+
+    #[test]
+    fn ip_exclusion_recorded_in_either_form_covers_both_forms() {
+        let plain_v6: IpAddr = "2001:db8::1".parse().expect("ipv6");
+        for ip in ipv4_edge_cases() {
+            let mapped = IpAddr::V6(ip.to_ipv6_mapped());
+            let unrelated = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+
+            // Evidence arrives on the IPv4 address.
+            let exclusions = PeerExclusions::new(PeerExclusionConfig {
+                wrong_peer_id_ip_threshold: 1,
+                ..config()
+            });
+            let outcome = exclusions.record_wrong_peer_id(
+                &quic_addr(ip, 3602),
+                Some(PeerId::random()),
+                PeerId::random(),
+            );
+            assert!(outcome.ip_exclusion.is_some(), "{ip}: threshold 1 excludes");
+            assert!(exclusions.is_ip_excluded(&IpAddr::V4(ip)));
+            assert!(
+                exclusions.is_ip_excluded(&mapped),
+                "{ip}: mapped form excluded"
+            );
+            assert!(exclusions.is_address_excluded(&mapped_quic_addr(ip, 4444), None));
+            assert!(exclusions.is_address_excluded(&quic_addr(ip, 4444), None));
+            assert!(!exclusions.is_ip_excluded(&plain_v6));
+            assert!(!exclusions.is_ip_excluded(&unrelated));
+
+            // Evidence arrives on the IPv4-mapped IPv6 address.
+            let exclusions = PeerExclusions::new(PeerExclusionConfig {
+                wrong_peer_id_ip_threshold: 1,
+                ..config()
+            });
+            let outcome = exclusions.record_wrong_peer_id(
+                &mapped_quic_addr(ip, 3602),
+                Some(PeerId::random()),
+                PeerId::random(),
+            );
+            assert!(
+                outcome.ip_exclusion.is_some(),
+                "{ip}: mapped evidence excludes"
+            );
+            assert!(
+                exclusions.is_ip_excluded(&IpAddr::V4(ip)),
+                "{ip}: ipv4 form excluded"
+            );
+            assert!(exclusions.is_ip_excluded(&mapped));
+            assert!(exclusions.is_address_excluded(&quic_addr(ip, 4444), None));
+            assert_eq!(exclusions.active_ip_exclusion_count(), 1);
+        }
+    }
+
+    #[test]
+    fn allow_list_entry_in_either_form_exempts_both_forms() {
+        for ip in ipv4_edge_cases() {
+            let mapped = IpAddr::V6(ip.to_ipv6_mapped());
+            for allow_entry in [IpAddr::V4(ip), mapped] {
+                let exclusions = PeerExclusions::new(PeerExclusionConfig {
+                    wrong_peer_id_ip_threshold: 1,
+                    allow_ips: HashSet::from([allow_entry]),
+                    ..config()
+                });
+                for evidence_addr in [quic_addr(ip, 3602), mapped_quic_addr(ip, 3602)] {
+                    let outcome = exclusions.record_wrong_peer_id(
+                        &evidence_addr,
+                        Some(PeerId::random()),
+                        PeerId::random(),
+                    );
+                    assert!(
+                        outcome.ip_exclusion.is_none(),
+                        "{ip}: allow entry {allow_entry} must exempt {evidence_addr}"
+                    );
+                    assert!(outcome.address_cooldown.is_none());
+                }
+                assert!(!exclusions.is_ip_excluded(&IpAddr::V4(ip)));
+                assert!(!exclusions.is_ip_excluded(&mapped));
+                assert!(!exclusions.is_address_excluded(&quic_addr(ip, 3602), None));
+                assert!(!exclusions.is_address_excluded(&mapped_quic_addr(ip, 3602), None));
+            }
+        }
     }
 }

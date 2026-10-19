@@ -3,8 +3,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use nockapp::noun::slab::NounSlab;
+use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
+use tonic::Request;
 
+use super::server::{
+    PRIVATE_GRPC_AUTH_HEADER, PRIVATE_GRPC_AUTH_TOKEN_ENV, PRIVATE_GRPC_MINER_TOKEN_ENV,
+};
 use crate::error::{NockAppGrpcError, Result};
 use crate::pb::common::v1::{ErrorStatus, Wire};
 use crate::pb::private::v1::nock_app_service_client::NockAppServiceClient as PrivateNockAppClient;
@@ -13,6 +18,7 @@ use crate::pb::private::v1::*;
 #[derive(Clone)]
 pub struct PrivateNockAppGrpcClient {
     client: PrivateNockAppClient<Channel>,
+    auth_token: Option<MetadataValue<Ascii>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,11 +32,72 @@ const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl PrivateNockAppGrpcClient {
+    fn auth_token_from_env(env_name: &str) -> Result<Option<MetadataValue<Ascii>>> {
+        std::env::var(env_name)
+            .ok()
+            .filter(|token| !token.is_empty())
+            .map(|token| {
+                MetadataValue::try_from(token.as_str()).map_err(|_| {
+                    NockAppGrpcError::InvalidRequest(
+                        "private gRPC token contains invalid metadata characters".to_string(),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    /// Switch this client to the restricted mining credential. The operator
+    /// credential is never sent on subsequent requests from this client.
+    pub fn with_miner_auth_token_from_env(mut self) -> Result<Self> {
+        self.auth_token = Some(
+            Self::auth_token_from_env(PRIVATE_GRPC_MINER_TOKEN_ENV)?.ok_or_else(|| {
+                NockAppGrpcError::InvalidRequest(format!(
+                    "{PRIVATE_GRPC_MINER_TOKEN_ENV} is required for restricted miner mode"
+                ))
+            })?,
+        );
+        Ok(self)
+    }
+
+    fn authenticated_request<T>(&self, body: T) -> Request<T> {
+        let mut request = Request::new(body);
+        if let Some(token) = &self.auth_token {
+            request
+                .metadata_mut()
+                .insert(PRIVATE_GRPC_AUTH_HEADER, token.clone());
+        }
+        request
+    }
+
     pub async fn connect<T: AsRef<str>>(address: T) -> Result<Self> {
         let client = PrivateNockAppClient::connect(address.as_ref().to_string())
             .await?
             .max_decoding_message_size(16 * 1024 * 1024);
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            auth_token: Self::auth_token_from_env(PRIVATE_GRPC_AUTH_TOKEN_ENV)?,
+        })
+    }
+
+    /// Connect with a caller-scoped operator credential, not process environment.
+    /// `None` sends no bearer token and does not inherit an ambient credential.
+    pub async fn connect_with_auth_token<T: AsRef<str>>(
+        address: T,
+        auth_token: Option<&str>,
+    ) -> Result<Self> {
+        let auth_token = auth_token
+            .map(|token| {
+                MetadataValue::try_from(token).map_err(|_| {
+                    NockAppGrpcError::InvalidRequest(
+                        "private gRPC token contains invalid metadata characters".to_string(),
+                    )
+                })
+            })
+            .transpose()?;
+        let client = PrivateNockAppClient::connect(address.as_ref().to_string())
+            .await?
+            .max_decoding_message_size(16 * 1024 * 1024);
+        Ok(Self { client, auth_token })
     }
 
     /// Connect with a bounded handshake and transport keepalives suitable for
@@ -49,6 +116,7 @@ impl PrivateNockAppGrpcClient {
         let channel = endpoint.connect().await?;
         Ok(Self {
             client: PrivateNockAppClient::new(channel),
+            auth_token: Self::auth_token_from_env(PRIVATE_GRPC_AUTH_TOKEN_ENV)?,
         })
     }
 
@@ -57,6 +125,7 @@ impl PrivateNockAppGrpcClient {
     pub async fn peek(&mut self, pid: i32, path: Vec<u8>) -> Result<Vec<u8>> {
         let request = PeekRequest { pid, path };
 
+        let request = self.authenticated_request(request);
         let response = self.client.peek(request).await?;
         let response = response.into_inner();
 
@@ -96,6 +165,7 @@ impl PrivateNockAppGrpcClient {
         head_filter: Vec<Vec<u8>>,
     ) -> Result<impl Stream<Item = Result<NounSlab>>> {
         let request = WatchEffectsRequest { pid, head_filter };
+        let request = self.authenticated_request(request);
         let response = self.client.watch_effects(request).await?;
         let inner = response.into_inner();
         let stream = inner.map(|item| match item {
@@ -127,6 +197,7 @@ impl PrivateNockAppGrpcClient {
             payload,
         };
 
+        let request = self.authenticated_request(request);
         let response = self.client.poke(request).await?;
         let response = response.into_inner();
 

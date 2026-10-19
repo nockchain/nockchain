@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 # Run just a nockchain node (useful for testing bridge connections separately)
 # Usage: ./run-node-only.sh [--clean] [--new] [--v1-phase N] [--pow-len N] [--log-difficulty N] [--genesis-jam-path PATH]
@@ -19,6 +19,14 @@ GENESIS_JAM="${GENESIS_JAM_PATH:-${BRIDGE_SOURCE_ROOT}/crates/nockchain/jams/fak
 NODE_BIND="/ip4/0.0.0.0/udp/3005/quic-v1"
 NODE_PUBLIC_GRPC="127.0.0.1:5001"
 NODE_PRIVATE_GRPC_PORT="5002"
+
+# Only a credential/policy-free single-user loopback launch defaults to the
+# explicit development opt-out. Never replace a supplied secure policy.
+if [ "${NOCKCHAIN_PRIVATE_GRPC_AUTH_TOKEN+x}" != x ] &&
+   [ "${NOCKCHAIN_PRIVATE_GRPC_MINER_TOKEN+x}" != x ] &&
+   [ "${NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC+x}" != x ]; then
+    export NOCKCHAIN_ALLOW_UNAUTHENTICATED_PRIVATE_GRPC=1
+fi
 
 CLEAN_FLAG="false"
 NEW_FLAG="false"

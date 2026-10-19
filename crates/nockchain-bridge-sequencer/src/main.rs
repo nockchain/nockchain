@@ -422,6 +422,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     nockvm::check_endian();
     let cli = NockchainBridgeSequencerCli::parse();
     boot::init_default_tracing(&cli.nockchain.nockapp_cli);
+    let private_grpc_config = nockchain::private_grpc_config(&cli.nockchain)?;
 
     if cli.base_confirmation_depth == 0 {
         return Err("base confirmation depth must be greater than 0".into());
@@ -532,8 +533,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await?;
 
     let api_config = nockchain::NockchainAPIConfig::EnablePublicServer(public_addr);
-    let nockchain_app =
-        nockchain::run_nockchain_app(nockchain_cli, prover_hot_state.as_slice(), api_config);
+    let nockchain_app = nockchain::run_nockchain_app(
+        nockchain_cli,
+        prover_hot_state.as_slice(),
+        api_config,
+        private_grpc_config,
+    );
     tokio::pin!(nockchain_app);
     tokio::select! {
         result = &mut nockchain_app => result,

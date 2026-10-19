@@ -21,6 +21,7 @@ nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 noun-serde = { workspace = true }
 rustls = { workspace = true }
+rpassword = "7"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile.workspace = true
@@ -31,7 +32,11 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 wallet-tx-builder = { path = "../wallet-tx-builder" }
+zeroize = { workspace = true }
 zkvm-jetpack = { workspace = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

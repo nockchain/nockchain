@@ -103,6 +103,7 @@ NODE_ARGS=(
     --fakenet
     --data-dir "$DATA_DIR"
     --bind-private-grpc-port "$PRIV_PORT"
+    --allow-unauthenticated-private-grpc
     --fakenet-pow-len "$FAKENET_POW_LEN"
     --fakenet-log-difficulty "$FAKENET_LOG_DIFF"
     --fakenet-ai-pow-activation-height "$FAKENET_AI_ACTIVATION"

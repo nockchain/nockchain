@@ -8,7 +8,7 @@ use libp2p::PeerId;
 use nockapp::driver::PokeResult;
 use nockapp::wire::Wire;
 use nockapp::NockAppError;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, info, trace, warn};
 
 use crate::driver::gen2::*;
@@ -17,6 +17,19 @@ use crate::messages::NockchainFact;
 use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_state::{BlockSource, P2PState};
 use crate::traffic_cop;
+
+struct RouteDispatchState {
+    active: AtomicBool,
+    processing_started: AtomicBool,
+}
+
+struct RouteDispatchLifetime(Arc<RouteDispatchState>);
+
+impl Drop for RouteDispatchLifetime {
+    fn drop(&mut self) {
+        self.0.active.store(false, Ordering::Release);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseProcessingGate {
@@ -147,13 +160,25 @@ pub(crate) async fn route_response_fact_with_dispatcher(
 
 pub(crate) async fn route_response_fact_with_source_with_dispatcher(
     peer: PeerId,
-    response: NockchainFact,
+    mut response: NockchainFact,
     traffic: &traffic_cop::TrafficCop,
     metrics: &Arc<NockchainP2PMetrics>,
     driver_state: &Arc<Mutex<P2PState>>,
     _swarm_actions: &mut SwarmActionDispatcher<'_>,
     block_source: BlockSource,
 ) -> Result<(), NockAppError> {
+    // A future block can be deferred before its kernel poke. Retain its
+    // source now so a later gossip effect can avoid sending it back.
+    let received_block_id = match &response {
+        NockchainFact::HeardBlock(block_id, _) => Some(block_id.clone()),
+        _ => None,
+    };
+    if let Some(block_id) = received_block_id.as_deref() {
+        driver_state
+            .lock()
+            .await
+            .record_block_echo_source(peer, block_id);
+    }
     if let Some((block_id, height)) = future_heard_block_details(&response)? {
         let heard_block_tx_ids = match &response {
             NockchainFact::HeardBlock(_, fact_poke) => {
@@ -174,6 +199,12 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
         let mut state_guard = driver_state.lock().await;
         let frontier = state_guard.first_negative;
         if height > frontier {
+            let tx_hint_count = if let Some(tx_ids) = heard_block_tx_ids.as_ref() {
+                state_guard.track_tx_ids_and_peer(tx_ids.iter().cloned(), peer);
+                tx_ids.len()
+            } else {
+                0
+            };
             let inserted = state_guard.defer_heard_block_with_source(
                 peer,
                 height,
@@ -182,11 +213,6 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
                 block_source,
             );
             drop(state_guard);
-            let tx_hint_count = if let Some(tx_ids) = heard_block_tx_ids.as_ref() {
-                track_future_heard_block_tx_hints(peer, tx_ids, driver_state).await?
-            } else {
-                0
-            };
             trace!(
                 peer = %peer,
                 block_id = %block_id,
@@ -199,23 +225,42 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
             return Ok(());
         }
     }
+    let mut retirement = None;
+    route_ready_response_fact_with_dispatcher(
+        peer, &mut response, traffic, metrics, driver_state, None, &mut retirement,
+    )
+    .await
+}
+
+/// Route a fact already admitted at the current frontier. An exclusive loan
+/// keeps the original Send-only noun slab available if routing is cancelled.
+pub(crate) async fn route_ready_response_fact_with_dispatcher(
+    peer: PeerId,
+    response: &mut NockchainFact,
+    traffic: &traffic_cop::TrafficCop,
+    metrics: &Arc<NockchainP2PMetrics>,
+    driver_state: &Arc<Mutex<P2PState>>,
+    deferred_lease_height: Option<u64>,
+    retirement: &mut Option<oneshot::Receiver<Duration>>,
+) -> Result<(), NockAppError> {
+    let received_block_id = match response {
+        NockchainFact::HeardBlock(block_id, _) => Some(block_id.clone()),
+        _ => None,
+    };
     #[cfg(test)]
-    let trace_block_id = match &response {
-        NockchainFact::HeardBlock(block_id, _) => Some(block_id.clone()),
-        _ => None,
-    };
-    let received_block_id = match &response {
-        NockchainFact::HeardBlock(block_id, _) => Some(block_id.clone()),
-        _ => None,
-    };
-    let received_block_height = match &response {
+    let trace_block_id = received_block_id.clone();
+    // The peer answered, so free its elders slot for the walk's next step.
+    if matches!(response, NockchainFact::HeardElders(..)) {
+        driver_state.lock().await.clear_elders_inflight(&peer);
+    }
+    let received_block_height = match response {
         NockchainFact::HeardBlock(_, fact_poke) => {
             heard_block_height_from_fact_poke(fact_poke).ok()
         }
         _ => None,
     };
-    let response_summary = response_fact_trace_summary(&response);
-    let heard_block_tx_ids = match &response {
+    let response_summary = response_fact_trace_summary(response);
+    let heard_block_tx_ids = match response {
         NockchainFact::HeardBlock(_, fact_poke) => {
             match heard_block_tx_ids_from_fact_poke(fact_poke) {
                 Ok(tx_ids) => Some(tx_ids),
@@ -233,7 +278,7 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
     };
     let state_arc = driver_state.clone();
     let metrics_arc = metrics.clone();
-    let response_gate = ResponseProcessingGate::from(&response);
+    let response_gate = ResponseProcessingGate::from(&*response);
     let response_gate_name = response_processing_gate_name(&response_gate);
     let response_gate_for_enable = response_gate.clone();
     // A seen block may be replayed to the kernel when the kernel has asked
@@ -249,8 +294,11 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
     } else {
         false
     };
-    let processing_started = Arc::new(AtomicBool::new(false));
-    let processing_started_for_enable = Arc::clone(&processing_started);
+    let dispatch_lifetime = RouteDispatchLifetime(Arc::new(RouteDispatchState {
+        active: AtomicBool::new(true),
+        processing_started: AtomicBool::new(false),
+    }));
+    let dispatch_for_enable = Arc::clone(&dispatch_lifetime.0);
     trace!(
         peer = %peer,
         response = %response_summary,
@@ -259,34 +307,48 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
     );
     let enable: Pin<Box<dyn Future<Output = bool> + Send>> = Box::pin(async move {
         let mut state_guard = state_arc.lock().await;
+        // Check after acquiring the lock: cancellation may have happened
+        // while this queued action waited for state.
+        if !dispatch_for_enable.active.load(Ordering::Acquire) {
+            return false;
+        }
+        if let Some(height) = deferred_lease_height {
+            let ResponseProcessingGate::HeardBlock(block_id) = &response_gate_for_enable else {
+                return false;
+            };
+            if !state_guard.has_deferred_heard_block_lease(height, block_id) {
+                return false;
+            }
+        }
         let should_process = should_process_response(
             &response_gate_for_enable, &mut state_guard, &metrics_arc, allow_seen_block_replay,
         );
         if should_process {
-            processing_started_for_enable.store(true, Ordering::Relaxed);
+            dispatch_for_enable
+                .processing_started
+                .store(true, Ordering::Relaxed);
         }
         should_process
     });
 
     let wire = Libp2pWire::Response(peer);
-    let poke_slab = response.fact_poke();
+    let poke_slab = response.fact_poke().clone();
 
     let (timing, timing_rx) = tokio::sync::oneshot::channel();
+    *retirement = Some(timing_rx);
     let route_started = Instant::now();
     let poke_result = traffic
-        .poke_high_priority(
-            Some(peer),
-            wire.to_wire(),
-            poke_slab.clone(),
-            enable,
-            Some(timing),
-        )
+        .poke_high_priority(Some(peer), wire.to_wire(), poke_slab, enable, Some(timing))
         .await;
     // Timing channel drop is not a task-level error: the traffic cop may
     // have gated the poke before dispatch, in which case `poke_result` is
     // `Ok(Nack)` and the downstream gate-hit / nack accounting still needs
     // to run. Treat a missing timing value as "unknown" and keep going.
-    let elapsed = match timing_rx.await {
+    let elapsed = match retirement
+        .take()
+        .expect("queued route retirement receiver")
+        .await
+    {
         Ok(elapsed) => elapsed,
         Err(err) => {
             trace!(
@@ -311,6 +373,7 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
     };
     info!(
         target: "nockchain::kernel_timing",
+        monotonic_us = traffic_cop::observation_time_us(),
         peer = %peer,
         response = %response_summary,
         response_gate = response_gate_name,
@@ -338,7 +401,7 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
         );
     }
 
-    match &response {
+    match response {
         NockchainFact::HeardBlock(..) => {
             metrics.heard_block_poke_time.add_timing(&elapsed);
         }
@@ -360,7 +423,11 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
             // gate: the tx can never be redelivered, and a pending block
             // waiting on it can never complete.
             // Seen dedupe stays driven by `%seen` effects only.
-            if processing_started.load(Ordering::Relaxed) {
+            if dispatch_lifetime
+                .0
+                .processing_started
+                .load(Ordering::Relaxed)
+            {
                 cancel_response_processing_gate(driver_state, &response_gate).await;
             }
             trace!(
@@ -398,7 +465,11 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
             }
         }
         Ok(PokeResult::Nack) => {
-            if processing_started.load(Ordering::Relaxed) {
+            if dispatch_lifetime
+                .0
+                .processing_started
+                .load(Ordering::Relaxed)
+            {
                 cancel_response_processing_gate(driver_state, &response_gate).await;
             }
             trace!(
@@ -430,7 +501,11 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
             return Ok(());
         }
         Err(NockAppError::MPSCFullError(act)) => {
-            if processing_started.load(Ordering::Relaxed) {
+            if dispatch_lifetime
+                .0
+                .processing_started
+                .load(Ordering::Relaxed)
+            {
                 cancel_response_processing_gate(driver_state, &response_gate).await;
             }
             #[cfg(test)]
@@ -452,7 +527,11 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
             return Err(NockAppError::MPSCFullError(act));
         }
         Err(err) => {
-            if processing_started.load(Ordering::Relaxed) {
+            if dispatch_lifetime
+                .0
+                .processing_started
+                .load(Ordering::Relaxed)
+            {
                 cancel_response_processing_gate(driver_state, &response_gate).await;
             }
             #[cfg(test)]

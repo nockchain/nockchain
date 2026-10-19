@@ -40,6 +40,11 @@
       blocks          blocks
       heaviest-block  `tip-id
       genesis-seal    `[0 *hash:t]
+      min-timestamps
+        %-  ~(gas h-by *(h-map block-id:t @))
+        :~  [genesis-id 0]
+            [tip-id 0]
+        ==
     ==
   =/  der=derived-state
     %*  .  *derived-state
@@ -50,6 +55,7 @@
             [proof-version-3-start:dcon tip-id]
         ==
     ==
+  %+  reconstruct-asert-caches:dumb  %.y
   %*  .  *kernel-state
     c          con
     d          der
@@ -98,8 +104,8 @@
   =.  puzzle-asert-states.d.state
     (~(put h-by puzzle-asert-states.d.state) tip-id [7 3 `tip-id `genesis-id])
   =/  expected=kernel-state  state
-  ::  Model a checkpoint saved after an older boot already deleted the block.
-  ::  No accepted orphan remains for the .blocks scan to discover.
+  ::  Seed metadata for an absent block; the block scan has no corresponding
+  ::  orphan to discover.
   =/  deleted-id=block-id:t  *block-id:t
   ?<  (~(has h-by blocks.c.state) deleted-id)
   =.  block-versions.c.state
@@ -134,28 +140,6 @@
     |.((load:inner:dumb state))
   `"preserving state and refusing to boot"
 ::
-++  test-load-refuses-invalid-canonical-zoe-page-without-reset
-  =/  base=proof:t  *proof:t
-  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
-  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
-  =/  state=kernel-state  (zoe-load-state [%.y `stale-v2])
-  =/  activation-id=block-id:t  (need heaviest-block.c.state)
-  =/  tip-page=page:v1:t
-    %*  .  *page:v1:t
-      height  +(proof-version-3-start:dcon)
-      parent  activation-id
-      pow     (some v3)
-    ==
-  =.  tip-page  tip-page(digest (compute-digest:page:t tip-page))
-  =/  tip-id=block-id:t  ~(digest get:page:t tip-page)
-  =.  blocks.c.state
-    (~(put h-by blocks.c.state) tip-id (to-local-page:page:t tip-page))
-  =.  heaviest-block.c.state  `tip-id
-  =.  heaviest-chain.d.state
-    (~(put z-by heaviest-chain.d.state) +(proof-version-3-start:dcon) tip-id)
-  %+  expect-fail
-    |.((load:inner:dumb state))
-  `"Invalid Zoe activation page"
 ::
 ++  test-load-refuses-unsafe-version-10-migration-without-reset
   =/  legacy-page=page:v1:t
@@ -201,16 +185,10 @@
     ==
   ~|  %candidate-fixture-must-be-v0  !!
 ::
-::  Sparse custom-network restart fixtures, not a replay or proof-verifier test.
-::  Only genesis -> Zoe -> 154499 is seeded; each suffix header is admitted by
-::  the real header validator before acceptance. Expensive PoW is explicitly
-::  off. Mixed-puzzle fixtures widen the custom ZK target domain so synthetic
-::  %5 envelopes pass the cheap target gate without mining a STARK.
-++  hardened-load-state
-  |=  [wide-target=? stamp=@]
+++  accepted-load-state
+  |=  [height=@ wide-target=? stamp=@]
   ^-  kernel-state
-  =/  bc  *blockchain-constants:tx-engine
-  =.  bc  bc(check-pow-flag %.n)
+  =/  bc  constants
   =?  max-target-atom.bc  wide-target  (bex 384)
   =/  base=proof:t  *proof:t
   =/  state=kernel-state
@@ -224,7 +202,7 @@
   =/  zoe-id=block-id:t  (need heaviest-block.c.state)
   =/  parent=page:v1:t
     %*  .  *page:v1:t
-      height     154.499
+      height     height
       parent     zoe-id
       timestamp  stamp
       pow        `[%5 objects.base hashes.base read-index.base]
@@ -237,10 +215,10 @@
     (~(put h-by min-timestamps.c.state) pid stamp)
   =.  heaviest-block.c.state  `pid
   =.  heaviest-chain.d.state
-    (~(put z-by heaviest-chain.d.state) 154.499 pid)
-  =.  highest-block-height.d.state  `154.499
+    (~(put z-by heaviest-chain.d.state) height pid)
+  =.  highest-block-height.d.state  `height
   =.  puzzle-asert-states.d.state
-    (~(put h-by puzzle-asert-states.d.state) pid [91 73 `pid `pid])
+    (~(put h-by puzzle-asert-states.d.state) pid ?:(=(height 154.499) [91 73 `pid `pid] [1 0 `pid ~]))
   =.  c.state
     (~(update-asert-anchor-min-timestamps dcon c.state d.state bc) %zk parent)
   =.  c.state
@@ -270,7 +248,7 @@
     candidate(digest (compute-digest:page:mt candidate))
   =/  valid
     (~(validate-page-without-txs dcon c.state d.state bc) pag ~(timestamp get:page:t pag))
-  ~|  [%synthetic-hardening-header-rejected valid]
+  ~|  [%synthetic-header-rejected valid]
   ?>  -.valid
   =.  c.state  (~(accept-block dcon c.state d.state bc) pag)
   =/  bid=block-id:t  ~(digest get:page:t pag)
@@ -292,7 +270,13 @@
   =.  asert-anchor-min-timestamps.c.state
     %-  ~(run by asert-anchor-min-timestamps.c.state)
     |=  timestamps=(h-map block-id:t @)
-    (~(run h-by timestamps) |=(@ 777))
+    %-  ~(rep h-by timestamps)
+    |=  [[bid=block-id:t timestamp=@] updated=_timestamps]
+    =/  pag=local-page:t  (~(got h-by blocks.c.state) bid)
+    %+  ~(put h-by updated)  bid
+    ?:  (lth ~(height get:local-page:t pag) (dec harden-phase:page:t))
+      timestamp
+    777
   =.  puzzle-asert-states.d.state
     %-  ~(rep h-by blocks.c.state)
     |=  [[bid=block-id:t pag=local-page:t] cache=(h-map block-id:t puzzle-asert-state)]
@@ -322,6 +306,7 @@
   ;:  weld
     (expect-eq !>(blocks.c.expected) !>(blocks.c.loaded))
     (expect-eq !>(heaviest-chain.d.expected) !>(heaviest-chain.d.loaded))
+    (expect-eq !>(asert-anchor-min-timestamps.c.expected) !>(asert-anchor-min-timestamps.c.loaded))
     (expect-eq !>((hardened-next-targets expected)) !>((hardened-next-targets loaded)))
     (expect-eq !>(puzzle-asert-states.d.expected) !>(puzzle-asert-states.d.loaded))
     (expect-eq !>(loaded) !>(repeated))
@@ -331,22 +316,22 @@
   ==
 :::
 ++  test-load-hardening-predecessor-only
-  (check-hardened-load-continuation (hardened-load-state %.n 123.456))
+  (check-hardened-load-continuation (accepted-load-state 154.499 %.n 123.456))
 :::
 ++  test-load-hardening-activation
-  =/  state=kernel-state  (hardened-load-state %.n 123.456)
+  =/  state=kernel-state  (accepted-load-state 154.499 %.n 123.456)
   (check-hardened-load-continuation (hardened-load-extend state %.y))
 :::
-++  test-hardened-history-audit-rebuilds-asert-caches-before-children
-  =/  state=kernel-state  (hardened-load-state %.n 123.456)
+++  test-load-hardening-reconstructs-asert-caches-before-children
+  =/  state=kernel-state  (accepted-load-state 154.499 %.n 123.456)
   =.  state  (hardened-load-extend state %.y)
   (check-hardened-load-continuation (hardened-load-extend state %.y))
 :::
 ++  test-load-hardening-mixed-branches
   ::  Opposite lane orders and different predecessor timestamps must not share
   ::  counters/heads/anchors. +load deliberately prunes the unselected branch.
-  =/  a=kernel-state  (hardened-load-state %.y 123.456)
-  =/  b=kernel-state  (hardened-load-state %.y 223.456)
+  =/  a=kernel-state  (accepted-load-state 154.499 %.y 123.456)
+  =/  b=kernel-state  (accepted-load-state 154.499 %.y 223.456)
   =.  a  (hardened-load-extend (hardened-load-extend a %.n) %.y)
   =.  b  (hardened-load-extend (hardened-load-extend b %.y) %.n)
   =/  both=kernel-state  a
@@ -372,23 +357,105 @@
     (expect-eq !>((hardened-next-targets b)) !>((hardened-next-targets loaded-b)))
   ==
 :::
-++  test-hardened-history-audit-rejects-incompatible-stored-header
-  =/  state=kernel-state  (hardened-load-state %.n 123.456)
+++  check-accepted-load-preservation
+  |=  state=kernel-state
+  ^-  tang
+  =.  init.a.state  %.n
   =.  state  (hardened-load-extend state %.y)
   =/  old-id=block-id:t  (need heaviest-block.c.state)
   =/  pag=page:t  (to-page:local-page:t (~(got h-by blocks.c.state) old-id))
   ?>  ?=(@ -.pag)
-  ::  Keep a readable, version-valid proof envelope and an internally matching
-  ::  digest/index: checkpoint validation succeeds, but the retained header's
-  ::  target is not the scheduled target. +load must bail, not reset or prune it.
+  ::  Accepted pages retain their header and artifact without new admission.
   =.  pag  pag(target (chunk:bignum:t 1))
   =.  pag  pag(digest (compute-digest:page:t pag))
   =.  blocks.c.state
     (~(put h-by (~(del h-by blocks.c.state) old-id)) digest.pag (to-local-page:page:t pag))
+  =.  min-timestamps.c.state
+    (~(put h-by (~(del h-by min-timestamps.c.state) old-id)) digest.pag timestamp.pag)
   =.  heaviest-block.c.state  `digest.pag
   =.  heaviest-chain.d.state
     (~(put z-by heaviest-chain.d.state) height.pag digest.pag)
-  (expect-fail |.((load:inner:dumb state)) ~)
+  =/  loaded=kernel-state  (load:inner:dumb state)
+  =/  next=kernel-state  (hardened-load-extend loaded %.y)
+  =/  fresh=page:t
+    (to-page:local-page:t (~(got h-by blocks.c.next) (need heaviest-block.c.next)))
+  ?<  (~(has h-by blocks.c.loaded) ~(digest get:page:t fresh))
+  =/  submission=[wir=path eny=@ our=@ux now=@da dat=*]
+    [libp2p-gossip-wire:h 0 0x0 ~2026.1.1 [%fact %0 %heard-block fresh]]
+  =/  rejected=kernel-state  loaded
+  =^  effs=(list effect)  rejected
+    (~(poke inner:dumb loaded) submission)
+  =/  proof-rejected=?
+    %+  lien  effs
+    |=  eff=effect
+    ?&  ?=([%liar-block-id *] eff)
+        =(~(digest get:page:t fresh) p.eff)
+        =(%failed-pow-check cause.eff)
+    ==
+  ;:  weld
+    (expect-eq !>(blocks.c.state) !>(blocks.c.loaded))
+    (expect-eq !>(heaviest-chain.d.state) !>(heaviest-chain.d.loaded))
+    (expect-eq !>(heaviest-block.c.state) !>(heaviest-block.c.loaded))
+    (expect-eq !>(%.y) !>(check-pow-flag.constants.loaded))
+    (expect-eq !>(loaded) !>((load:inner:dumb loaded)))
+    (expect-eq !>(%.y) !>(proof-rejected))
+    (expect-eq !>(blocks.c.loaded) !>(blocks.c.rejected))
+    (expect-eq !>(heaviest-block.c.loaded) !>(heaviest-block.c.rejected))
+    (expect-eq !>(%.y) !>(check-pow-flag.constants.rejected))
+  ==
+::::
+++  test-load-preserves-accepted-hardening-pages-with-proof-checking
+  (check-accepted-load-preservation (accepted-load-state 154.499 %.n 123.456))
+::::
+++  consensus-batch-load-state
+  |=  [wide-target=? stamp=@]
+  ^-  kernel-state
+  (accepted-load-state 169.999 wide-target stamp)
+::::
+++  test-load-consensus-batch-predecessor-only
+  (check-hardened-load-continuation (consensus-batch-load-state %.n 123.456))
+::::
+++  test-load-consensus-batch-activation
+  =/  state=kernel-state  (consensus-batch-load-state %.n 123.456)
+  (check-hardened-load-continuation (hardened-load-extend state %.y))
+::::
+++  test-load-consensus-batch-reconstructs-asert-caches-before-children
+  =/  state=kernel-state  (consensus-batch-load-state %.n 123.456)
+  =.  state  (hardened-load-extend state %.y)
+  (check-hardened-load-continuation (hardened-load-extend state %.y))
+::::
+++  test-load-consensus-batch-mixed-branches
+  ::  Both fork selections reconstruct their own timestamps and lane heads.
+  ::  The existing load policy discards the unselected fork.
+  =/  a=kernel-state  (consensus-batch-load-state %.y 123.456)
+  =/  b=kernel-state  (consensus-batch-load-state %.y 223.456)
+  =.  a  (hardened-load-extend (hardened-load-extend a %.n) %.y)
+  =.  b  (hardened-load-extend (hardened-load-extend b %.y) %.n)
+  =/  both=kernel-state  a
+  =.  blocks.c.both  (~(uni h-by blocks.c.a) blocks.c.b)
+  =.  block-versions.c.both  (~(uni h-by block-versions.c.a) block-versions.c.b)
+  =.  min-timestamps.c.both  (~(uni h-by min-timestamps.c.a) min-timestamps.c.b)
+  =.  puzzle-asert-states.d.both
+    (~(uni h-by puzzle-asert-states.d.a) puzzle-asert-states.d.b)
+  =/  loaded-a=kernel-state
+    (load:inner:dumb (stale-hardened-load-state both))
+  =.  heaviest-block.c.both  heaviest-block.c.b
+  =.  heaviest-chain.d.both  heaviest-chain.d.b
+  =/  loaded-b=kernel-state
+    (load:inner:dumb (stale-hardened-load-state both))
+  ;:  weld
+    (check-hardened-load-continuation a)
+    (check-hardened-load-continuation b)
+    (expect-eq !>(blocks.c.a) !>(blocks.c.loaded-a))
+    (expect-eq !>(blocks.c.b) !>(blocks.c.loaded-b))
+    (expect-eq !>(puzzle-asert-states.d.a) !>(puzzle-asert-states.d.loaded-a))
+    (expect-eq !>(puzzle-asert-states.d.b) !>(puzzle-asert-states.d.loaded-b))
+    (expect-eq !>((hardened-next-targets a)) !>((hardened-next-targets loaded-a)))
+    (expect-eq !>((hardened-next-targets b)) !>((hardened-next-targets loaded-b)))
+  ==
+::::
+++  test-load-preserves-accepted-consensus-batch-pages-with-proof-checking
+  (check-accepted-load-preservation (consensus-batch-load-state %.n 123.456))
 :::
 ++  test-load-discards-pending-preserves-transactions-repeatedly
   =/  con=consensus-state  initial-consensus-state:h

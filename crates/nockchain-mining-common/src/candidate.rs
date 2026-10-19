@@ -209,7 +209,9 @@ mod tests {
                 &[D(tas!(b"mine-ai")), D(4), D(0x22), D(0x33), D(64), D(height)],
             );
             slab.set_root(root);
-            let candidate = MiningCandidate::from_effect_slab(slab).unwrap().unwrap();
+            let candidate = MiningCandidate::from_effect_slab(slab)
+                .expect("valid mine-ai fixture should decode")
+                .expect("mine-ai fixture should contain a mining candidate");
             assert_eq!(candidate.candidate_height, Some(height));
             assert_eq!(candidate.pow_len, 64);
         }

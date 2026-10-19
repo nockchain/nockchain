@@ -35,15 +35,20 @@ pub fn compute_bridge_fee(amount: u64, nicks_fee_per_nock: u64) -> u64 {
 }
 
 pub fn compute_minimum_fee(inputs: FeeInputs) -> FeeBreakdown {
+    let effective_base_fee = if (inputs.height.0).0 < (inputs.bythos_phase.0).0 {
+        inputs.base_fee.saturating_mul(2)
+    } else {
+        inputs.base_fee
+    };
     let witness_divisor =
         witness_divisor(inputs.height, inputs.bythos_phase, inputs.input_fee_divisor);
-    let seed_fee = inputs.seed_words.saturating_mul(inputs.base_fee);
+    let seed_fee = inputs.seed_words.saturating_mul(effective_base_fee);
     let witness_fee = if witness_divisor == 0 {
         0
     } else {
         inputs
             .witness_words
-            .saturating_mul(inputs.base_fee)
+            .saturating_mul(effective_base_fee)
             .saturating_div(witness_divisor)
     };
     let word_fee = seed_fee.saturating_add(witness_fee);
@@ -113,11 +118,11 @@ mod tests {
         inputs.bythos_phase = BlockHeight(Belt(10));
 
         let fee = compute_minimum_fee(inputs);
-        assert_eq!(fee.seed_fee, 15);
+        assert_eq!(fee.seed_fee, 30);
         assert_eq!(fee.witness_divisor, 1);
-        assert_eq!(fee.witness_fee, 40);
-        assert_eq!(fee.word_fee, 55);
-        assert_eq!(fee.minimum_fee, 55);
+        assert_eq!(fee.witness_fee, 80);
+        assert_eq!(fee.word_fee, 110);
+        assert_eq!(fee.minimum_fee, 110);
     }
 
     #[test]

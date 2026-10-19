@@ -26,6 +26,7 @@ use libp2p::{allow_block_list, connection_limits, memory_connection_limits, Peer
 use nockapp::kernel::boot;
 use nockapp::utils::make_tas;
 use nockapp::NockApp;
+use nockapp_grpc::private_nockapp::PrivateGrpcServerConfig;
 use termcolor::{ColorChoice, StandardStream};
 pub mod colors;
 
@@ -166,15 +167,21 @@ impl NockchainAPIConfig {
     }
 }
 
-/// Boots and runs the Nockchain node with the supplied public API config.
+/// Boots and runs the node with private API policy resolved before runtime preparation.
 pub async fn run_nockchain_app(
     cli: config::NockchainCli,
     hot_state: &[HotEntry],
     server_config: NockchainAPIConfig,
+    private_grpc_config: PrivateGrpcServerConfig,
 ) -> Result<(), Box<dyn Error>> {
-    let mut nockchain =
-        init_with_kernel::<chaff::Chaff>(cli, kernels_open_dumb::KERNEL, hot_state, server_config)
-            .await?;
+    let mut nockchain = init_with_kernel::<chaff::Chaff>(
+        cli,
+        kernels_open_dumb::KERNEL,
+        hot_state,
+        server_config,
+        private_grpc_config,
+    )
+    .await?;
     nockchain.run().await?;
     Ok(())
 }
@@ -263,13 +270,25 @@ fn load_allowed_peers_with_cap(
     Ok(allow_behavior)
 }
 
-#[instrument(skip(kernel_jam, hot_state))]
+/// Resolve private API policy before consensus preparation or kernel startup.
+pub fn private_grpc_config(cli: &NockchainCli) -> Result<PrivateGrpcServerConfig, Box<dyn Error>> {
+    let addr = cli.bind_private_grpc_addr.unwrap_or_else(|| {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cli.bind_private_grpc_port)
+    });
+    Ok(PrivateGrpcServerConfig::from_env(
+        addr, cli.allow_unauthenticated_private_grpc,
+    )?)
+}
+
+#[instrument(skip(kernel_jam, hot_state, private_grpc_config))]
 pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     cli: config::NockchainCli,
     kernel_jam: &[u8],
     hot_state: &[HotEntry],
     server_config: NockchainAPIConfig,
+    private_grpc_config: PrivateGrpcServerConfig,
 ) -> Result<NockApp<J>, Box<dyn Error>> {
+    private_grpc_config.validate()?;
     welcome();
 
     cli.validate()?;
@@ -665,12 +684,10 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             .add_io_driver(nockapp_grpc::public_nockchain::grpc_server_driver(addr))
             .await;
     }
-    let private_grpc_addr = cli.bind_private_grpc_addr.unwrap_or_else(|| {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cli.bind_private_grpc_port)
-    });
+    // Configuration was resolved and validated before kernel side effects.
     nockapp
         .add_io_driver(nockapp_grpc::private_nockapp::grpc_server_driver(
-            private_grpc_addr,
+            private_grpc_config,
         ))
         .await;
 

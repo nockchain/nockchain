@@ -111,8 +111,9 @@ async fn miner_finds_and_submits_block_against_mock_node() {
         }
     });
 
-    // Spawn the server.
-    let server = PrivateNockAppGrpcServer::new(handle);
+    // Spawn the server. The mock node has no bearer tokens, so opt out of
+    // private gRPC auth explicitly; the server otherwise refuses to start.
+    let server = PrivateNockAppGrpcServer::new(handle).with_allow_unauthenticated(true);
     let server_task = tokio::spawn(async move { server.serve(addr).await });
 
     // Give the server a moment.

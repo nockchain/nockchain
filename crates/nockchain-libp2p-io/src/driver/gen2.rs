@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::{rng, Rng};
 
 use super::*;
 use crate::messages::{block_by_height_message, BatchErrorClass};
@@ -17,7 +17,7 @@ pub(crate) use frontier::flush_ready_deferred_heard_blocks;
 pub(crate) use frontier::{
     collect_tip5_zset_strings, flush_ready_deferred_heard_blocks_with_dispatcher,
     future_heard_block_details, heard_block_height_from_fact_poke,
-    heard_block_tx_ids_from_fact_poke, track_future_heard_block_tx_hints,
+    heard_block_tx_ids_from_fact_poke, track_future_heard_block_tx_hints, DeferredFlushRecovery,
 };
 use inbound::handle_inbound_request;
 use outbound::handle_outbound_response;
@@ -76,9 +76,45 @@ pub(super) async fn send_outbound_request_now(
     swarm: &mut Swarm<NockchainBehaviour>,
     driver_state: &Arc<Mutex<P2PState>>,
     metrics: &NockchainP2PMetrics,
-    request_context: OutboundRequestContext,
+    mut request_context: OutboundRequestContext,
 ) {
     let peer_id = request_context.peer_id;
+    let prefetch_range = request_context.prefetch_range();
+    let is_prefetch = prefetch_range.is_some();
+    if is_prefetch {
+        let Some(endpoints) = swarm.behaviour().recovery.request_endpoints(&peer_id) else {
+            debug!(monotonic_us = traffic_cop::observation_time_us(), peer = %peer_id,
+                "Prefetch endpoints awaiting numeric resolution");
+            return;
+        };
+        let state = driver_state.lock().await;
+        if state.inflight_prefetch_count_for_peer(&peer_id) >= state.prefetch_inflight_limit() {
+            debug!(monotonic_us = traffic_cop::observation_time_us(), peer = %peer_id,
+                peer_inflight = state.inflight_prefetch_count_for_peer(&peer_id),
+                limit = state.prefetch_inflight_limit(), "Prefetch peer inflight limit reached");
+            return;
+        }
+        if let Some((connection, budget)) =
+            state.prefetch_throttle(&peer_id, endpoints.iter().copied())
+        {
+            debug!(monotonic_us = traffic_cop::observation_time_us(), peer = %peer_id,
+                connection_id = ?connection.connection_id, endpoint = %budget.endpoint,
+                bucket = %budget.bucket, peer_window_bytes = budget.peer_window_bytes,
+                bucket_window_bytes = budget.bucket_window_bytes, peer_inflight = budget.peer_inflight,
+                peer_cap_bytes = state.prefetch_bandwidth_cap_per_peer_bytes_per_min(),
+                bucket_cap_bytes = state.prefetch_bucket_bandwidth_cap(),
+                "Prefetch peer bandwidth window exhausted");
+            return;
+        }
+        drop(state);
+        request_context.request_endpoints = endpoints;
+    } else {
+        request_context.request_endpoints = swarm
+            .behaviour()
+            .recovery
+            .numeric_request_endpoints(&peer_id);
+    }
+    request_context.issued_prefetch_range = Some(prefetch_range);
     let request = request_context.request.clone();
     if let Some(item_count) = batch_request_item_count(&request_context.request) {
         metrics.gen2_batch_requests_sent.increment();
@@ -99,6 +135,9 @@ pub(super) async fn send_outbound_request_now(
         .request_response
         .send_request(&peer_id, request);
     debug!(
+        monotonic_us = traffic_cop::observation_time_us(),
+        is_prefetch,
+        candidate_connections = ?request_context.request_endpoints,
         peer = %peer_id,
         request_id = %request_id,
         request_shape = outbound_request_shape(&request_context.request),
@@ -109,6 +148,23 @@ pub(super) async fn send_outbound_request_now(
         retry_count = request_context.retry_count,
         "Nous req-res outbound request sent"
     );
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        if let NockchainRequest::AuthenticatedGossip { message, .. } = &request_context.request {
+            if tracing::Span::current()
+                .metadata()
+                .is_some_and(|meta| meta.name() == "gossip_payload")
+            {
+                debug!(
+                    monotonic_us = traffic_cop::observation_time_us(),
+                    destination_peer = %peer_id,
+                    request_id = %request_id,
+                    message_bytes = message.len(),
+                    candidate_connections = ?request_context.request_endpoints,
+                    "Gossip payload sent"
+                );
+            }
+        }
+    }
     driver_state
         .lock()
         .await
@@ -159,15 +215,30 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
         .await
         .remove_outbound_request(request_id);
     driver_state.lock().await.record_request_failure(peer);
+    // Only an elders request failure releases the elders slot.
+    let failed_elders_request = request_context.as_ref().is_some_and(|context| {
+        matches!(&context.request, NockchainRequest::BatchRequest { items, .. }
+        if items.iter().any(|item| matches!(
+            decode_request_item_message(&item.message),
+            Ok(NockchainDataRequest::EldersById(..))
+        )))
+    });
+    if failed_elders_request {
+        driver_state.lock().await.clear_elders_inflight(&peer);
+    }
     if peer_exclusions.record_peer_request_failure(peer) {
         metrics.request_peer_cooldowns_created.increment();
     }
     let timed_out = matches!(&error, request_response::OutboundFailure::Timeout);
     let transient_failure = transient_outbound_failure(&error);
+    let exhausted_transient_retry = transient_failure
+        && request_context
+            .as_ref()
+            .is_some_and(|context| context.retry_count >= GEN2_RETRY_MAX_ATTEMPTS);
     let mut skip_transient_retry = false;
     let mut retry_item_filter = None;
 
-    if timed_out {
+    if timed_out || exhausted_transient_retry {
         if let Some(request_context) = request_context.as_ref() {
             match &request_context.request {
                 NockchainRequest::BatchRequest { items, .. } => {
@@ -185,7 +256,7 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
                             continue;
                         };
                         match queue_block_height_retry_to_alternate_peer_with_dispatcher(
-                            swarm_actions, &driver_state, height, request_message,
+                            swarm_actions, &driver_state, &peer_exclusions, height, request_message,
                         )
                         .await
                         {
@@ -202,7 +273,7 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
                                     item_id = item.item_id,
                                     height,
                                     error = %err,
-                                    "Failed to queue alternate peer retry after batch block-by-height timeout"
+                                    "Failed to queue alternate peer retry after batch block-by-height failure"
                                 );
                                 retry_item_ids.insert(item.item_id);
                             }
@@ -270,6 +341,10 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
     }
 
     log_outbound_failure(peer, request_id, error, request_context.as_ref(), metrics);
+    driver_state
+        .lock()
+        .await
+        .retire_disconnected_peer_session(&peer);
 }
 
 pub(crate) async fn handle_outbound_request_failure(
@@ -396,15 +471,27 @@ pub(super) fn bundle_request_batch_item_height(
         _ => None,
     }
 }
+/// True when the outbound batch item at `item_id` was an `EldersById`
+/// request, i.e. the one that claimed the peer's elders slot.
+pub(super) fn elders_batch_item(
+    request_context: Option<&OutboundRequestContext>,
+    item_id: u32,
+) -> bool {
+    matches!(
+        data_request_batch_item(request_context, item_id),
+        Some(NockchainDataRequest::EldersById(..))
+    )
+}
 pub(super) async fn queue_block_height_retry_to_alternate_peer_with_dispatcher(
     swarm_actions: &mut SwarmActionDispatcher<'_>,
     driver_state: &Arc<Mutex<P2PState>>,
+    peer_exclusions: &PeerExclusions,
     height: u64,
     request_message: ByteBuf,
 ) -> Result<bool, NockAppError> {
     let retry_peer = {
         let mut state_guard = driver_state.lock().await;
-        // Phase 5: every entry to this function is triggered by an upstream
+        // Every entry to this function is triggered by an upstream
         // failure (timeout / abort / decode error). Account it against the
         // height before deciding whether to retry. Once the rolling
         // failure count crosses the configured budget the height enters
@@ -450,11 +537,11 @@ pub(super) async fn queue_block_height_retry_to_alternate_peer_with_dispatcher(
         }
 
         let candidate_peer_count = candidate_peers.len();
-        let selected_peers = select_request_peers_with_preferences(candidate_peers, 1, true, &[]);
-        if !selected_peers.is_empty() {
-            state_guard.track_block_height_attempted_peers(height, selected_peers.iter().copied());
+        let retry_peer =
+            state_guard.select_block_height_request_peer(candidate_peers, peer_exclusions);
+        if let Some(peer) = retry_peer {
+            state_guard.track_block_height_attempted_peers(height, [peer]);
         }
-        let retry_peer = selected_peers.into_iter().next();
         trace!(
             height,
             attempted_peer_count,
@@ -488,12 +575,13 @@ pub(super) async fn queue_block_height_retry_to_alternate_peer_with_dispatcher(
 pub(super) async fn queue_block_height_retry_to_alternate_peer(
     swarm_tx: &mpsc::Sender<SwarmAction>,
     driver_state: &Arc<Mutex<P2PState>>,
+    peer_exclusions: &PeerExclusions,
     height: u64,
     request_message: ByteBuf,
 ) -> Result<bool, NockAppError> {
     let mut swarm_actions = SwarmActionDispatcher::Channel(swarm_tx);
     queue_block_height_retry_to_alternate_peer_with_dispatcher(
-        &mut swarm_actions, driver_state, height, request_message,
+        &mut swarm_actions, driver_state, peer_exclusions, height, request_message,
     )
     .await
 }
@@ -653,6 +741,25 @@ pub(super) async fn process_queue_kernel_request_action(
     )
     .await;
 
+    if request_message_block_range_start(&request_message).is_some() {
+        if let Some(flushed_batch) = take_pending_batch_request(
+            pending_gen2_batches, peer_id, &local_peer_id, equix_builder,
+        )? {
+            send_outbound_request_now(swarm, driver_state, metrics, flushed_batch).await;
+        }
+        queue_pending_gen2_batch_request(
+            metrics, pending_gen2_batches, peer_id, &request_message, estimated_response_bytes,
+            contains_response_budget_item,
+        )?;
+        if let Some(range_batch) = take_pending_batch_request(
+            pending_gen2_batches, peer_id, &local_peer_id, equix_builder,
+        )? {
+            send_outbound_request_now(swarm, driver_state, metrics, range_batch).await;
+        }
+        update_pending_batch_metrics(metrics, pending_gen2_batches);
+        return Ok(());
+    }
+
     let flush_reason = pending_gen2_batches
         .get(&peer_id)
         .map(|pending_batch| {
@@ -777,26 +884,11 @@ pub(super) fn spawn_retry_requests(
     });
 }
 
-pub(super) async fn process_flush_deferred_heard_blocks_action(
-    buffered_swarm_actions: &mut VecDeque<SwarmAction>,
-    traffic_cop: &traffic_cop::TrafficCop,
-    metrics: &Arc<NockchainP2PMetrics>,
-    driver_state: &Arc<Mutex<P2PState>>,
-) -> Result<(), NockAppError> {
-    let mut swarm_actions = SwarmActionDispatcher::Buffered(buffered_swarm_actions);
-    let flushed = flush_ready_deferred_heard_blocks_with_dispatcher(
-        traffic_cop, metrics, driver_state, &mut swarm_actions,
-    )
-    .await?;
-    trace!(flushed, "Processed deferred heard-block flush action");
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_request_response(
     peer: PeerId,
     connection_id: ConnectionId,
-    message: request_response::Message<NockchainRequest, NockchainResponse>,
+    message: request_response::Message<NockchainRequest, crate::behaviour::TransportResponse>,
     swarm_tx: mpsc::Sender<SwarmAction>,
     equix_builder: &mut equix::EquiXBuilder,
     local_peer_id: PeerId,
@@ -809,11 +901,14 @@ pub(super) async fn handle_request_response(
     trace!("handle_request_response peer: {peer}");
     match message {
         Request {
-            request, channel, ..
+            request_id,
+            request,
+            channel,
         } => {
             handle_inbound_request(
                 peer,
                 connection_id,
+                request_id,
                 request,
                 channel,
                 swarm_tx,
@@ -831,9 +926,18 @@ pub(super) async fn handle_request_response(
             request_id,
             response,
         } => {
+            let Some(response_bytes) = response.received_bytes else {
+                warn!(peer = %peer, request_id = %request_id,
+                    "Ignoring response without transport byte measurement");
+                driver_state
+                    .lock()
+                    .await
+                    .remove_outbound_request(request_id);
+                return Ok(());
+            };
             handle_outbound_response(
-                peer, request_id, response, swarm_tx, equix_builder, local_peer_id, traffic,
-                metrics, driver_state, peer_exclusions,
+                peer, request_id, response.message, response_bytes, swarm_tx, equix_builder,
+                local_peer_id, traffic, metrics, driver_state, peer_exclusions,
             )
             .await?;
         }

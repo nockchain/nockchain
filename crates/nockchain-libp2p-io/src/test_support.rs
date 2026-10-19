@@ -11,7 +11,6 @@ use bytes::Bytes;
 use futures::AsyncWriteExt;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use libp2p::core::ConnectedPoint;
-use libp2p::request_response::cbor;
 use libp2p::swarm::{ConnectionId, NetworkBehaviour};
 use libp2p::{request_response, Multiaddr, PeerId, Swarm};
 use nockapp::noun::slab::NounSlab;
@@ -22,7 +21,9 @@ use nockvm_macros::tas;
 use serde_bytes::ByteBuf;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
+use crate::behaviour::codec::NockchainCodec;
 use crate::behaviour::request_response_protocols;
+pub use crate::behaviour::TransportResponse;
 use crate::config::LibP2PConfig;
 use crate::driver::{
     build_retry_request_contexts, collect_tip5_zset_strings, handle_outbound_request_failure,
@@ -138,7 +139,7 @@ pub struct ProtocolRecordingCodec {
     trace: Option<ProtocolTrace>,
     raw_request_injection: RawRequestInjection,
     raw_response_injection: RawResponseInjection,
-    inner: cbor::codec::Codec<NockchainRequest, NockchainResponse>,
+    inner: NockchainCodec,
 }
 
 impl ProtocolRecordingCodec {
@@ -149,7 +150,7 @@ impl ProtocolRecordingCodec {
         raw_response_injection: RawResponseInjection,
         libp2p_config: &LibP2PConfig,
     ) -> Self {
-        let inner = cbor::codec::Codec::default()
+        let inner = NockchainCodec::default()
             .set_request_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64)
             .set_response_size_maximum(libp2p_config.gen2_batch_max_bytes() as u64);
         Self {
@@ -172,7 +173,7 @@ impl ProtocolRecordingCodec {
 impl request_response::Codec for ProtocolRecordingCodec {
     type Protocol = libp2p::StreamProtocol;
     type Request = NockchainRequest;
-    type Response = NockchainResponse;
+    type Response = TransportResponse;
 
     async fn read_request<T>(
         &mut self,
@@ -250,11 +251,11 @@ pub struct ReqResTestBehaviour {
 
 #[derive(Debug)]
 pub enum ReqResTestEvent {
-    RequestResponse(request_response::Event<NockchainRequest, NockchainResponse>),
+    RequestResponse(request_response::Event<NockchainRequest, TransportResponse>),
 }
 
-impl From<request_response::Event<NockchainRequest, NockchainResponse>> for ReqResTestEvent {
-    fn from(event: request_response::Event<NockchainRequest, NockchainResponse>) -> Self {
+impl From<request_response::Event<NockchainRequest, TransportResponse>> for ReqResTestEvent {
+    fn from(event: request_response::Event<NockchainRequest, TransportResponse>) -> Self {
         Self::RequestResponse(event)
     }
 }
@@ -380,14 +381,8 @@ impl ReqResFailureObservabilityProbe {
 }
 
 fn fresh_outbound_request_id() -> request_response::OutboundRequestId {
-    let mut behaviour: request_response::cbor::Behaviour<NockchainRequest, NockchainResponse> =
-        request_response::cbor::Behaviour::new(
-            [(
-                libp2p::StreamProtocol::new(LibP2PConfig::req_res_protocol_version()),
-                request_response::ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        );
+    let mut behaviour =
+        crate::behaviour::build_request_response_behaviour(&LibP2PConfig::default());
     behaviour.send_request(
         &PeerId::random(),
         NockchainRequest::BatchRequest {

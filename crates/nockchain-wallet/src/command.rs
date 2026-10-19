@@ -328,6 +328,22 @@ pub enum Commands {
         label: Option<String>,
     },
 
+    /// Verify retained child key material against the active parent, then store
+    /// and display the rederived child. Requires an independently known index.
+    RecoverChild {
+        /// Known child index, in range [0, 2^31)
+        #[arg(value_parser = clap::value_parser!(u64).range(0..(1u64 << 31)))]
+        index: u64,
+
+        /// The known child was derived with hardening
+        #[arg(long)]
+        hardened: bool,
+
+        /// File containing one extended key; private keys must be kept secret
+        #[arg(long, value_name = "FILE")]
+        key_file: PathBuf,
+    },
+
     /// Derive a contiguous batch of child keys from the current master key
     DeriveChildBatch {
         /// Starting child index, should be in range [0, 2^31)
@@ -352,7 +368,7 @@ pub enum Commands {
     },
 
     /// Import keys from a file, extended key, seed phrase, or master private key
-    #[command(group = clap::ArgGroup::new("import_source").required(true).args(&["file", "key", "seedphrase"]))]
+    #[command(group = clap::ArgGroup::new("import_source").required(true).args(&["file", "key", "key_file", "seedphrase"]))]
     ImportKeys {
         /// Path to the jammed keys file
         #[arg(short = 'f', long = "file", value_name = "FILE")]
@@ -362,11 +378,15 @@ pub enum Commands {
         #[arg(short = 'k', long = "key", value_name = "EXTENDED_KEY")]
         key: Option<String>,
 
-        /// Seed phrase to generate master private key, requires version. If your key was generated prior to
+        /// File containing one extended key, avoiding secrets in process arguments
+        #[arg(long, value_name = "FILE")]
+        key_file: Option<PathBuf>,
+
+        /// Prompt for a seed phrase to generate a master private key. Requires version. If your key was generated prior to
         /// the release of the v1 protocol upgrade on October 15, 2025, it is mostly likely version 0.
         /// If it was generated after that date, it is likely version 1.
-        #[arg(short = 's', long = "seedphrase", value_name = "SEEDPHRASE")]
-        seedphrase: Option<String>,
+        #[arg(short = 's', long = "seedphrase")]
+        seedphrase: bool,
 
         /// Master key version to use when generating from seed phrase
         #[arg(long = "version", value_name = "VERSION", requires = "seedphrase")]
@@ -870,6 +890,7 @@ impl Commands {
         match self {
             Commands::Keygen => "keygen",
             Commands::DeriveChild { .. } => "derive-child",
+            Commands::RecoverChild { .. } => "recover-child",
             Commands::DeriveChildBatch { .. } => "derive-child-batch",
             Commands::ImportKeys { .. } => "import-keys",
             Commands::ExportKeys => "export-keys",
@@ -1134,5 +1155,69 @@ mod tests {
         };
 
         assert_eq!(destination, SAMPLE_P2PKH);
+    }
+
+    #[test]
+    fn seed_phrase_is_a_prompt_flag_not_a_process_argument() {
+        let cli = WalletCli::try_parse_from([
+            "nockchain-wallet", "import-keys", "--seedphrase", "--version", "1",
+        ])
+        .expect("interactive seed import should parse");
+        let Commands::ImportKeys { seedphrase, .. } = cli.command else {
+            panic!("expected import-keys command");
+        };
+        assert!(seedphrase);
+
+        assert!(
+            WalletCli::try_parse_from([
+                "nockchain-wallet", "import-keys", "--seedphrase", "word1 word2 word3",
+                "--version", "1",
+            ])
+            .is_err(),
+            "a seed phrase supplied on the command line must be rejected"
+        );
+    }
+
+    #[test]
+    fn child_recovery_requires_file_and_known_bounded_index() {
+        let cli = WalletCli::try_parse_from([
+            "nockchain-wallet", "recover-child", "7", "--hardened", "--key-file", "retained.key",
+        ])
+        .expect("file-based child recovery should parse");
+        let Commands::RecoverChild {
+            index,
+            hardened,
+            key_file,
+        } = cli.command
+        else {
+            panic!("expected recover-child command");
+        };
+        assert_eq!(index, 7);
+        assert!(hardened);
+        assert_eq!(key_file, PathBuf::from("retained.key"));
+        for arguments in [
+            vec!["nockchain-wallet", "recover-child", "7"],
+            vec!["nockchain-wallet", "recover-child", "7", "--key", "secret"],
+            vec!["nockchain-wallet", "recover-child", "2147483648", "--key-file", "retained.key"],
+        ] {
+            assert!(WalletCli::try_parse_from(arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn extended_key_import_accepts_one_file_source() {
+        let cli = WalletCli::try_parse_from([
+            "nockchain-wallet", "import-keys", "--key-file", "retained.key",
+        ])
+        .expect("file-based extended key import should parse");
+        let Commands::ImportKeys { key_file, .. } = cli.command else {
+            panic!("expected import-keys command");
+        };
+        assert_eq!(key_file, Some(PathBuf::from("retained.key")));
+        assert!(WalletCli::try_parse_from([
+            "nockchain-wallet", "import-keys", "--key-file", "retained.key", "--key",
+            "another-key",
+        ])
+        .is_err());
     }
 }

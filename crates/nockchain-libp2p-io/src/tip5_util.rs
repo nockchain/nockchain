@@ -12,6 +12,15 @@ use num_bigint::BigUint;
 // Goldilocks prime
 const P: u64 = 0xffffffff00000001;
 
+fn check_tip5_limbs(hash: &[u64; 5]) -> Result<(), NockAppError> {
+    if hash.iter().any(|&limb| limb >= P) {
+        return Err(NockAppError::OtherError(
+            "tip5 hash has a noncanonical field limb".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Maximum ASCII width of a base58-encoded TIP5 hash.
 ///
 /// A TIP5 hash is five limbs modulo the Goldilocks prime, so its value is
@@ -76,6 +85,7 @@ fn accum_prime_ubig_stack<S: Stack>(
 }
 
 pub fn base_p_to_decimal(hash: [u64; 5]) -> Result<UBig, NockAppError> {
+    check_tip5_limbs(&hash)?;
     let prime = BigUint::from(P);
     let mut result = BigUint::from(0u8);
 
@@ -89,6 +99,7 @@ pub fn base_p_to_decimal_stack<S: Stack>(
     stack: &mut S,
     hash: [u64; 5],
 ) -> Result<UBig, NockAppError> {
+    check_tip5_limbs(&hash)?;
     let prime_ubig = UBig::from(P);
     let mut result = ubig!(0);
 
@@ -265,6 +276,21 @@ mod tests {
         let encoded =
             ubig_to_base58(base_p_to_decimal(max_tip5).expect("tip5 upper bound encodes"));
         assert_eq!(encoded.len(), TIP5_BASE58_MAX_CHARS);
+    }
+
+    #[test]
+    fn noncanonical_tip5_limb_cannot_alias_a_valid_block_id() {
+        let canonical = [1, 1, 0, 0, 0];
+        let alias = [P + 1, 0, 0, 0, 0];
+        assert!(base_p_to_decimal(canonical).is_ok());
+        assert!(base_p_to_decimal(alias).is_err());
+
+        let mut slab: NounSlab = NounSlab::new();
+        let limb = nockvm::noun::Atom::new(&mut slab, P + 1).as_noun();
+        let noun = T(&mut slab, &[limb, D(0), D(0), D(0), D(0)]);
+        let space = slab.noun_space();
+        assert!(tip5_hash_to_base58(noun, &space).is_err());
+        assert!(tip5_hash_to_base58_stack(&mut slab, noun, &space).is_err());
     }
 
     // Wrapper struct for implementing Arbitrary

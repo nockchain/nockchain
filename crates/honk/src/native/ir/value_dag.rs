@@ -201,8 +201,12 @@ mod tests {
         assert!(!unsafe { left.raw_equals(&right) });
 
         let mut arena = ValueArena::new();
-        let left_id = arena.import(left, &slab.noun_space()).unwrap();
-        let right_id = arena.import(right, &slab.noun_space()).unwrap();
+        let left_id = arena
+            .import(left, &slab.noun_space())
+            .expect("import left cell value fixture");
+        let right_id = arena
+            .import(right, &slab.noun_space())
+            .expect("import structurally equal right cell fixture");
         assert_eq!(left_id, right_id);
         assert!(arena.children(left_id).is_some());
     }

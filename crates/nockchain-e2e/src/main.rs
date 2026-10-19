@@ -20,7 +20,13 @@ enum Command {
         #[arg(long)]
         nockchain_bin: Option<PathBuf>,
         #[arg(long)]
+        miner_bin: Option<PathBuf>,
+        #[arg(long)]
         docker_image: Option<String>,
+        #[arg(long)]
+        docker_miner_image: Option<String>,
+        #[arg(long)]
+        docker_miner_bin: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         docker: bool,
         #[arg(long)]
@@ -30,7 +36,7 @@ enum Command {
             action = ArgAction::Set,
             value_parser = BoolishValueParser::new(),
             default_value_t = true,
-            help = "Use target/release/nockchain when --nockchain-bin is not provided"
+            help = "Use target/release node and miner binaries when their paths are not provided"
         )]
         release: bool,
         #[arg(long, default_value = "target/nockchain-e2e")]
@@ -122,7 +128,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Run {
             scenario,
             nockchain_bin,
+            miner_bin,
             docker_image,
+            docker_miner_image,
+            docker_miner_bin,
             docker,
             wallet_bin,
             release,
@@ -148,6 +157,19 @@ async fn main() -> anyhow::Result<()> {
                     })
                 })
             };
+            let miner_bin = if docker {
+                None
+            } else {
+                Some(miner_bin.unwrap_or_else(|| {
+                    PathBuf::from(if release {
+                        "target/release/zk-pow-mine"
+                    } else {
+                        "target/debug/zk-pow-mine"
+                    })
+                }))
+            };
+            let docker_miner_image =
+                docker_miner_image.or_else(|| std::env::var("NOCKCHAIN_E2E_MINER_IMAGE").ok());
             if !docker {
                 if let Some(path) = &nockchain_bin {
                     if !path.exists() {
@@ -169,6 +191,7 @@ async fn main() -> anyhow::Result<()> {
             let options = runner::RunOptions {
                 scenario_path: scenario,
                 nockchain_bin,
+                miner_bin,
                 wallet_bin,
                 work_dir,
                 base_grpc_port,
@@ -176,6 +199,8 @@ async fn main() -> anyhow::Result<()> {
                 base_p2p_port,
                 docker,
                 docker_image,
+                docker_miner_image,
+                docker_miner_bin,
                 keep_artifacts,
             };
             runner::run_scenario(options).await

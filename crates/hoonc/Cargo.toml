@@ -35,6 +35,7 @@ tracing-tracy = { workspace = true, optional = true, features = [
     "ondemand",
 ] }
 walkdir = "2.5.0"
+zkvm-jetpack = { workspace = true }
 
 [lints]
 workspace = true

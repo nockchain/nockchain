@@ -336,10 +336,9 @@ mod tests {
 
     #[test]
     fn hash_noun_varlen_digest_walks_deep_chains_iteratively() {
-        // GHSA-xjmj-ppvv-9hfj (latent crash component): a deep spine noun
-        // (reachable via crafted gossip before validation) must digest
-        // without overflowing the hashing thread's stack. Walk order is
-        // pinned by `hash_noun_varlen_digest_uses_public_shape_encoding`.
+        // Digest traversal must handle deep chains iteratively with bounded
+        // call-stack space. Walk order is pinned by
+        // `hash_noun_varlen_digest_uses_public_shape_encoding`.
         let depth = 200_000;
         let digest = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
@@ -362,10 +361,8 @@ mod tests {
 
     #[test]
     fn hash_noun_varlen_digest_rejects_dag_bomb_expansion() {
-        // GHSA-g3rv-687v-p7h9: a shared DAG `a_k = [a_(k-1) a_(k-1)]` of a
-        // few dozen physical nodes implies a 2^k-node logical tree. The
-        // digest is defined over the logical expansion, so the walk is
-        // budget-bounded and errors instead of expanding unboundedly.
+        // The digest is defined over the logical expansion of shared DAGs.
+        // Traversal must return an error when that expansion exceeds its budget.
         let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
         let mut noun = D(0);
         for _ in 0..30 {

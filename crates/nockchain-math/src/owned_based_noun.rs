@@ -354,9 +354,8 @@ mod tests {
 
     #[test]
     fn from_noun_survives_deep_chain_on_worker_stack() {
-        // GHSA-qrw6-mmw4-vjfq: an 80,000-deep right-leaning spine in an
-        // ~61 KB hax preimage must convert without stack overflow on a
-        // tokio-worker-sized (2 MB) thread.
+        // Deep-chain conversion must use bounded call-stack space on a
+        // worker-sized (2 MB) thread and preserve the full logical depth.
         let depth = 80_000;
         let result = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
@@ -385,10 +384,8 @@ mod tests {
 
     #[test]
     fn from_noun_rejects_exponential_dag_expansion() {
-        // GHSA-3f53-rmcr-5jmf: a doubling tower `cN = [c(N-1) c(N-1)]`
-        // shares structure in the slab but implies a 2^(N+1)-1 node
-        // logical tree. Conversion must stop at the budget and return an
-        // error instead of allocating until the process aborts.
+        // Conversion of shared DAGs must respect the logical-expansion node
+        // budget, returning an error when the expanded tree exceeds it.
         let levels = 30;
         let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_SMALL, 0);
         let mut noun = nockvm::noun::D(0);

@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 use libp2p::multiaddr::Protocol;
@@ -39,11 +39,48 @@ pub trait MultiaddrExt {
     fn ip_addr(&self) -> Option<IpAddr>;
 }
 
+/// Use one identity for an IPv4 endpoint even when a transport reports its
+/// IPv4-mapped IPv6 form. Exclusion, allowlist and IP-bucket keys must agree.
+pub(crate) fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        v4 => v4,
+    }
+}
+
+pub(crate) fn quic_socket_addr(address: &Multiaddr) -> Option<SocketAddr> {
+    let mut protocols = address.iter();
+    let ip = match protocols.next()? {
+        Protocol::Ip4(ip) => IpAddr::V4(ip),
+        Protocol::Ip6(ip) => canonical_ip(IpAddr::V6(ip)),
+        _ => return None,
+    };
+    let Protocol::Udp(port) = protocols.next()? else {
+        return None;
+    };
+    if port == 0 || !matches!(protocols.next(), Some(Protocol::QuicV1)) {
+        return None;
+    }
+    match protocols.next() {
+        None => Some(SocketAddr::new(ip, port)),
+        Some(Protocol::P2p(_)) if protocols.next().is_none() => Some(SocketAddr::new(ip, port)),
+        _ => None,
+    }
+}
+
+pub(crate) fn same_endpoint_without_p2p(left: &Multiaddr, right: &Multiaddr) -> bool {
+    left.iter()
+        .filter(|protocol| !matches!(protocol, Protocol::P2p(_)))
+        .eq(right
+            .iter()
+            .filter(|protocol| !matches!(protocol, Protocol::P2p(_))))
+}
+
 impl MultiaddrExt for Multiaddr {
     fn ip_addr(&self) -> Option<IpAddr> {
         self.iter().find_map(|component| match component {
             libp2p::multiaddr::Protocol::Ip4(ip) => Some(IpAddr::V4(ip)),
-            libp2p::multiaddr::Protocol::Ip6(ip) => Some(IpAddr::V6(ip)),
+            libp2p::multiaddr::Protocol::Ip6(ip) => Some(canonical_ip(IpAddr::V6(ip))),
             _ => None,
         })
     }

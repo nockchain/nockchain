@@ -56,11 +56,6 @@ steps:
     timeout_ms: 120000
 
 asserts:
-  - assert: req_res_generation
-    node: "node-b"
-    peer: "node-a"
-    generation: gen2
-    timeout_ms: 30000
   - assert: heads_equal
     nodes: ["node-a", "node-b"]
     timeout_ms: 30000

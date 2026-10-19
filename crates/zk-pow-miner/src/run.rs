@@ -342,51 +342,53 @@ pub async fn run_with_pool(
         // the node's post-poke update lands on a live stream. Configuration
         // pokes are idempotent: transport ambiguity is retried after reconnect,
         // while an explicit kernel NACK is a permanent configuration failure.
-        match call_with_deadline(
-            cfg.rpc_timeout,
-            &shutdown,
-            client.set_mining_key(
-                ZkPowMinerWire::SetPubKey.to_wire(),
-                Vec::new(),
-                cfg.mining_pkh_configs.clone(),
-            ),
-        )
-        .await
-        {
-            TimedCall::Completed(Ok(())) => {}
-            TimedCall::Completed(Err(error @ NodeClientError::PokeRejected { .. })) => {
-                return Err(MinerError::Configure(format!("set_mining_key: {error}")));
-            }
-            TimedCall::Completed(Err(error)) => {
-                if !reconnect
-                    .wait(
-                        &cfg,
-                        &shutdown,
-                        format!("set_mining_key transport failed: {error}"),
-                    )
-                    .await?
-                {
-                    return Ok(());
+        if !client.is_operator_managed() {
+            match call_with_deadline(
+                cfg.rpc_timeout,
+                &shutdown,
+                client.set_mining_key(
+                    ZkPowMinerWire::SetPubKey.to_wire(),
+                    Vec::new(),
+                    cfg.mining_pkh_configs.clone(),
+                ),
+            )
+            .await
+            {
+                TimedCall::Completed(Ok(())) => {}
+                TimedCall::Completed(Err(error @ NodeClientError::PokeRejected { .. })) => {
+                    return Err(MinerError::Configure(format!("set_mining_key: {error}")));
                 }
-                continue;
-            }
-            TimedCall::TimedOut => {
-                if !reconnect
-                    .wait(
-                        &cfg,
-                        &shutdown,
-                        format!(
-                            "set_mining_key exceeded {}ms deadline",
-                            cfg.rpc_timeout.as_millis()
-                        ),
-                    )
-                    .await?
-                {
-                    return Ok(());
+                TimedCall::Completed(Err(error)) => {
+                    if !reconnect
+                        .wait(
+                            &cfg,
+                            &shutdown,
+                            format!("set_mining_key transport failed: {error}"),
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    continue;
                 }
-                continue;
+                TimedCall::TimedOut => {
+                    if !reconnect
+                        .wait(
+                            &cfg,
+                            &shutdown,
+                            format!(
+                                "set_mining_key exceeded {}ms deadline",
+                                cfg.rpc_timeout.as_millis()
+                            ),
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                TimedCall::Shutdown => return Ok(()),
             }
-            TimedCall::Shutdown => return Ok(()),
         }
 
         let mut candidates = match call_with_deadline(
@@ -429,49 +431,55 @@ pub async fn run_with_pool(
             TimedCall::Shutdown => return Ok(()),
         };
 
-        match call_with_deadline(
-            cfg.rpc_timeout,
-            &shutdown,
-            client.enable_mining(ZkPowMinerWire::Enable.to_wire(), true),
-        )
-        .await
-        {
-            TimedCall::Completed(Ok(())) => {}
-            TimedCall::Completed(Err(error @ NodeClientError::PokeRejected { .. })) => {
-                return Err(MinerError::Configure(format!(
-                    "enable_mining(true): {error}"
-                )));
-            }
-            TimedCall::Completed(Err(error)) => {
-                if !reconnect
-                    .wait(
-                        &cfg,
-                        &shutdown,
-                        format!("enable_mining(true) transport failed: {error}"),
-                    )
-                    .await?
-                {
-                    return Ok(());
+        if !client.is_operator_managed() {
+            match call_with_deadline(
+                cfg.rpc_timeout,
+                &shutdown,
+                client.enable_mining(ZkPowMinerWire::Enable.to_wire(), true),
+            )
+            .await
+            {
+                TimedCall::Completed(Ok(())) => {}
+                TimedCall::Completed(Err(error @ NodeClientError::PokeRejected { .. })) => {
+                    return Err(MinerError::Configure(format!(
+                        "enable_mining(true): {error}"
+                    )));
                 }
-                continue;
-            }
-            TimedCall::TimedOut => {
-                if !reconnect
-                    .wait(
-                        &cfg,
-                        &shutdown,
-                        format!(
-                            "enable_mining(true) exceeded {}ms deadline",
-                            cfg.rpc_timeout.as_millis()
-                        ),
-                    )
-                    .await?
-                {
-                    return Ok(());
+                TimedCall::Completed(Err(error)) => {
+                    if !reconnect
+                        .wait(
+                            &cfg,
+                            &shutdown,
+                            format!("enable_mining(true) transport failed: {error}"),
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    continue;
                 }
-                continue;
+                TimedCall::TimedOut => {
+                    if !reconnect
+                        .wait(
+                            &cfg,
+                            &shutdown,
+                            format!(
+                                "enable_mining(true) exceeded {}ms deadline",
+                                cfg.rpc_timeout.as_millis()
+                            ),
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                TimedCall::Shutdown => return Ok(()),
             }
-            TimedCall::Shutdown => return Ok(()),
+        } else {
+            info!(
+                "zk-pow-miner: operator-managed mining; payout and enable state come from the node"
+            );
         }
         info!("zk-pow-miner: subscribed + mining enabled; awaiting candidates");
 
@@ -1043,7 +1051,10 @@ mod tests {
 
         async fn start_server(&mut self) {
             assert!(self.server_task.is_none(), "mock server already running");
-            let server = PrivateNockAppGrpcServer::new(self.build_handle());
+            // Mock node without bearer tokens: opt out of private gRPC auth
+            // explicitly, as the server otherwise refuses to start.
+            let server =
+                PrivateNockAppGrpcServer::new(self.build_handle()).with_allow_unauthenticated(true);
             let addr = self.addr;
             self.server_task = Some(tokio::spawn(async move { server.serve(addr).await }));
             tokio::time::sleep(Duration::from_millis(100)).await;

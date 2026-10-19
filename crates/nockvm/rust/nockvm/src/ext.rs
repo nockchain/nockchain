@@ -44,6 +44,9 @@ impl IndirectAtomExt for IndirectAtom {
         size: usize,
         data: *const u8,
     ) -> Atom {
+        if size == 0 {
+            return Atom::new(allocator, 0);
+        }
         // Use normalize_as_atom_stack since new_raw_bytes creates stack-pointer form atoms
         Self::new_raw_bytes(allocator, size, data).normalize_as_atom_stack()
     }
@@ -250,6 +253,29 @@ mod tests {
     use super::noun_equality;
     use crate::mem::{NockStack, NOCK_STACK_SIZE_TINY};
     use crate::noun::{Cell, IndirectAtom, D};
+
+    #[test]
+    fn empty_byte_atoms_are_canonical_zero() {
+        use super::{make_tas, AtomExt, IndirectAtomExt};
+        use crate::noun::Atom;
+
+        let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
+        let atoms = [
+            <Atom as AtomExt>::from_bytes(&mut stack, &[]),
+            <IndirectAtom as IndirectAtomExt>::from_bytes(&mut stack, &[]),
+            make_tas(&mut stack, ""),
+        ];
+        let space = stack.noun_space();
+        for atom in atoms {
+            assert!(atom.is_direct());
+            assert_eq!(
+                atom.in_space(&space)
+                    .as_u64()
+                    .expect("empty byte atom should fit in u64"),
+                0
+            );
+        }
+    }
 
     /// Verifies noun_equality correctly compares nouns for structural equality.
     ///

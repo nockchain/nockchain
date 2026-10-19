@@ -26,11 +26,11 @@ Nodes support exactly one request-response protocol ID:
 
 Generation 1 is not registered, negotiated, decoded, or used as a fallback. A peer that only supports `/nockchain-1-req-res` is incompatible and must upgrade before joining the network.
 
-This cutover removes the unauthenticated legacy `Gossip` wire shape. Every accepted request, including gossip, carries sender-bound proof-of-work and participates in replay protection.
+Every accepted request, including gossip, carries sender-bound proof-of-work and participates in replay protection.
 
 ## Motivation
 
-The generation-1 transport paid one network round trip and one proof-of-work solve per singleton data request. It also admitted a legacy gossip message without proof-of-work, allowing unauthenticated peers to consume request-processing and retained-message resources.
+The transport batches data requests under one proof-of-work solve and authenticates gossip with sender-bound proof-of-work.
 
 Generation 2 provides:
 
@@ -148,7 +148,7 @@ Inbound processing MUST verify proof-of-work before routing work to the kernel. 
 - Retry logic MUST requeue only retryable or missing items and MUST keep generation-2 request shapes.
 - Response envelopes are validated before facts are routed to the kernel.
 - Bundled transactions are routed before their containing block fact.
-- Fair-queue lock poisoning and stale scheduling tokens are recovered without panicking the networking task.
+- Fair-queue scheduling recovers poisoned locks and stale scheduling tokens.
 
 ### Limits and Pressure Controls
 
@@ -163,18 +163,33 @@ Implementations MUST enforce configured bounds before allocating or executing un
 - request and gossip admission buckets;
 - CBOR decoding rejects more than 4,096 batch items, 262,144 items in one bundle list, 255 range blocks, or 4 MiB of aggregate container-element storage;
 - jam decoding is capped at 1,000,000 encoded noun positions per network payload;
-- every cue decoder rejects a declared atom size larger than the remaining input before any allocation, so a crafted jam length prefix cannot trigger an oversized allocation request, an out-of-range slice, or a panic;
-- owned-noun conversion of decoded values walks a worklist and is budgeted (2^20 nodes), so a structurally shared jam DAG cannot expand into an unbounded logical tree and a deep spine cannot overflow the converting thread;
-- noun re-homing after decode walks a worklist instead of recursing, so a deeply nested decoded noun cannot overflow the decoding thread's stack;
-- the tx-source hint order queue is capped by its own length, so per-id removals and disconnects that empty the live map cannot strand queue entries;
-- malformed runtime commands crash deterministically instead of returning process-exit effects, so an unauthenticated command poke cannot terminate the node;
-- noun digest hashing walks a worklist, so a deeply nested decoded noun cannot overflow the hashing thread's stack;
-- DAG-aware noun validation memoizes on source pointers and logical-expansion walks are budgeted (2^20 nodes), so a structurally shared jam DAG cannot drive exponential traversal work on a validating node;
-- the `dor`/`gor`/`mor` order jets compare by value (pointer fast path, cached-mug pre-filter, budgeted structural walk), so two separately-allocated equal atoms order identically to the pure `+dor` gate and canonical sorted state (z-sets, z-maps) cannot diverge across jet configurations;
+- every cue decoder validates declared atom sizes against the remaining input before allocation;
+- owned-noun conversion of decoded values uses an iterative worklist with a budget of 2^20 nodes;
+- noun re-homing after decode uses an iterative worklist;
+- the tx-source hint order queue is capped by its own length, independently of live-map entries removed per ID or on disconnect;
+- runtime commands follow a strict schema;
+- noun digest hashing uses an iterative worklist;
+- DAG-aware noun validation memoizes on source pointers, and logical-expansion walks are budgeted at 2^20 nodes;
+- the `dor`/`gor`/`mor` order jets compare by value using a pointer fast path, cached-mug pre-filter, and budgeted structural walk; separately allocated equal atoms order identically to the pure `+dor` gate, preserving canonical sorted state (z-sets, z-maps) across jet configurations;
 - IP exclusions, address cooldowns, peer cooldowns, IP history, and per-IP evidence are each capped by `max_exclusion_entries`; unrelated events cannot evict retained per-IP strikes;
 - deferred heard-block buffering is capped at 4,096 entries and 64 MiB per peer, and at 65,536 entries and 256 MiB globally.
 
 A request that cannot fit the item or batch caps is rejected rather than emitted through an alternate protocol.
+
+Automatic configured startup, backbone, and recovery dialing uses endpoint-scoped
+single-flight admission: bootstrap and backbone requests do not start another
+configured attempt while one is pending. Actual terminal connection events or
+connection establishment update pending-attempt tracking so normal retries can
+proceed. Manual and force dialing remain distinct; this does not impose
+single-flight behavior on all manual dials or broaden the exact configured
+endpoint, expected-identity, or recovery exceptions. Other address/IP exclusions,
+admission limits, and recovery-slot protection remain effective.
+
+Connection health is tracked by authenticated connection ID. A successful ping
+resets only that connection's consecutive-failure count, and reaching the
+configured threshold closes only that connection. Closing a connection removes
+its health state. Shared-IP admission, request quotas, and address hygiene remain
+independent.
 
 ### Gossip
 

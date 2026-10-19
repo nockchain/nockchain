@@ -190,8 +190,7 @@
 ::    ordering at runtime — z-map order is deterministic but
 ::    implicit, so this test exists to lock in the current behaviour
 ::    and would catch any future change to the z-map sort or to
-::    ++new's "give-to-first" branch. See
-::    014-aletheia-emissions-audit.md finding #4.
+::    ++new's "give-to-first" branch.
 ++  test-split-post-activation-residual-to-first-key  ^-  tang
   =/  miner-a-pkh=hash:t  (hash:schnorr-pubkey:t default-a-pt-1:h)
   =/  miner-b-pkh=hash:t  (hash:schnorr-pubkey:t default-a-pt-2:h)

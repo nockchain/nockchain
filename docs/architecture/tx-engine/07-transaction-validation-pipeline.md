@@ -113,7 +113,7 @@ V1 introduces a unified `check-context` structure that bundles all context neede
 This arm validates a complete spend by:
 1. Checking Bythos compatibility (full proofs only after bythos-phase; gates `%full` LMP format to `now >= bythos-phase`)
 2. Extracting the spend condition from the lock merkle proof (handles both stub 3-tuple and full 4-tuple formats)
-3. Verifying the lock merkle proof against the lock root
+3. Binding the proof root to the parent note's first-name and verifying exact Merkle inclusion. A full proof must also select a complete authorization condition: axis 1 for a single-condition lock, or a balanced OR-tree leaf at the depth for arity 2, 4, 8, or 16, with the final (root-level) sibling equal to the hash of that arity tag.
 4. Checking each lock primitive in the spend condition via `levy` (AND logic):
    - `%tim` → check timelocks against current height
    - `%hax` → check hash preimages
@@ -121,6 +121,17 @@ This arm validates a complete spend by:
    - `%brn` → always fail (`%|`)
 
 All checks must pass (AND logic within a spend condition).
+
+Full-proof authorization boundaries are enforced as soon as the upgraded node
+validates a spend, at every spending height; they have no activation-height
+selector. The standalone full-proof checker and the production proof wrapper
+share the same check. Existing lock and note hashes, proof encoding, and honest
+proof builders are unchanged. An empty spend condition never authorizes a
+spend, under either proof format, whether revealed as a leaf or a whole lock;
+complete burn conditions remain valid Merkle leaves but cannot satisfy the burn
+primitive. Bythos still independently gates use of the full-proof format, and
+the existing seed parent-hash gate is unchanged. Historical validation applies
+the same complete-authorization boundary rule at every spending height.
 
 ## Phase 3: Context-Aware Validation
 

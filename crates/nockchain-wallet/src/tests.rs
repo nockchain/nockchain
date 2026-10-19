@@ -30,9 +30,9 @@ use wallet_tx_builder::types::{
 use super::*;
 use crate::command::WalletWire;
 use crate::create_tx::{
-    ensure_manual_planner_parity, ActiveSignerEntryNoun, MigrateV0NotesSummary,
-    MigrateV0SignerSummary, PlannerBlockchainConstantsNoun, PlannerNoteDataConstantsNoun,
-    SigningKeyLockMatcher,
+    decode_fund_spend_policy, ensure_manual_planner_parity, fund_candidate_height,
+    ActiveSignerEntryNoun, FundSpendPolicyNoun, MigrateV0NotesSummary, MigrateV0SignerSummary,
+    PlannerBlockchainConstantsNoun, PlannerNoteDataConstantsNoun, SigningKeyLockMatcher,
 };
 use crate::recipient::{planner_recipient_outputs, RecipientSpec, BRIDGE_LOCK_ROOT_DEFAULT_B58};
 
@@ -533,7 +533,8 @@ async fn import_seed_phrase(
     let wire = WalletWire::Command(Commands::ImportKeys {
         file: None,
         key: None,
-        seedphrase: Some(seedphrase.to_string()),
+        key_file: None,
+        seedphrase: true,
         version: Some(version),
     })
     .to_wire();
@@ -1058,6 +1059,193 @@ fn planner_refund_output_template_includes_lock_note_data_when_enabled() {
         planner_refund_output_template(None, &signer, false).expect("refund output without data");
     assert_eq!(without_data.amount, 0);
     assert_eq!(without_data.note_data.len(), 0);
+}
+
+#[test]
+fn fund_policy_rejects_absent_malformed_and_mismatched_responses() {
+    for absent in [None, Some(None::<FundSpendPolicyNoun>)] {
+        let mut slab: NounSlab<NockJammer> = NounSlab::new();
+        let noun = absent.to_noun(&mut slab);
+        assert!(decode_fund_spend_policy(&noun, &slab.noun_space(), 12).is_err());
+    }
+
+    let mut slab: NounSlab<NockJammer> = NounSlab::new();
+    let malformed = Some(Some(42u64)).to_noun(&mut slab);
+    assert!(decode_fund_spend_policy(&malformed, &slab.noun_space(), 12).is_err());
+    let invalid_minimum = Some(Some((12u64, hash(1), hash(2), 7u64))).to_noun(&mut slab);
+    assert!(decode_fund_spend_policy(&invalid_minimum, &slab.noun_space(), 12).is_err());
+    let noun = Some(Some(FundSpendPolicyNoun {
+        candidate_height: 11,
+        fund_lock_root: hash(1),
+        fund_first_name: hash(2),
+        minimum: None,
+    }))
+    .to_noun(&mut slab);
+    assert!(decode_fund_spend_policy(&noun, &slab.noun_space(), 12).is_err());
+    assert!(fund_candidate_height(u64::MAX).is_err());
+}
+
+/// Public protocol-fund reveal only; no signing key or wallet mutation is used.
+fn public_fund_spend_condition() -> SpendCondition {
+    SpendCondition::new(vec![LockPrimitive::Pkh(Pkh::new(
+        3,
+        [
+            "7pGXggKU1AWk3d3wqX2kpKUatTqT68Cv8SQfGzGRQvJvYnQBvagSSjT",
+            "8Mc1U7kdujhPoEwog1BfNsFDtRp8St8UQCHk84iaLdhP4cX9a2CT1MU",
+            "DAvp9ffoyNTBqAudZN29qc6s8GZfvvvAGvAfEFrqQsCVgSSSkg1SaSm",
+            "9LK7wEcQsmRpEot4qFaV9bwjSE9ZD6tB1kWbgNsFkDa2LEpvBV9WGY3",
+        ]
+        .into_iter()
+        .map(|pkh| Hash::from_base58(pkh).expect("public fund participant")),
+    ))])
+}
+
+#[tokio::test]
+async fn fund_policy_runtime_selects_mature_notes_without_changing_reveal(
+) -> Result<(), NockAppError> {
+    use wallet_tx_builder::lock_resolver::{FundMaturity, LockRootLockMatcher};
+    use wallet_tx_builder::types::PlannedOutput;
+
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    // Far beyond activation without mirroring a consensus phase in Rust.
+    // The Hoon wallet tests derive and exercise the exact shared phase boundary.
+    let tip = u64::MAX / 2;
+    let candidate_height = fund_candidate_height(tip)?;
+    let policy = wallet.peek_fund_spend_policy(candidate_height).await?;
+    let minimum = policy.minimum.expect("active fund recovery policy");
+    assert!(minimum > 0, "default runtime has a positive minimum");
+    let condition = public_fund_spend_condition();
+    assert_eq!(condition.hash().unwrap(), policy.fund_lock_root);
+
+    let note = |last, origin| {
+        let name = Name::new(policy.fund_first_name.clone(), hash(last));
+        let note = v1::Note::V1(v1::NoteV1::new(
+            BlockHeight(Belt(origin)),
+            name.clone(),
+            NoteData::new(Vec::new()),
+            Nicks(10_000_000),
+        ));
+        (name, note)
+    };
+    let immature = note(1, candidate_height - minimum + 1);
+    let mature = note(2, candidate_height - minimum);
+    let snapshot =
+        normalize_balance_pages(&[balance_page(tip, 1, vec![immature.clone(), mature.clone()])])
+            .expect("consistent synthetic snapshot");
+    let policy = wallet
+        .peek_fund_spend_policy(fund_candidate_height((snapshot.metadata.height.0).0)?)
+        .await?;
+    // The wallet kernel remains at its empty stored balance: the requested
+    // candidate comes from the supplied normalized snapshot instead.
+    assert_eq!((peek_balance_state(&mut wallet).await?.height.0).0, 0);
+    let matcher = LockRootLockMatcher::from_lock_root(&policy.fund_lock_root)
+        .unwrap()
+        .with_spend_condition(condition.clone())
+        .with_fund_notes(
+            &policy.fund_lock_root,
+            &policy.fund_first_name,
+            FundMaturity {
+                candidate_height: policy.candidate_height,
+                minimum: policy.minimum,
+            },
+        );
+    let constants = peek_wallet_blockchain_constants(&mut wallet).await?;
+    let mut request = PlanRequest {
+        planning_mode: CreateTxPlanningMode::Standard,
+        selection_mode: SelectionMode::Auto,
+        order_direction: SelectionOrder::Ascending,
+        include_data: false,
+        chain_context: ChainContext {
+            height: snapshot.metadata.height,
+            bythos_phase: BlockHeight(Belt(constants.bythos_phase)),
+            base_fee: constants.base_fee,
+            input_fee_divisor: constants.input_fee_divisor,
+            min_fee: constants.data.min_fee,
+        },
+        signer_pkh: None,
+        candidate_version_policy: CandidateVersionPolicy::V1Only,
+        candidates: snapshot.candidates,
+        recipient_outputs: vec![PlannedOutput {
+            lock_root: hash(99),
+            amount: 100_000,
+            note_data: Vec::new(),
+        }],
+        refund_output: planner_refund_output_template(None, &hash(99), false)?,
+        coinbase_relative_min: Some(constants.coinbase_timelock_min()?),
+        v0_migration_signer_pubkeys: Vec::new(),
+    };
+    let plan = plan_create_tx(&request, &matcher).expect("mature note funds the plan");
+    assert_eq!(plan.selected.len(), 1);
+    assert_eq!(plan.selected[0].name, mature.0);
+    let planned_names = plan
+        .selected
+        .iter()
+        .map(|input| input.name.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        ensure_manual_planner_parity(&[immature.0.clone(), mature.0.clone()], &planned_names,)
+            .is_err()
+    );
+    request.selection_mode = SelectionMode::Manual {
+        note_names: vec![immature.0.clone()],
+    };
+    assert!(plan_create_tx(&request, &matcher).is_err());
+
+    request.selection_mode = SelectionMode::Auto;
+    request
+        .candidates
+        .retain(|candidate| candidate.identity().name == mature.0);
+    // An inactive policy is a present payload, not an absent scry.
+    let inactive = wallet.peek_fund_spend_policy(0).await?;
+    assert!(inactive.minimum.is_none());
+    let inactive_matcher = LockRootLockMatcher::from_lock_root(&inactive.fund_lock_root)
+        .unwrap()
+        .with_spend_condition(condition.clone())
+        .with_fund_notes(
+            &inactive.fund_lock_root,
+            &inactive.fund_first_name,
+            FundMaturity {
+                candidate_height: inactive.candidate_height,
+                minimum: inactive.minimum,
+            },
+        );
+    let inactive_plan = plan_create_tx(&request, &inactive_matcher).expect("inactive mature plan");
+    assert_eq!(plan.selected, inactive_plan.selected);
+    assert_eq!(plan.final_fee, inactive_plan.final_fee);
+    assert_eq!(plan.word_counts, inactive_plan.word_counts);
+    let candidate = &request.candidates[0];
+    let resolution = matcher.select_v1_candidate(ResolveLockRequest {
+        note_first_name: &candidate.identity().name.first,
+        decoded_note_data: candidate.decoded_note_data(),
+        signer_pkh: None,
+        coinbase_relative_min: request.coinbase_relative_min,
+    });
+    assert_eq!(resolution.spend_condition.unwrap(), condition);
+    let mut slab: NounSlab<NockJammer> = NounSlab::new();
+    let zero = Some(Some(FundSpendPolicyNoun {
+        minimum: Some(0),
+        ..policy
+    }))
+    .to_noun(&mut slab);
+    let zero = decode_fund_spend_policy(&zero, &slab.noun_space(), candidate_height)?;
+    let zero_matcher = LockRootLockMatcher::from_lock_root(&zero.fund_lock_root)
+        .unwrap()
+        .with_spend_condition(condition)
+        .with_fund_notes(
+            &zero.fund_lock_root,
+            &zero.fund_first_name,
+            FundMaturity {
+                candidate_height: zero.candidate_height,
+                minimum: zero.minimum,
+            },
+        );
+    request.candidates[0].identity_mut().origin_page = BlockHeight(Belt(candidate_height + 1));
+    assert!(plan_create_tx(&request, &zero_matcher).is_err());
+    assert!(plan_create_tx(&request, &inactive_matcher).is_ok());
+    // A backwards query must return an inactive policy after an active query.
+    assert!(wallet.peek_fund_spend_policy(0).await?.minimum.is_none());
+    Ok(())
 }
 
 #[test]
@@ -2107,6 +2295,805 @@ async fn test_derive_child() -> Result<(), NockAppError> {
     Ok(())
 }
 
+fn key_output_field(effects: &[NounSlab], field: &str) -> String {
+    effects
+        .iter()
+        .filter_map(|effect| Wallet::markdown_text_from_effect(effect).unwrap())
+        .find_map(|text| {
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix(field).map(str::to_owned))
+        })
+        .expect("expected key field in kernel output")
+}
+
+fn kernel_exit_code(effects: &[NounSlab]) -> u64 {
+    effects
+        .iter()
+        .find_map(|effect| {
+            let space = effect.noun_space();
+            let cell = unsafe { effect.root() }.in_space(&space).as_cell().ok()?;
+            (cell.head().as_atom().ok()?.into_string().ok()? == "exit")
+                .then(|| cell.tail().as_atom().unwrap().as_u64().unwrap())
+        })
+        .expect("kernel exit effect")
+}
+
+fn kernel_file_bytes(effects: &[NounSlab], expected_path: &str) -> Option<Vec<u8>> {
+    effects.iter().find_map(|effect| {
+        let space = effect.noun_space();
+        let cell = unsafe { effect.root() }.in_space(&space).as_cell().ok()?;
+        if cell.head().as_atom().ok()?.into_string().ok()? != "file" {
+            return None;
+        }
+        let operation = cell.tail().as_cell().ok()?;
+        if operation.head().as_atom().ok()?.into_string().ok()? != "write" {
+            return None;
+        }
+        let write = operation.tail().as_cell().ok()?;
+        if write.head().as_atom().ok()?.into_string().ok()? != expected_path {
+            return None;
+        }
+        let atom = write.tail().as_atom().ok()?;
+        let bytes = atom.as_ne_bytes();
+        let length = bytes
+            .iter()
+            .rposition(|byte| *byte != 0)
+            .map_or(0, |i| i + 1);
+        Some(bytes[..length].to_vec())
+    })
+}
+
+async fn wallet_state_jam(wallet: &mut Wallet) -> Result<Vec<u8>, NockAppError> {
+    let mut slab = NounSlab::new();
+    let tag = make_tas(&mut slab, "state").as_noun();
+    slab.modify(|_| vec![tag, SIG]);
+    Ok(wallet.app.peek(slab).await?.jam().as_ref().to_vec())
+}
+
+async fn derived_key_output(
+    wallet: &mut Wallet,
+    index: u64,
+    hardened: bool,
+) -> Result<Vec<NounSlab>, NockAppError> {
+    let (poke, _) = Wallet::derive_child(index, hardened, &None)?;
+    wallet
+        .app
+        .poke(
+            WalletWire::Command(Commands::DeriveChild {
+                index,
+                hardened,
+                label: None,
+            })
+            .to_wire(),
+            poke,
+        )
+        .await
+}
+
+async fn recover_child_output(
+    wallet: &mut Wallet,
+    index: u64,
+    hardened: bool,
+    retained: &str,
+) -> Result<Vec<NounSlab>, NockAppError> {
+    let (poke, _) = Wallet::recover_child(index, hardened, retained)?;
+    wallet
+        .app
+        .poke(
+            WalletWire::Command(Commands::RecoverChild {
+                index,
+                hardened,
+                key_file: PathBuf::from("unused-in-kernel-test"),
+            })
+            .to_wire(),
+            poke,
+        )
+        .await
+}
+
+// Keep the checksum valid when testing independent key-material controls.
+fn extended_key_with_payload_change(key: &str, change: impl FnOnce(&mut [u8])) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut bytes = bs58::decode(key).into_vec().expect("extended key base58");
+    let payload_length = bytes.len() - 4;
+    change(&mut bytes[..payload_length]);
+    let first = Sha256::digest(&bytes[..payload_length]);
+    let first_nonzero = first
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(first.len());
+    let second = Sha256::digest(&first[first_nonzero..]);
+    bytes[payload_length..].copy_from_slice(&second[..4]);
+    bs58::encode(bytes).into_string()
+}
+
+fn extended_key_with_changed_byte(key: &str, offset: usize) -> String {
+    extended_key_with_payload_change(key, |payload| payload[offset] ^= 1)
+}
+
+fn significant_bytes(bytes: &[u8]) -> &[u8] {
+    &bytes[bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len())..]
+}
+
+fn assert_child_exports_match_stored_material(
+    exported: &[u8],
+    absolute_index: u64,
+    private: &[u8],
+    public: &[u8],
+) {
+    let mut slab: NounSlab = NounSlab::new();
+    let noun = slab
+        .cue_into(Bytes::copy_from_slice(exported))
+        .expect("decode wallet keys export");
+    let space = slab.noun_space();
+    let mut entries = noun.in_space(&space);
+    let mut matched = Vec::new();
+    while let Ok(list) = entries.as_cell() {
+        let entry = list.head().as_cell().expect("keys export entry");
+        let mut path = entry.head();
+        let mut child_index = None;
+        while let Ok(segments) = path.as_cell() {
+            child_index = segments.head().as_cell().ok().and_then(|segment| {
+                match segment
+                    .head()
+                    .as_atom()
+                    .unwrap()
+                    .into_string()
+                    .unwrap()
+                    .as_str()
+                {
+                    "ud" => Some(segment.tail().as_atom().unwrap().as_u64().unwrap()),
+                    _ => None,
+                }
+            });
+            path = segments.tail();
+        }
+        let metadata = entry.tail().as_cell().expect("key metadata");
+        if child_index == Some(absolute_index)
+            && metadata.head().as_atom().unwrap().into_string().unwrap() == "coil"
+        {
+            let coil = metadata.tail().as_cell().expect("stored coil");
+            let data = coil.tail().as_cell().expect("stored coil data");
+            let key = data.head().as_cell().expect("stored key");
+            let kind = key.head().as_atom().unwrap().into_string().unwrap();
+            let (expected, key_offset) = match kind.as_str() {
+                "prv" => (private, 47),
+                "pub" => (public, 46),
+                _ => panic!("unexpected stored key kind"),
+            };
+            assert_eq!(
+                coil.head().as_atom().unwrap().as_u64().unwrap(),
+                expected[4] as u64
+            );
+            let stored_key = key.tail().as_atom().unwrap().to_be_bytes();
+            let stored_chain = data.tail().as_atom().unwrap().to_be_bytes();
+            assert_eq!(
+                significant_bytes(&stored_key),
+                significant_bytes(&expected[key_offset..expected.len() - 4]),
+            );
+            assert_eq!(
+                significant_bytes(&stored_chain),
+                significant_bytes(&expected[14..46])
+            );
+            matched.push(kind);
+        }
+        entries = list.tail();
+    }
+    matched.sort();
+    assert_eq!(matched, ["prv", "pub"]);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn child_exports_preserve_stored_protocol_and_signing_identity() -> Result<(), NockAppError> {
+    init_tracing();
+    let phrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+    for parent_version in [0, 1] {
+        let (mut source, _source_dir) = boot_test_wallet().await?;
+        import_seed_phrase(&mut source, phrase, parent_version).await?;
+        let (mut target, _target_dir) = boot_test_wallet().await?;
+        import_seed_phrase(&mut target, phrase, parent_version).await?;
+        let master = peek_master_signing_key(&mut target).await?;
+        for (index, hardened) in [(3, false), (7, true)] {
+            let original = derived_key_output(&mut source, index, hardened).await?;
+            let private = key_output_field(&original, "- Extended Private Key: ");
+            let public = key_output_field(&original, "- Extended Public Key: ");
+            let private_bytes = bs58::decode(&private)
+                .into_vec()
+                .expect("private extended key");
+            let public_bytes = bs58::decode(&public)
+                .into_vec()
+                .expect("public extended key");
+            assert_eq!(private_bytes.len(), 83);
+            assert_eq!(public_bytes.len(), 147);
+            assert_eq!(private_bytes[46], 0);
+            let stored = peek_active_signers(&mut source)
+                .await?
+                .into_iter()
+                .find(|signer| signer.child_index == Some(index) && signer.hardened == hardened)
+                .expect("stored child signer");
+            assert_eq!(stored.version, if hardened { 0 } else { parent_version });
+            let absolute_index = index + if hardened { 1 << 31 } else { 0 };
+            for bytes in [&private_bytes, &public_bytes] {
+                assert_eq!(bytes[4] as u64, stored.version);
+                assert_eq!(bytes[5], 1);
+                assert_eq!(
+                    u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as u64,
+                    absolute_index
+                );
+            }
+            let mut printed_versions = Vec::new();
+            for effect in &original {
+                if let Some(text) = Wallet::markdown_text_from_effect(effect)? {
+                    for line in text.lines() {
+                        if let Some(version) = line.trim().strip_prefix("- Version: ") {
+                            printed_versions.push(version.parse::<u64>().expect("printed version"));
+                        }
+                    }
+                }
+            }
+            assert_eq!(printed_versions, vec![stored.version; 2]);
+            assert_eq!(
+                Wallet::derived_address_from_effects(&original)?,
+                stored.address_b58
+            );
+            let public_key = bs58::encode(&public_bytes[46..143]).into_string();
+            assert_eq!(
+                SchnorrPubkey::from_base58(&public_key).unwrap(),
+                stored.pubkey
+            );
+            let (export, _) = Wallet::export_keys()?;
+            let exported = source
+                .app
+                .poke(OnePunchWire::Poke.to_wire(), export)
+                .await?;
+            let exported = kernel_file_bytes(&exported, "keys.export").expect("keys export");
+            assert_child_exports_match_stored_material(
+                &exported, absolute_index, &private_bytes, &public_bytes,
+            );
+
+            let before = wallet_state_jam(&mut target).await?;
+            for retained in [&private, &public] {
+                let wrong_version = extended_key_with_changed_byte(retained, 4);
+                let rejected =
+                    recover_child_output(&mut target, index, hardened, &wrong_version).await?;
+                assert_eq!(kernel_exit_code(&rejected), 1);
+                assert_eq!(wallet_state_jam(&mut target).await?, before);
+            }
+            let recovered = recover_child_output(&mut target, index, hardened, &private).await?;
+            assert_eq!(kernel_exit_code(&recovered), 0);
+            assert_eq!(
+                key_output_field(&recovered, "- Extended Private Key: "),
+                private
+            );
+            assert_eq!(
+                key_output_field(&recovered, "- Extended Public Key: "),
+                public
+            );
+            assert_eq!(
+                Wallet::derived_address_from_effects(&recovered)?,
+                stored.address_b58
+            );
+            assert_eq!(peek_master_signing_key(&mut target).await?, master);
+            let recovered_public =
+                recover_child_output(&mut target, index, hardened, &public).await?;
+            assert_eq!(kernel_exit_code(&recovered_public), 0);
+
+            let message = b"stored child identity";
+            let (sign, _) = Wallet::sign_message(message, Some(index), hardened)?;
+            let signed = target.app.poke(OnePunchWire::Poke.to_wire(), sign).await?;
+            let signature = kernel_file_bytes(&signed, "message.sig").expect("child signature");
+            let (verify, _) = Wallet::verify_message(message, &signature, &public_key)?;
+            let verified = source
+                .app
+                .poke(OnePunchWire::Poke.to_wire(), verify)
+                .await?;
+            assert_eq!(kernel_exit_code(&verified), 0);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn child_recovery_matches_material_before_writing() -> Result<(), NockAppError> {
+    init_tracing();
+    let phrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+    let (mut source, _source_dir) = boot_test_wallet().await?;
+    import_seed_phrase(&mut source, phrase, 1).await?;
+    let (mut target, _target_dir) = boot_test_wallet().await?;
+    import_seed_phrase(&mut target, phrase, 1).await?;
+    derive_child_key(&mut target, 5, false).await?;
+    let master = peek_master_signing_key(&mut target).await?;
+    let untouched_address = peek_active_signers(&mut target)
+        .await?
+        .into_iter()
+        .find(|signer| signer.child_index == Some(5))
+        .expect("unrelated child")
+        .address_b58;
+
+    for (index, hardened) in [(3, false), (7, true)] {
+        let original = derived_key_output(&mut source, index, hardened).await?;
+        let private = key_output_field(&original, "- Extended Private Key: ");
+        let public = key_output_field(&original, "- Extended Public Key: ");
+        let address = Wallet::derived_address_from_effects(&original)?;
+        let before = wallet_state_jam(&mut target).await?;
+        // Byte 4 is the protocol version; byte 14 begins the chain code.
+        for (retained, requested_index, requested_hardening) in [
+            (private.clone(), index + 1, hardened),
+            (private.clone(), index, !hardened),
+            (extended_key_with_changed_byte(&private, 4), index, hardened),
+            (
+                extended_key_with_changed_byte(&private, 14),
+                index,
+                hardened,
+            ),
+            (extended_key_with_changed_byte(&public, 14), index, hardened),
+        ] {
+            let effects =
+                recover_child_output(&mut target, requested_index, requested_hardening, &retained)
+                    .await?;
+            assert_eq!(kernel_exit_code(&effects), 1);
+            assert_eq!(wallet_state_jam(&mut target).await?, before);
+            assert!(effects.iter().all(|effect| {
+                Wallet::markdown_text_from_effect(effect)
+                    .unwrap()
+                    .is_none_or(|text| !text.contains("Extended Private Key:"))
+            }));
+        }
+        let recovered = recover_child_output(&mut target, index, hardened, &private).await?;
+        assert_eq!(kernel_exit_code(&recovered), 0);
+        assert_eq!(
+            key_output_field(&recovered, "- Extended Private Key: "),
+            private
+        );
+        assert_eq!(
+            key_output_field(&recovered, "- Extended Public Key: "),
+            public
+        );
+        assert_eq!(Wallet::derived_address_from_effects(&recovered)?, address);
+        assert_eq!(peek_master_signing_key(&mut target).await?, master);
+        let recovered_again = recover_child_output(&mut target, index, hardened, &public).await?;
+        assert_eq!(kernel_exit_code(&recovered_again), 0);
+        assert!(
+            peek_active_signers(&mut target)
+                .await?
+                .iter()
+                .any(|signer| signer.child_index == Some(5)
+                    && signer.address_b58 == untouched_address)
+        );
+
+        let pubkey = peek_active_signers(&mut source)
+            .await?
+            .into_iter()
+            .find(|signer| signer.child_index == Some(index) && signer.hardened == hardened)
+            .expect("source child signer")
+            .pubkey
+            .to_base58()
+            .expect("child public key base58");
+        let message = b"child identity";
+        let (sign_poke, _) = Wallet::sign_message(message, Some(index), hardened)?;
+        let signed = target
+            .app
+            .poke(OnePunchWire::Poke.to_wire(), sign_poke)
+            .await?;
+        assert_eq!(kernel_exit_code(&signed), 0);
+        let signature = kernel_file_bytes(&signed, "message.sig").expect("signature file effect");
+        for (candidate_message, expected_exit) in
+            [(message.as_slice(), 0), (b"other identity".as_slice(), 1)]
+        {
+            let (verify_poke, _) = Wallet::verify_message(candidate_message, &signature, &pubkey)?;
+            let verified = source
+                .app
+                .poke(OnePunchWire::Poke.to_wire(), verify_poke)
+                .await?;
+            assert_eq!(kernel_exit_code(&verified), expected_exit);
+        }
+    }
+
+    let (mut wrong_parent, _wrong_dir) = boot_test_wallet().await?;
+    let (keygen, _) = Wallet::keygen(&[7u8; 32], &[9u8; 16])?;
+    wrong_parent
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), keygen)
+        .await?;
+    let original = derived_key_output(&mut source, 3, false).await?;
+    let retained = key_output_field(&original, "- Extended Private Key: ");
+    let before = wallet_state_jam(&mut wrong_parent).await?;
+    let rejected = recover_child_output(&mut wrong_parent, 3, false, &retained).await?;
+    assert_eq!(kernel_exit_code(&rejected), 1);
+    assert_eq!(wallet_state_jam(&mut wrong_parent).await?, before);
+    let (mut empty, _empty_dir) = boot_test_wallet().await?;
+    let before = wallet_state_jam(&mut empty).await?;
+    let rejected = recover_child_output(&mut empty, 3, false, &retained).await?;
+    assert_eq!(kernel_exit_code(&rejected), 1);
+    assert_eq!(wallet_state_jam(&mut empty).await?, before);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn public_parent_recovery_keeps_watch_only_authority() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut source, _source_dir) = boot_test_wallet().await?;
+    let (keygen, _) = Wallet::keygen(&[7u8; 32], &[9u8; 16])?;
+    source
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), keygen)
+        .await?;
+    let parent_public = {
+        let (poke, _) = Wallet::show_master_pubkey()?;
+        let shown = source.app.poke(OnePunchWire::Poke.to_wire(), poke).await?;
+        key_output_field(&shown, "- Extended Public Key: ")
+            .split_whitespace()
+            .next()
+            .expect("root public key")
+            .to_owned()
+    };
+    let (mut target, _target_dir) = boot_test_wallet().await?;
+    let (import, _) = Wallet::import_extended(&parent_public)?;
+    let imported = target
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), import)
+        .await?;
+    assert_eq!(kernel_exit_code(&imported), 0);
+    let original = derived_key_output(&mut source, 3, false).await?;
+    let public = key_output_field(&original, "- Extended Public Key: ");
+    let private = key_output_field(&original, "- Extended Private Key: ");
+    let before = wallet_state_jam(&mut target).await?;
+    for (index, hardened, retained) in [(3, false, &private), (3, true, &public)] {
+        let rejected = recover_child_output(&mut target, index, hardened, retained).await?;
+        assert_eq!(kernel_exit_code(&rejected), 1);
+        assert_eq!(wallet_state_jam(&mut target).await?, before);
+    }
+    let recovered = recover_child_output(&mut target, 3, false, &public).await?;
+    assert_eq!(kernel_exit_code(&recovered), 0);
+    assert_eq!(
+        key_output_field(&recovered, "- Extended Public Key: "),
+        public
+    );
+    assert!(recovered.iter().all(|effect| {
+        Wallet::markdown_text_from_effect(effect)
+            .unwrap()
+            .is_none_or(|text| !text.contains("Extended Private Key:"))
+    }));
+    let before = wallet_state_jam(&mut target).await?;
+    let (sign, _) = Wallet::sign_message(b"watch only", Some(3), false)?;
+    let result = target.app.poke(OnePunchWire::Poke.to_wire(), sign).await;
+    if let Ok(effects) = result {
+        assert!(kernel_file_bytes(&effects, "message.sig").is_none());
+    }
+    assert!(peek_active_signers(&mut target).await?.is_empty());
+    assert_eq!(wallet_state_jam(&mut target).await?, before);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn standalone_key_import_preserves_signing_identity() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut source, _source_dir) = boot_test_wallet().await?;
+    let (keygen, _) = Wallet::keygen(&[7u8; 32], &[9u8; 16])?;
+    source
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), keygen)
+        .await?;
+    let public_identity = peek_master_signing_pubkey(&mut source).await?;
+    let public_b58 = public_identity.to_base58().expect("public key base58");
+    let (show_private, _) = Wallet::show_master_privkey()?;
+    let shown = source
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), show_private)
+        .await?;
+    let private = key_output_field(&shown, "- Extended Private Key: ")
+        .split_whitespace()
+        .next()
+        .expect("root private key")
+        .to_owned();
+    let (show_public, _) = Wallet::show_master_pubkey()?;
+    let shown = source
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), show_public)
+        .await?;
+    let public = key_output_field(&shown, "- Extended Public Key: ")
+        .split_whitespace()
+        .next()
+        .expect("root public key")
+        .to_owned();
+    for (key, can_sign) in [(&private, true), (&public, false)] {
+        let (mut isolated, isolated_dir) = boot_test_wallet().await?;
+        let path = isolated_dir.path().join("standalone.key");
+        fs::write(&path, format!("{key}\n")).map_err(NockAppError::IoError)?;
+        let input = Wallet::read_extended_key_file(&path)?;
+        let (import, _) = Wallet::import_extended_checked(input.trim())?;
+        let imported = isolated
+            .app
+            .poke(OnePunchWire::Poke.to_wire(), import)
+            .await?;
+        assert_eq!(kernel_exit_code(&imported), 0);
+        let (show, _) = Wallet::show_master_pubkey()?;
+        let shown = isolated
+            .app
+            .poke(OnePunchWire::Poke.to_wire(), show)
+            .await?;
+        assert_eq!(
+            key_output_field(&shown, "- Extended Public Key: ")
+                .split_whitespace()
+                .next()
+                .expect("imported public key"),
+            public,
+        );
+        let before = wallet_state_jam(&mut isolated).await?;
+        let (sign, _) = Wallet::sign_message(b"standalone identity", None, false)?;
+        let result = isolated.app.poke(OnePunchWire::Poke.to_wire(), sign).await;
+        if can_sign {
+            let signed = result?;
+            assert_eq!(kernel_exit_code(&signed), 0);
+            let signature = kernel_file_bytes(&signed, "message.sig").expect("signature output");
+            let (verify, _) =
+                Wallet::verify_message(b"standalone identity", &signature, &public_b58)?;
+            let verified = source
+                .app
+                .poke(OnePunchWire::Poke.to_wire(), verify)
+                .await?;
+            assert_eq!(kernel_exit_code(&verified), 0);
+        } else {
+            if let Ok(effects) = result {
+                assert!(kernel_file_bytes(&effects, "message.sig").is_none());
+            }
+            assert!(peek_active_signers(&mut isolated).await?.is_empty());
+        }
+        assert_eq!(wallet_state_jam(&mut isolated).await?, before);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn key_material_rejection_preserves_state_and_terminates() -> Result<(), NockAppError> {
+    init_tracing();
+    let phrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+    let (mut wallet, _wallet_dir) = boot_test_wallet().await?;
+    import_seed_phrase(&mut wallet, phrase, 1).await?;
+    let child = derived_key_output(&mut wallet, 3, false).await?;
+    let private = key_output_field(&child, "- Extended Private Key: ");
+    let public = key_output_field(&child, "- Extended Public Key: ");
+    let mut bad_checksum = bs58::decode(&private).into_vec().expect("private base58");
+    let checksum_end = bad_checksum.len() - 1;
+    bad_checksum[checksum_end] ^= 1;
+    let inputs = [
+        String::new(),
+        "not-a-valid-extended-key".to_owned(),
+        "0OIl".to_owned(),
+        bs58::encode(bad_checksum).into_string(),
+        extended_key_with_payload_change(&private, |payload| payload[47..].fill(0)),
+        extended_key_with_payload_change(&private, |payload| payload[47..].fill(0xff)),
+        extended_key_with_payload_change(&public, |payload| payload[46..].fill(0)),
+        format!("zprv{}", "1".repeat(256)),
+    ];
+    let before = wallet_state_jam(&mut wallet).await?;
+    for input in &inputs {
+        let recovered = recover_child_output(&mut wallet, 3, false, input).await?;
+        assert_eq!(kernel_exit_code(&recovered), 1);
+        assert_eq!(wallet_state_jam(&mut wallet).await?, before);
+        let (import, _) = Wallet::import_extended_checked(input)?;
+        let imported = wallet
+            .app
+            .poke(OnePunchWire::Poke.to_wire(), import)
+            .await?;
+        assert_eq!(kernel_exit_code(&imported), 1);
+        assert_eq!(wallet_state_jam(&mut wallet).await?, before);
+        for effects in [&recovered, &imported] {
+            assert!(effects.iter().all(|effect| {
+                let space = effect.noun_space();
+                let cell = unsafe { effect.root() }.in_space(&space).as_cell().unwrap();
+                cell.head().as_atom().unwrap().into_string().unwrap() != "file"
+            }));
+        }
+    }
+    // Exercise the same one-shot consumer and exit driver used by these CLI paths.
+    for checked_import in [false, true] {
+        let (mut consumer, _consumer_dir) = boot_test_wallet().await?;
+        import_seed_phrase(&mut consumer, phrase, 1).await?;
+        let (poke, _) = if checked_import {
+            Wallet::import_extended_checked("not-a-valid-extended-key")?
+        } else {
+            Wallet::recover_child(3, false, "not-a-valid-extended-key")?
+        };
+        consumer.app.add_io_driver(key_material_driver(poke)).await;
+        consumer.app.add_io_driver(exit_driver()).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), consumer.app.run())
+            .await
+            .expect("rejected key operation must terminate");
+        assert!(matches!(result, Err(NockAppError::Exit(1))));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn full_key_export_roundtrip_preserves_namespaced_material() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut source, source_dir) = boot_test_wallet().await?;
+    let phrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+    import_seed_phrase(&mut source, phrase, 1).await?;
+    let master = peek_master_signing_key(&mut source).await?;
+    let label = Some("retained-child".to_owned());
+    let (derive, _) = Wallet::derive_child(7, true, &label)?;
+    source
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), derive)
+        .await?;
+    derive_child_key(&mut source, 3, false).await?;
+    let (watch, _) = Wallet::watch_address(&hash(42).to_base58())?;
+    source.app.poke(OnePunchWire::Poke.to_wire(), watch).await?;
+    let (other_root, _) = Wallet::keygen(&[7u8; 32], &[9u8; 16])?;
+    source
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), other_root)
+        .await?;
+    assert_eq!(peek_master_signing_key(&mut source).await?, master);
+    let (export, _) = Wallet::export_keys()?;
+    let exported = source
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), export)
+        .await?;
+    let bytes = kernel_file_bytes(&exported, "keys.export").expect("keys export effect");
+    let path = source_dir.path().join("roundtrip.keys");
+    fs::write(&path, &bytes).map_err(NockAppError::IoError)?;
+    let (mut restored, _restored_dir) = boot_test_wallet().await?;
+    let (import, _) = Wallet::import_keys(path.to_str().expect("temporary export path"))?;
+    let imported = restored
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), import)
+        .await?;
+    assert_eq!(kernel_exit_code(&imported), 0);
+    let (export, _) = Wallet::export_keys()?;
+    let reexported = restored
+        .app
+        .poke(OnePunchWire::Poke.to_wire(), export)
+        .await?;
+    assert_eq!(
+        kernel_file_bytes(&reexported, "keys.export").expect("restored export effect"),
+        bytes,
+        "all namespaces, private/public coils, labels, seeds, and watch entries must survive",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn importing_exported_child_keeps_active_master() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    let original_master = peek_master_signing_key(&mut wallet).await?;
+
+    let (derive_poke, _) = Wallet::derive_child(7, true, &None)?;
+    let derive_wire = WalletWire::Command(Commands::DeriveChild {
+        index: 7,
+        hardened: true,
+        label: None,
+    })
+    .to_wire();
+    let derive_effects = wallet.app.poke(derive_wire, derive_poke).await?;
+    let mut child_extended_key = None;
+    for effect in &derive_effects {
+        if let Some(markdown) = Wallet::markdown_text_from_effect(effect)? {
+            for line in markdown.lines() {
+                if let Some(key) = line.trim().strip_prefix("- Extended Private Key: ") {
+                    child_extended_key = Some(key.trim().to_owned());
+                }
+            }
+        }
+    }
+    let child_extended_key = child_extended_key.expect("derived child private key in effect");
+    let (import_poke, _) = Wallet::import_extended(&child_extended_key)?;
+    let import_wire = WalletWire::Command(Commands::ImportKeys {
+        file: None,
+        key: Some(child_extended_key),
+        key_file: None,
+        seedphrase: false,
+        version: None,
+    })
+    .to_wire();
+    let import_effects = wallet.app.poke(import_wire, import_poke).await?;
+    let exit_space = import_effects
+        .last()
+        .expect("import exit effect")
+        .noun_space();
+    let exit = unsafe { *import_effects.last().unwrap().root() }.in_space(&exit_space);
+    assert_eq!(exit.as_cell()?.tail().as_atom()?.as_u64()?, 0);
+    assert_eq!(peek_master_signing_key(&mut wallet).await?, original_master);
+    assert_eq!(peek_active_signers(&mut wallet).await?.len(), 2);
+
+    let (mut other_wallet, _other_data_dir) = boot_test_wallet().await?;
+    let (keygen_poke, _) = Wallet::keygen(&[7u8; 32], &[9u8; 16])?;
+    other_wallet
+        .app
+        .poke(WalletWire::Command(Commands::Keygen).to_wire(), keygen_poke)
+        .await?;
+    assert_ne!(
+        peek_master_signing_key(&mut other_wallet).await?,
+        original_master
+    );
+    let (show_poke, _) = Wallet::show_master_privkey()?;
+    let show_effects = other_wallet
+        .app
+        .poke(
+            WalletWire::Command(Commands::ShowMasterZPrv).to_wire(),
+            show_poke,
+        )
+        .await?;
+    let mut other_root_key = None;
+    for effect in &show_effects {
+        if let Some(markdown) = Wallet::markdown_text_from_effect(effect)? {
+            for line in markdown.lines() {
+                if let Some(key) = line.trim().strip_prefix("- Extended Private Key: ") {
+                    other_root_key = key.split_whitespace().next().map(str::to_owned);
+                }
+            }
+        }
+    }
+    let other_root_key = other_root_key.expect("other wallet root private key in effect");
+    let (root_import_poke, _) = Wallet::import_extended(&other_root_key)?;
+    let root_import_effects = wallet
+        .app
+        .poke(
+            WalletWire::Command(Commands::ImportKeys {
+                file: None,
+                key: Some(other_root_key),
+                key_file: None,
+                seedphrase: false,
+                version: None,
+            })
+            .to_wire(),
+            root_import_poke,
+        )
+        .await?;
+    assert!(root_import_effects.iter().any(|effect| {
+        Wallet::markdown_text_from_effect(effect)
+            .ok()
+            .flatten()
+            .is_some_and(|text| text.contains("Active master key unchanged"))
+    }));
+    assert_eq!(peek_master_signing_key(&mut wallet).await?, original_master);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn planner_uses_only_the_keys_the_kernel_will_sign_with() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    let master = peek_master_signing_key(&mut wallet).await?;
+    let child_address = derive_child_address(&mut wallet, 3, false).await?;
+    let child = Hash::from_base58(&child_address).expect("v1 child address");
+    let second_child_address = derive_child_address(&mut wallet, 5, false).await?;
+    let second_child = Hash::from_base58(&second_child_address).expect("v1 child address");
+
+    assert_eq!(wallet.resolve_planner_signer_keys(&[]).await?, vec![master]);
+    assert_eq!(
+        wallet.resolve_planner_signer_keys(&[(3, false)]).await?,
+        vec![child.clone()]
+    );
+    assert_eq!(
+        wallet
+            .resolve_planner_signer_keys(&[(5, false), (3, false), (5, false)])
+            .await?,
+        vec![second_child, child],
+        "explicit sender order must match the wallet kernel"
+    );
+    Ok(())
+}
+
 // Tests for Cold Side Commands
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
@@ -2121,7 +3108,8 @@ async fn test_gen_master_privkey() -> Result<(), NockAppError> {
     let wire = WalletWire::Command(Commands::ImportKeys {
         file: None,
         key: None,
-        seedphrase: Some(seedphrase.to_string()),
+        key_file: None,
+        seedphrase: true,
         version: Some(version),
     })
     .to_wire();
@@ -2156,7 +3144,8 @@ async fn test_import_keys() -> Result<(), NockAppError> {
     let wire = WalletWire::Command(Commands::ImportKeys {
         file: Some(test_path.to_string()),
         key: None,
-        seedphrase: None,
+        key_file: None,
+        seedphrase: false,
         version: None,
     })
     .to_wire();
@@ -2303,4 +3292,16 @@ fn domain_hash_from_base58_accepts_valid_id() {
 fn domain_hash_from_base58_rejects_invalid_id() {
     let invalid_tx_id = "not-a-valid-hash";
     assert!(Hash::from_base58(invalid_tx_id).is_err());
+}
+
+#[test]
+fn normalize_seed_phrase_collapses_whitespace_into_zeroizing_buffer() {
+    // The prompted phrase and its normalized copy must both live in
+    // `Zeroizing` buffers. Wiping on drop is not observable from safe Rust, so
+    // this pins the type and the normalization rule.
+    let normalized: zeroize::Zeroizing<String> =
+        normalize_seed_phrase("  abandon\tability\n\n able  about ");
+    assert_eq!(normalized.as_str(), "abandon ability able about");
+    assert_eq!(normalize_seed_phrase("").as_str(), "");
+    assert_eq!(normalize_seed_phrase("single").as_str(), "single");
 }

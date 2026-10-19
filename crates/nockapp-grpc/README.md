@@ -27,6 +27,11 @@ The regular node uses the private service for trusted local control. `nockchain-
 - Effect filtering compares only the raw head atom and does not parse or validate the effect tail.
 - A successful `PokeResponse` reports delivery/acknowledgement, not consensus acceptance of any block or transaction produced by the command.
 - Public query caches follow reported chain state but are not protocol authority. Callers must tolerate warm-up, reorganization, and stale-read windows documented by the API binary.
+- Explorer range commits require contiguous heights and parent links, a matching adjacent cached boundary, matching seed/final tip identity where applicable, and the current chain generation. Reorg reconciliation atomically retains hash-verified common ancestry and replaces the orphan suffix using a tip-anchored seed. A decoded replacement with no proven common ancestor discards unverified history. Old-generation work cannot commit.
+- Detected divergence quarantines retained cache state before replacement I/O: canonical cached positives, misses, prefixes and pagination return retryable `Unavailable` until validated reconciliation succeeds. Transient replacement-fetch failures retain indexes and backfill progress; old-generation reads/backfill cannot publish into or clear a recovered generation. Explicit consistency failures still discard unverified history.
+- Both transaction endpoints classify a confirmation-index miss only when canonical history is complete: a present raw transaction returns `Pending`, while an encoded absent raw transaction returns `NotFound`. Incomplete indexing or a concurrent reorganization returns retryable `Unavailable`; malformed or failed scries remain errors.
+- Historical backfill keeps one bounded range in flight, yields between successful chunks, and retains retry backoff when history is unavailable. Successful chunks have no mandatory fixed delay.
+- Explorer consistency checks do not make reads linearizable with the kernel. Cached data can lag until a reorg is observed, and warm-up or recovery can leave gaps. Freshness is eventual without a fixed convergence deadline.
 
 ## Security and distributed-systems properties
 

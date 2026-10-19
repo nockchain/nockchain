@@ -45,6 +45,7 @@
         *hash:tb
         witness-full
         bythos-phase.bc
+        ~
     ==
   =/  ctx-pre-stub=check-context:tb
     :*  9
@@ -52,6 +53,7 @@
         *hash:tb
         witness-stub
         bythos-phase.bc
+        ~
     ==
   =/  ctx-post-full=check-context:tb
     :*  10
@@ -59,6 +61,7 @@
         *hash:tb
         witness-full
         bythos-phase.bc
+        ~
     ==
   =/  ctx-post-stub=check-context:tb
     :*  10
@@ -66,6 +69,7 @@
         *hash:tb
         witness-stub
         bythos-phase.bc
+        ~
     ==
   =/  res-pre-full=?  (check:check-context:tb [ctx-pre-full parent-first])
   =/  res-pre-stub=?  (check:check-context:tb [ctx-pre-stub parent-first])

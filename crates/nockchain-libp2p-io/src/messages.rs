@@ -320,7 +320,9 @@ pub(crate) fn block_id_from_page<'a>(page: NounHandle<'a>) -> Result<NounHandle<
     }
 }
 
-fn tx_id_from_raw_tx<'a>(raw_tx: NounHandle<'a>) -> Result<NounHandle<'a>, NockAppError> {
+pub(crate) fn tx_id_from_raw_tx<'a>(
+    raw_tx: NounHandle<'a>,
+) -> Result<NounHandle<'a>, NockAppError> {
     let raw_tx_cell = raw_tx.as_cell()?;
     // raw-tx v0: [tx-id ...]
     // raw-tx v1: [%1 tx-id ...]

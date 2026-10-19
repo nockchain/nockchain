@@ -161,8 +161,7 @@ fn pearl_default_cols_pattern() -> Vec<u32> {
 /// Largest synthetic nockchain target whose factor-adjusted product fits
 /// the 256-bit band for every fixture config in this file (factors up to
 /// 2^16): 2^240 − 1, so the adjusted target is 2^256 − 2^16 at factor
-/// 2^16 and 2^252 − 2^12 at factor 2^12. Fixtures previously used
-/// `[0xff; 32]`, which the fail-closed multiply rejects as over-band.
+/// 2^16 and 2^252 − 2^12 at factor 2^12.
 fn easy_nockchain_target() -> [u8; 32] {
     let mut t = [0u8; 32];
     t[..30].fill(0xff);

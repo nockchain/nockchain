@@ -25,6 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         nockchain::NockchainCli::parse_with_default_stack_size(boot::NockStackSize::Large);
     boot::init_default_tracing(&cli.nockapp_cli);
 
+    let private_grpc_config = nockchain::private_grpc_config(&cli)?;
     let prover_hot_state = nockchain::consensus::prepare_consensus_runtime(&mut cli)?;
 
     let api_config = if let Some(addr) = cli.bind_public_grpc_addr {
@@ -33,9 +34,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         NockchainAPIConfig::DisablePublicServer
     };
 
-    let mut nockchain =
-        nockchain::init_with_kernel::<Chaff>(cli, KERNEL, prover_hot_state.as_slice(), api_config)
-            .await?;
+    let mut nockchain = nockchain::init_with_kernel::<Chaff>(
+        cli,
+        KERNEL,
+        prover_hot_state.as_slice(),
+        api_config,
+        private_grpc_config,
+    )
+    .await?;
     nockchain.run().await?;
     Ok(())
 }

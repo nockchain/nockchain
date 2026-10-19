@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,12 +16,13 @@ use nockapp::NockAppError;
 use nockvm::noun::NounAllocator;
 use nockvm::noun::{Noun, NounSpace};
 use rand::prelude::SliceRandom;
+use smallvec::SmallVec;
 use tracing::{debug, info, trace, warn};
 
 use crate::ip_block::PeerExclusions;
 use crate::messages::{NockchainDataRequest, NockchainFact, NockchainRequest, RequestReplayKey};
 use crate::metrics::NockchainP2PMetrics;
-use crate::p2p_util::{multiaddr_without_p2p, MultiaddrExt};
+use crate::p2p_util::{multiaddr_without_p2p, same_endpoint_without_p2p, MultiaddrExt};
 use crate::peer_stats::{
     global_peer_stats_registry, unix_timestamp_millis, PeerReqResGeneration, PeerStatsEntry,
     PeerStatsRegistry, PeerStatsSnapshot,
@@ -31,8 +33,12 @@ const TX_SOURCE_HINT_CAP: usize = 65_536;
 const BLOCK_HEIGHT_ATTEMPT_CAP: usize = 65_536;
 const KERNEL_BLOCK_HEIGHT_REQUEST_CAP: usize = 65_536;
 const SEEN_BLOCKS_CAP: usize = 65_536;
+const SEEN_TXS_CAP: usize = 65_536;
+const RESPONSE_CACHE_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const RESPONSE_CACHE_MAX_ENTRIES: usize = 4_096;
 const REJECTED_POW_BLOCKS_CAP: usize = 65_536;
 const BLOCK_RECEIPT_CAP: usize = 65_536;
+const BLOCK_ECHO_SOURCE_CAP: usize = 65_536;
 const ELDERS_NEGATIVE_CACHE_CAP: usize = 8_192;
 const ELDERS_REQUEST_COOLDOWN_CAP: usize = 8_192;
 /// Minimum spacing between identical outbound elders requests (same block
@@ -42,6 +48,16 @@ const ELDERS_REQUEST_COOLDOWN_CAP: usize = 8_192;
 /// every duplicate-block poke, which without damping turns into a burst of
 /// redundant outbound requests.
 pub(crate) const ELDERS_REQUEST_COOLDOWN: Duration = Duration::from_secs(5);
+/// Upper bound on how long one peer's elders slot is held.
+///
+/// A peer gets at most one elders request in flight, independently of the
+/// block id named by the request.
+///
+/// The recovery walk is sequential -- each response drives the next request --
+/// so it never wants two at once and is not slowed. This exceeds the req-res
+/// timeout so a live request is never double-issued, and expiring the slot
+/// keeps a peer that never answers from wedging recovery.
+pub(crate) const ELDERS_INFLIGHT_TTL: Duration = Duration::from_secs(35);
 /// Upper bound on how long an in-flight processing claim is honored. A
 /// kernel poke completes in milliseconds, so any claim older than this was
 /// leaked by a delivery path that never released it. Expiring stale claims
@@ -58,8 +74,12 @@ const INBOUND_REPLAY_TOTAL_CAP: usize = 65_536;
 #[derive(Default)]
 struct IpInfo {
     request_count: u64,
-    ping_failure_count: u64,
     connections: BTreeSet<ConnectionId>,
+}
+
+struct ConnectionInfo {
+    peer_id: PeerId,
+    ping_failure_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -67,7 +87,7 @@ pub(crate) struct IpBucket(IpAddr);
 
 impl IpBucket {
     pub(crate) fn from_ip(ip: IpAddr) -> Self {
-        match ip {
+        match crate::p2p_util::canonical_ip(ip) {
             IpAddr::V4(ip) => Self(IpAddr::V4(ip)),
             IpAddr::V6(ip) => {
                 let masked = u128::from(ip) & (!0u128 << 64);
@@ -90,6 +110,32 @@ impl fmt::Display for IpBucket {
 struct GossipBucketState {
     tokens: u32,
     last_refill: Instant,
+    // Fractional tokens in billionths, retained between subsecond arrivals.
+    refill_remainder: u32,
+}
+
+fn refill_gossip_bucket(
+    gossip: &mut GossipBucketState,
+    capacity: u32,
+    refill_per_second: u32,
+    now: Instant,
+) {
+    const NANOS_PER_SECOND: u128 = 1_000_000_000;
+    let elapsed_nanos = now.duration_since(gossip.last_refill).as_nanos();
+    let accrued = elapsed_nanos
+        .saturating_mul(u128::from(refill_per_second))
+        .saturating_add(u128::from(gossip.refill_remainder));
+    let whole_tokens = accrued / NANOS_PER_SECOND;
+    gossip.tokens = u128::from(gossip.tokens)
+        .saturating_add(whole_tokens)
+        .min(u128::from(capacity)) as u32;
+    // Time spent full cannot fund a later burst above the configured rate.
+    gossip.refill_remainder = if gossip.tokens == capacity {
+        0
+    } else {
+        (accrued % NANOS_PER_SECOND) as u32
+    };
+    gossip.last_refill = now;
 }
 
 #[derive(Default)]
@@ -147,6 +193,7 @@ struct PeerRequestHealth {
     failures: u64,
     last_success: Option<Instant>,
     last_failure: Option<Instant>,
+    last_chain_progress: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -169,8 +216,11 @@ pub struct HeightFailureRecord {
     pub last_observed: Instant,
 }
 
-/// Bandwidth window length for the prefetch-per-peer cap.
+/// Bandwidth window length for the prefetch peer and IP-bucket caps.
 const PREFETCH_BANDWIDTH_WINDOW: Duration = Duration::from_secs(60);
+const PREFETCH_BANDWIDTH_BUCKET_MULTIPLIER: usize = 4;
+const PREFETCH_BANDWIDTH_BUCKET_COUNT_CAP: usize = 4096;
+const PREFETCH_BANDWIDTH_BUCKET_BIN_WIDTH: Duration = Duration::from_secs(1);
 const PREFETCH_PEER_COOLDOWN_INITIAL: Duration = Duration::from_secs(2);
 const PREFETCH_PEER_COOLDOWN_MAX: Duration = Duration::from_secs(60);
 const PREFETCH_PEER_ACTIVE_REQUEST_BIAS: f64 = 1.5;
@@ -257,6 +307,21 @@ struct DeferredHeardBlock {
     /// downstream phases without churning the warning.
     #[allow(dead_code)]
     source: BlockSource,
+}
+
+pub(crate) struct DeferredFlushEntry {
+    pub height: u64,
+    pub block_id: String,
+    pub peer_id: PeerId,
+    pub fact: NockchainFact,
+    pub source: BlockSource,
+    pub retained_bytes: u64,
+}
+
+struct DeferredFlushLease {
+    peer_id: PeerId,
+    retained_bytes: u64,
+    valid: bool,
 }
 
 impl ResponseSizeHints {
@@ -447,12 +512,33 @@ impl ResponseSizeHints {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RequestEndpoint {
+    pub connection_id: ConnectionId,
+    pub endpoint: SocketAddr,
+}
+
+pub(crate) type RequestEndpoints = SmallVec<[RequestEndpoint; 2]>;
+
+pub(crate) struct PrefetchBudgetObservation {
+    pub endpoint: SocketAddr,
+    pub bucket: IpBucket,
+    pub peer_window_bytes: usize,
+    pub bucket_window_bytes: usize,
+    pub peer_inflight: usize,
+}
 #[derive(Debug, Clone)]
 pub struct OutboundRequestContext {
     pub peer_id: PeerId,
     pub request: NockchainRequest,
     pub retry_count: u8,
     pub started_at: Instant,
+    pub(crate) request_endpoints: RequestEndpoints,
+    pub(crate) response_endpoint: Option<RequestEndpoint>,
+    // Cache both range and non-range classification once issued; response
+    // accounting must not cue the original request again.
+    pub(crate) issued_prefetch_range: Option<Option<(u64, u8)>>,
+    pub(crate) response_bytes: Option<usize>,
 }
 
 impl OutboundRequestContext {
@@ -466,6 +552,10 @@ impl OutboundRequestContext {
             request,
             retry_count,
             started_at: Instant::now(),
+            request_endpoints: RequestEndpoints::new(),
+            response_endpoint: None,
+            issued_prefetch_range: None,
+            response_bytes: None,
         }
     }
 
@@ -474,6 +564,11 @@ impl OutboundRequestContext {
             NockchainRequest::BatchRequest { items, .. } => Some(items.len() as u64),
             NockchainRequest::AuthenticatedGossip { .. } => None,
         }
+    }
+
+    pub(crate) fn prefetch_range(&self) -> Option<(u64, u8)> {
+        self.issued_prefetch_range
+            .unwrap_or_else(|| prefetch_range_from_request(&self.request))
     }
 
     pub fn mark_started(&mut self) {
@@ -544,6 +639,13 @@ pub struct P2PState {
     block_first_seen_at: BTreeMap<String, Instant>,
     block_receipts: BTreeMap<String, BTreeSet<PeerId>>,
     block_receipt_order: VecDeque<String>,
+    // A bounded hint for suppressing the full-block gossip echo to the peer
+    // that supplied it. This is deliberately separate from block_receipts:
+    // receipt accounting is recorded only after the kernel acknowledges a poke.
+    block_echo_sources: BTreeMap<String, BTreeSet<PeerId>>,
+    block_echo_source_order: VecDeque<(String, PeerId)>,
+    validated_block_sources: BTreeMap<String, BTreeSet<PeerId>>,
+    validated_block_source_order: VecDeque<(String, PeerId)>,
     peer_to_block_ids: BTreeMap<PeerId, BTreeSet<String>>,
     // It's stupid that we must track this state locally. libp2p does not expose
     // the lookup shape this driver needs.
@@ -559,10 +661,16 @@ pub struct P2PState {
     peer_to_outbound_request_items: BTreeMap<PeerId, BTreeMap<Vec<u8>, usize>>,
     inbound_req_res_inflight: BTreeMap<PeerId, usize>,
     // libp2p does not expose the lookup shape this driver needs; keep it locally.
-    connections: BTreeMap<ConnectionId, PeerId>,
+    connections: BTreeMap<ConnectionId, ConnectionInfo>,
     // subset of connections: all inbound connections
     inbound_connections: BTreeMap<ConnectionId, PeerId>,
+    // subset of connections: connections we dialed. Inbound peers must
+    // not make the bootstrap recovery loop think outbound links are healthy.
+    outbound_connections: BTreeMap<ConnectionId, PeerId>,
     pub(crate) peer_connections: BTreeMap<PeerId, BTreeMap<ConnectionId, Multiaddr>>,
+    outbound_connection_aliases: BTreeMap<ConnectionId, Multiaddr>,
+    configured_initial_peers: Arc<[Multiaddr]>,
+    configured_backbone_peers: Arc<[Multiaddr]>,
     ip_info: BTreeMap<IpAddr, IpInfo>,
     ip_bucket_info: BTreeMap<IpBucket, IpBucketInfo>,
     inbound_replay_by_peer: BTreeMap<PeerId, PeerReplayCache>,
@@ -578,17 +686,28 @@ pub struct P2PState {
     pub rejected_pow_blocks: BTreeSet<String>,
     rejected_pow_block_order: VecDeque<String>,
     pub seen_txs: BTreeSet<String>,
+    seen_tx_order: VecDeque<(u64, String)>,
+    seen_tx_generation: BTreeMap<String, u64>,
+    next_seen_tx_generation: u64,
     processing_blocks: BTreeMap<String, Instant>,
     processing_txs: BTreeMap<String, Instant>,
     pub block_cache: BTreeMap<u64, NounSlab>,
     pub tx_cache: BTreeMap<String, NounSlab>,
     pub elders_cache: BTreeMap<String, NounSlab>,
+    response_cache_bytes: u64,
     pub elders_negative_cache: BTreeSet<String>,
     elders_negative_cache_order: VecDeque<String>,
     elders_request_last_sent: BTreeMap<String, Instant>,
     elders_request_last_sent_order: VecDeque<String>,
+    /// Peers with an elders request outstanding, and when it was issued.
+    /// Bounded by the connected peer set.
+    elders_inflight: BTreeMap<PeerId, Instant>,
     peer_request_health: BTreeMap<PeerId, PeerRequestHealth>,
+    /// Independent round-robin positions for progress, configured and ordinary peers.
+    block_height_peer_cursors: [AtomicUsize; 3],
     deferred_heard_blocks: BTreeMap<u64, BTreeMap<String, DeferredHeardBlock>>,
+    /// Leased worker entries still occupy buffer capacity until completed.
+    deferred_flush_inflight: BTreeMap<u64, BTreeMap<String, DeferredFlushLease>>,
     deferred_heard_block_count_by_peer: BTreeMap<PeerId, usize>,
     deferred_heard_block_total_count: usize,
     deferred_heard_block_bytes_by_peer: BTreeMap<PeerId, u64>,
@@ -633,6 +752,10 @@ pub struct P2PState {
     /// is `VecDeque<(observed_at, response_bytes)>`; entries older than
     /// 60s are pruned on each insertion. Used to cap bad-peer amplification.
     prefetch_bandwidth_window: BTreeMap<PeerId, VecDeque<(Instant, usize)>>,
+    /// Aggregate accounting survives identity churn within an IP bucket.
+    /// Entries are `(fixed_bin_end, response_bytes)`. One-second bins retain
+    /// bytes for at most one extra second, without refreshing old debt.
+    prefetch_bandwidth_bucket_window: BTreeMap<IpBucket, VecDeque<(Instant, usize)>>,
     prefetch_peer_range_stats: BTreeMap<PeerId, PrefetchPeerRangeStats>,
     /// Phase 5: per-height failure budget; if `None` use the
     /// `PREFETCH_HEIGHT_FAILURE_BUDGET` constant. Set by the driver at
@@ -640,9 +763,11 @@ pub struct P2PState {
     prefetch_height_failure_budget: u8,
     prefetch_stuck_backoff: Duration,
     prefetch_bandwidth_cap_per_peer_bytes_per_min: usize,
+    prefetch_max_inflight_per_peer: u8,
     response_size_hints: ResponseSizeHints,
-    // Highest block height seen
+    // First height beyond the kernel-accepted frontier; never moves backward.
     pub first_negative: u64,
+    seen_frontier_advanced_at: Instant,
     pub seen_tx_clear_interval: u64,
     pub last_tx_cache_clear_height: u64,
 }
@@ -668,6 +793,10 @@ impl P2PState {
             block_first_seen_at: BTreeMap::new(),
             block_receipts: BTreeMap::new(),
             block_receipt_order: VecDeque::new(),
+            block_echo_sources: BTreeMap::new(),
+            block_echo_source_order: VecDeque::new(),
+            validated_block_sources: BTreeMap::new(),
+            validated_block_source_order: VecDeque::new(),
             peer_to_block_ids: BTreeMap::new(),
             block_height_attempted_peers: BTreeMap::new(),
             peer_to_block_height_attempts: BTreeMap::new(),
@@ -682,7 +811,11 @@ impl P2PState {
             inbound_req_res_inflight: BTreeMap::new(),
             connections: BTreeMap::new(),
             inbound_connections: BTreeMap::new(),
+            outbound_connections: BTreeMap::new(),
             peer_connections: BTreeMap::new(),
+            outbound_connection_aliases: BTreeMap::new(),
+            configured_initial_peers: Arc::default(),
+            configured_backbone_peers: Arc::default(),
             ip_info: BTreeMap::new(),
             ip_bucket_info: BTreeMap::new(),
             inbound_replay_by_peer: BTreeMap::new(),
@@ -693,17 +826,24 @@ impl P2PState {
             rejected_pow_blocks: BTreeSet::new(),
             rejected_pow_block_order: VecDeque::new(),
             seen_txs: BTreeSet::new(),
+            seen_tx_order: VecDeque::new(),
+            seen_tx_generation: BTreeMap::new(),
+            next_seen_tx_generation: 0,
             processing_blocks: BTreeMap::new(),
             processing_txs: BTreeMap::new(),
             block_cache: BTreeMap::new(),
             tx_cache: BTreeMap::new(),
             elders_cache: BTreeMap::new(),
+            response_cache_bytes: 0,
             elders_negative_cache: BTreeSet::new(),
             elders_negative_cache_order: VecDeque::new(),
             elders_request_last_sent: BTreeMap::new(),
             elders_request_last_sent_order: VecDeque::new(),
+            elders_inflight: BTreeMap::new(),
             peer_request_health: BTreeMap::new(),
+            block_height_peer_cursors: std::array::from_fn(|_| AtomicUsize::new(0)),
             deferred_heard_blocks: BTreeMap::new(),
+            deferred_flush_inflight: BTreeMap::new(),
             deferred_heard_block_count_by_peer: BTreeMap::new(),
             deferred_heard_block_total_count: 0,
             deferred_heard_block_bytes_by_peer: BTreeMap::new(),
@@ -719,12 +859,15 @@ impl P2PState {
             prefetched_heights: BTreeSet::new(),
             block_height_failures: BTreeMap::new(),
             prefetch_bandwidth_window: BTreeMap::new(),
+            prefetch_bandwidth_bucket_window: BTreeMap::new(),
             prefetch_peer_range_stats: BTreeMap::new(),
             prefetch_height_failure_budget: 4,
             prefetch_stuck_backoff: Duration::from_secs(60),
             prefetch_bandwidth_cap_per_peer_bytes_per_min: 50 * 1024 * 1024,
+            prefetch_max_inflight_per_peer: 4,
             response_size_hints: ResponseSizeHints::default(),
             first_negative: 0,
+            seen_frontier_advanced_at: Instant::now(),
             seen_tx_clear_interval,
             last_tx_cache_clear_height: 0,
         };
@@ -810,9 +953,20 @@ impl P2PState {
         addr: &Multiaddr,
         endpoint: ConnectedPoint,
     ) {
-        self.connections.insert(connection_id, peer_id);
-        if let ConnectedPoint::Listener { .. } = endpoint {
-            self.inbound_connections.insert(connection_id, peer_id);
+        self.connections.insert(
+            connection_id,
+            ConnectionInfo {
+                peer_id,
+                ping_failure_count: 0,
+            },
+        );
+        match endpoint {
+            ConnectedPoint::Listener { .. } => {
+                self.inbound_connections.insert(connection_id, peer_id);
+            }
+            ConnectedPoint::Dialer { .. } => {
+                self.outbound_connections.insert(connection_id, peer_id);
+            }
         }
         if let Some(c) = self.peer_connections.get_mut(&peer_id) {
             c.insert(connection_id, addr.clone());
@@ -822,25 +976,7 @@ impl P2PState {
             self.peer_connections.insert(peer_id, new_map);
         }
         if let Some(ip) = addr.ip_addr() {
-            if let Some(info) = self.ip_info.get_mut(&ip) {
-                info.connections.insert(connection_id);
-            } else {
-                let mut connections = BTreeSet::new();
-                connections.insert(connection_id);
-                self.ip_info.insert(
-                    ip,
-                    IpInfo {
-                        connections,
-                        request_count: 0,
-                        ping_failure_count: 0,
-                    },
-                );
-            }
-            self.ip_bucket_info
-                .entry(IpBucket::from_ip(ip))
-                .or_default()
-                .connections
-                .insert(connection_id);
+            self.add_connection_ip(connection_id, ip);
         }
         let peer_count = self.peer_connections.len() as f64;
         let _ = self.metrics.peer_count.swap(peer_count);
@@ -851,9 +987,87 @@ impl P2PState {
         self.refresh_peer_stats_snapshot();
     }
 
+    fn add_connection_ip(&mut self, connection_id: ConnectionId, ip: IpAddr) {
+        self.ip_info
+            .entry(ip)
+            .or_insert_with(|| IpInfo {
+                connections: BTreeSet::new(),
+                request_count: 0,
+            })
+            .connections
+            .insert(connection_id);
+        self.ip_bucket_info
+            .entry(IpBucket::from_ip(ip))
+            .or_default()
+            .connections
+            .insert(connection_id);
+    }
+
+    fn remove_connection_ip(&mut self, connection_id: ConnectionId, ip: IpAddr) {
+        if let Some(info) = self.ip_info.get_mut(&ip) {
+            info.connections.remove(&connection_id);
+            if info.connections.is_empty() {
+                self.ip_info.remove(&ip);
+            }
+        }
+        let bucket = IpBucket::from_ip(ip);
+        if let Some(info) = self.ip_bucket_info.get_mut(&bucket) {
+            info.connections.remove(&connection_id);
+            if info.connections.is_empty() && info.request_count == 0 {
+                self.ip_bucket_info.remove(&bucket);
+            }
+        }
+    }
+
+    pub(crate) fn update_connection_address(
+        &mut self,
+        connection_id: ConnectionId,
+        address: &Multiaddr,
+    ) {
+        let Some(peer_id) = self
+            .connections
+            .get(&connection_id)
+            .map(|info| info.peer_id)
+        else {
+            return;
+        };
+        let Some(current) = self
+            .peer_connections
+            .get_mut(&peer_id)
+            .and_then(|connections| connections.get_mut(&connection_id))
+        else {
+            return;
+        };
+        if current == address {
+            return;
+        }
+        let previous = std::mem::replace(current, address.clone());
+        let old_ip = previous.ip_addr();
+        let new_ip = address.ip_addr();
+        if old_ip != new_ip {
+            if let Some(ip) = old_ip {
+                self.remove_connection_ip(connection_id, ip);
+            }
+            if let Some(ip) = new_ip {
+                self.add_connection_ip(connection_id, ip);
+            }
+        }
+        if old_ip.is_none()
+            && self.outbound_connections.contains_key(&connection_id)
+            && !self
+                .outbound_connection_aliases
+                .contains_key(&connection_id)
+        {
+            self.outbound_connection_aliases
+                .insert(connection_id, previous);
+        }
+    }
+
     pub(crate) fn lost_connection(&mut self, connection_id: ConnectionId) -> usize {
-        if let Some(peer_id) = self.connections.remove(&connection_id) {
+        if let Some(ConnectionInfo { peer_id, .. }) = self.connections.remove(&connection_id) {
             self.inbound_connections.remove(&connection_id);
+            self.outbound_connections.remove(&connection_id);
+            self.outbound_connection_aliases.remove(&connection_id);
             if let Some(c) = self.peer_connections.get_mut(&peer_id) {
                 let addr = c.remove(&connection_id);
                 if c.is_empty() {
@@ -862,19 +1076,7 @@ impl P2PState {
                 }
                 if let Some(addr) = addr {
                     if let Some(ip) = addr.ip_addr() {
-                        if let Some(info) = self.ip_info.get_mut(&ip) {
-                            info.connections.remove(&connection_id);
-                            if info.connections.is_empty() {
-                                self.ip_info.remove(&ip);
-                            }
-                        }
-                        let bucket = IpBucket::from_ip(ip);
-                        if let Some(info) = self.ip_bucket_info.get_mut(&bucket) {
-                            info.connections.remove(&connection_id);
-                            if info.connections.is_empty() && info.request_count == 0 {
-                                self.ip_bucket_info.remove(&bucket);
-                            }
-                        }
+                        self.remove_connection_ip(connection_id, ip);
                     }
                 }
             }
@@ -882,6 +1084,101 @@ impl P2PState {
         let peer_count = self.peer_connections.len();
         let _ = self.metrics.peer_count.swap(peer_count as f64);
         peer_count
+    }
+
+    /// Count distinct peers reached by our own dials. Raw connected-peer
+    /// cardinality includes inbound sockets that need not speak the protocol.
+    pub(crate) fn outbound_peer_count(&self) -> usize {
+        self.outbound_connections
+            .values()
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// Numeric configured peers often omit a PeerId. Match their actual
+    /// outbound endpoint.
+    pub(crate) fn has_outbound_connection_at_address(&self, address: &Multiaddr) -> bool {
+        self.outbound_connections
+            .iter()
+            .any(|(id, peer)| self.outbound_connection_matches_address(*id, peer, address))
+    }
+
+    fn outbound_connection_matches_address(
+        &self,
+        id: ConnectionId,
+        peer: &PeerId,
+        address: &Multiaddr,
+    ) -> bool {
+        self.peer_connections
+            .get(peer)
+            .and_then(|connections| connections.get(&id))
+            .is_some_and(|connected| same_endpoint_without_p2p(connected, address))
+            || self
+                .outbound_connection_aliases
+                .get(&id)
+                .is_some_and(|alias| same_endpoint_without_p2p(alias, address))
+    }
+
+    /// Transport outages at an intended endpoint use configured redial backoff,
+    /// not discovery quarantine. A matching PeerId alone is insufficient.
+    pub(crate) fn is_configured_transport_endpoint(
+        &self,
+        address: &Multiaddr,
+        peer: Option<PeerId>,
+        initial: &[Multiaddr],
+        backbone: &[Multiaddr],
+    ) -> bool {
+        if address.iter().any(|protocol| {
+            matches!(protocol, libp2p::multiaddr::Protocol::P2p(expected) if peer != Some(expected))
+        }) {
+            return false;
+        }
+        initial.iter().chain(backbone).any(|configured| {
+            let identity_matches = configured.iter().all(|protocol| match protocol {
+                libp2p::multiaddr::Protocol::P2p(expected) => peer == Some(expected),
+                _ => true,
+            });
+            identity_matches
+                && (same_endpoint_without_p2p(configured, address)
+                    || self.outbound_connection_aliases.iter().any(|(id, alias)| {
+                        same_endpoint_without_p2p(configured, alias)
+                            && self
+                                .outbound_connections
+                                .get(id)
+                                .is_some_and(|connected_peer| {
+                                    peer.is_none_or(|expected| expected == *connected_peer)
+                                        && self
+                                            .peer_connections
+                                            .get(connected_peer)
+                                            .and_then(|connections| connections.get(id))
+                                            .is_some_and(|connected| {
+                                                same_endpoint_without_p2p(connected, address)
+                                            })
+                                })
+                    }))
+        })
+    }
+
+    /// Preserve configured connections and peers supplying newly accepted
+    /// chain progress, not peers merely acknowledging our gossip.
+    pub(crate) fn recovery_connection_to_reclaim(
+        &self,
+        initial: &[Multiaddr],
+        backbone: &[Multiaddr],
+    ) -> Option<ConnectionId> {
+        let now = Instant::now();
+        self.outbound_connections.iter().find_map(|(id, peer)| {
+            self.peer_connections.get(peer)?.get(id)?;
+            let protected = initial.iter().chain(backbone).any(|configured| {
+                configured.iter().any(|protocol| {
+                    matches!(protocol, libp2p::multiaddr::Protocol::P2p(expected) if expected == *peer)
+                }) || self.outbound_connection_matches_address(*id, peer, configured)
+            });
+            let useful = self.peer_request_health.get(peer).is_some_and(|health| {
+                health.last_chain_progress.is_some_and(|at| now.duration_since(at) < PREFETCH_BANDWIDTH_WINDOW)
+            });
+            (!protected && !useful).then_some(*id)
+        })
     }
 
     pub(crate) fn peer_has_connection_at_address(
@@ -1098,14 +1395,9 @@ impl P2PState {
         let gossip = info.gossip.get_or_insert(GossipBucketState {
             tokens: capacity,
             last_refill: now,
+            refill_remainder: 0,
         });
-        let elapsed_secs = now.duration_since(gossip.last_refill).as_secs();
-        if elapsed_secs > 0 {
-            let refill = elapsed_secs.saturating_mul(u64::from(refill_per_second));
-            let tokens = u64::from(gossip.tokens).saturating_add(refill);
-            gossip.tokens = tokens.min(u64::from(capacity)) as u32;
-            gossip.last_refill = now;
-        }
+        refill_gossip_bucket(gossip, capacity, refill_per_second, now);
 
         if gossip.tokens == 0 {
             GossipBucketAdmission::Rejected { bucket }
@@ -1155,6 +1447,69 @@ impl P2PState {
         health.last_failure = Some(now);
     }
 
+    pub(crate) fn set_configured_recovery_peers(
+        &mut self,
+        initial: Arc<[Multiaddr]>,
+        backbone: Arc<[Multiaddr]>,
+    ) {
+        self.configured_initial_peers = initial;
+        self.configured_backbone_peers = backbone;
+    }
+
+    /// Height demand and alternate retries rank only after the caller removes
+    /// attempted peers and the shared health policy removes ineligible peers.
+    pub(crate) fn select_block_height_request_peer(
+        &self,
+        target_peers: Vec<PeerId>,
+        exclusions: &PeerExclusions,
+    ) -> Option<PeerId> {
+        let now = Instant::now();
+        let mut eligible = self
+            .eligible_request_peers(target_peers, exclusions)
+            .into_iter()
+            .map(|peer| {
+                let recent_progress = self.peer_request_health.get(&peer).is_some_and(|health| {
+                    health
+                        .last_chain_progress
+                        .is_some_and(|at| now.duration_since(at) < PREFETCH_BANDWIDTH_WINDOW)
+                });
+                let priority = if recent_progress {
+                    0
+                } else if self.has_configured_recovery_connection(&peer) {
+                    1
+                } else {
+                    2
+                };
+                (priority, peer)
+            })
+            .collect::<Vec<_>>();
+        eligible.sort_unstable();
+        eligible.dedup();
+        let tier = eligible.first()?.0;
+        let tier_len = eligible.iter().take_while(|entry| entry.0 == tier).count();
+        let position = self.block_height_peer_cursors[tier].fetch_add(1, Ordering::Relaxed);
+        Some(eligible[position % tier_len].1)
+    }
+
+    fn has_configured_recovery_connection(&self, peer: &PeerId) -> bool {
+        let Some(connections) = self.peer_connections.get(peer) else {
+            return false;
+        };
+        connections.keys().any(|id| {
+            self.outbound_connections.get(id) == Some(peer)
+                && self
+                    .configured_initial_peers
+                    .iter()
+                    .chain(self.configured_backbone_peers.iter())
+                    .any(|configured| {
+                        configured.iter().all(|protocol| match protocol {
+                            libp2p::multiaddr::Protocol::P2p(expected) => expected == *peer,
+                            _ => true,
+                        }) && self.outbound_connection_matches_address(*id, peer, configured)
+                    })
+        })
+    }
+
     pub(crate) fn select_request_peers_with_preferences(
         &self,
         target_peers: Vec<PeerId>,
@@ -1162,6 +1517,15 @@ impl P2PState {
         exclusions: &PeerExclusions,
         preserve_peer_order: bool,
         preferred_peers: &[PeerId],
+    ) -> Vec<PeerId> {
+        let selected_from = self.eligible_request_peers(target_peers, exclusions);
+        self.order_request_peers(selected_from, limit, preserve_peer_order, preferred_peers)
+    }
+
+    fn eligible_request_peers(
+        &self,
+        target_peers: Vec<PeerId>,
+        exclusions: &PeerExclusions,
     ) -> Vec<PeerId> {
         let mut healthy = Vec::new();
         let mut fallback = Vec::new();
@@ -1180,12 +1544,11 @@ impl P2PState {
             healthy.push(peer_id);
         }
 
-        let selected_from = if healthy.is_empty() {
+        if healthy.is_empty() {
             fallback
         } else {
             healthy
-        };
-        self.order_request_peers(selected_from, limit, preserve_peer_order, preferred_peers)
+        }
     }
 
     fn order_request_peers(
@@ -1254,7 +1617,7 @@ impl P2PState {
             .map(IpBucket::from_ip)
     }
 
-    fn request_score(&self, peer_id: &PeerId) -> i64 {
+    pub(crate) fn request_score(&self, peer_id: &PeerId) -> i64 {
         self.peer_request_health
             .get(peer_id)
             .map(|health| health.successes as i64 * 2 - health.failures as i64)
@@ -1278,43 +1641,30 @@ impl P2PState {
         saw_ip
     }
 
-    pub(crate) fn ping_succeeded(&mut self, connection: ConnectionId) {
-        let addr = self.connection_address(connection);
-        let Some(addr) = addr else {
-            trace!("No address for connection {connection}. Please inform the developers.");
-            return;
+    pub(crate) fn ping_succeeded(&mut self, connection: ConnectionId, peer: PeerId) -> bool {
+        let Some(info) = self.connections.get_mut(&connection) else {
+            return false;
         };
-        let Some(ip) = addr.ip_addr() else {
-            debug!("No IP address for connection {connection}.");
-            return;
-        };
-        if let Some(info) = self.ip_info.get_mut(&ip) {
-            info.ping_failure_count = 0;
+        if info.peer_id != peer {
+            return false;
         }
+        info.ping_failure_count = 0;
+        true
     }
 
-    pub(crate) fn ping_failed(&mut self, connection: ConnectionId) -> u64 {
-        let addr = self.connection_address(connection);
-        let Some(addr) = addr else {
-            trace!("No address for connection {connection}. Please inform the developers.");
-            return 0;
-        };
-        let Some(ip) = addr.ip_addr() else {
-            debug!("No IP address for connection {connection}.");
-            return 0;
-        };
-        if let Some(info) = self.ip_info.get_mut(&ip) {
-            info.ping_failure_count += 1;
-            info.ping_failure_count
-        } else {
-            0
+    pub(crate) fn ping_failed(&mut self, connection: ConnectionId, peer: PeerId) -> Option<u64> {
+        let info = self.connections.get_mut(&connection)?;
+        if info.peer_id != peer {
+            return None;
         }
+        info.ping_failure_count = info.ping_failure_count.saturating_add(1);
+        Some(info.ping_failure_count)
     }
 
     pub(crate) fn connection_address(&self, connection_id: ConnectionId) -> Option<Multiaddr> {
-        self.connections.get(&connection_id).and_then(|peer_id| {
+        self.connections.get(&connection_id).and_then(|info| {
             self.peer_connections
-                .get(peer_id)
+                .get(&info.peer_id)
                 .and_then(|map| map.get(&connection_id))
                 .cloned()
         })
@@ -1370,6 +1720,61 @@ impl P2PState {
             block_ids.remove(block_id);
             if block_ids.is_empty() {
                 self.peer_to_block_ids.remove(&peer_id);
+            }
+        }
+    }
+
+    /// The kernel emits %track remove after validating the page's digest and
+    /// proof. Retain that source provenance until actual height acceptance.
+    pub(crate) fn validate_and_untrack_block_sources(&mut self, block_id: String) {
+        let Some(peers) = self.block_id_to_peers.remove(&block_id) else {
+            return;
+        };
+        for peer in peers {
+            if let Some(blocks) = self.peer_to_block_ids.get_mut(&peer) {
+                blocks.remove(&block_id);
+                if blocks.is_empty() {
+                    self.peer_to_block_ids.remove(&peer);
+                }
+            }
+            if self
+                .validated_block_sources
+                .entry(block_id.clone())
+                .or_default()
+                .insert(peer)
+            {
+                self.validated_block_source_order
+                    .push_back((block_id.clone(), peer));
+            }
+        }
+        while self.validated_block_source_order.len() > BLOCK_ECHO_SOURCE_CAP {
+            let Some((old_block, old_peer)) = self.validated_block_source_order.pop_front() else {
+                break;
+            };
+            if let Some(peers) = self.validated_block_sources.get_mut(&old_block) {
+                peers.remove(&old_peer);
+                if peers.is_empty() {
+                    self.validated_block_sources.remove(&old_block);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn record_accepted_chain_progress(&mut self, block_id: &str, height: u64) {
+        if height < self.first_negative {
+            return;
+        }
+        let Some(peers) = self.validated_block_sources.get(block_id) else {
+            return;
+        };
+        let now = Instant::now();
+        for peer in peers {
+            if self.peer_connections.contains_key(peer) {
+                self.peer_request_health
+                    .entry(*peer)
+                    .or_default()
+                    .last_chain_progress = Some(now);
+                debug!(peer_id = %peer, block_id, height, "Peer supplied newly accepted chain data");
             }
         }
     }
@@ -1467,6 +1872,13 @@ impl P2PState {
     }
 
     fn discard_deferred_blocks_for_peer(&mut self, peer_id: &PeerId) {
+        for entries in self.deferred_flush_inflight.values_mut() {
+            for lease in entries.values_mut() {
+                if &lease.peer_id == peer_id {
+                    lease.valid = false;
+                }
+            }
+        }
         let mut removed_count = 0usize;
         let mut removed_bytes = 0u64;
         self.deferred_heard_blocks.retain(|_, blocks| {
@@ -1488,21 +1900,36 @@ impl P2PState {
             self.deferred_heard_block_total_bytes = self
                 .deferred_heard_block_total_bytes
                 .saturating_sub(removed_bytes);
-            self.deferred_heard_block_count_by_peer.remove(peer_id);
-            self.deferred_heard_block_bytes_by_peer.remove(peer_id);
+            if let Some(count) = self.deferred_heard_block_count_by_peer.get_mut(peer_id) {
+                *count = count.saturating_sub(removed_count);
+                if *count == 0 {
+                    self.deferred_heard_block_count_by_peer.remove(peer_id);
+                }
+            }
+            if let Some(bytes) = self.deferred_heard_block_bytes_by_peer.get_mut(peer_id) {
+                *bytes = bytes.saturating_sub(removed_bytes);
+                if *bytes == 0 {
+                    self.deferred_heard_block_bytes_by_peer.remove(peer_id);
+                }
+            }
             self.publish_deferred_metrics();
         }
     }
 
     fn clear_peer_session_state(&mut self, peer_id: &PeerId, clear_replay_cache: bool) {
-        self.clear_outbound_requests_for_peer(peer_id);
+        // Request-response emits actual response/failure events for closing
+        // streams. Retain their issued endpoint snapshots until that terminal
+        // event (and any already-running response consumer) retires them.
         self.inbound_req_res_inflight.remove(peer_id);
         self.peer_stats.remove(peer_id);
         self.peer_request_health.remove(peer_id);
         self.non_bundle_capable_peers.remove(peer_id);
         self.non_range_capable_peers.remove(peer_id);
         self.prefetch_peer_range_stats.remove(peer_id);
-        self.prefetch_bandwidth_window.remove(peer_id);
+        if !self.peer_to_outbound_requests.contains_key(peer_id) {
+            self.prefetch_bandwidth_window.remove(peer_id);
+        }
+        self.elders_inflight.remove(peer_id);
         self.discard_deferred_blocks_for_peer(peer_id);
         if clear_replay_cache {
             self.clear_inbound_replay_cache_for_peer(peer_id);
@@ -1859,6 +2286,74 @@ impl P2PState {
         self.prefetch_bandwidth_cap_per_peer_bytes_per_min = bandwidth_cap_bytes_per_min;
     }
 
+    pub(crate) fn set_prefetch_inflight_limit(&mut self, limit: u8) {
+        self.prefetch_max_inflight_per_peer = limit;
+    }
+
+    pub(crate) fn prefetch_inflight_limit(&self) -> u8 {
+        self.prefetch_max_inflight_per_peer
+    }
+
+    pub(crate) fn prefetch_throttle(
+        &self,
+        peer: &PeerId,
+        endpoints: impl IntoIterator<Item = RequestEndpoint>,
+    ) -> Option<(RequestEndpoint, PrefetchBudgetObservation)> {
+        self.prefetch_throttle_at(peer, endpoints, Instant::now())
+    }
+
+    fn prefetch_throttle_at(
+        &self,
+        peer: &PeerId,
+        endpoints: impl IntoIterator<Item = RequestEndpoint>,
+        now: Instant,
+    ) -> Option<(RequestEndpoint, PrefetchBudgetObservation)> {
+        let cap = self.prefetch_bandwidth_cap_per_peer_bytes_per_min;
+        if cap == 0 {
+            return None;
+        }
+        let peer_window_bytes = self.prefetch_bandwidth_window_bytes_at(peer, now);
+        let mut checked = SmallVec::<[IpBucket; 2]>::new();
+        for connection in endpoints {
+            let bucket = IpBucket::from_ip(connection.endpoint.ip());
+            if checked.contains(&bucket) {
+                continue;
+            }
+            checked.push(bucket);
+            let bucket_window_bytes = self.prefetch_bucket_window_bytes_at(bucket, now);
+            if peer_window_bytes >= cap
+                || bucket_window_bytes >= self.prefetch_bucket_bandwidth_cap()
+            {
+                return Some((
+                    connection,
+                    PrefetchBudgetObservation {
+                        endpoint: connection.endpoint,
+                        bucket,
+                        peer_window_bytes,
+                        bucket_window_bytes,
+                        peer_inflight: self.uncharged_prefetch_count(peer),
+                    },
+                ));
+            }
+        }
+        None
+    }
+
+    fn uncharged_prefetch_count(&self, peer: &PeerId) -> usize {
+        self.peer_to_outbound_requests
+            .get(peer)
+            .into_iter()
+            .flat_map(|requests| requests.iter())
+            .filter(|id| {
+                self.inflight_prefetches.contains_key(*id)
+                    && self
+                        .outbound_requests
+                        .get(*id)
+                        .is_some_and(|context| context.response_bytes.is_none())
+            })
+            .count()
+    }
+
     pub fn prefetch_height_failure_budget(&self) -> u8 {
         self.prefetch_height_failure_budget
     }
@@ -1937,8 +2432,28 @@ impl P2PState {
     /// Phase 5: record `bytes` of prefetch response from `peer_id` and
     /// return the rolling 60s total *after* this insertion. Used to
     /// enforce `prefetch_bandwidth_cap_per_peer_bytes_per_min`.
-    pub fn record_prefetch_bandwidth(&mut self, peer_id: PeerId, bytes: usize) -> usize {
-        let now = Instant::now();
+    #[cfg(test)]
+    fn record_prefetch_bandwidth(&mut self, peer_id: PeerId, bytes: usize) -> usize {
+        let bucket = self.peer_ip_bucket(&peer_id);
+        self.record_prefetch_bandwidth_for_bucket(peer_id, bucket, bytes)
+    }
+
+    fn record_prefetch_bandwidth_for_bucket(
+        &mut self,
+        peer_id: PeerId,
+        bucket: Option<IpBucket>,
+        bytes: usize,
+    ) -> usize {
+        self.record_prefetch_bandwidth_for_bucket_at(peer_id, bucket, bytes, Instant::now())
+    }
+
+    fn record_prefetch_bandwidth_for_bucket_at(
+        &mut self,
+        peer_id: PeerId,
+        bucket: Option<IpBucket>,
+        bytes: usize,
+        now: Instant,
+    ) -> usize {
         let cutoff = now.checked_sub(PREFETCH_BANDWIDTH_WINDOW);
         let entry = self.prefetch_bandwidth_window.entry(peer_id).or_default();
         if let Some(cutoff) = cutoff {
@@ -1951,22 +2466,111 @@ impl P2PState {
             }
         }
         entry.push_back((now, bytes));
-        entry.iter().map(|(_, b)| *b).sum()
+        let total = entry.iter().map(|(_, b)| *b).sum();
+        if let Some(bucket) = bucket {
+            if !self.prefetch_bandwidth_bucket_window.contains_key(&bucket)
+                && self.prefetch_bandwidth_bucket_window.len()
+                    >= PREFETCH_BANDWIDTH_BUCKET_COUNT_CAP
+            {
+                self.prefetch_bandwidth_bucket_window.retain(|_, entries| {
+                    entries
+                        .back()
+                        .is_some_and(|(stamp, _)| cutoff.is_none_or(|cutoff| *stamp >= cutoff))
+                });
+                if self.prefetch_bandwidth_bucket_window.len()
+                    >= PREFETCH_BANDWIDTH_BUCKET_COUNT_CAP
+                {
+                    if let Some(oldest) = self
+                        .prefetch_bandwidth_bucket_window
+                        .iter()
+                        .min_by_key(|(_, entries)| entries.back().map(|(stamp, _)| *stamp))
+                        .map(|(bucket, _)| *bucket)
+                    {
+                        self.prefetch_bandwidth_bucket_window.remove(&oldest);
+                    }
+                }
+            }
+            let bucket_entry = self
+                .prefetch_bandwidth_bucket_window
+                .entry(bucket)
+                .or_default();
+            if let Some(cutoff) = cutoff {
+                while bucket_entry
+                    .front()
+                    .is_some_and(|(stamp, _)| *stamp < cutoff)
+                {
+                    bucket_entry.pop_front();
+                }
+            }
+            match bucket_entry.back_mut() {
+                Some((bin_end, bin_bytes)) if now <= *bin_end => {
+                    *bin_bytes = bin_bytes.saturating_add(bytes);
+                }
+                _ => {
+                    // Fixed upper bounds never forget recent bytes early. Bin ends
+                    // are more than one second apart, so at most 61 survive pruning.
+                    bucket_entry.push_back((now + PREFETCH_BANDWIDTH_BUCKET_BIN_WIDTH, bytes));
+                }
+            }
+        }
+        total
     }
 
     /// Phase 5: 60s prefetch byte total for `peer_id`. Read-only check
     /// used before issuing a prefetch so we can throttle abusive peers
     /// without first recording another burst.
     pub fn prefetch_bandwidth_window_bytes(&self, peer_id: &PeerId) -> usize {
+        self.prefetch_bandwidth_window_bytes_at(peer_id, Instant::now())
+    }
+
+    fn prefetch_bandwidth_window_bytes_at(&self, peer_id: &PeerId, now: Instant) -> usize {
         let Some(entry) = self.prefetch_bandwidth_window.get(peer_id) else {
             return 0;
         };
-        let cutoff = Instant::now().checked_sub(PREFETCH_BANDWIDTH_WINDOW);
+        let cutoff = now.checked_sub(PREFETCH_BANDWIDTH_WINDOW);
         entry
             .iter()
             .filter(|(stamp, _)| cutoff.is_none_or(|cutoff| *stamp >= cutoff))
             .map(|(_, b)| *b)
             .sum()
+    }
+
+    /// The same short-lived budget applies across peer identities on an IP
+    /// bucket, including identities that have already disconnected.
+    pub fn prefetch_bucket_bandwidth_exhausted(&self, peer_id: &PeerId) -> bool {
+        let cap = self.prefetch_bucket_bandwidth_cap();
+        if cap == 0 {
+            return false;
+        }
+        self.peer_connections
+            .get(peer_id)
+            .is_some_and(|connections| {
+                connections.values().any(|address| {
+                    address.ip_addr().is_none_or(|ip| {
+                        self.prefetch_bucket_window_bytes(IpBucket::from_ip(ip)) >= cap
+                    })
+                })
+            })
+    }
+
+    pub(crate) fn prefetch_bucket_bandwidth_cap(&self) -> usize {
+        self.prefetch_bandwidth_cap_per_peer_bytes_per_min
+            .saturating_mul(PREFETCH_BANDWIDTH_BUCKET_MULTIPLIER)
+    }
+
+    pub(crate) fn prefetch_bucket_window_bytes(&self, bucket: IpBucket) -> usize {
+        self.prefetch_bucket_window_bytes_at(bucket, Instant::now())
+    }
+
+    fn prefetch_bucket_window_bytes_at(&self, bucket: IpBucket, now: Instant) -> usize {
+        let Some(entry) = self.prefetch_bandwidth_bucket_window.get(&bucket) else {
+            return 0;
+        };
+        let cutoff = now.checked_sub(PREFETCH_BANDWIDTH_WINDOW);
+        entry
+            .iter()
+            .filter(|(stamp, _)| cutoff.is_none_or(|cutoff| *stamp >= cutoff))
+            .fold(0usize, |sum, (_, bytes)| sum.saturating_add(*bytes))
     }
 
     fn record_prefetch_range_success(
@@ -2059,47 +2663,71 @@ impl P2PState {
         Some(removed)
     }
 
-    fn evict_deferred_total_if_needed(&mut self, incoming_bytes: u64) {
-        while self.deferred_heard_block_total_count >= DEFERRED_HEARD_BLOCK_TOTAL_CAP
-            || self
-                .deferred_heard_block_total_bytes
-                .saturating_add(incoming_bytes)
-                > self.deferred_heard_block_total_bytes_cap
+    /// When the shared buffer is full, trim the peer holding the most of it.
+    /// Within the heaviest holders, evict the farthest height first to retain
+    /// near-frontier entries while maintaining each peer's fair share.
+    fn enforce_deferred_total_cap(&mut self) {
+        while self.deferred_heard_block_total_count > DEFERRED_HEARD_BLOCK_TOTAL_CAP
+            || self.deferred_heard_block_total_bytes > self.deferred_heard_block_total_bytes_cap
         {
-            if !self.evict_oldest_deferred_entry(None) {
+            let over_count = self.deferred_heard_block_total_count > DEFERRED_HEARD_BLOCK_TOTAL_CAP;
+            let heaviest = self.heaviest_deferred_peers(over_count);
+            if !self.evict_farthest_deferred_entry_where(|peer_id| heaviest.contains(&peer_id))
+                && !self.evict_farthest_deferred_entry_where(|_| true)
+            {
                 break;
             }
         }
     }
 
-    fn evict_deferred_for_peer_if_needed(&mut self, peer_id: PeerId, incoming_bytes: u64) {
+    /// Peers tied for the most deferred entries (by count when the count cap
+    /// is exceeded, otherwise by retained bytes).
+    fn heaviest_deferred_peers(&self, by_count: bool) -> BTreeSet<PeerId> {
+        fn tied_max<V: Ord + Copy>(loads: &BTreeMap<PeerId, V>) -> BTreeSet<PeerId> {
+            let Some(max) = loads.values().copied().max() else {
+                return BTreeSet::new();
+            };
+            loads
+                .iter()
+                .filter(|(_, load)| **load == max)
+                .map(|(peer_id, _)| *peer_id)
+                .collect()
+        }
+        if by_count {
+            tied_max(&self.deferred_heard_block_count_by_peer)
+        } else {
+            tied_max(&self.deferred_heard_block_bytes_by_peer)
+        }
+    }
+
+    fn enforce_deferred_peer_cap(&mut self, peer_id: PeerId) {
         while self
             .deferred_heard_block_count_by_peer
             .get(&peer_id)
             .copied()
             .unwrap_or_default()
-            >= DEFERRED_HEARD_BLOCK_PER_PEER_CAP
+            > DEFERRED_HEARD_BLOCK_PER_PEER_CAP
             || self
                 .deferred_heard_block_bytes_by_peer
                 .get(&peer_id)
                 .copied()
                 .unwrap_or_default()
-                .saturating_add(incoming_bytes)
                 > self.deferred_heard_block_per_peer_bytes_cap
         {
-            if !self.evict_oldest_deferred_entry(Some(peer_id)) {
+            if !self.evict_farthest_deferred_entry_where(|held_by| held_by == peer_id) {
                 break;
             }
         }
     }
 
-    fn evict_oldest_deferred_entry(&mut self, peer_filter: Option<PeerId>) -> bool {
+    fn evict_farthest_deferred_entry_where(&mut self, eligible: impl Fn(PeerId) -> bool) -> bool {
         let candidate = self
             .deferred_heard_blocks
             .iter()
+            .rev()
             .find_map(|(height, blocks)| {
                 blocks.iter().find_map(|(block_id, block)| {
-                    if peer_filter.is_some_and(|peer_id| peer_id != block.peer_id) {
+                    if !eligible(block.peer_id) {
                         return None;
                     }
                     Some((*height, block_id.clone()))
@@ -2111,10 +2739,8 @@ impl P2PState {
         self.remove_deferred_entry(height, &block_id).is_some()
     }
 
-    /// Phase 5: drop any deferred-buffer entries for `block_id` and the
-    /// matching prefetch. Called from the LiarBlockId arm when a forked or
-    /// liar-served height needs to free the buffer for a fresh fetch from a
-    /// different peer. Returns `true` if any entry was removed.
+    /// Discard buffered copies and invalidate leased copies of this block.
+    /// A worker's retained slab continues occupying capacity until retirement.
     pub fn invalidate_deferred_block_id(&mut self, block_id: &str) -> bool {
         let mut removed_any = false;
         let heights = self
@@ -2125,6 +2751,12 @@ impl P2PState {
         for height in heights {
             if self.remove_deferred_entry(height, block_id).is_some() {
                 removed_any = true;
+            }
+        }
+        for entries in self.deferred_flush_inflight.values_mut() {
+            if let Some(lease) = entries.get_mut(block_id) {
+                removed_any |= lease.valid;
+                lease.valid = false;
             }
         }
         if removed_any {
@@ -2178,16 +2810,29 @@ impl P2PState {
     }
 
     /// Returns true when an elders request identified by `key` (block id +
-    /// target peer) may be sent now, recording the send time. Returns false
-    /// when an identical request went out within `cooldown` — the kernel
-    /// re-emits the same elders request on every duplicate-block poke, and
-    /// only the first one per window is useful.
+    /// target peer) may be sent to `peer_id` now, claiming that peer's elders
+    /// slot and recording the send time.
+    ///
+    /// Identical requests share a cooldown, and distinct requests share one
+    /// in-flight slot per peer. The sequential recovery walk issues its next
+    /// request after the previous response releases the slot.
     pub fn should_send_elders_request(
         &mut self,
+        peer_id: PeerId,
         key: &str,
         now: Instant,
         cooldown: Duration,
+        inflight_ttl: Duration,
     ) -> bool {
+        if let Some(claimed_at) = self.elders_inflight.get(&peer_id) {
+            if now.duration_since(*claimed_at) < inflight_ttl {
+                return false;
+            }
+            trace!(
+                peer = %peer_id,
+                "Expiring stale elders slot; the peer never answered"
+            );
+        }
         if let Some(last_sent) = self.elders_request_last_sent.get(key) {
             if now.duration_since(*last_sent) < cooldown {
                 return false;
@@ -2203,7 +2848,19 @@ impl P2PState {
             }
         }
         self.elders_request_last_sent.insert(key.to_owned(), now);
+        self.elders_inflight.insert(peer_id, now);
         true
+    }
+
+    /// Release `peer_id`'s elders slot: its response landed, or the session
+    /// ended. Idempotent.
+    pub fn clear_elders_inflight(&mut self, peer_id: &PeerId) {
+        self.elders_inflight.remove(peer_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn elders_inflight_len(&self) -> usize {
+        self.elders_inflight.len()
     }
 
     pub fn try_start_processing_block(&mut self, block_id: &str) -> bool {
@@ -2303,7 +2960,67 @@ impl P2PState {
 
     pub fn finish_processing_tx_seen(&mut self, tx_id: &str) {
         self.processing_txs.remove(tx_id);
-        self.seen_txs.insert(tx_id.to_owned());
+        if self.seen_txs.insert(tx_id.to_owned()) {
+            self.next_seen_tx_generation = self.next_seen_tx_generation.wrapping_add(1);
+            let generation = self.next_seen_tx_generation;
+            self.seen_tx_generation.insert(tx_id.to_owned(), generation);
+            self.seen_tx_order.push_back((generation, tx_id.to_owned()));
+            self.evict_seen_txs();
+        }
+    }
+
+    pub(crate) fn reopen_seen_tx(&mut self, tx_id: &str) {
+        self.seen_txs.remove(tx_id);
+        self.seen_tx_generation.remove(tx_id);
+        self.cancel_processing_tx(tx_id);
+    }
+
+    pub(crate) fn clear_seen_txs(&mut self) {
+        self.seen_txs.clear();
+        self.seen_tx_generation.clear();
+        self.seen_tx_order.clear();
+    }
+
+    /// Advance only from kernel-accepted heights. Height-only reconciliation
+    /// cannot attribute acceptance to a peer or create kernel prefetch demand.
+    pub(crate) fn advance_seen_frontier(&mut self, height: u64) -> bool {
+        let frontier = height.saturating_add(1);
+        if frontier <= self.first_negative {
+            return false;
+        }
+        self.first_negative = frontier;
+        self.seen_frontier_advanced_at = Instant::now();
+        self.metrics.highest_block_height_seen.swap(height as f64);
+        if height.saturating_sub(self.last_tx_cache_clear_height) >= self.seen_tx_clear_interval {
+            self.clear_seen_txs();
+            self.last_tx_cache_clear_height = height;
+        }
+        true
+    }
+
+    pub(crate) fn deferred_above_frontier(&self, now: Instant) -> Option<(u64, usize, Duration)> {
+        let mut heights = self
+            .deferred_heard_blocks
+            .iter()
+            .filter(|(height, blocks)| **height > self.first_negative && !blocks.is_empty());
+        let (&lowest, _) = heights.next()?;
+        Some((
+            lowest,
+            1 + heights.count(),
+            now.saturating_duration_since(self.seen_frontier_advanced_at),
+        ))
+    }
+
+    fn evict_seen_txs(&mut self) {
+        while self.seen_tx_order.len() > SEEN_TXS_CAP || self.seen_txs.len() > SEEN_TXS_CAP {
+            let Some((generation, tx_id)) = self.seen_tx_order.pop_front() else {
+                break;
+            };
+            if self.seen_tx_generation.get(&tx_id) == Some(&generation) {
+                self.seen_txs.remove(&tx_id);
+                self.seen_tx_generation.remove(&tx_id);
+            }
+        }
     }
 
     pub fn cancel_processing_block(&mut self, block_id: &str) {
@@ -2331,6 +3048,34 @@ impl P2PState {
             self.block_receipts.remove(&block_id);
             self.block_first_seen_at.remove(&block_id);
         }
+    }
+
+    pub(crate) fn record_block_echo_source(&mut self, peer_id: PeerId, block_id: &str) {
+        if !self
+            .block_echo_sources
+            .entry(block_id.to_owned())
+            .or_default()
+            .insert(peer_id)
+        {
+            return;
+        }
+        self.block_echo_source_order
+            .push_back((block_id.to_owned(), peer_id));
+        while self.block_echo_source_order.len() > BLOCK_ECHO_SOURCE_CAP {
+            let Some((oldest_block, oldest_peer)) = self.block_echo_source_order.pop_front() else {
+                break;
+            };
+            if let Some(sources) = self.block_echo_sources.get_mut(&oldest_block) {
+                sources.remove(&oldest_peer);
+                if sources.is_empty() {
+                    self.block_echo_sources.remove(&oldest_block);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn block_echo_sources(&self, block_id: &str) -> Option<&BTreeSet<PeerId>> {
+        self.block_echo_sources.get(block_id)
     }
 
     pub fn record_elders_negative_cache(&mut self, id: String) {
@@ -2380,6 +3125,13 @@ impl P2PState {
         source: BlockSource,
     ) -> bool {
         if self
+            .deferred_flush_inflight
+            .get(&height)
+            .is_some_and(|entries| entries.contains_key(&block_id))
+        {
+            return false;
+        }
+        if self
             .deferred_heard_blocks
             .get(&height)
             .is_some_and(|deferred| deferred.contains_key(&block_id))
@@ -2396,25 +3148,11 @@ impl P2PState {
         {
             return false;
         }
-        self.evict_deferred_for_peer_if_needed(peer_id, retained_bytes);
-        self.evict_deferred_total_if_needed(retained_bytes);
-        if self
-            .deferred_heard_block_bytes_by_peer
-            .get(&peer_id)
-            .copied()
-            .unwrap_or_default()
-            .saturating_add(retained_bytes)
-            > self.deferred_heard_block_per_peer_bytes_cap
-            || self
-                .deferred_heard_block_total_bytes
-                .saturating_add(retained_bytes)
-                > self.deferred_heard_block_total_bytes_cap
-        {
-            return false;
-        }
+        // Account for the incoming height before choosing what to evict.
+        // A distant unvalidated block must not displace one near the frontier.
         let deferred = self.deferred_heard_blocks.entry(height).or_default();
         deferred.insert(
-            block_id,
+            block_id.clone(),
             DeferredHeardBlock {
                 peer_id,
                 fact,
@@ -2423,8 +3161,14 @@ impl P2PState {
             },
         );
         self.increment_deferred_accounting(peer_id, retained_bytes);
+        self.enforce_deferred_peer_cap(peer_id);
+        self.enforce_deferred_total_cap();
+        let retained = self
+            .deferred_heard_blocks
+            .get(&height)
+            .is_some_and(|blocks| blocks.contains_key(&block_id));
         self.note_deferred_changed();
-        true
+        retained
     }
 
     /// Returns true if at least one block at `height` is currently held in
@@ -2438,6 +3182,26 @@ impl P2PState {
         self.deferred_heard_blocks
             .get(&height)
             .is_some_and(|blocks| !blocks.is_empty())
+    }
+
+    /// A retained future gossip block can hint at catch-up work, but is not
+    /// evidence of an accepted height. Consult only the bounded pending pool
+    /// on demand at the current non-genesis frontier; prefetched fills and
+    /// entries already drained into a flush lease cannot create more demand.
+    pub(crate) fn retained_future_gossip_height(&self, demanded_height: u64) -> Option<u64> {
+        if demanded_height == 0 || demanded_height != self.first_negative {
+            return None;
+        }
+        self.deferred_heard_blocks
+            .range(demanded_height..)
+            .rev()
+            .find_map(|(height, blocks)| {
+                (*height > demanded_height
+                    && blocks
+                        .values()
+                        .any(|block| block.source == BlockSource::Gossip))
+                .then_some(*height)
+            })
     }
 
     fn deferred_block_is_flushable(&self, height: u64, block: &DeferredHeardBlock) -> bool {
@@ -2494,16 +3258,12 @@ impl P2PState {
                 .unwrap_or_default()
                 > per_peer_bytes_cap
             {
-                if !self.evict_oldest_deferred_entry(Some(peer_id)) {
+                if !self.evict_farthest_deferred_entry_where(|held_by| held_by == peer_id) {
                     break;
                 }
             }
         }
-        while self.deferred_heard_block_total_bytes > total_bytes_cap {
-            if !self.evict_oldest_deferred_entry(None) {
-                break;
-            }
-        }
+        self.enforce_deferred_total_cap();
         self.note_deferred_changed();
     }
 
@@ -2518,7 +3278,7 @@ impl P2PState {
             })
     }
 
-    pub fn take_ready_deferred_heard_blocks(&mut self) -> Vec<(PeerId, NockchainFact)> {
+    pub(crate) fn take_ready_deferred_heard_block_entries(&mut self) -> Vec<DeferredFlushEntry> {
         let ready_heights = self
             .deferred_heard_blocks
             .keys()
@@ -2538,15 +3298,30 @@ impl P2PState {
                     BlockSource::Prefetch => requested,
                 };
                 if flushable {
-                    self.decrement_deferred_accounting(block.peer_id, block.retained_bytes);
-                    ready.push((block.peer_id, block.fact));
+                    self.deferred_flush_inflight
+                        .entry(height)
+                        .or_default()
+                        .insert(
+                            block_id.clone(),
+                            DeferredFlushLease {
+                                peer_id: block.peer_id,
+                                retained_bytes: block.retained_bytes,
+                                valid: true,
+                            },
+                        );
+                    ready.push(DeferredFlushEntry {
+                        height,
+                        block_id,
+                        peer_id: block.peer_id,
+                        fact: block.fact,
+                        source: block.source,
+                        retained_bytes: block.retained_bytes,
+                    });
                 } else {
                     retained.insert(block_id, block);
                 }
             }
-            if retained.is_empty() {
-                self.forget_kernel_block_height_request(height);
-            } else {
+            if !retained.is_empty() {
                 self.deferred_heard_blocks.insert(height, retained);
             }
         }
@@ -2554,6 +3329,86 @@ impl P2PState {
             self.note_deferred_changed();
         }
         ready
+    }
+
+    pub(crate) fn has_deferred_heard_block_lease(&self, height: u64, block_id: &str) -> bool {
+        self.deferred_flush_inflight
+            .get(&height)
+            .and_then(|entries| entries.get(block_id))
+            .is_some_and(|lease| lease.valid)
+    }
+
+    pub(crate) fn complete_deferred_heard_block_entry(&mut self, entry: &DeferredFlushEntry) {
+        let Some(lease) = self
+            .deferred_flush_inflight
+            .get_mut(&entry.height)
+            .and_then(|entries| entries.remove(&entry.block_id))
+        else {
+            return;
+        };
+        if self
+            .deferred_flush_inflight
+            .get(&entry.height)
+            .is_some_and(BTreeMap::is_empty)
+        {
+            self.deferred_flush_inflight.remove(&entry.height);
+        }
+        self.decrement_deferred_accounting(lease.peer_id, lease.retained_bytes);
+        if !self.deferred_flush_inflight.contains_key(&entry.height)
+            && !self.deferred_heard_blocks.contains_key(&entry.height)
+        {
+            self.forget_kernel_block_height_request(entry.height);
+        }
+        self.note_deferred_changed();
+    }
+
+    pub(crate) fn requeue_deferred_heard_block_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = DeferredFlushEntry>,
+    ) {
+        for entry in entries {
+            let Some(lease) = self
+                .deferred_flush_inflight
+                .get_mut(&entry.height)
+                .and_then(|held| held.remove(&entry.block_id))
+            else {
+                continue;
+            };
+            if self
+                .deferred_flush_inflight
+                .get(&entry.height)
+                .is_some_and(BTreeMap::is_empty)
+            {
+                self.deferred_flush_inflight.remove(&entry.height);
+            }
+            if !lease.valid {
+                let height = entry.height;
+                drop(entry);
+                self.decrement_deferred_accounting(lease.peer_id, lease.retained_bytes);
+                if !self.deferred_flush_inflight.contains_key(&height)
+                    && !self.deferred_heard_blocks.contains_key(&height)
+                {
+                    self.forget_kernel_block_height_request(height);
+                }
+                continue;
+            }
+            if entry.source == BlockSource::Prefetch {
+                self.note_kernel_block_height_requested(entry.height);
+            }
+            self.deferred_heard_blocks
+                .entry(entry.height)
+                .or_default()
+                .insert(
+                    entry.block_id,
+                    DeferredHeardBlock {
+                        peer_id: entry.peer_id,
+                        fact: entry.fact,
+                        retained_bytes: entry.retained_bytes,
+                        source: entry.source,
+                    },
+                );
+        }
+        self.note_deferred_changed();
     }
 
     fn note_deferred_changed(&mut self) {
@@ -2641,11 +3496,9 @@ impl P2PState {
         let Some(request_count) = request_context.logical_request_count() else {
             return;
         };
-        // Phase 5: track prefetch byte volume against the responding peer
-        // so the per-peer 60s bandwidth cap can throttle subsequent
-        // prefetch issuance to the same peer.
-        if prefetch_range_from_request(&request_context.request).is_some() {
-            self.record_prefetch_bandwidth(request_context.peer_id, response_bytes);
+        // Bandwidth is charged at the SDK response event, before async routing
+        // or disconnect can change the connection's address bookkeeping.
+        if request_context.prefetch_range().is_some() {
             if failure_count == 0 {
                 self.record_prefetch_range_success(
                     request_context.peer_id, response_bytes, round_trip,
@@ -2673,7 +3526,7 @@ impl P2PState {
         let Some(request_count) = request_context.logical_request_count() else {
             return;
         };
-        if prefetch_range_from_request(&request_context.request).is_some() {
+        if request_context.prefetch_range().is_some() {
             self.record_prefetch_range_failure(request_context.peer_id, timeout, failure_count);
         }
         let stats = self.ensure_peer_stats(request_context.peer_id);
@@ -2742,7 +3595,9 @@ impl P2PState {
         // the singleton-suppression and per-peer cap are maintained without
         // touching the SwarmAction layer. A request whose only item decodes
         // to `BlockRangeWithTxs` is a catch-up prefetch.
-        if let Some((start_height, len)) = prefetch_range_from_request(&context.request) {
+        let prefetch_range = context.prefetch_range();
+        context.issued_prefetch_range = Some(prefetch_range);
+        if let Some((start_height, len)) = prefetch_range {
             let peer_id = context.peer_id;
             self.outbound_requests.insert(request_id, context);
             self.register_prefetch(request_id, peer_id, start_height, len);
@@ -2758,6 +3613,63 @@ impl P2PState {
         request_id: OutboundRequestId,
     ) -> Option<&OutboundRequestContext> {
         self.outbound_requests.get(&request_id)
+    }
+
+    pub(crate) fn charge_received_response(
+        &mut self,
+        request_id: OutboundRequestId,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        receipt_endpoint: Option<SocketAddr>,
+        response_bytes: usize,
+    ) -> Result<Option<PrefetchBudgetObservation>, &'static str> {
+        let is_prefetch = self.inflight_prefetches.contains_key(&request_id);
+        let endpoint = {
+            let Some(context) = self.outbound_requests.get_mut(&request_id) else {
+                return Ok(None);
+            };
+            if context.peer_id != peer_id {
+                return Err("response peer differs from issued request peer");
+            }
+            let selected = context
+                .request_endpoints
+                .iter()
+                .find(|endpoint| endpoint.connection_id == connection_id)
+                .copied();
+            if is_prefetch && selected.is_none() {
+                return Err("range response ConnectionId is absent from issued endpoint snapshot");
+            }
+            if context.response_bytes.is_some() {
+                return Ok(None);
+            }
+            context.response_endpoint = selected.or_else(|| {
+                if is_prefetch {
+                    None
+                } else {
+                    receipt_endpoint.map(|endpoint| RequestEndpoint {
+                        connection_id,
+                        endpoint,
+                    })
+                }
+            });
+            context.response_bytes = Some(response_bytes);
+            if !is_prefetch {
+                return Ok(None);
+            }
+            selected
+                .ok_or("range response has no issued endpoint")?
+                .endpoint
+        };
+        let bucket = IpBucket::from_ip(endpoint.ip());
+        let peer_window_bytes =
+            self.record_prefetch_bandwidth_for_bucket(peer_id, Some(bucket), response_bytes);
+        Ok(Some(PrefetchBudgetObservation {
+            endpoint,
+            bucket,
+            peer_window_bytes,
+            bucket_window_bytes: self.prefetch_bucket_window_bytes(bucket),
+            peer_inflight: self.uncharged_prefetch_count(&peer_id),
+        }))
     }
 
     pub fn remove_outbound_request(
@@ -2796,30 +3708,30 @@ impl P2PState {
                 self.peer_to_outbound_request_items.remove(&context.peer_id);
             }
         }
-        self.update_req_res_inflight_metrics();
+        if !self.retire_disconnected_peer_session(&context.peer_id) {
+            self.update_req_res_inflight_metrics();
+        }
         Some(context)
     }
 
-    pub fn clear_outbound_requests_for_peer(
-        &mut self,
-        peer_id: &PeerId,
-    ) -> Vec<OutboundRequestContext> {
-        let Some(request_ids) = self.peer_to_outbound_requests.remove(peer_id) else {
-            return Vec::new();
-        };
-        self.peer_to_outbound_request_items.remove(peer_id);
+    pub(crate) fn retire_disconnected_peer_session(&mut self, peer: &PeerId) -> bool {
+        if self.peer_connections.contains_key(peer)
+            || self.peer_to_outbound_requests.contains_key(peer)
+        {
+            return false;
+        }
+        // Late consumers can recreate session metadata after the last socket
+        // closes. Retire it only after their recording and retry decisions.
+        self.clear_peer_session_state(peer, false);
+        true
+    }
 
-        let cleared = request_ids
-            .into_iter()
-            .filter_map(|request_id| {
-                // Phase 4: peer-wide cleanup must also drop any prefetch
-                // bookkeeping for requests that originated to this peer.
-                self.clear_prefetch(request_id);
-                self.outbound_requests.remove(&request_id)
-            })
-            .collect::<Vec<_>>();
-        self.update_req_res_inflight_metrics();
-        cleared
+    #[cfg(test)]
+    pub(crate) fn request_session_metadata_count(&self) -> usize {
+        self.peer_stats.len()
+            + self.peer_request_health.len()
+            + self.prefetch_peer_range_stats.len()
+            + self.prefetch_bandwidth_window.len()
     }
 
     pub fn try_admit_inbound_req_res(&mut self, peer_id: PeerId, max_inflight: usize) -> bool {
@@ -2887,6 +3799,101 @@ impl P2PState {
         message_bytes: usize,
     ) {
         self.response_size_hints.record(request, message_bytes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_response_cache_bounds(&self) {
+        let actual_bytes: u64 = self
+            .block_cache
+            .values()
+            .chain(self.tx_cache.values())
+            .chain(self.elders_cache.values())
+            .map(NounSlab::allocated_bytes)
+            .sum();
+        assert_eq!(self.response_cache_bytes, actual_bytes);
+        assert!(actual_bytes <= RESPONSE_CACHE_MAX_BYTES);
+        assert!(
+            self.block_cache.len() + self.tx_cache.len() + self.elders_cache.len()
+                <= RESPONSE_CACHE_MAX_ENTRIES
+        );
+    }
+
+    /// Bound cached scry responses by their actual arena allocations, not
+    /// merely their serialized sizes. Eviction only causes a later scry.
+    fn trim_response_caches(&mut self) {
+        while self.response_cache_bytes > RESPONSE_CACHE_MAX_BYTES
+            || self.block_cache.len() + self.tx_cache.len() + self.elders_cache.len()
+                > RESPONSE_CACHE_MAX_ENTRIES
+        {
+            let removed = self
+                .tx_cache
+                .pop_first()
+                .or_else(|| self.elders_cache.pop_first())
+                .map(|(_, slab)| slab)
+                .or_else(|| self.block_cache.pop_first().map(|(_, slab)| slab));
+            let Some(removed) = removed else { break };
+            self.response_cache_bytes = self
+                .response_cache_bytes
+                .saturating_sub(removed.allocated_bytes());
+        }
+    }
+
+    pub(crate) fn cache_block_response(&mut self, height: u64, slab: NounSlab) {
+        let bytes = slab.allocated_bytes();
+        if let Some(old) = self.block_cache.remove(&height) {
+            self.response_cache_bytes = self
+                .response_cache_bytes
+                .saturating_sub(old.allocated_bytes());
+        }
+        if bytes > RESPONSE_CACHE_MAX_BYTES {
+            return;
+        }
+        self.block_cache.insert(height, slab);
+        self.response_cache_bytes = self.response_cache_bytes.saturating_add(bytes);
+        self.trim_response_caches();
+    }
+
+    pub(crate) fn cache_tx_response(&mut self, id: String, slab: NounSlab) {
+        let bytes = slab.allocated_bytes();
+        if let Some(old) = self.tx_cache.remove(&id) {
+            self.response_cache_bytes = self
+                .response_cache_bytes
+                .saturating_sub(old.allocated_bytes());
+        }
+        if bytes > RESPONSE_CACHE_MAX_BYTES {
+            return;
+        }
+        self.tx_cache.insert(id, slab);
+        self.response_cache_bytes = self.response_cache_bytes.saturating_add(bytes);
+        self.trim_response_caches();
+    }
+
+    pub(crate) fn cache_elders_response(&mut self, id: String, slab: NounSlab) {
+        let bytes = slab.allocated_bytes();
+        if let Some(old) = self.elders_cache.remove(&id) {
+            self.response_cache_bytes = self
+                .response_cache_bytes
+                .saturating_sub(old.allocated_bytes());
+        }
+        if bytes > RESPONSE_CACHE_MAX_BYTES {
+            return;
+        }
+        self.elders_cache.insert(id, slab);
+        self.response_cache_bytes = self.response_cache_bytes.saturating_add(bytes);
+        self.trim_response_caches();
+    }
+
+    pub(crate) fn clear_block_and_elders_responses(&mut self) {
+        let removed_bytes = self
+            .block_cache
+            .values()
+            .chain(self.elders_cache.values())
+            .fold(0u64, |total, slab| {
+                total.saturating_add(slab.allocated_bytes())
+            });
+        self.block_cache.clear();
+        self.elders_cache.clear();
+        self.response_cache_bytes = self.response_cache_bytes.saturating_sub(removed_bytes);
     }
 
     #[cfg(test)]
@@ -2984,7 +3991,7 @@ mod tests {
     use crate::config::{LibP2PConfig, PeerExclusionConfig};
     use crate::ip_block::PeerExclusions;
     use crate::messages::{BatchRequestItem, NockchainDataRequest, NockchainResponse};
-    use crate::p2p_util::PeerIdExt;
+    use crate::p2p_util::{quic_socket_addr, PeerIdExt};
 
     pub static LIBP2P_CONFIG: LazyLock<LibP2PConfig> = LazyLock::new(LibP2PConfig::default);
 
@@ -3018,6 +4025,51 @@ mod tests {
             role_override: Endpoint::Dialer,
             port_use: PortUse::Reuse,
         }
+    }
+
+    #[test]
+    fn ping_failure_counts_follow_authenticated_connection_lifecycle() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        let other = PeerId::random();
+        let failing = ConnectionId::new_unchecked(501);
+        let same_peer = ConnectionId::new_unchecked(502);
+        let same_ip = ConnectionId::new_unchecked(503);
+        let unknown = ConnectionId::new_unchecked(504);
+        let address: Multiaddr = "/ip4/127.0.0.1/udp/5000/quic-v1".parse().unwrap();
+        for (connection, owner) in [(failing, peer), (same_peer, peer), (same_ip, other)] {
+            state.track_connection(
+                connection,
+                owner,
+                &address,
+                dialer_endpoint(address.clone()),
+            );
+        }
+        for expected in 1..=4 {
+            assert_eq!(state.ping_failed(failing, peer), Some(expected));
+            assert!(state.ping_succeeded(same_peer, peer));
+            assert!(state.ping_succeeded(same_ip, other));
+            assert!(!state.ping_succeeded(failing, other));
+            assert_eq!(state.ping_failed(failing, other), None);
+        }
+        assert!(state.ping_succeeded(failing, peer));
+        assert_eq!(state.ping_failed(failing, peer), Some(1));
+        assert_eq!(state.ping_failed(same_peer, peer), Some(1));
+        assert!(!state.ping_succeeded(unknown, peer));
+        assert_eq!(state.ping_failed(unknown, peer), None);
+        assert_eq!(state.connections.len(), 3);
+
+        let resolved: Multiaddr = "/ip4/127.0.0.2/udp/5000/quic-v1".parse().unwrap();
+        state.update_connection_address(failing, &resolved);
+        assert_eq!(state.ping_failed(failing, peer), Some(2));
+        state.lost_connection(failing);
+        assert!(!state.ping_succeeded(failing, peer));
+        assert_eq!(state.ping_failed(failing, peer), None);
+        assert_eq!(state.connections.len(), 2);
+        state.track_connection(failing, other, &address, dialer_endpoint(address.clone()));
+        assert_eq!(state.ping_failed(failing, peer), None);
+        assert_eq!(state.ping_failed(failing, other), Some(1));
+        assert_eq!(state.ping_failed(same_peer, peer), Some(2));
     }
 
     #[test]
@@ -3152,6 +4204,49 @@ mod tests {
             .expect("expected ip info for tracked connection");
 
         assert!(ip_info.connections.contains(&connection_id));
+    }
+
+    #[test]
+    fn inbound_peers_do_not_satisfy_outbound_recovery_health() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let addr: Multiaddr = "/ip4/203.0.113.10/udp/3006/quic-v1"
+            .parse()
+            .expect("valid remote address");
+        let inbound_id = ConnectionId::new_unchecked(401);
+        let outbound_id = ConnectionId::new_unchecked(402);
+        let inbound_peer = PeerId::random();
+        let outbound_peer = PeerId::random();
+
+        state.track_connection(
+            inbound_id,
+            inbound_peer,
+            &addr,
+            ConnectedPoint::Listener {
+                local_addr: "/ip4/0.0.0.0/udp/3006/quic-v1"
+                    .parse()
+                    .expect("valid local address"),
+                send_back_addr: addr.clone(),
+            },
+        );
+        assert_eq!(state.peer_connections.len(), 1);
+        assert_eq!(state.outbound_peer_count(), 0);
+        assert!(!state.has_outbound_connection_at_address(&addr));
+
+        state.track_connection(
+            outbound_id,
+            outbound_peer,
+            &addr,
+            dialer_endpoint(addr.clone()),
+        );
+        assert_eq!(state.outbound_peer_count(), 1);
+        assert!(state.has_outbound_connection_at_address(&addr));
+        assert!(!state.has_outbound_connection_at_address(
+            &"/ip4/192.0.2.1/udp/3006/quic-v1".parse().unwrap()
+        ));
+        state.lost_connection(outbound_id);
+        assert_eq!(state.peer_connections.len(), 1);
+        assert_eq!(state.outbound_peer_count(), 0);
+        assert!(!state.has_outbound_connection_at_address(&addr));
     }
 
     #[test]
@@ -3393,33 +4488,120 @@ mod tests {
         let metrics = isolated_test_metrics();
         let mut state = P2PState::new(metrics, LIBP2P_CONFIG.seen_tx_clear_interval);
         let cooldown = Duration::from_secs(5);
+        let ttl = Duration::from_secs(35);
         let start = Instant::now();
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
         let key_a = "block-a:peer-1";
         let key_b = "block-a:peer-2";
 
         assert!(
-            state.should_send_elders_request(key_a, start, cooldown),
+            state.should_send_elders_request(peer_a, key_a, start, cooldown, ttl),
             "first elders request for a key should send"
         );
+        state.clear_elders_inflight(&peer_a);
         assert!(
-            !state.should_send_elders_request(key_a, start + Duration::from_secs(1), cooldown),
+            !state.should_send_elders_request(
+                peer_a,
+                key_a,
+                start + Duration::from_secs(1),
+                cooldown,
+                ttl
+            ),
             "identical elders request inside the cooldown window should be suppressed"
         );
         assert!(
-            state.should_send_elders_request(key_b, start, cooldown),
+            state.should_send_elders_request(peer_b, key_b, start, cooldown, ttl),
             "same block toward a different peer is a distinct key and should send"
         );
+        state.clear_elders_inflight(&peer_a);
         assert!(
-            state.should_send_elders_request(key_a, start + cooldown, cooldown),
+            state.should_send_elders_request(peer_a, key_a, start + cooldown, cooldown, ttl),
             "elders request after the cooldown elapses should send again"
         );
+        state.clear_elders_inflight(&peer_a);
         assert!(
             !state.should_send_elders_request(
+                peer_a,
                 key_a,
                 start + cooldown + Duration::from_secs(1),
-                cooldown
+                cooldown,
+                ttl
             ),
             "resend should re-arm the cooldown window"
+        );
+    }
+
+    /// One elders request in flight per peer, whatever block id it names.
+    #[test]
+    fn elders_slot_gates_distinct_block_ids_from_one_peer() {
+        let metrics = isolated_test_metrics();
+        let mut state = P2PState::new(metrics, LIBP2P_CONFIG.seen_tx_clear_interval);
+        let cooldown = Duration::from_secs(5);
+        let ttl = Duration::from_secs(35);
+        let start = Instant::now();
+        let peer = PeerId::random();
+        let other = PeerId::random();
+
+        assert!(
+            state.should_send_elders_request(peer, "request-1:p", start, cooldown, ttl),
+            "the first elders request to a peer should send"
+        );
+        for (i, at) in [1u64, 2, 30].iter().enumerate() {
+            assert!(
+                !state.should_send_elders_request(
+                    peer,
+                    &format!("request-{}:p", i + 2),
+                    start + Duration::from_secs(*at),
+                    cooldown,
+                    ttl
+                ),
+                "a fresh block id must not buy another elders request while the peer's slot is held"
+            );
+        }
+        assert!(
+            state.should_send_elders_request(other, "request-2:q", start, cooldown, ttl),
+            "the slot is per peer, so another peer is unaffected"
+        );
+
+        // The walk's next step goes out as soon as the response lands.
+        state.clear_elders_inflight(&peer);
+        assert!(
+            state.should_send_elders_request(
+                peer,
+                "next-step:p",
+                start + Duration::from_millis(20),
+                cooldown,
+                ttl
+            ),
+            "releasing the slot on the response must not delay the sequential walk"
+        );
+
+        // A peer that never answers frees its slot at the TTL.
+        assert!(
+            state.should_send_elders_request(peer, "after-ttl:p", start + ttl * 2, cooldown, ttl),
+            "a silent peer must not hold its slot forever"
+        );
+    }
+
+    #[test]
+    fn elders_slot_is_released_when_the_peer_session_ends() {
+        let metrics = isolated_test_metrics();
+        let mut state = P2PState::new(metrics, LIBP2P_CONFIG.seen_tx_clear_interval);
+        let peer = PeerId::random();
+        assert!(state.should_send_elders_request(
+            peer,
+            "b:p",
+            Instant::now(),
+            Duration::from_secs(5),
+            Duration::from_secs(35)
+        ));
+        assert_eq!(state.elders_inflight_len(), 1);
+        state.remove_peer(&peer);
+        assert_eq!(
+            state.elders_inflight_len(),
+            0,
+            "a disconnected peer must not leave its elders slot claimed"
         );
     }
 
@@ -3756,7 +4938,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lost_connection_clears_outbound_request_contexts_for_disconnected_peer() {
+    fn lost_connection_retains_requests_until_sdk_terminal_event() {
         let metrics = Arc::new(
             NockchainP2PMetrics::register(gnort::global_metrics_registry())
                 .expect("Could not register metrics"),
@@ -3794,6 +4976,10 @@ mod tests {
         let remaining_peers = state.lost_connection(connection_id);
 
         assert_eq!(remaining_peers, 0);
+        assert!(state.outbound_request_context(request_id).is_some());
+        assert_eq!(state.outbound_request_count_for_peer(peer_id), 1);
+        assert_eq!(state.total_outbound_request_count(), 1);
+        state.remove_outbound_request(request_id);
         assert!(state.outbound_request_context(request_id).is_none());
         assert_eq!(state.outbound_request_count_for_peer(peer_id), 0);
         assert_eq!(state.total_outbound_request_count(), 0);
@@ -4080,7 +5266,7 @@ mod tests {
         let tx_id = String::from("tx-cache-id");
         let mut cached_tx = NounSlab::new();
         cached_tx.set_root(D(0));
-        state.tx_cache.insert(tx_id.clone(), cached_tx.clone());
+        state.cache_tx_response(tx_id.clone(), cached_tx.clone());
 
         let hit = state
             .check_cache(
@@ -4550,6 +5736,76 @@ mod tests {
     }
 
     #[test]
+    fn retained_future_gossip_hint_requires_current_frontier_and_pending_gossip() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        state.first_negative = 3;
+        assert_eq!(state.retained_future_gossip_height(3), None);
+        assert!(state.defer_heard_block_with_source(
+            peer,
+            30,
+            String::from("prefetch-30"),
+            dummy_heard_block_fact(),
+            BlockSource::Prefetch,
+        ));
+        assert_eq!(state.retained_future_gossip_height(3), None);
+        assert!(state.defer_heard_block(
+            peer,
+            24,
+            String::from("gossip-24"),
+            dummy_heard_block_fact(),
+        ));
+        assert_eq!(state.retained_future_gossip_height(3), Some(24));
+        assert_eq!(state.retained_future_gossip_height(2), None);
+        assert_eq!(state.retained_future_gossip_height(4), None);
+        assert!(!state.has_kernel_block_height_request(24));
+        assert!(!state.has_ready_deferred_heard_blocks());
+        state.first_negative = 0;
+        assert_eq!(state.retained_future_gossip_height(0), None);
+        state.first_negative = 24;
+        assert_eq!(state.retained_future_gossip_height(24), None);
+        let drained = state.take_ready_deferred_heard_block_entries();
+        assert_eq!(drained.len(), 1);
+        // Even if the frontier moves back, a drained lease is not a hint.
+        state.first_negative = 3;
+        assert_eq!(state.retained_future_gossip_height(3), None);
+        for entry in drained {
+            state.complete_deferred_heard_block_entry(&entry);
+        }
+    }
+
+    #[test]
+    fn retained_future_gossip_hint_forgets_invalidated_and_evicted_entries() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        state.first_negative = 3;
+        assert!(state.defer_heard_block(
+            peer,
+            24,
+            String::from("gossip-24"),
+            dummy_heard_block_fact(),
+        ));
+        assert!(state.defer_heard_block(
+            peer,
+            10,
+            String::from("gossip-10"),
+            dummy_heard_block_fact(),
+        ));
+        assert_eq!(state.retained_future_gossip_height(3), Some(24));
+        assert!(state.invalidate_deferred_block_id("gossip-24"));
+        assert_eq!(state.retained_future_gossip_height(3), Some(10));
+        state.set_deferred_heard_block_byte_caps(0, 0);
+        assert_eq!(state.retained_future_gossip_height(3), None);
+        assert!(!state.defer_heard_block(
+            peer,
+            u64::MAX,
+            String::from("rejected"),
+            dummy_heard_block_fact(),
+        ));
+        assert_eq!(state.retained_future_gossip_height(3), None);
+    }
+
+    #[test]
     fn has_deferred_block_at_height_reflects_buffer_contents() {
         let mut state = P2PState::new(isolated_test_metrics(), 100);
         let peer_id = PeerId::random();
@@ -4577,7 +5833,9 @@ mod tests {
 
         // Drain everything by advancing frontier.
         state.first_negative = 100;
-        let _ = state.take_ready_deferred_heard_blocks();
+        for entry in state.take_ready_deferred_heard_block_entries() {
+            state.complete_deferred_heard_block_entry(&entry);
+        }
         assert!(!state.has_deferred_block_at_height(50));
         assert!(
             state.has_deferred_block_at_height(51),
@@ -4586,7 +5844,9 @@ mod tests {
         assert_eq!(state.deferred_heard_block_total(), 1);
 
         state.note_kernel_block_height_requested(51);
-        let _ = state.take_ready_deferred_heard_blocks();
+        for entry in state.take_ready_deferred_heard_block_entries() {
+            state.complete_deferred_heard_block_entry(&entry);
+        }
         assert!(!state.has_deferred_block_at_height(51));
         assert_eq!(state.deferred_heard_block_total(), 0);
     }
@@ -4607,7 +5867,7 @@ mod tests {
         assert!(!state.has_ready_deferred_heard_blocks());
         assert!(!state.has_ready_deferred_block_at_height(11));
         assert!(
-            state.take_ready_deferred_heard_blocks().is_empty(),
+            state.take_ready_deferred_heard_block_entries().is_empty(),
             "frontier progress alone must not flush prefetched blocks"
         );
         assert!(state.has_deferred_block_at_height(11));
@@ -4615,8 +5875,11 @@ mod tests {
         state.note_kernel_block_height_requested(11);
         assert!(state.has_ready_deferred_heard_blocks());
         assert!(state.has_ready_deferred_block_at_height(11));
-        let ready = state.take_ready_deferred_heard_blocks();
+        let ready = state.take_ready_deferred_heard_block_entries();
         assert_eq!(ready.len(), 1);
+        for entry in &ready {
+            state.complete_deferred_heard_block_entry(entry);
+        }
         assert!(!state.has_deferred_block_at_height(11));
         assert!(!state.has_kernel_block_height_request(11));
     }
@@ -4635,9 +5898,133 @@ mod tests {
 
         assert!(state.has_ready_deferred_heard_blocks());
         assert!(state.has_ready_deferred_block_at_height(11));
-        let ready = state.take_ready_deferred_heard_blocks();
+        let ready = state.take_ready_deferred_heard_block_entries();
         assert_eq!(ready.len(), 1);
+        for entry in &ready {
+            state.complete_deferred_heard_block_entry(entry);
+        }
         assert!(!state.has_deferred_block_at_height(11));
+    }
+
+    #[test]
+    fn deferred_flush_leases_preserve_capacity_provenance_and_requested_tail() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        state.first_negative = 11;
+        state.note_kernel_block_height_requested(11);
+        assert!(state.defer_heard_block_with_source(
+            peer,
+            11,
+            "a".into(),
+            dummy_heard_block_fact(),
+            BlockSource::Prefetch
+        ));
+        assert!(state.defer_heard_block_with_source(
+            peer,
+            11,
+            "b".into(),
+            dummy_heard_block_fact(),
+            BlockSource::Gossip
+        ));
+        let bytes = state.deferred_heard_block_total_bytes();
+        let mut leased = state.take_ready_deferred_heard_block_entries();
+        assert_eq!(leased.len(), 2);
+        assert_eq!(state.deferred_heard_block_total(), 2);
+        assert_eq!(state.deferred_heard_block_total_bytes(), bytes);
+        assert!(!state.defer_heard_block(peer, 11, "a".into(), dummy_heard_block_fact()));
+        let completed = leased.pop().unwrap();
+        state.complete_deferred_heard_block_entry(&completed);
+        state.requeue_deferred_heard_block_entries(leased);
+        assert_eq!(state.deferred_heard_block_total(), 1);
+        assert!(state.has_kernel_block_height_request(11));
+        let retry = state.take_ready_deferred_heard_block_entries();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].source, BlockSource::Prefetch);
+        state.complete_deferred_heard_block_entry(&retry[0]);
+        assert_eq!(state.deferred_heard_block_total(), 0);
+        assert_eq!(state.deferred_heard_block_total_bytes(), 0);
+        assert!(!state.has_kernel_block_height_request(11));
+    }
+
+    #[test]
+    fn leased_deferred_entries_keep_their_capacity_during_concurrent_admission() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        state.first_negative = 11;
+        assert!(state.defer_heard_block(peer, 11, "leased".into(), dummy_heard_block_fact()));
+        let bytes = state.deferred_heard_block_total_bytes();
+        state.set_deferred_heard_block_byte_caps(bytes, bytes);
+        let leased = state.take_ready_deferred_heard_block_entries();
+        assert!(!state.defer_heard_block(
+            PeerId::random(),
+            12,
+            "new".into(),
+            dummy_heard_block_fact()
+        ));
+        assert_eq!(state.deferred_heard_block_total_bytes(), bytes);
+        assert_eq!(state.deferred_heard_block_total(), 1);
+        state.requeue_deferred_heard_block_entries(leased);
+        assert!(state.has_deferred_block_at_height(11));
+        assert_eq!(state.deferred_heard_block_total_bytes(), bytes);
+    }
+
+    #[test]
+    fn invalidated_deferred_leases_keep_capacity_until_retirement() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        state.first_negative = 11;
+        state.note_kernel_block_height_requested(11);
+        assert!(state.defer_heard_block_with_source(
+            peer,
+            11,
+            "leased".into(),
+            dummy_heard_block_fact(),
+            BlockSource::Prefetch
+        ));
+        let bytes = state.deferred_heard_block_total_bytes();
+        let leased = state.take_ready_deferred_heard_block_entries();
+        assert!(state.has_deferred_heard_block_lease(11, "leased"));
+        assert!(state.invalidate_deferred_block_id("leased"));
+        assert!(!state.has_deferred_heard_block_lease(11, "leased"));
+        assert_eq!(state.deferred_heard_block_total(), 1);
+        assert_eq!(state.deferred_heard_block_total_bytes(), bytes);
+        assert!(state.has_kernel_block_height_request(11));
+        assert!(!state.invalidate_deferred_block_id("leased"));
+        state.requeue_deferred_heard_block_entries(leased);
+        assert!(!state.has_deferred_block_at_height(11));
+        assert!(!state.has_kernel_block_height_request(11));
+        assert_eq!(state.deferred_heard_block_total(), 0);
+        assert_eq!(state.deferred_heard_block_total_bytes(), 0);
+    }
+
+    #[test]
+    fn supplier_cleanup_tombstones_leases_without_resurrecting_them() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        let other = PeerId::random();
+        state.first_negative = 11;
+        assert!(state.defer_heard_block(peer, 11, "discarded".into(), dummy_heard_block_fact()));
+        assert!(state.defer_heard_block(other, 11, "retained".into(), dummy_heard_block_fact()));
+        let leased = state.take_ready_deferred_heard_block_entries();
+        let bytes = state.deferred_heard_block_total_bytes();
+        state.remove_peer(&peer);
+        assert!(!state.has_deferred_heard_block_lease(11, "discarded"));
+        assert!(state.has_deferred_heard_block_lease(11, "retained"));
+        assert_eq!(state.deferred_heard_block_total(), 2);
+        assert_eq!(state.deferred_heard_block_total_bytes(), bytes);
+        assert!(!state.defer_heard_block(peer, 11, "discarded".into(), dummy_heard_block_fact()));
+        state.requeue_deferred_heard_block_entries(leased);
+        assert_eq!(state.deferred_heard_block_total(), 1);
+        assert!(!state.deferred_heard_block_count_by_peer.contains_key(&peer));
+        assert_eq!(
+            state.deferred_heard_block_count_by_peer.get(&other),
+            Some(&1)
+        );
+        let retry = state.take_ready_deferred_heard_block_entries();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].block_id, "retained");
+        state.complete_deferred_heard_block_entry(&retry[0]);
+        assert_eq!(state.deferred_heard_block_total(), 0);
     }
 
     #[test]
@@ -4749,6 +6136,471 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_bucket_budget_survives_peer_identity_churn() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        state.set_prefetch_safety_config(4, Duration::from_secs(60), 100);
+        let now = Instant::now();
+        for index in 0..4 {
+            let peer = PeerId::random();
+            let connection = ConnectionId::new_unchecked(2000 + index);
+            let address: Multiaddr = format!("/ip4/198.51.100.7/tcp/{}", 5000 + index)
+                .parse()
+                .expect("valid address");
+            state.track_connection(connection, peer, &address, dialer_endpoint(address.clone()));
+            assert!(!state.prefetch_bucket_bandwidth_exhausted(&peer));
+            let bucket = state.peer_ip_bucket(&peer).unwrap();
+            state.record_prefetch_bandwidth_for_bucket_at(peer, Some(bucket), 100, now);
+            state.lost_connection(connection);
+            assert_eq!(state.prefetch_bandwidth_window_bytes_at(&peer, now), 0);
+        }
+
+        let next_peer = PeerId::random();
+        let same_ip: Multiaddr = "/ip4/198.51.100.7/tcp/6000".parse().unwrap();
+        state.track_connection(
+            ConnectionId::new_unchecked(2100),
+            next_peer,
+            &same_ip,
+            dialer_endpoint(same_ip.clone()),
+        );
+        assert_eq!(state.prefetch_bandwidth_window_bytes(&next_peer), 0);
+        assert!(state.prefetch_bucket_bandwidth_exhausted(&next_peer));
+
+        let other_peer = PeerId::random();
+        let other_ip: Multiaddr = "/ip4/203.0.113.8/tcp/6000".parse().unwrap();
+        state.track_connection(
+            ConnectionId::new_unchecked(2101),
+            other_peer,
+            &other_ip,
+            dialer_endpoint(other_ip.clone()),
+        );
+        assert!(!state.prefetch_bucket_bandwidth_exhausted(&other_peer));
+        let endpoint = RequestEndpoint {
+            connection_id: ConnectionId::new_unchecked(2100),
+            endpoint: "198.51.100.7:6000".parse().unwrap(),
+        };
+        let bucket = state.peer_ip_bucket(&next_peer).unwrap();
+        let within_window = now + PREFETCH_BANDWIDTH_WINDOW;
+        assert_eq!(
+            state.prefetch_bucket_window_bytes_at(bucket, within_window),
+            400
+        );
+        assert!(state
+            .prefetch_throttle_at(&next_peer, [endpoint], within_window)
+            .is_some());
+        let expired = now + Duration::from_secs(61) + Duration::from_nanos(1);
+        assert_eq!(state.prefetch_bucket_window_bytes_at(bucket, expired), 0);
+        assert!(state
+            .prefetch_throttle_at(&next_peer, [endpoint], expired)
+            .is_none());
+    }
+
+    #[test]
+    fn prefetch_response_keeps_dispatch_bucket_after_disconnect() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        state.set_prefetch_safety_config(4, Duration::from_secs(60), 100);
+        let peer = PeerId::random();
+        let address: Multiaddr = "/ip4/198.51.100.7/udp/6000/quic-v1".parse().unwrap();
+        let connection = ConnectionId::new_unchecked(2300);
+        state.track_connection(connection, peer, &address, dialer_endpoint(address.clone()));
+        let request_id = fresh_outbound_request_id();
+        state.record_outbound_request(
+            request_id,
+            OutboundRequestContext::new(
+                peer,
+                NockchainRequest::BatchRequest {
+                    pow: [0; 16],
+                    nonce: 0,
+                    items: vec![crate::messages::BatchRequestItem {
+                        item_id: 0,
+                        message: crate::messages::block_range_with_txs_request_message(42, 2)
+                            .unwrap(),
+                    }],
+                },
+            ),
+        );
+        state
+            .outbound_requests
+            .get_mut(&request_id)
+            .unwrap()
+            .request_endpoints
+            .push(RequestEndpoint {
+                connection_id: connection,
+                endpoint: quic_socket_addr(&address).unwrap(),
+            });
+        state.lost_connection(connection);
+        assert!(state.outbound_request_context(request_id).is_some());
+        let charge = state
+            .charge_received_response(request_id, peer, connection, None, 400)
+            .unwrap()
+            .unwrap();
+        assert_eq!(charge.endpoint, quic_socket_addr(&address).unwrap());
+        assert_eq!(charge.bucket_window_bytes, 400);
+        assert!(state
+            .charge_received_response(request_id, peer, connection, None, 400)
+            .unwrap()
+            .is_none());
+        state.remove_outbound_request(request_id);
+
+        let next_peer = PeerId::random();
+        let next_connection = ConnectionId::new_unchecked(2301);
+        state.track_connection(
+            next_connection,
+            next_peer,
+            &address,
+            dialer_endpoint(address.clone()),
+        );
+        assert!(state.prefetch_bucket_bandwidth_exhausted(&next_peer));
+    }
+    fn range_context_with_endpoints(
+        peer: PeerId,
+        endpoints: &[RequestEndpoint],
+    ) -> OutboundRequestContext {
+        let mut context = OutboundRequestContext::new(
+            peer,
+            NockchainRequest::BatchRequest {
+                pow: [0; 16],
+                nonce: 0,
+                items: vec![crate::messages::BatchRequestItem {
+                    item_id: 0,
+                    message: crate::messages::block_range_with_txs_request_message(42, 2).unwrap(),
+                }],
+            },
+        );
+        context.request_endpoints.extend_from_slice(endpoints);
+        context
+    }
+
+    #[test]
+    fn range_response_charges_selected_connection_and_gates_every_candidate_bucket() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        state.set_prefetch_safety_config(4, Duration::from_secs(60), 100);
+        let peer = PeerId::random();
+        let addresses: [Multiaddr; 2] = [
+            "/ip4/198.51.100.7/udp/6000/quic-v1".parse().unwrap(),
+            "/ip4/203.0.113.8/udp/6001/quic-v1".parse().unwrap(),
+        ];
+        let endpoints = [0, 1].map(|index| RequestEndpoint {
+            connection_id: ConnectionId::new_unchecked(2400 + index),
+            endpoint: quic_socket_addr(&addresses[index]).unwrap(),
+        });
+        for (connection, address) in endpoints.iter().zip(&addresses) {
+            state.track_connection(
+                connection.connection_id,
+                peer,
+                address,
+                dialer_endpoint(address.clone()),
+            );
+        }
+        let request_id = fresh_outbound_request_id();
+        let context = range_context_with_endpoints(peer, &endpoints);
+        assert!(!context.request_endpoints.spilled());
+        state.record_outbound_request(request_id, context);
+        state.lost_connection(endpoints[0].connection_id);
+        let charge = state
+            .charge_received_response(request_id, peer, endpoints[1].connection_id, None, 400)
+            .unwrap()
+            .unwrap();
+        assert_eq!(charge.endpoint, endpoints[1].endpoint);
+        assert_eq!(
+            state.prefetch_bucket_window_bytes(IpBucket::from_ip(endpoints[0].endpoint.ip())),
+            0
+        );
+        assert_eq!(charge.bucket_window_bytes, 400);
+        let fresh_identity = PeerId::random();
+        let (blocked, _) = state.prefetch_throttle(&fresh_identity, endpoints).unwrap();
+        assert_eq!(blocked.connection_id, endpoints[1].connection_id);
+        assert!(state
+            .prefetch_throttle(&fresh_identity, [endpoints[0]])
+            .is_none());
+
+        // The 60-second window plus at most one conservative bin second
+        // expires independently of peer identity or connection removal.
+        let expired = Instant::now() + Duration::from_secs(62);
+        assert!(state
+            .prefetch_throttle_at(&fresh_identity, endpoints, expired)
+            .is_none());
+        state.remove_outbound_request(request_id);
+        assert_eq!(state.inflight_prefetch_count_for_peer(&peer), 0);
+    }
+
+    #[test]
+    fn range_response_with_unissued_connection_cannot_charge_another_bucket() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        let endpoint = RequestEndpoint {
+            connection_id: ConnectionId::new_unchecked(2500),
+            endpoint: "198.51.100.7:6000".parse().unwrap(),
+        };
+        let request_id = fresh_outbound_request_id();
+        state.record_outbound_request(request_id, range_context_with_endpoints(peer, &[endpoint]));
+        assert_eq!(
+            state
+                .charge_received_response(
+                    request_id,
+                    peer,
+                    ConnectionId::new_unchecked(2501),
+                    None,
+                    400
+                )
+                .err(),
+            Some("range response ConnectionId is absent from issued endpoint snapshot")
+        );
+        assert_eq!(
+            state
+                .charge_received_response(
+                    request_id,
+                    PeerId::random(),
+                    endpoint.connection_id,
+                    None,
+                    400
+                )
+                .err(),
+            Some("response peer differs from issued request peer")
+        );
+        assert_eq!(state.prefetch_bandwidth_window_bytes(&peer), 0);
+        assert_eq!(
+            state.prefetch_bucket_window_bytes(IpBucket::from_ip(endpoint.endpoint.ip())),
+            0
+        );
+        assert!(state
+            .outbound_request_context(request_id)
+            .unwrap()
+            .response_bytes
+            .is_none());
+        state.remove_outbound_request(request_id);
+        assert_eq!(state.total_outbound_request_count(), 0);
+        assert_eq!(state.inflight_prefetch_count_for_peer(&peer), 0);
+    }
+
+    #[test]
+    fn block_echo_source_history_bounds_peer_block_pairs() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        for index in 0..=BLOCK_ECHO_SOURCE_CAP {
+            state.record_block_echo_source(peer, &format!("block-{index}"));
+        }
+        assert_eq!(state.block_echo_source_order.len(), BLOCK_ECHO_SOURCE_CAP);
+        assert_eq!(state.block_echo_sources.len(), BLOCK_ECHO_SOURCE_CAP);
+        assert!(state.block_echo_sources("block-0").is_none());
+        assert!(state
+            .block_echo_sources(&format!("block-{BLOCK_ECHO_SOURCE_CAP}"))
+            .is_some_and(|sources| sources.contains(&peer)));
+    }
+
+    #[test]
+    fn prefetch_bucket_same_bin_charges_do_not_refresh_expiry() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        state.set_prefetch_safety_config(4, Duration::from_secs(60), 100);
+        let peer = PeerId::random();
+        let address: Multiaddr = "/ip4/198.51.100.7/udp/6000/quic-v1".parse().unwrap();
+        let endpoint = RequestEndpoint {
+            connection_id: ConnectionId::new_unchecked(2200),
+            endpoint: quic_socket_addr(&address).unwrap(),
+        };
+        state.track_connection(
+            endpoint.connection_id,
+            peer,
+            &address,
+            dialer_endpoint(address.clone()),
+        );
+        let bucket = state.peer_ip_bucket(&peer).unwrap();
+        let start = Instant::now();
+        for millis in 0..=1000 {
+            state.record_prefetch_bandwidth_for_bucket_at(
+                peer,
+                Some(bucket),
+                1,
+                start + Duration::from_millis(millis),
+            );
+        }
+
+        let within_window = start + PREFETCH_BANDWIDTH_WINDOW;
+        assert_eq!(
+            state.prefetch_bandwidth_window_bytes_at(&peer, within_window),
+            1001
+        );
+        assert_eq!(
+            state.prefetch_bucket_window_bytes_at(bucket, within_window),
+            1001
+        );
+        let inclusive_bin_expiry = start + Duration::from_secs(61);
+        // The final charge is exactly 60 seconds old and must still count.
+        assert_eq!(
+            state.prefetch_bandwidth_window_bytes_at(&peer, inclusive_bin_expiry),
+            1
+        );
+        assert_eq!(
+            state.prefetch_bucket_window_bytes_at(bucket, inclusive_bin_expiry),
+            1001
+        );
+        let (_, observation) = state
+            .prefetch_throttle_at(&peer, [endpoint], inclusive_bin_expiry)
+            .unwrap();
+        assert_eq!(observation.peer_window_bytes, 1);
+        assert_eq!(observation.bucket_window_bytes, 1001);
+
+        // Even a charge at the bin's exact end cannot move its expiry.
+        let expired = inclusive_bin_expiry + Duration::from_nanos(1);
+        assert_eq!(state.prefetch_bandwidth_window_bytes_at(&peer, expired), 0);
+        assert_eq!(state.prefetch_bucket_window_bytes_at(bucket, expired), 0);
+        assert!(state
+            .prefetch_throttle_at(&peer, [endpoint], expired)
+            .is_none());
+    }
+
+    #[test]
+    fn prefetch_bucket_window_keeps_recent_bytes_across_bin_boundaries() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        let bucket = IpBucket::from_ip("198.51.100.7".parse().unwrap());
+        let start = Instant::now();
+        let next_bin = start + Duration::from_secs(1) + Duration::from_nanos(1);
+        state.record_prefetch_bandwidth_for_bucket_at(peer, Some(bucket), 100, start);
+        state.record_prefetch_bandwidth_for_bucket_at(peer, Some(bucket), 200, next_bin);
+        assert_eq!(
+            state.prefetch_bucket_window_bytes_at(bucket, start + PREFETCH_BANDWIDTH_WINDOW),
+            300
+        );
+
+        let within_window = next_bin + PREFETCH_BANDWIDTH_WINDOW;
+        assert_eq!(
+            state.prefetch_bucket_window_bytes_at(bucket, within_window),
+            200
+        );
+        assert_eq!(
+            state.record_prefetch_bandwidth_for_bucket_at(peer, Some(bucket), 300, within_window),
+            500
+        );
+        assert_eq!(
+            state.prefetch_bucket_window_bytes_at(bucket, within_window),
+            500
+        );
+        let expired = next_bin + Duration::from_secs(61) + Duration::from_nanos(1);
+        assert_eq!(state.prefetch_bucket_window_bytes_at(bucket, expired), 300);
+    }
+
+    #[test]
+    fn prefetch_bucket_steady_load_ages_without_false_throttling() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let mib = 1024 * 1024;
+        state.set_prefetch_safety_config(8, Duration::from_secs(20), 200 * mib);
+        let peers = [PeerId::random(), PeerId::random()];
+        let addresses: [Multiaddr; 2] = [
+            "/ip4/198.51.100.7/udp/6000/quic-v1".parse().unwrap(),
+            "/ip4/198.51.100.7/udp/6001/quic-v1".parse().unwrap(),
+        ];
+        let endpoints = [0, 1].map(|index| RequestEndpoint {
+            connection_id: ConnectionId::new_unchecked(2600 + index),
+            endpoint: quic_socket_addr(&addresses[index]).unwrap(),
+        });
+        for (index, peer) in peers.iter().enumerate() {
+            state.track_connection(
+                endpoints[index].connection_id,
+                *peer,
+                &addresses[index],
+                dialer_endpoint(addresses[index].clone()),
+            );
+        }
+        let bucket = state.peer_ip_bucket(&peers[0]).unwrap();
+        assert_eq!(state.peer_ip_bucket(&peers[1]), Some(bucket));
+        let start = Instant::now();
+        for index in 0..800u64 {
+            let now = start + Duration::from_millis(index * 400);
+            let peer = peers[(index % 2) as usize];
+            let peer_bytes =
+                state.record_prefetch_bandwidth_for_bucket_at(peer, Some(bucket), mib, now);
+            assert!(peer_bytes <= 76 * mib);
+            // At 2.5 MiB/s, a 60-second inclusive window plus at most
+            // one second of conservative debt cannot approach 800 MiB.
+            assert!(state.prefetch_bucket_window_bytes_at(bucket, now) <= 154 * mib);
+            assert!(state.prefetch_bandwidth_bucket_window[&bucket].len() <= 61);
+            for (index, peer) in peers.iter().enumerate() {
+                assert!(state
+                    .prefetch_throttle_at(peer, [endpoints[index]], now)
+                    .is_none());
+            }
+        }
+
+        let now = start + Duration::from_secs(320);
+        for (index, peer) in peers.iter().enumerate() {
+            assert_eq!(
+                state.prefetch_bandwidth_window_bytes_at(peer, now),
+                75 * mib
+            );
+            assert!(state
+                .prefetch_throttle_at(peer, [endpoints[index]], now)
+                .is_none());
+        }
+        let bucket_bytes = state.prefetch_bucket_window_bytes_at(bucket, now);
+        // Exactly 150 MiB arrived in the true window; no more than three
+        // additional 400-ms-spaced charges can occupy the conservative sliver.
+        assert!((150 * mib..=153 * mib).contains(&bucket_bytes));
+        assert!(bucket_bytes < state.prefetch_bucket_bandwidth_cap());
+    }
+
+    #[test]
+    fn prefetch_bucket_sustained_over_budget_load_still_throttles() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let mib = 1024 * 1024;
+        state.set_prefetch_safety_config(8, Duration::from_secs(20), 200 * mib);
+        let peers: [PeerId; 8] = std::array::from_fn(|_| PeerId::random());
+        let endpoints: [RequestEndpoint; 8] = std::array::from_fn(|index| {
+            let address: Multiaddr = format!("/ip4/198.51.100.7/udp/{}/quic-v1", 6100 + index)
+                .parse()
+                .unwrap();
+            let endpoint = RequestEndpoint {
+                connection_id: ConnectionId::new_unchecked(2700 + index),
+                endpoint: quic_socket_addr(&address).unwrap(),
+            };
+            state.track_connection(
+                endpoint.connection_id,
+                peers[index],
+                &address,
+                dialer_endpoint(address.clone()),
+            );
+            endpoint
+        });
+        let bucket = state.peer_ip_bucket(&peers[0]).unwrap();
+        let start = Instant::now();
+        for index in 0..2400u64 {
+            let now = start + Duration::from_millis(index * 50);
+            state.record_prefetch_bandwidth_for_bucket_at(
+                peers[(index % 8) as usize],
+                Some(bucket),
+                mib,
+                now,
+            );
+            assert!(state.prefetch_bandwidth_bucket_window[&bucket].len() <= 61);
+            if index >= 1600 {
+                let (_, observation) = state
+                    .prefetch_throttle_at(&peers[0], [endpoints[0]], now)
+                    .unwrap();
+                assert!(
+                    observation.peer_window_bytes
+                        < state.prefetch_bandwidth_cap_per_peer_bytes_per_min()
+                );
+                assert!(observation.bucket_window_bytes >= state.prefetch_bucket_bandwidth_cap());
+            }
+        }
+
+        let now = start + Duration::from_secs(120);
+        for (index, peer) in peers.iter().enumerate() {
+            assert_eq!(
+                state.prefetch_bandwidth_window_bytes_at(peer, now),
+                150 * mib
+            );
+            let (_, observation) = state
+                .prefetch_throttle_at(peer, [endpoints[index]], now)
+                .unwrap();
+            assert!(
+                observation.peer_window_bytes
+                    < state.prefetch_bandwidth_cap_per_peer_bytes_per_min()
+            );
+            assert!(observation.bucket_window_bytes >= 1200 * mib);
+        }
+    }
+
+    #[test]
     fn ip_bucket_request_admission_groups_ipv6_by_64() {
         let mut state = P2PState::new(isolated_test_metrics(), 100);
         let peer_a = PeerId::random();
@@ -4829,6 +6681,29 @@ mod tests {
             panic!("remaining connection should have an IP bucket");
         };
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn gossip_bucket_preserves_fractional_refill_without_banking_full_time() {
+        let start = Instant::now();
+        let mut bucket = GossipBucketState {
+            tokens: 0,
+            last_refill: start,
+            refill_remainder: 0,
+        };
+        refill_gossip_bucket(&mut bucket, 10, 2, start + Duration::from_millis(250));
+        assert_eq!(bucket.tokens, 0);
+        assert_eq!(bucket.refill_remainder, 500_000_000);
+        refill_gossip_bucket(&mut bucket, 10, 2, start + Duration::from_millis(500));
+        assert_eq!(bucket.tokens, 1);
+        assert_eq!(bucket.refill_remainder, 0);
+
+        bucket.tokens = 10;
+        refill_gossip_bucket(&mut bucket, 10, 2, start + Duration::from_secs(10));
+        assert_eq!(bucket.refill_remainder, 0);
+        bucket.tokens -= 1;
+        refill_gossip_bucket(&mut bucket, 10, 2, start + Duration::from_secs(10));
+        assert_eq!(bucket.tokens, 9);
     }
 
     #[test]
@@ -4928,6 +6803,250 @@ mod tests {
     }
 
     #[test]
+    fn only_validated_new_chain_progress_protects_recovery_connections() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        let id = ConnectionId::new_unchecked(1);
+        let address: Multiaddr = "/ip4/127.0.0.1/udp/3000/quic-v1".parse().unwrap();
+        let endpoint = ConnectedPoint::Dialer {
+            address: address.clone(),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        state.track_connection(id, peer, &address, endpoint);
+        state.record_request_success(peer);
+        assert!(state.try_admit_inbound_req_res(peer, 4));
+        assert_eq!(state.req_res_inflight_for_peer(peer), 1);
+        assert_eq!(state.recovery_connection_to_reclaim(&[], &[]), Some(id));
+        state.record_block_echo_source(peer, "pending");
+        state.track_block_id_str_and_peer("pending".to_owned(), peer);
+        state.record_accepted_chain_progress("pending", 1);
+        assert_eq!(state.recovery_connection_to_reclaim(&[], &[]), Some(id));
+        state.validate_and_untrack_block_sources("pending".to_owned());
+        state.record_accepted_chain_progress("pending", 1);
+        assert_eq!(state.recovery_connection_to_reclaim(&[], &[]), None);
+        state.first_negative = 2;
+        state
+            .peer_request_health
+            .get_mut(&peer)
+            .unwrap()
+            .last_chain_progress =
+            Some(Instant::now() - PREFETCH_BANDWIDTH_WINDOW - Duration::from_secs(1));
+        state.record_accepted_chain_progress("pending", 1);
+        state.record_request_success(peer);
+        state.release_inbound_req_res(peer);
+        assert!(state.try_admit_inbound_req_res(peer, 4));
+        assert_eq!(state.recovery_connection_to_reclaim(&[], &[]), Some(id));
+    }
+
+    #[test]
+    fn block_height_source_preference_requires_live_outbound_endpoint_and_identity() {
+        let exclusions = PeerExclusions::default();
+        for condition in [
+            "numeric", "alias", "inbound", "wrong-endpoint", "wrong-identity", "disconnected",
+        ] {
+            let mut state = P2PState::new(isolated_test_metrics(), 100);
+            let mut peers = [PeerId::random(), PeerId::random()];
+            peers.sort_unstable();
+            let source = peers[1];
+            let id = ConnectionId::new_unchecked(1);
+            let actual: Multiaddr = "/ip4/203.0.113.9/udp/3000/quic-v1".parse().unwrap();
+            let configured: Multiaddr = match condition {
+                "numeric" => actual.clone(),
+                "alias" => format!("/dns4/recovery.example/udp/3000/quic-v1/p2p/{source}")
+                    .parse()
+                    .unwrap(),
+                "wrong-endpoint" => format!("/ip4/203.0.113.10/udp/3000/quic-v1/p2p/{source}")
+                    .parse()
+                    .unwrap(),
+                "wrong-identity" => format!("{actual}/p2p/{}", peers[0]).parse().unwrap(),
+                _ => format!("{actual}/p2p/{source}").parse().unwrap(),
+            };
+            let dial_address = if condition == "alias" {
+                &configured
+            } else {
+                &actual
+            };
+            let endpoint = if condition == "inbound" {
+                ConnectedPoint::Listener {
+                    local_addr: "/ip4/0.0.0.0/udp/3000/quic-v1".parse().unwrap(),
+                    send_back_addr: actual.clone(),
+                }
+            } else {
+                ConnectedPoint::Dialer {
+                    address: dial_address.clone(),
+                    role_override: libp2p::core::Endpoint::Dialer,
+                    port_use: libp2p::core::transport::PortUse::Reuse,
+                }
+            };
+            state.track_connection(id, source, dial_address, endpoint);
+            if condition == "alias" {
+                state.update_connection_address(id, &actual);
+            }
+            state.set_configured_recovery_peers(Arc::from([configured]), Arc::default());
+            if condition == "disconnected" {
+                state.lost_connection(id);
+                // Reconnecting at another endpoint must not retain dial-alias preference.
+                let other: Multiaddr = "/ip4/203.0.113.10/udp/3000/quic-v1".parse().unwrap();
+                state.track_connection(
+                    id,
+                    source,
+                    &other,
+                    ConnectedPoint::Dialer {
+                        address: other.clone(),
+                        role_override: libp2p::core::Endpoint::Dialer,
+                        port_use: libp2p::core::transport::PortUse::Reuse,
+                    },
+                );
+            }
+            let expected = if matches!(condition, "numeric" | "alias") {
+                source
+            } else {
+                peers[0]
+            };
+            assert_eq!(
+                state.select_block_height_request_peer(peers.to_vec(), &exclusions),
+                Some(expected),
+                "condition={condition}",
+            );
+        }
+    }
+
+    #[test]
+    fn block_height_source_preference_ranks_recent_progress_before_configured_and_rotates_ties() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let exclusions = PeerExclusions::default();
+        let mut peers = (0..5).map(|_| PeerId::random()).collect::<Vec<_>>();
+        peers.sort_unstable();
+        for (index, peer) in peers.iter().enumerate() {
+            let address: Multiaddr = format!("/ip4/127.0.0.1/udp/{}/quic-v1", 3000 + index)
+                .parse()
+                .unwrap();
+            state.track_connection(
+                ConnectionId::new_unchecked(index),
+                *peer,
+                &address,
+                ConnectedPoint::Dialer {
+                    address: address.clone(),
+                    role_override: libp2p::core::Endpoint::Dialer,
+                    port_use: libp2p::core::transport::PortUse::Reuse,
+                },
+            );
+        }
+        state.set_configured_recovery_peers(
+            Arc::from([
+                "/ip4/127.0.0.1/udp/3002/quic-v1".parse().unwrap(),
+                "/ip4/127.0.0.1/udp/3001/quic-v1".parse().unwrap(),
+            ]),
+            Arc::default(),
+        );
+        let configured_first = state
+            .select_block_height_request_peer(peers.clone(), &exclusions)
+            .unwrap();
+        assert!(peers[1..3].contains(&configured_first));
+        state.track_block_id_str_and_peer("accepted".to_owned(), peers[4]);
+        state.track_block_id_str_and_peer("accepted".to_owned(), peers[3]);
+        state.validate_and_untrack_block_sources("accepted".to_owned());
+        state.record_accepted_chain_progress("accepted", 1);
+        state.first_negative = 2;
+        let progress_first = state
+            .select_block_height_request_peer(peers.clone(), &exclusions)
+            .unwrap();
+        let progress_second = state
+            .select_block_height_request_peer(peers.clone(), &exclusions)
+            .unwrap();
+        assert_eq!(
+            BTreeSet::from([progress_first, progress_second]),
+            BTreeSet::from([peers[3], peers[4]]),
+        );
+        assert_eq!(
+            state.select_block_height_request_peer(vec![peers[4], peers[2]], &exclusions),
+            Some(peers[4]),
+        );
+        for peer in &peers[3..] {
+            state
+                .peer_request_health
+                .get_mut(peer)
+                .unwrap()
+                .last_chain_progress =
+                Some(Instant::now() - PREFETCH_BANDWIDTH_WINDOW - Duration::from_secs(1));
+        }
+        // Reobserving an older accepted height cannot refresh source preference.
+        state.record_accepted_chain_progress("accepted", 1);
+        state.record_request_success(peers[3]);
+        let configured_second = state
+            .select_block_height_request_peer(peers.clone(), &exclusions)
+            .unwrap();
+        assert_eq!(
+            BTreeSet::from([configured_first, configured_second]),
+            BTreeSet::from([peers[1], peers[2]]),
+        );
+        state.set_configured_recovery_peers(Arc::default(), Arc::default());
+        peers.reverse();
+        let ordinary = (0..peers.len())
+            .map(|_| {
+                state
+                    .select_block_height_request_peer(peers.clone(), &exclusions)
+                    .unwrap()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ordinary, peers.iter().copied().collect());
+    }
+
+    #[test]
+    fn independent_height_demands_rotate_and_single_peer_stays_bounded() {
+        let state = P2PState::new(isolated_test_metrics(), 100);
+        let exclusions = PeerExclusions::default();
+        let peers = (0..3).map(|_| PeerId::random()).collect::<Vec<_>>();
+        let first_round = (0..peers.len())
+            .map(|_| {
+                state
+                    .select_block_height_request_peer(peers.clone(), &exclusions)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_round.iter().copied().collect::<BTreeSet<_>>(),
+            peers.iter().copied().collect(),
+        );
+        for expected in first_round.iter().cycle().take(6) {
+            assert_eq!(
+                state.select_block_height_request_peer(peers.clone(), &exclusions),
+                Some(*expected),
+            );
+        }
+        for _ in 0..4 {
+            assert_eq!(
+                state.select_block_height_request_peer(vec![peers[1]], &exclusions),
+                Some(peers[1]),
+            );
+        }
+        assert_eq!(
+            state.select_block_height_request_peer(Vec::new(), &exclusions),
+            None
+        );
+    }
+
+    #[test]
+    fn validated_chain_source_bookkeeping_is_bounded() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        for index in 0..=BLOCK_ECHO_SOURCE_CAP {
+            let block = format!("validated-{index}");
+            state.track_block_id_str_and_peer(block.clone(), peer);
+            state.validate_and_untrack_block_sources(block);
+        }
+        assert_eq!(
+            state.validated_block_source_order.len(),
+            BLOCK_ECHO_SOURCE_CAP
+        );
+        assert_eq!(state.validated_block_sources.len(), BLOCK_ECHO_SOURCE_CAP);
+        assert!(!state.validated_block_sources.contains_key("validated-0"));
+        assert!(state.block_id_to_peers.is_empty());
+        assert!(state.peer_to_block_ids.is_empty());
+    }
+
+    #[test]
     fn remove_peer_clears_capability_health_and_prefetch_state() {
         let mut state = P2PState::new(isolated_test_metrics(), 100);
         let peer = PeerId::random();
@@ -5021,19 +7140,71 @@ mod tests {
     }
 
     #[test]
+    fn response_caches_are_bounded_and_clear_reclaims_accounting() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        for index in 0..(RESPONSE_CACHE_MAX_ENTRIES + 8) {
+            state.cache_tx_response(format!("tx-{index:05}"), NounSlab::new());
+        }
+        assert_eq!(state.tx_cache.len(), RESPONSE_CACHE_MAX_ENTRIES);
+        assert!(!state.tx_cache.contains_key("tx-00000"));
+
+        state.cache_block_response(7, NounSlab::new());
+        state.cache_elders_response("elders".to_owned(), NounSlab::new());
+        let total = state
+            .block_cache
+            .values()
+            .chain(state.tx_cache.values())
+            .chain(state.elders_cache.values())
+            .fold(0u64, |bytes, slab| {
+                bytes.saturating_add(slab.allocated_bytes())
+            });
+        assert_eq!(state.response_cache_bytes, total);
+        assert!(total <= RESPONSE_CACHE_MAX_BYTES);
+
+        state.clear_block_and_elders_responses();
+        assert!(state.block_cache.is_empty());
+        assert!(state.elders_cache.is_empty());
+        let tx_bytes = state.tx_cache.values().fold(0u64, |bytes, slab| {
+            bytes.saturating_add(slab.allocated_bytes())
+        });
+        assert_eq!(state.response_cache_bytes, tx_bytes);
+    }
+
+    #[test]
+    fn seen_tx_cache_stays_bounded_across_reopen_and_clear() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        state.finish_processing_tx_seen("reopened");
+        state.reopen_seen_tx("reopened");
+        state.finish_processing_tx_seen("reopened");
+        assert!(state.seen_txs.contains("reopened"));
+
+        for index in 0..(SEEN_TXS_CAP + 8) {
+            state.finish_processing_tx_seen(&format!("tx-{index}"));
+        }
+        assert_eq!(state.seen_txs.len(), SEEN_TXS_CAP);
+        assert_eq!(state.seen_tx_order.len(), SEEN_TXS_CAP);
+        assert_eq!(state.seen_tx_generation.len(), SEEN_TXS_CAP);
+        assert!(!state.seen_txs.contains("tx-0"));
+        assert!(state.seen_txs.contains(&format!("tx-{}", SEEN_TXS_CAP + 7)));
+
+        state.clear_seen_txs();
+        assert!(state.seen_txs.is_empty());
+        assert!(state.seen_tx_order.is_empty());
+        assert!(state.seen_tx_generation.is_empty());
+    }
+
+    #[test]
     fn tx_source_hint_order_stays_bounded_across_disconnect_cycles() {
-        // GHSA-76mh-596x-hpjh: transaction ids leave the live map on
-        // disconnect without popping the order queue, and a live-map gate
-        // never fires while each cycle lands exactly at the cap (the map
-        // is never strictly greater). The queue itself must stay capped.
+        // Both the live map and its order queue must stay within their caps
+        // across disconnect cycles, including cycles landing exactly at the cap.
         let mut state = P2PState::new(isolated_test_metrics(), 100);
         for cycle in 0..3 {
-            let attacker = PeerId::random();
+            let cycling_peer = PeerId::random();
             let tx_ids: Vec<String> = (0..TX_SOURCE_HINT_CAP)
                 .map(|index| format!("disconnect-tx-{cycle}-{index}"))
                 .collect();
-            state.track_tx_ids_and_peer(tx_ids, attacker);
-            state.remove_peer(&attacker);
+            state.track_tx_ids_and_peer(tx_ids, cycling_peer);
+            state.remove_peer(&cycling_peer);
             assert_eq!(state.tx_id_to_peers.len(), 0);
         }
         assert!(
@@ -5043,11 +7214,11 @@ mod tests {
         );
 
         // Live entries still bound the queue and the map together.
-        let honest = PeerId::random();
+        let live_peer = PeerId::random();
         let tx_ids: Vec<String> = (0..(TX_SOURCE_HINT_CAP + 8))
             .map(|index| format!("live-tx-{index}"))
             .collect();
-        state.track_tx_ids_and_peer(tx_ids, honest);
+        state.track_tx_ids_and_peer(tx_ids, live_peer);
         assert!(state.tx_source_hint_order.len() <= TX_SOURCE_HINT_CAP);
         assert!(state.tx_id_to_peers.len() <= TX_SOURCE_HINT_CAP);
     }
@@ -5105,8 +7276,158 @@ mod tests {
             state.deferred_heard_block_total(),
             DEFERRED_HEARD_BLOCK_PER_PEER_CAP
         );
-        assert!(!state.has_deferred_block_at_height(0));
-        assert!(state.has_deferred_block_at_height(DEFERRED_HEARD_BLOCK_PER_PEER_CAP as u64 + 7));
+        assert!(state.has_deferred_block_at_height(0));
+        assert!(!state.has_deferred_block_at_height(DEFERRED_HEARD_BLOCK_PER_PEER_CAP as u64 + 7));
+    }
+
+    #[test]
+    fn distant_deferred_block_cannot_displace_near_frontier_blocks() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let peer = PeerId::random();
+        assert!(state.defer_heard_block(
+            peer,
+            100,
+            String::from("block-100"),
+            dummy_heard_block_fact(),
+        ));
+        let one_block_bytes = state.deferred_heard_block_total_bytes();
+        state.set_deferred_heard_block_byte_caps(one_block_bytes * 2, one_block_bytes * 2);
+
+        assert!(state.defer_heard_block(
+            peer,
+            11,
+            String::from("block-011"),
+            dummy_heard_block_fact(),
+        ));
+        assert!(!state.defer_heard_block(
+            peer,
+            u64::MAX,
+            String::from("block-max"),
+            dummy_heard_block_fact(),
+        ));
+        assert!(state.has_deferred_block_at_height(11));
+        assert!(state.has_deferred_block_at_height(100));
+        assert!(!state.has_deferred_block_at_height(u64::MAX));
+
+        // Trim the heaviest holder's farthest block to admit another peer.
+        // Near-frontier protection still applies within each peer.
+        let other = PeerId::random();
+        assert!(state.defer_heard_block(
+            other,
+            u64::MAX - 1,
+            String::from("block-top"),
+            dummy_heard_block_fact(),
+        ));
+        assert_eq!(state.deferred_heard_block_heights(), vec![11, u64::MAX - 1]);
+        // The newcomer cannot take more than its share either: its next
+        // block makes it the heaviest and evicts its own farthest entry.
+        // (Ids stay nine characters long: the byte caps count them.)
+        assert!(state.defer_heard_block(
+            other,
+            u64::MAX - 2,
+            String::from("block-tip"),
+            dummy_heard_block_fact(),
+        ));
+        assert_eq!(state.deferred_heard_block_heights(), vec![11, u64::MAX - 2]);
+        assert_eq!(
+            state.deferred_heard_block_total_bytes(),
+            one_block_bytes * 2
+        );
+    }
+
+    /// Equal-load peers share a capped buffer with full count and byte accounting.
+    #[test]
+    fn deferred_buffer_equal_share_preserves_each_peers_entries() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        state.first_negative = 1_000;
+        // Retained bytes include the id's capacity, so every id here has the
+        // same exact length to keep the byte caps whole multiples of a block.
+        let block_id = |label: &str| {
+            let mut id = String::from(label);
+            id.shrink_to_fit();
+            assert_eq!(id.len(), 8);
+            id
+        };
+        let additional_peer = PeerId::random();
+        assert!(state.defer_heard_block(
+            additional_peer,
+            1_050,
+            block_id("blk-1050"),
+            dummy_heard_block_fact(),
+        ));
+        let one_block_bytes = state.deferred_heard_block_total_bytes();
+        // Each peer may hold four blocks within a twelve-block shared budget.
+        state.set_deferred_heard_block_byte_caps(one_block_bytes * 4, one_block_bytes * 12);
+
+        let loaded_peers = (0..3).map(|_| PeerId::random()).collect::<Vec<_>>();
+        for (peer_index, loaded_peer) in loaded_peers.iter().enumerate() {
+            for entry_index in 0..4 {
+                state.defer_heard_block(
+                    *loaded_peer,
+                    1_001,
+                    block_id(&format!("ent-{peer_index}{entry_index:03}")),
+                    dummy_heard_block_fact(),
+                );
+            }
+        }
+        assert_eq!(state.deferred_heard_block_total(), 12);
+        assert!(
+            state.has_deferred_block_at_height(1_050),
+            "filling the buffer with near-frontier entries must evict entries, not the additional peer block"
+        );
+
+        for height in [1_051u64, 1_052] {
+            assert!(
+                state.defer_heard_block(
+                    additional_peer,
+                    height,
+                    block_id(&format!("blk-{height}")),
+                    dummy_heard_block_fact(),
+                ),
+                "additional peer block {height} must be retained over loaded-peer entries"
+            );
+        }
+        for height in [1_050u64, 1_051, 1_052] {
+            assert!(
+                state.has_deferred_block_at_height(height),
+                "additional peer block {height} must survive the total cap"
+            );
+        }
+        assert_eq!(state.deferred_heard_block_total(), 12);
+        let entries_remaining = state
+            .deferred_heard_blocks
+            .get(&1_001)
+            .map(BTreeMap::len)
+            .unwrap_or_default();
+        assert_eq!(
+            entries_remaining, 9,
+            "each additional peer insert must evict one loaded-peer entry, never an additional peer entry"
+        );
+        // Twelve slots over four peers settle at three entries each.
+        let count_for = |state: &P2PState, peer_id: &PeerId| {
+            state
+                .deferred_heard_block_count_by_peer
+                .get(peer_id)
+                .copied()
+                .unwrap_or_default()
+        };
+        for loaded_peer in &loaded_peers {
+            assert_eq!(count_for(&state, loaded_peer), 3);
+        }
+        assert_eq!(count_for(&state, &additional_peer), 3);
+
+        // A peer exceeding the equal share loses its own farthest entry.
+        assert!(!state.defer_heard_block(
+            additional_peer,
+            1_053,
+            block_id("blk-1053"),
+            dummy_heard_block_fact(),
+        ));
+        for height in [1_050u64, 1_051, 1_052] {
+            assert!(state.has_deferred_block_at_height(height));
+        }
+        assert_eq!(count_for(&state, &additional_peer), 3);
+        assert_eq!(state.deferred_heard_block_total(), 12);
     }
 
     #[test]
@@ -5171,5 +7492,602 @@ mod tests {
         assert!(!state.has_deferred_block_at_height(60));
         assert!(state.has_deferred_block_at_height(70));
         assert_eq!(state.deferred_heard_block_heights(), vec![50, 70]);
+    }
+
+    // ---- Response-cache accounting invariants under random sequences ----
+
+    use nockvm::noun::Atom;
+    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
+
+    use crate::p2p_util::canonical_ip;
+
+    fn response_cache_slab(size_class: u8) -> NounSlab {
+        let bytes = match size_class % 4 {
+            0 => 0,
+            1 => 64,
+            2 => 1_024,
+            _ => 8_192,
+        };
+        let mut slab = NounSlab::new();
+        if bytes > 0 {
+            let atom = Atom::from_value(&mut slab, vec![0xA5u8; bytes])
+                .expect("payload atom should build")
+                .as_noun();
+            slab.set_root(atom);
+        }
+        slab
+    }
+
+    fn response_cache_retained_bytes(state: &P2PState) -> u64 {
+        state
+            .block_cache
+            .values()
+            .chain(state.tx_cache.values())
+            .chain(state.elders_cache.values())
+            .fold(0u64, |bytes, slab| {
+                bytes.saturating_add(slab.allocated_bytes())
+            })
+    }
+
+    fn response_cache_entry_count(state: &P2PState) -> usize {
+        state.block_cache.len() + state.tx_cache.len() + state.elders_cache.len()
+    }
+
+    fn assert_response_cache_accounting(state: &P2PState, context: &str) {
+        assert_eq!(
+            state.response_cache_bytes,
+            response_cache_retained_bytes(state),
+            "{context}: response_cache_bytes must equal the sum of retained allocated_bytes"
+        );
+        assert!(
+            state.response_cache_bytes <= RESPONSE_CACHE_MAX_BYTES,
+            "{context}: response cache bytes exceeded the cap"
+        );
+        assert!(
+            response_cache_entry_count(state) <= RESPONSE_CACHE_MAX_ENTRIES,
+            "{context}: response cache entry count exceeded the cap"
+        );
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum ResponseCacheKind {
+        Block,
+        Tx,
+        Elders,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ResponseCacheOp {
+        Insert(ResponseCacheKind, u16, u8),
+        Clear,
+    }
+
+    impl ResponseCacheOp {
+        fn arbitrary_with_clears(g: &mut Gen, with_clears: bool) -> Self {
+            let key = u16::arbitrary(g) % 2_000;
+            let size_class = u8::arbitrary(g);
+            if with_clears && u8::arbitrary(g) % 64 == 0 {
+                return Self::Clear;
+            }
+            match u8::arbitrary(g) % 3 {
+                0 => Self::Insert(ResponseCacheKind::Block, key, size_class),
+                1 => Self::Insert(ResponseCacheKind::Tx, key, size_class),
+                _ => Self::Insert(ResponseCacheKind::Elders, key, size_class),
+            }
+        }
+    }
+
+    /// Sequence length is drawn explicitly (up to 20,000 ops over 6,000
+    /// distinct keys) so the 4,096-entry cap is reached in clear-free runs;
+    /// the other half of the runs interleave block/elders clears.
+    #[derive(Debug, Clone)]
+    struct ResponseCacheOps(Vec<ResponseCacheOp>);
+
+    impl Arbitrary for ResponseCacheOps {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let with_clears = bool::arbitrary(g);
+            let len = usize::arbitrary(g) % 20_000;
+            Self(
+                (0..len)
+                    .map(|_| ResponseCacheOp::arbitrary_with_clears(g, with_clears))
+                    .collect(),
+            )
+        }
+    }
+
+    static RESPONSE_CACHE_ENTRY_CAP_REACHED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    fn response_cache_contains(state: &P2PState, kind: ResponseCacheKind, key: u16) -> bool {
+        match kind {
+            ResponseCacheKind::Block => state.block_cache.contains_key(&u64::from(key)),
+            ResponseCacheKind::Tx => state.tx_cache.contains_key(&format!("tx-{key:05}")),
+            ResponseCacheKind::Elders => {
+                state.elders_cache.contains_key(&format!("elders-{key:05}"))
+            }
+        }
+    }
+
+    /// For any insert/replace/clear sequence, the byte counter equals the
+    /// sum of retained entries' `allocated_bytes`, the entry count is the sum
+    /// of the three maps, and neither exceeds its cap after trimming. Until
+    /// the first trim the caches mirror an exact shadow model; after it the
+    /// retained keys stay a subset of the model.
+    #[test]
+    fn response_cache_accounting_holds_for_random_sequences() {
+        fn prop(ops: ResponseCacheOps) -> TestResult {
+            let ops = ops.0;
+            let mut state = P2PState::new(isolated_test_metrics(), 100);
+            let mut model: BTreeMap<(ResponseCacheKind, u16), u64> = BTreeMap::new();
+            let mut model_exact = true;
+            for (step, op) in ops.iter().enumerate() {
+                match *op {
+                    ResponseCacheOp::Insert(kind, key, size_class) => {
+                        let slab = response_cache_slab(size_class);
+                        let bytes = slab.allocated_bytes();
+                        match kind {
+                            ResponseCacheKind::Block => {
+                                state.cache_block_response(u64::from(key), slab)
+                            }
+                            ResponseCacheKind::Tx => {
+                                state.cache_tx_response(format!("tx-{key:05}"), slab)
+                            }
+                            ResponseCacheKind::Elders => {
+                                state.cache_elders_response(format!("elders-{key:05}"), slab)
+                            }
+                        }
+                        model.insert((kind, key), bytes);
+                    }
+                    ResponseCacheOp::Clear => {
+                        state.clear_block_and_elders_responses();
+                        model.retain(|(kind, _), _| *kind == ResponseCacheKind::Tx);
+                        assert!(state.block_cache.is_empty() && state.elders_cache.is_empty());
+                    }
+                }
+                let context = format!("step {step} op {op:?}");
+                assert_response_cache_accounting(&state, &context);
+                if response_cache_entry_count(&state) == RESPONSE_CACHE_MAX_ENTRIES {
+                    RESPONSE_CACHE_ENTRY_CAP_REACHED
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                let model_bytes = model.values().fold(0u64, |a, b| a.saturating_add(*b));
+                if model.len() > RESPONSE_CACHE_MAX_ENTRIES
+                    || model_bytes > RESPONSE_CACHE_MAX_BYTES
+                {
+                    model_exact = false;
+                }
+                if model_exact {
+                    assert_eq!(
+                        response_cache_entry_count(&state),
+                        model.len(),
+                        "{context}: no trim yet, so the caches must mirror the model"
+                    );
+                    assert_eq!(state.response_cache_bytes, model_bytes, "{context}");
+                }
+                for (kind, key) in [
+                    (ResponseCacheKind::Block, 0u16),
+                    (ResponseCacheKind::Tx, 0u16),
+                    (ResponseCacheKind::Elders, 0u16),
+                ] {
+                    if response_cache_contains(&state, kind, key) {
+                        assert!(model.contains_key(&(kind, key)), "{context}: stray entry");
+                    }
+                }
+            }
+            for ((kind, key), _) in model.iter() {
+                if !model_exact {
+                    break;
+                }
+                assert!(
+                    response_cache_contains(&state, *kind, *key),
+                    "model entry {kind:?}/{key} missing before any trim"
+                );
+            }
+            TestResult::passed()
+        }
+
+        QuickCheck::new()
+            .tests(16)
+            .quickcheck(prop as fn(ResponseCacheOps) -> TestResult);
+        assert!(
+            RESPONSE_CACHE_ENTRY_CAP_REACHED.load(std::sync::atomic::Ordering::SeqCst),
+            "at least one generated sequence must drive the caches to the entry cap"
+        );
+    }
+
+    /// The byte cap trims oldest tx/elders/block entries until
+    /// the total fits, a single entry larger than the cap is refused (and a
+    /// stale same-key entry it would have replaced is still released), and
+    /// clearing block/elders leaves exactly the tx bytes.
+    #[test]
+    fn response_cache_byte_cap_trims_and_refuses_oversize_entries() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        let chunk = 4 * 1024 * 1024usize;
+        let mut index = 0u64;
+        while state.response_cache_bytes + (chunk as u64) <= RESPONSE_CACHE_MAX_BYTES {
+            let mut slab = NounSlab::new();
+            let atom = Atom::from_value(&mut slab, vec![0x5Au8; chunk])
+                .expect("payload atom should build")
+                .as_noun();
+            slab.set_root(atom);
+            state.cache_block_response(index, slab);
+            index += 1;
+            assert_response_cache_accounting(&state, "filling to the byte cap");
+        }
+        let entries_at_cap = state.block_cache.len();
+        assert!(entries_at_cap >= 2, "fixture should hold several chunks");
+
+        for extra in 0..3u64 {
+            let mut slab = NounSlab::new();
+            let atom = Atom::from_value(&mut slab, vec![0x3Cu8; chunk])
+                .expect("payload atom should build")
+                .as_noun();
+            slab.set_root(atom);
+            state.cache_block_response(index + extra, slab);
+            assert_response_cache_accounting(&state, "inserting past the byte cap");
+            assert!(
+                state.block_cache.len() <= entries_at_cap,
+                "trim must evict before the total exceeds the cap"
+            );
+        }
+        assert!(
+            !state.block_cache.contains_key(&0),
+            "byte-cap trim evicts the lowest block height first"
+        );
+
+        let oversize_bytes = usize::try_from(RESPONSE_CACHE_MAX_BYTES).expect("fits") + 1;
+        let mut oversize = NounSlab::new();
+        let atom = Atom::from_value(&mut oversize, vec![0x1Eu8; oversize_bytes])
+            .expect("oversize atom should build")
+            .as_noun();
+        oversize.set_root(atom);
+        assert!(oversize.allocated_bytes() > RESPONSE_CACHE_MAX_BYTES);
+        let replaced_height = index + 2;
+        assert!(state.block_cache.contains_key(&replaced_height));
+        let bytes_before = state.response_cache_bytes;
+        let replaced_bytes = state
+            .block_cache
+            .get(&replaced_height)
+            .map(|slab| slab.allocated_bytes())
+            .expect("replaced entry present");
+        state.cache_block_response(replaced_height, oversize);
+        assert!(
+            !state.block_cache.contains_key(&replaced_height),
+            "an oversize replacement is refused and the stale entry is dropped"
+        );
+        assert_eq!(state.response_cache_bytes, bytes_before - replaced_bytes);
+        assert_response_cache_accounting(&state, "after oversize refusal");
+
+        state.cache_tx_response(String::from("tx-keep"), response_cache_slab(3));
+        state.cache_elders_response(String::from("elders-drop"), response_cache_slab(3));
+        state.clear_block_and_elders_responses();
+        assert!(state.block_cache.is_empty() && state.elders_cache.is_empty());
+        assert_eq!(state.tx_cache.len(), 1);
+        assert_response_cache_accounting(&state, "after clear");
+    }
+
+    // ---- Gossip bucket refill properties ----
+
+    #[derive(Debug, Clone, Copy)]
+    struct RefillStep {
+        elapsed_nanos: u32,
+        consume: bool,
+    }
+
+    impl Arbitrary for RefillStep {
+        fn arbitrary(g: &mut Gen) -> Self {
+            // Mix sub-token, multi-second and zero-length gaps.
+            let elapsed_nanos = match u8::arbitrary(g) % 4 {
+                0 => 0,
+                1 => u32::arbitrary(g) % 1_000,
+                2 => u32::arbitrary(g) % 1_000_000_000,
+                _ => u32::arbitrary(g),
+            };
+            Self {
+                elapsed_nanos,
+                consume: bool::arbitrary(g),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RefillSteps(Vec<RefillStep>);
+
+    impl Arbitrary for RefillSteps {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let len = usize::arbitrary(g) % 200;
+            Self((0..len).map(|_| RefillStep::arbitrary(g)).collect())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RefillGaps(Vec<u32>);
+
+    impl Arbitrary for RefillGaps {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let len = usize::arbitrary(g) % 400;
+            Self((0..len).map(|_| u32::arbitrary(g)).collect())
+        }
+    }
+
+    /// Tokens never exceed capacity, the fractional remainder stays below
+    /// one second of accrual, a full bucket carries no remainder, and the
+    /// tokens granted over the whole sequence never exceed floor(rate * time).
+    #[test]
+    fn gossip_bucket_refill_invariants_hold_for_random_sequences() {
+        fn prop(capacity: u8, rate: u8, steps: RefillSteps) -> TestResult {
+            let steps = steps.0;
+            let capacity = u32::from(capacity % 32) + 1;
+            let rate = u32::from(rate % 8);
+            let start = Instant::now();
+            let mut now = start;
+            let mut bucket = GossipBucketState {
+                tokens: 0,
+                last_refill: start,
+                refill_remainder: 0,
+            };
+            let mut total_nanos = 0u128;
+            let mut consumed = 0u128;
+            for step in steps {
+                now += Duration::from_nanos(u64::from(step.elapsed_nanos));
+                total_nanos += u128::from(step.elapsed_nanos);
+                refill_gossip_bucket(&mut bucket, capacity, rate, now);
+                assert!(bucket.tokens <= capacity, "tokens exceeded capacity");
+                assert!(
+                    bucket.refill_remainder < 1_000_000_000,
+                    "remainder must stay below one second of accrual"
+                );
+                if bucket.tokens == capacity {
+                    assert_eq!(bucket.refill_remainder, 0, "a full bucket banks nothing");
+                }
+                assert_eq!(bucket.last_refill, now);
+                if step.consume && bucket.tokens > 0 {
+                    bucket.tokens -= 1;
+                    consumed += 1;
+                }
+            }
+            let entitled = total_nanos * u128::from(rate) / 1_000_000_000;
+            assert!(
+                u128::from(bucket.tokens) + consumed <= entitled,
+                "granted {} tokens but only {entitled} accrued",
+                u128::from(bucket.tokens) + consumed
+            );
+            TestResult::passed()
+        }
+
+        QuickCheck::new()
+            .tests(400)
+            .quickcheck(prop as fn(u8, u8, RefillSteps) -> TestResult);
+    }
+
+    /// While the bucket never fills, the total refill over a long
+    /// sequence is exactly floor(rate * total_time) and the remainder is
+    /// exactly the leftover fraction, independent of how time is sliced.
+    #[test]
+    fn gossip_bucket_refill_is_exact_while_never_full() {
+        fn prop(rate: u8, gaps: RefillGaps) -> TestResult {
+            let gaps = gaps.0;
+            let rate = u32::from(rate % 8);
+            let start = Instant::now();
+            let mut now = start;
+            let mut bucket = GossipBucketState {
+                tokens: 0,
+                last_refill: start,
+                refill_remainder: 0,
+            };
+            let mut total_nanos = 0u128;
+            for gap in gaps {
+                now += Duration::from_nanos(u64::from(gap));
+                total_nanos += u128::from(gap);
+                refill_gossip_bucket(&mut bucket, u32::MAX, rate, now);
+            }
+            let accrued = total_nanos * u128::from(rate);
+            assert_eq!(u128::from(bucket.tokens), accrued / 1_000_000_000);
+            assert_eq!(u128::from(bucket.refill_remainder), accrued % 1_000_000_000);
+            TestResult::passed()
+        }
+
+        QuickCheck::new()
+            .tests(300)
+            .quickcheck(prop as fn(u8, RefillGaps) -> TestResult);
+    }
+
+    /// A bucket that is already full discards elapsed time
+    /// entirely, so draining one token afterwards does not refill it from
+    /// banked time; the first refill happens only after a full token period.
+    #[test]
+    fn gossip_bucket_full_time_is_not_banked_across_a_drain() {
+        let start = Instant::now();
+        let mut bucket = GossipBucketState {
+            tokens: 4,
+            last_refill: start,
+            refill_remainder: 999_999_999,
+        };
+        refill_gossip_bucket(&mut bucket, 4, 1, start + Duration::from_secs(100));
+        assert_eq!(bucket.tokens, 4);
+        assert_eq!(bucket.refill_remainder, 0);
+        bucket.tokens = 3;
+        refill_gossip_bucket(&mut bucket, 4, 1, start + Duration::from_secs(100));
+        assert_eq!(bucket.tokens, 3);
+        refill_gossip_bucket(
+            &mut bucket,
+            4,
+            1,
+            start + Duration::from_secs(100) + Duration::from_nanos(999_999_999),
+        );
+        assert_eq!(bucket.tokens, 3);
+        assert_eq!(bucket.refill_remainder, 999_999_999);
+        refill_gossip_bucket(&mut bucket, 4, 1, start + Duration::from_secs(101));
+        assert_eq!(bucket.tokens, 4);
+        assert_eq!(bucket.refill_remainder, 0);
+    }
+
+    // ---- IPv4-mapped IPv6 identity for buckets ----
+
+    fn ipv4_edge_cases() -> [Ipv4Addr; 8] {
+        [
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(255, 255, 255, 255),
+            Ipv4Addr::new(127, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(169, 254, 1, 1),
+            Ipv4Addr::new(203, 0, 113, 44),
+            Ipv4Addr::new(198, 51, 100, 255),
+            Ipv4Addr::new(224, 0, 0, 1),
+        ]
+    }
+
+    #[test]
+    fn ip_bucket_treats_ipv4_mapped_ipv6_as_the_ipv4_endpoint() {
+        for v4 in ipv4_edge_cases() {
+            let mapped = IpAddr::V6(v4.to_ipv6_mapped());
+            assert_eq!(canonical_ip(IpAddr::V4(v4)), IpAddr::V4(v4));
+            assert_eq!(
+                canonical_ip(mapped),
+                IpAddr::V4(v4),
+                "{mapped} should canonicalize"
+            );
+            assert_eq!(IpBucket::from_ip(mapped), IpBucket::from_ip(IpAddr::V4(v4)));
+            assert_eq!(IpBucket::from_ip(mapped).to_string(), format!("{v4}/32"));
+        }
+
+        let mapped_zero: Ipv6Addr = "::ffff:0:0".parse().expect("valid ipv6");
+        assert_eq!(
+            canonical_ip(IpAddr::V6(mapped_zero)),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+        let mapped_broadcast: Ipv6Addr = "::ffff:ffff:ffff".parse().expect("valid ipv6");
+        assert_eq!(
+            canonical_ip(IpAddr::V6(mapped_broadcast)),
+            IpAddr::V4(Ipv4Addr::BROADCAST)
+        );
+
+        // A plain IPv6 address keeps its /64 bucket and never aliases IPv4.
+        let plain: Ipv6Addr = "2001:db8::1".parse().expect("valid ipv6");
+        assert_eq!(canonical_ip(IpAddr::V6(plain)), IpAddr::V6(plain));
+        let plain_bucket = IpBucket::from_ip(IpAddr::V6(plain));
+        assert_eq!(plain_bucket.to_string(), "2001:db8::/64");
+        let same_prefix: Ipv6Addr = "2001:db8::ffff:1".parse().expect("valid ipv6");
+        assert_eq!(IpBucket::from_ip(IpAddr::V6(same_prefix)), plain_bucket);
+        let other_prefix: Ipv6Addr = "2001:db8:0:1::1".parse().expect("valid ipv6");
+        assert_ne!(IpBucket::from_ip(IpAddr::V6(other_prefix)), plain_bucket);
+        for v4 in ipv4_edge_cases() {
+            assert_ne!(IpBucket::from_ip(IpAddr::V4(v4)), plain_bucket);
+        }
+
+        // The deprecated IPv4-compatible form (::a.b.c.d) is not mapped and
+        // stays an IPv6 identity; only ::ffff:a.b.c.d collapses to IPv4.
+        let compatible: Ipv6Addr = "::203.0.113.44".parse().expect("valid ipv6");
+        assert_eq!(canonical_ip(IpAddr::V6(compatible)), IpAddr::V6(compatible));
+        assert_ne!(
+            IpBucket::from_ip(IpAddr::V6(compatible)),
+            IpBucket::from_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 44)))
+        );
+    }
+
+    #[test]
+    fn ip_bucket_connection_and_request_accounting_merge_ipv4_and_mapped_ipv6() {
+        for v4 in ipv4_edge_cases() {
+            let mut state = P2PState::new(isolated_test_metrics(), 100);
+            let peer_a = PeerId::random();
+            let peer_b = PeerId::random();
+            let conn_a = ConnectionId::new_unchecked(5301);
+            let conn_b = ConnectionId::new_unchecked(5302);
+            let addr_a: Multiaddr = format!("/ip4/{v4}/udp/4001/quic-v1")
+                .parse()
+                .expect("valid ipv4 multiaddr");
+            let addr_b: Multiaddr = format!("/ip6/{}/udp/4002/quic-v1", v4.to_ipv6_mapped())
+                .parse()
+                .expect("valid mapped ipv6 multiaddr");
+            state.track_connection(conn_a, peer_a, &addr_a, dialer_endpoint(addr_a.clone()));
+            state.track_connection(conn_b, peer_b, &addr_b, dialer_endpoint(addr_b.clone()));
+
+            let expected_bucket = IpBucket::from_ip(IpAddr::V4(v4));
+            assert_eq!(
+                state.ip_bucket_connection_count(conn_a),
+                Some((expected_bucket, 2)),
+                "{v4}: ipv4 connection should see the mapped-ipv6 sibling"
+            );
+            assert_eq!(
+                state.ip_bucket_connection_count(conn_b),
+                Some((expected_bucket, 2)),
+                "{v4}: mapped-ipv6 connection should see the ipv4 sibling"
+            );
+
+            let first = state.admit_request_from_connection(conn_a, 1);
+            let second = state.admit_request_from_connection(conn_b, 1);
+            assert_eq!(
+                first,
+                IpBucketAdmission::Admitted {
+                    bucket: expected_bucket,
+                    count: 1,
+                    limit: 1,
+                }
+            );
+            assert_eq!(
+                second,
+                IpBucketAdmission::Rejected {
+                    bucket: expected_bucket,
+                    count: 2,
+                    limit: 1,
+                },
+                "{v4}: the mapped form must share the ipv4 request budget"
+            );
+
+            let gossip_a = state.admit_gossip_from_connection(conn_a, 1, 0);
+            let gossip_b = state.admit_gossip_from_connection(conn_b, 1, 0);
+            assert!(matches!(
+                gossip_a,
+                GossipBucketAdmission::Admitted { bucket, remaining_tokens: 0 } if bucket == expected_bucket
+            ));
+            assert!(
+                matches!(gossip_b, GossipBucketAdmission::Rejected { bucket } if bucket == expected_bucket),
+                "{v4}: the mapped form must share the ipv4 gossip bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn advance_seen_frontier_only_moves_forward() {
+        let metrics = isolated_test_metrics();
+        let mut state = P2PState::new(metrics.clone(), 10);
+        state.finish_processing_tx_seen("old-tx");
+        assert!(state.advance_seen_frontier(10));
+        assert_eq!(state.first_negative, 11);
+        assert!(state.seen_txs.is_empty());
+        assert!(state.seen_tx_generation.is_empty());
+        assert!(state.seen_tx_order.is_empty());
+        state.finish_processing_tx_seen("new-tx");
+        let advanced_at = state.seen_frontier_advanced_at;
+        assert!(!state.advance_seen_frontier(10));
+        assert!(!state.advance_seen_frontier(5));
+        assert_eq!(state.first_negative, 11);
+        assert_eq!(state.seen_frontier_advanced_at, advanced_at);
+        assert_eq!(metrics.highest_block_height_seen.load(), 10.0);
+        assert!(state.seen_txs.contains("new-tx"));
+        assert!(state.advance_seen_frontier(u64::MAX));
+        assert_eq!(state.first_negative, u64::MAX);
+        assert!(!state.advance_seen_frontier(u64::MAX));
+    }
+
+    #[test]
+    fn deferred_above_frontier_reports_parked_heights_and_idle_time() {
+        let mut state = P2PState::new(isolated_test_metrics(), 100);
+        assert!(state.advance_seen_frontier(10));
+        let advanced_at = state.seen_frontier_advanced_at;
+        for height in [10, 12, 14] {
+            state.defer_heard_block(
+                PeerId::random(),
+                height,
+                format!("block-{height}"),
+                dummy_heard_block_fact(),
+            );
+        }
+        assert_eq!(
+            state.deferred_above_frontier(advanced_at + Duration::from_secs(300)),
+            Some((12, 2, Duration::from_secs(300)))
+        );
+        assert!(state.advance_seen_frontier(14));
+        assert_eq!(state.deferred_above_frontier(Instant::now()), None);
     }
 }

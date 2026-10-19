@@ -1415,15 +1415,19 @@ impl IndirectAtom {
     /** Make an indirect atom that can be written into. Return the atom (which should not be used
      * until it is written and normalized) and a mutable pointer which is the data buffer for the
      * indirect atom, to be written into.
+     * A zero-word request retains one initialized zero word so normalization is valid.
      */
     pub unsafe fn new_raw_mut<A: NounAllocator>(
         allocator: &mut A,
         size: usize,
     ) -> (Self, *mut u64) {
-        debug_assert!(size > 0);
-        let buffer = allocator.alloc_indirect(size);
+        let allocated_size = size.max(1);
+        let buffer = allocator.alloc_indirect(allocated_size);
         *buffer = 0;
-        *buffer.add(1) = size as u64;
+        *buffer.add(1) = allocated_size as u64;
+        if size == 0 {
+            *buffer.add(2) = 0;
+        }
         (Self::from_raw_pointer(buffer), buffer.add(2))
     }
 
@@ -1457,7 +1461,8 @@ impl IndirectAtom {
     /** Make an indirect atom that can be written into as a slice of bytes. The constraints of
      * [new_raw_mut_zeroed] also apply here
      *
-     * Note: size is bytes, not words
+     * Note: size is bytes, not words. Empty buffers retain one zero data word
+     * so the indirect atom can be normalized safely to the zero atom.
      */
     pub unsafe fn new_raw_mut_bytes<'a, A: NounAllocator>(
         allocator: &mut A,
@@ -3237,6 +3242,78 @@ mod test {
 
     use crate::jets::util::test::init_context;
     use crate::noun::Atom;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn empty_raw_atoms_normalize_to_zero() {
+        use crate::noun::IndirectAtom;
+
+        let mut context = init_context();
+        let (mut writable, bytes) =
+            unsafe { IndirectAtom::new_raw_mut_bytes(&mut context.stack, 0) };
+        assert!(bytes.is_empty());
+        let space = context.stack.noun_space();
+        assert_eq!(writable.as_atom().in_space(&space).size(), 1);
+        assert_eq!(
+            unsafe { writable.normalize_as_atom_stack() }
+                .in_space(&space)
+                .as_u64()
+                .expect("normalized empty writable byte atom should fit in u64"),
+            0,
+        );
+        let mut copied = unsafe { IndirectAtom::new_raw_bytes(&mut context.stack, 0, [].as_ptr()) };
+        assert_eq!(
+            unsafe { copied.normalize_as_atom_stack() }
+                .in_space(&space)
+                .as_u64()
+                .expect("normalized empty copied byte atom should fit in u64"),
+            0,
+        );
+        let (mut array, bytes) =
+            unsafe { IndirectAtom::new_raw_mut_bytearray::<0, _>(&mut context.stack) };
+        assert!(bytes.is_empty());
+        assert_eq!(
+            unsafe { array.normalize_as_atom_stack() }
+                .in_space(&space)
+                .as_u64()
+                .expect("normalized empty bytearray atom should fit in u64"),
+            0,
+        );
+        let (bits, bitslice) = unsafe { IndirectAtom::new_raw_mut_bitslice(&mut context.stack, 0) };
+        assert!(bitslice.is_empty());
+        let (words, _) = unsafe { IndirectAtom::new_raw_mut(&mut context.stack, 0) };
+        let (zeroed_words, _) = unsafe { IndirectAtom::new_raw_mut_zeroed(&mut context.stack, 0) };
+        let copied_words = unsafe { IndirectAtom::new_raw(&mut context.stack, 0, [].as_ptr()) };
+        for mut atom in [bits, words, zeroed_words, copied_words] {
+            assert_eq!(atom.as_atom().in_space(&space).size(), 1);
+            let normalized = unsafe { atom.normalize_as_atom_stack() };
+            assert!(normalized.is_direct());
+            assert_eq!(
+                normalized
+                    .in_space(&space)
+                    .as_u64()
+                    .expect("normalized empty raw atom should fit in u64"),
+                0
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn raw_byte_atoms_preserve_word_boundaries() {
+        use crate::noun::IndirectAtom;
+
+        let mut context = init_context();
+        for size in [1, 7, 8, 9, 15, 16, 17] {
+            let bytes = vec![0x5a; size];
+            let atom =
+                unsafe { IndirectAtom::new_raw_bytes(&mut context.stack, size, bytes.as_ptr()) };
+            let space = context.stack.noun_space();
+            let stored = atom.as_atom().in_space(&space).to_ne_bytes();
+            assert_eq!(&stored[..size], bytes.as_slice());
+            assert!(stored[size..].iter().all(|byte| *byte == 0));
+        }
+    }
 
     #[test]
     //  APOLOGIA: ibig/ubig ManuallyDrops Vec, we are aware, we plan on purging it

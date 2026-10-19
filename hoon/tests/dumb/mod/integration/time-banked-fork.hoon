@@ -1,13 +1,9 @@
 ::  tests/dumb/mod/integration/time-banked-fork.hoon
 ::
-::  A real-kernel regression for the delayed-fork ASERT failure.  A private
-::  branch forked at the activation anchor still banks elapsed wall-clock
-::  time: six legal far-future timestamps flip the median-time-past window
-::  and its seventh block's target saturates at the ZK ceiling.  But fork
-::  choice prices the expected work of each block at its own target, so the
-::  capped blocks contribute the floored minimum and the longer private
-::  branch loses to the shorter honest branch that mined at tightening
-::  targets.
+::  Real-kernel coverage of accumulated-work fork choice. A longer branch
+::  at the ZK ceiling can have less accumulated work than a shorter branch
+::  with tightening targets. Each ceiling-target block contributes the
+::  floored minimum work; branch length alone does not determine fork choice.
 ::
 /=  helpers  /tests/dumb/helpers
 /=  dcon     /apps/dumbnet/lib/consensus
@@ -116,10 +112,8 @@
 ::
 ::  The live path is `prove-page` -> `heard-block`: every page has a real ZK
 ::  proof, target validation, timestamp validation, block admission, and
-::  fork-choice update.  The private branch's timestamps are legal under the
-::  current rules, its seventh post-anchor target reaches the ceiling, and it
-::  still loses: each capped block earns the floored minimum work, so the
-::  shorter honest branch is heavier.
+::  fork-choice update. The longer ceiling-target branch contributes minimum
+::  work per capped block and loses to the shorter tightening-target branch.
 ++  test-time-banked-fork-loses-by-work
   ^-  tang
   =+  [nockchain genesis]=init-nockchain:h
@@ -130,14 +124,12 @@
   =^  anchor=page:t  nockchain
     (hear-zk-run genesis (add g 150) 150 10 nockchain)
   =/  anchor-ts=@  ~(timestamp get:page:t anchor)
-  ::  The honest branch keeps the 150s cadence: eight blocks whose ASERT
+  ::  The shorter branch keeps the 150s cadence: eight blocks whose ASERT
   ::  targets tighten below the anchor target.
   =^  public-tip=page:t  nockchain
     (hear-zk-run anchor (add anchor-ts 150) 150 8 nockchain)
-  ::  The attacker starts from the same height-10 anchor much later.  Six
-  ::  timestamps near one common wall-clock time flip the 11-block MTP; the
-  ::  seventh child therefore sees that elapsed interval with only six virtual
-  ::  ZK blocks in its ASERT history, and its target clamps at the ceiling.
+  ::  The longer branch shares the height-10 anchor and uses fixed later
+  ::  timestamps. Its target reaches the ceiling under the same ASERT rules.
   =^  private-tip=page:t  nockchain
     (hear-zk-run anchor (add anchor-ts 1.000.000) 0 16 nockchain)
   =/  public-target=@   (merge:bignum:t ~(target get:page:t public-tip))
@@ -147,14 +139,14 @@
   =/  con=consensus-state  (live-con nockchain)
   =/  der=derived-state    (live-der nockchain)
   ;:  weld
-    ::  the honest branch tightened below the ceiling
+    ::  the shorter branch tightened below the ceiling
     (expect-eq !>(%.y) !>((lth public-target max-target-atom:txe)))
-    ::  the banked elapsed time still saturates the private branch's target
+    ::  the longer branch's target reaches the ceiling
     (expect-eq !>(max-target-atom:txe) !>(private-target))
     ::  ...so its blocks earn the floored minimum work
     %+  expect-eq  !>(1)
     !>((merge:bignum:t (~(block-compute-work dcon con der bc-time-banked-fork) private-tip)))
-    ::  the private branch is TWICE the honest branch's length...
+    ::  the ceiling-target branch is longer than the tightening-target branch
     (expect-eq !>(%.y) !>((gth ~(height get:page:t private-tip) ~(height get:page:t public-tip))))
     ::  ...but LIGHTER: discounts do not accumulate into heaviness
     (expect-eq !>(%.y) !>((lth private-work public-work)))

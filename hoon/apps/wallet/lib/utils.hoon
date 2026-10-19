@@ -531,15 +531,14 @@
   ::    derives the i-th child from the master key. for hardened keys,
   ::    (bex 31) should be already added to `i`.
   ::
+  ::    returns the ancestry-bearing core and stored coils with the same material version.
   ++  derive-child
     |=  i=@u
-    ^-  (set coil:wt)
+    ^-  [child-core=_(from-private:s10 *keyc:s10) derived-keys=(set coil:wt)]
     ?:  (gte i (bex 32))
       ~|("Child index {<i>} out of range. Child indices are capped to values between [0, 2^32)" !!)
     ?~  active-master.state
       ~|("No master keys available for derivation" !!)
-    =;  coils=(list coil:wt)
-      (silt coils)
     =/  hardened  (gte i (bex 31))
     ::
     ::  Grab the prv master key if it exists (cold wallet)
@@ -549,10 +548,15 @@
         ~(master get %prv)
       ~(master get %pub)
     =/  keyc=keyc:s10  ~(keyc get:coil:wt parent)
+    ?>  |(!hardened ?=(%prv -.key.parent))
+    =/  child-core
+      ?:  ?=(%prv -.key.parent)
+        (derive:s10 keyc %prv i)
+      (derive:s10 keyc %pub i)
+    =/  coils=(list coil:wt)
     ?:  hardened
-      ?>  ?=(%prv -.key.parent)
       ::
-      =>  (derive:s10 keyc %prv i)
+      =>  child-core
       ?:  =(%1 +..)
         :~  [%1 [%prv private-key] `@ux`chain-code]
             [%1 [%pub public-key] `@ux`chain-code]
@@ -567,7 +571,7 @@
     ?-    -.key.parent
      ::  if the parent is a private key, we can derive the unhardened prv and pub child
         %prv
-      =>  [(derive:s10 keyc %prv i) version=ver.keyc]
+      =>  [child-core version=ver.keyc]
       ?:  =(%1 version)
         :~  [%1 [%prv private-key] `@ux`chain-code]
             [%1 [%pub public-key] `@ux`chain-code]
@@ -578,11 +582,15 @@
     ::
      ::  if the parent is a public key, we can only derive the unhardened pub child
         %pub
-      =>  [(derive:s10 keyc %pub i) version=ver.keyc]
+      =>  [child-core version=ver.keyc]
       ?:  =(%1 version)
         ~[[%1 [%pub public-key] `@ux`chain-code]]
       ~[[%0 [%pub public-key] `@ux`chain-code]]
     ==
+    =/  child-coil=coil:wt  (snag 0 coils)
+    ?>  (levy coils |=(=coil:wt =(-.coil -.child-coil)))
+    ::  Reconstruct ancestry without changing the stored child material version.
+    [child-core(ver -.child-coil) (silt coils)]
   -- ::vault
   ::
   ++  display

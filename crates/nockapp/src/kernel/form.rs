@@ -3628,7 +3628,6 @@ mod tests {
 
     #[test]
     #[ignore = "benchmark harness"]
-    #[cfg_attr(miri, ignore)]
     fn cold_state_noun_jam_persistence_bench() {
         let boot_start = Instant::now();
         let mut serf = bench_serf(DUMB_KERNEL_JAM);
@@ -3835,10 +3834,8 @@ mod tests {
             .expect("write test PMA metadata");
     }
 
-    // Regression for the reported symptom: after a kernel upgrade the hash gate
-    // made *both* slabs report `None`, so selection fell through to its
-    // `Slab0` default and then reported slab 0's metadata as "missing or
-    // invalid" even though the live state was in slab 1.
+    // Active PMA slab selection chooses the latest committed event
+    // independently of the kernel hash.
     #[test]
     fn select_active_pma_slab_is_kernel_hash_agnostic_and_picks_latest_event() {
         let dir = TempDir::new().expect("temp dir");
