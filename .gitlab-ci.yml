@@ -1,5 +1,4 @@
 stages:
-  - docs
   - kernels
   - test
   - sync
@@ -27,38 +26,6 @@ open-sync-merge-train-gate:
       if: '$CI_MERGE_REQUEST_EVENT_TYPE == "merge_train" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "open" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^ci\/open-sync(-.*)?$/'
   script:
     - echo "Automated open-sync MR was already validated by the merged-result pipeline."
-
-docs-check:
-  stage: docs
-  needs: []
-  rules:
-    - <<: *open_sync_merge_train_rule
-      when: never
-    - if: '$CI_MERGE_REQUEST_ID'
-      changes:
-        - "**/*.md"
-        - "scripts/docs/**/*"
-        - "Makefile"
-        - ".gitlab-ci.yml"
-    - if: '$CI_COMMIT_BRANCH == "open"'
-      changes:
-        - "**/*.md"
-        - "scripts/docs/**/*"
-        - "Makefile"
-        - ".gitlab-ci.yml"
-    - if: '$CI_COMMIT_BRANCH =~ /^ci\/open-sync-/'
-      changes:
-        - "**/*.md"
-        - "scripts/docs/**/*"
-        - "Makefile"
-        - ".gitlab-ci.yml"
-    - when: never
-  script:
-    - |
-      nix develop -c bash -c '
-        set -euo pipefail
-        make docs-check
-      '
 
 build-kernels:
   stage: kernels

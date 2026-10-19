@@ -50,10 +50,6 @@ Promotion MUST include technical hardening in the same change:
    - `## Verification Contract`
 4. State what the doc is NOT authoritative for, and route those decisions to the canonical authority doc.
 5. Record promotion rationale in PR/commit history (not in the promoted document body).
-6. Run `make -C open docs-check`.
-
-This gate is CI-enforced for docs that declare Tier 1 canonical status.
-
 ## Promotion Eligibility Criteria (Objective)
 
 A doc is a Tier 1 promotion candidate only if all are true:

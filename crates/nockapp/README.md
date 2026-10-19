@@ -78,7 +78,6 @@ application and its drivers.
 When runtime-interface behavior changes in `nockapp`, update this doc in the same change.
 
 Minimum validation:
-- `make docs-check`
 - `cargo check -p nockapp`
 
 The slab capacity boundary test uses a borrowed word buffer and exercises the

@@ -35,7 +35,6 @@ This document is NOT canonical for:
 When public API behavior, flags, or risk posture changes, update this doc in the same change.
 
 Minimum validation:
-- `make docs-check`
 - `cargo check -p nockchain-api`
 
 ## What it does

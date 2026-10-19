@@ -83,7 +83,6 @@ This document is NOT canonical for:
 When wallet CLI behavior or flags change, update this doc in the same change.
 
 Minimum validation:
-- `make docs-check`
 - `cargo check -p nockchain-wallet`
 
 ## Setup

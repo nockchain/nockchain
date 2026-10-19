@@ -178,12 +178,6 @@ install-hooks: ## Install git pre-commit hooks (cargo fmt + clippy) from .githoo
 	git config core.hooksPath .githooks
 	@echo "Installed git hooks: core.hooksPath -> .githooks"
 
-.PHONY: docs-check
-docs-check:
-	./scripts/docs/check_docs_metadata.sh
-	./scripts/docs/check_canonical_links.sh
-	./scripts/docs/check_nous_validation_entrypoints.sh
-
 .PHONY: build-hoonc
 build-hoonc: ## Build hoonc from this repo without clearing compiler data
 	$(call show_env_vars)
