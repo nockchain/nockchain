@@ -983,7 +983,7 @@ fn native_cache_namespace(
     let mut hash = blake3::Hasher::new();
     // Bump whenever native compilation semantics or the serialized cache
     // payload changes. Source/dependency contents are Merkle-hashed separately.
-    hash.update(b"honk-native-cache-compiler-abi-2026-08-07-1\0");
+    hash.update(b"honk-native-cache-compiler-abi-2026-10-19-1\0");
     hash.update(env!("CARGO_PKG_VERSION").as_bytes());
     hash.update(env!("HONK_NATIVE_COMPILER_FINGERPRINT").as_bytes());
     hash.update(&[u8::from(cli.dbug), u8::from(cli.vet)]);
@@ -2349,6 +2349,10 @@ impl<'a> NativeBuildContext<'a> {
             )?)
         })?;
         let mut imported_vases = Vec::new();
+        // hoonc marks every dependency under /dat as an eval node (+is-dat):
+        // its build trap returns the evaluated vase instead of deferring the
+        // minted formula, so the formula and its spots never reach the kernel.
+        let dat_eval = !keep_product && is_dat_source(&self.directory, path);
         let imports_need_eval = evaluate_value || needs_subject;
         for import in imports {
             let imported = match import.kind {
@@ -2379,12 +2383,32 @@ impl<'a> NativeBuildContext<'a> {
         // hoonc vets every file it compiles (`vet=&` is the ++ut door default
         // in hoonc.hoon's build chain), not just the entry — align.
         let vet = self.entry_vet;
+        let mut dat_value = None;
         let (ty, formula, vase_trap) = match override_value {
             Some(value) => {
                 let (ty, formula) = trace_timed(format!("minting {label}"), || {
                     self.mint_with_subject_type_vet(subject_ty, &expr, vet)
                 })?;
                 let vase_trap = self.eval_vase_trap(ty, value)?;
+                (ty, formula, vase_trap)
+            }
+            None if dat_eval => {
+                // Kick the deferred trap exactly as hoonc does (`$:swetted`):
+                // dependency traps evaluate lazily under their `~+` memo.
+                let subject_trap = subject_trap.expect("subject trap should be present");
+                let (ty, formula, swet_trap) = trace_timed(format!("swetting {label}"), || {
+                    self.native_swet_vase_trap(subject_ty, subject_trap, &expr, vet)
+                })?;
+                self.reset_eval_memo_if_needed(path);
+                let vase = self.kick_trap(swet_trap, &label)?;
+                let value = vase
+                    .in_space(&self.ut.slab.noun_space())
+                    .as_cell()
+                    .map_err(|err| format!("dat trap {label} did not produce a vase: {err:?}"))?
+                    .tail()
+                    .noun();
+                dat_value = Some(value);
+                let vase_trap = self.trap_from_payload(self.wrappers.eval_vase, vase);
                 (ty, formula, vase_trap)
             }
             None => {
@@ -2426,6 +2450,12 @@ impl<'a> NativeBuildContext<'a> {
                 let eval_space = self.eval_context.stack.noun_space();
                 let eval_value =
                     copy_noun_to_allocator(&mut *self.ut.slab, eval_value, &eval_space);
+                SubjectVase {
+                    ty,
+                    eval_value: Some(eval_value),
+                    trap: vase_trap,
+                }
+            } else if let Some(eval_value) = dat_value {
                 SubjectVase {
                     ty,
                     eval_value: Some(eval_value),
@@ -2659,6 +2689,43 @@ impl<'a> NativeBuildContext<'a> {
 
     fn trap_from_payload(&mut self, battery: Noun, payload: Noun) -> Noun {
         T(&mut *self.ut.slab, &[battery, payload])
+    }
+
+    fn kick_trap(&mut self, trap: Noun, label: &str) -> Result<Noun> {
+        let eval_context = &mut self.eval_context;
+        let slab = &mut *self.ut.slab;
+        let slab_space = slab.noun_space();
+        catch_nock_panic(format!("kicking trap {label}"), || {
+            let interpreted = unsafe {
+                eval_context.with_stack_frame(
+                    0,
+                    |context| -> std::result::Result<Noun, NockError> {
+                        let subject = copy_noun_to_allocator(&mut context.stack, trap, &slab_space);
+                        let kick = T(&mut context.stack, &[D(9), D(2), D(0), D(1)]);
+                        let eval_start = Instant::now();
+                        let interpreted = interpret(context, subject, kick);
+                        let elapsed = eval_start.elapsed();
+                        add_interpret_timing(elapsed);
+                        debug!(
+                            label = label,
+                            reason = "kicking build trap",
+                            elapsed_ms = elapsed.as_secs_f64() * 1_000.0,
+                            success = interpreted.is_ok(),
+                            "NockStack eval finished"
+                        );
+                        if let Err(err) = &interpreted {
+                            if env::var_os("NATIVE_HOON_TRACE").is_some() {
+                                trace_interpret_error(context, err);
+                            }
+                        }
+                        interpreted
+                    },
+                )
+            };
+            let value = interpreted.map_err(|err| format!("interpret trap {label}: {err:?}"))?;
+            let eval_space = eval_context.stack.noun_space();
+            Ok(copy_noun_to_allocator(slab, value, &eval_space))
+        })
     }
 
     fn slam_wrapper_gate(&mut self, gate: Noun, sample: Noun, label: &str) -> Result<Noun> {
@@ -4707,6 +4774,12 @@ fn hoonc_directory_allowed_paths(directory: &Path, files: &[PathBuf]) -> Result<
         allowed.insert(hoonc_manifest_relative_path(directory, file)?);
     }
     Ok(allowed)
+}
+
+/// hoonc's +is-dat: the source's manifest path starts with `/dat/`. A file
+/// outside the build directory is never a hoonc node, so it is not dat.
+fn is_dat_source(directory: &Path, file: &Path) -> bool {
+    hoonc_manifest_relative_path(directory, file).is_ok_and(|path| path.starts_with("/dat/"))
 }
 
 fn hoonc_manifest_relative_path(directory: &Path, file: &Path) -> Result<String> {
