@@ -1,6 +1,5 @@
 +++
 version = "0.1.16"
-status = "activated"
 consensus_critical = true
 
 # Activation

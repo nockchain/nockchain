@@ -1,6 +1,5 @@
 +++
 version = "1.0.0"
-status = "final"
 consensus_critical = false
 
 activation_height = 0

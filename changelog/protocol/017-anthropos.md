@@ -1,6 +1,5 @@
 +++
 version = "0.1.17"
-status = "draft"
 consensus_critical = true
 
 # Activation

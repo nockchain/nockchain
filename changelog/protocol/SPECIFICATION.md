@@ -1,13 +1,12 @@
 # Protocol Upgrade Specification Format
 
-Status: Active
 Owner: Nockchain Maintainers
 Last Reviewed: 2026-02-19
-Canonical/Legacy: Canonical (schema/lifecycle authority for `changelog/protocol/*.md`; top-level protocol index authority is [`PROTOCOL.md`](../../PROTOCOL.md))
+Canonical/Legacy: Canonical (schema/process authority for `changelog/protocol/*.md`; top-level protocol index authority is [`PROTOCOL.md`](../../PROTOCOL.md))
 
 Use [`PROTOCOL.md`](../../PROTOCOL.md) as the protocol index and active-upgrade selector.
 Canonical protocol source files live under [`changelog/protocol/`](./).
-Use this file as the required schema and lifecycle contract for those source files.
+Use this file as the required schema and process contract for those source files.
 This schema document does not supersede `PROTOCOL.md`.
 
 This document defines the format and process for documenting protocol upgrades.
@@ -44,7 +43,6 @@ The sequential number provides ordering; the semver version in the frontmatter i
 ```toml
 +++
 version = "0.1.0"
-status = "draft"  # draft | final | activated | superseded
 consensus_critical = true
 
 # Activation (filled in after coordination)
@@ -56,7 +54,7 @@ activation_target = ""  # ISO date for scheduled activations, should be >= 1 mon
 
 # People
 authors = ["@nockchain-core"]  # handles preferred; "Name <email>" allowed
-reviewers = ["@nockchain-core"]  # Required before status can be "final"
+reviewers = ["@nockchain-core"]  # reviewers who approved the spec
 
 # Release-track lineage metadata
 supersedes = ""  # previous protocol version on the main release track, if any
@@ -64,7 +62,7 @@ superseded_by = ""  # next protocol version on the main release track, if assign
 +++
 ```
 
-Lineage fields (`supersedes`, `superseded_by`) track release ordering. They do not, by themselves, require `status = "superseded"`.
+Lineage fields (`supersedes`, `superseded_by`) track release ordering. Whether and where an upgrade activated is recorded by its activation fields, its Activation section, and the [`PROTOCOL.md`](../../PROTOCOL.md) index.
 
 ### Required Sections
 
@@ -125,35 +123,14 @@ List required or recommended tests and validation steps (unit/integration/manual
 
 Link to the implementation (PR/commit/branch) and any related design docs.
 
-## Status Lifecycle
-
-Normal path:
-
-```
-draft → final → activated
-```
-
-Replacement path (if activation is withdrawn before it goes live):
-
-```
-draft → final → superseded
-```
-
-- **draft**: Specification is being developed, subject to change
-- **final**: Specification is complete, activation trigger is set (height-based or rollout-gated), awaiting activation
-- **activated**: Upgrade is live on mainnet
-- **superseded**: This upgrade plan was replaced before activation and is not the current deployment target (set `superseded_by` to the replacement version when known)
-
-An activated historical upgrade may still have `superseded_by` populated to record release-track lineage.
-
 ## Process
 
-1. **Draft**: Author creates spec file with `status = "draft"`
+1. **Draft**: Author creates the spec file
 2. **Review**: Reviewers listed in frontmatter review the spec
-3. **Finalize**: After review, set `status = "final"` and determine activation mechanism (height-based or rollout-gated with `activation_height = 0`)
+3. **Finalize**: After review, determine the activation mechanism (height-based, or rollout-gated with `activation_height = 0`)
 4. **Announce**: For scheduled activations, publish spec at least 1 month before activation
-5. **Activate**: After the activation condition is met (height reached or coordinated rollout complete), set `status = "activated"`
-6. **Replace (optional)**: If a finalized plan is replaced before activation, set `status = "superseded"` and set `superseded_by` to the replacement version
+5. **Activate**: After the activation condition is met (height reached or coordinated rollout complete), update the [`PROTOCOL.md`](../../PROTOCOL.md) release track
+6. **Replace (optional)**: If a plan is replaced before activation, set `superseded_by` to the replacement version and state in its Activation section that it never activated
 
 ## Versioning Rules
 
@@ -177,7 +154,6 @@ The TOML frontmatter can be parsed programmatically. The frontmatter is delimite
 
 Tools can extract metadata for:
 - Generating upgrade timelines
-- Checking activation status
 - Building compatibility matrices
 - Automating release notes
 
@@ -188,7 +164,6 @@ A minimal template for new upgrade specifications:
 ```markdown
 +++
 version = "X.Y.Z"
-status = "draft"
 consensus_critical = true
 
 activation_height = 0

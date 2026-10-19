@@ -1,6 +1,5 @@
 +++
 version = "0.1.2"
-status = "activated"
 consensus_critical = true
 
 activation_height = 2448

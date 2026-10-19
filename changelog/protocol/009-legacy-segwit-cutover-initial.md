@@ -1,6 +1,5 @@
 +++
 version = "0.1.8"
-status = "superseded"
 consensus_critical = true
 
 activation_height = 37350
@@ -86,7 +85,7 @@ Semantic delta:
 
 ## Activation
 
-- **Height**: `37350` (initial plan)
+- **Height**: `37350` (initial plan; never activated, replaced by 010 at `39000`)
 - **Coordination**: Full node, miner, and tx-builder rollout required.
 
 ## Migration
