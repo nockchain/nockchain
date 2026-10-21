@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -60,6 +62,12 @@ pub enum Commands {
     /// Test Phase 1 infrastructure (temporary demo command)
     #[command(hide = true)]
     TestPhase1,
+
+    /// External subcommand: `nockup foo bar` execs `nockup-foo bar` from `$PATH`.
+    /// Mirrors cargo's plugin-discovery convention so downstream tools can
+    /// extend the CLI without an upstream PR.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 #[derive(clap::Subcommand, Debug)]

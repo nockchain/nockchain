@@ -29,12 +29,7 @@ pub async fn run(name: Option<String>) -> Result<()> {
     let pkg = HoonPackage {
         package: PackageMeta {
             name: dir_name.to_string(),
-            version: None,
-            description: None,
-            authors: None,
-            license: None,
-            template: None,
-            template_commit: None,
+            ..Default::default()
         },
         dependencies: Some(Default::default()),
     };

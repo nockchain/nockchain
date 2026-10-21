@@ -2,6 +2,7 @@ pub mod build;
 pub mod cache;
 pub mod channel;
 pub mod common;
+pub mod external;
 pub mod init;
 pub mod package;
 pub mod run;

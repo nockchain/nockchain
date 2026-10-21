@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use colored::Colorize;
 use handlebars::Handlebars;
 
+use crate::git_fetcher::{GitFetcher, GitSpec};
 use crate::manifest::NockAppManifest;
 
 pub async fn run() -> Result<()> {
@@ -44,12 +45,24 @@ pub async fn run() -> Result<()> {
         );
     }
 
-    // Resolve template directory (supports pinned commit)
+    // Resolve template directory. Three sources, in priority order:
+    //   1. `template_git` — fetch from any git URL (incl. `file://`)
+    //   2. `template_commit` pin — channel cache, commit-suffixed
+    //   3. plain channel cache (~/.nockup/templates/<name>/)
     let cache_dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
         .join(".nockup/templates");
 
-    let template_src = if let Some(commit) = template_commit {
+    let template_src = if let Some(git_url) = manifest.package.template_git.as_deref() {
+        resolve_git_template(
+            &cache_dir,
+            git_url,
+            template_commit,
+            manifest.package.template_path.as_deref(),
+            template_name,
+        )
+        .await?
+    } else if let Some(commit) = template_commit {
         cache_dir.join(format!("{}-{}", template_name, commit))
     } else {
         cache_dir.join(template_name)
@@ -57,10 +70,15 @@ pub async fn run() -> Result<()> {
 
     if !template_src.exists() {
         anyhow::bail!(
-            "Template '{}' not found in cache at {}.\n\
-             Run `nockup channel update` or check your template-commit hash.",
+            "Template '{}' not found at {}.\n\
+             {}",
             template_name,
-            template_src.display()
+            template_src.display(),
+            if manifest.package.template_git.is_some() {
+                "Verify `template_git`, `template_path`, and that `template` names a directory under that path."
+            } else {
+                "Run `nockup channel update` or check your template-commit hash."
+            }
         );
     }
 
@@ -116,6 +134,49 @@ fn copy_and_render_template(
 
     copy_dir_recursive(src_dir, dest_dir, &handlebars, context, dest_dir)?;
     Ok(())
+}
+
+/// Fetch a template from a git URL via [`GitFetcher`] and resolve the
+/// concrete template directory under it.
+///
+/// Layout:
+///   - When `template_path` is set, the template lives at
+///     `<repo>/<template_path>/<template_name>/`.
+///   - When unset, it lives at `<repo>/<template_name>/`.
+///
+/// `template_commit` pins the fetch to a specific revision; when unset
+/// `GitFetcher` resolves whatever the URL's HEAD points at. The cache
+/// directory is shared with the channel cache (`~/.nockup/templates/git/`)
+/// and keyed by URL hash + commit, so repeat fetches are no-ops.
+async fn resolve_git_template(
+    cache_dir: &Path,
+    git_url: &str,
+    template_commit: Option<&str>,
+    template_path: Option<&str>,
+    template_name: &str,
+) -> Result<PathBuf> {
+    let fetcher = GitFetcher::new(cache_dir.join("git"));
+    let spec = GitSpec {
+        url: git_url.to_string(),
+        commit: template_commit.map(str::to_string),
+        tag: None,
+        branch: None,
+        path: None,
+        install_path: None,
+        file: None,
+    };
+    let repo_root = fetcher
+        .fetch(&spec)
+        .await
+        .with_context(|| format!("Failed to fetch template repo {}", git_url))?;
+
+    let sub = template_path.unwrap_or("").trim_matches('/');
+    let resolved = if sub.is_empty() {
+        repo_root.join(template_name)
+    } else {
+        repo_root.join(sub).join(template_name)
+    };
+    Ok(resolved)
 }
 
 fn copy_dir_recursive(

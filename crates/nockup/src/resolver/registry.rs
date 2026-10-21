@@ -199,21 +199,42 @@ static REGISTRY: Lazy<HashMap<&'static str, RegistryEntry>> = Lazy::new(|| {
 /// Cached online registry
 static ONLINE_REGISTRY: Lazy<RwLock<Option<RegistryToml>>> = Lazy::new(|| RwLock::new(None));
 
-const REGISTRY_URL: &str =
+const DEFAULT_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/sigilante/typhoon/master/registry.toml";
 
-/// Fetch and parse the online registry (blocking - use spawn_blocking in async context)
+/// Resolve the registry URL, honoring `NOCKUP_REGISTRY_URL` if set.
+/// Accepts `https://`, `http://`, and `file://` URLs (the last reads
+/// directly via `std::fs`, useful for local testing).
+fn registry_url() -> String {
+    std::env::var("NOCKUP_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
+}
+
+/// Emit a stderr warning the first time the env-var override is observed.
+/// `Lazy::force` ensures the closure runs at most once per process.
+static OVERRIDE_NOTICE: Lazy<()> = Lazy::new(|| {
+    if let Ok(v) = std::env::var("NOCKUP_REGISTRY_URL") {
+        use colored::Colorize;
+        eprintln!("{} using NOCKUP_REGISTRY_URL={}", "warning:".yellow(), v);
+    }
+});
+
+/// Fetch and parse the registry (blocking — use spawn_blocking in async context).
 fn fetch_registry_sync() -> Result<RegistryToml> {
-    let response =
-        reqwest::blocking::get(REGISTRY_URL).context("Failed to fetch registry from GitHub")?;
+    Lazy::force(&OVERRIDE_NOTICE);
+    let url = registry_url();
 
-    let content = response
-        .text()
-        .context("Failed to read registry response")?;
+    let content = if let Some(path) = url.strip_prefix("file://") {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read registry from {}", path))?
+    } else {
+        reqwest::blocking::get(&url)
+            .with_context(|| format!("Failed to fetch registry from {}", url))?
+            .text()
+            .context("Failed to read registry response")?
+    };
 
-    let registry: RegistryToml =
-        toml::from_str(&content).context("Failed to parse registry TOML")?;
-
+    let registry: RegistryToml = toml::from_str(&content)
+        .with_context(|| format!("registry at {} did not parse as typhoon TOML", url))?;
     Ok(registry)
 }
 
