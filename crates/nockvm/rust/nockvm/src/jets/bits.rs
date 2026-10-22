@@ -472,13 +472,6 @@ pub mod util {
         let mut list = D(0);
         for i in (0..len).rev() {
             let new_atom = unsafe {
-                // Each block is `step` units of `2^bloq` bits. Size it through
-                // `bite_to_word` (as every other allocation in this file does)
-                // so the `step << bloq` shift is overflow- and bound-checked
-                // (`checked_left_shift` vs `MAX_BIT_LENGTH`) and the buffer is
-                // measured in words, not bits. The previous raw `step << bloq`
-                // passed a bit count where a word count was expected (a 64x
-                // over-allocation) and left the shift unchecked.
                 let (mut new_indirect, new_slice) =
                     IndirectAtom::new_raw_mut_bitslice(stack, bite_to_word(bloq, step)?);
                 chop(
