@@ -5,6 +5,7 @@ use nockvm::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
 use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, DIRECT_MAX, T};
 
 use crate::errors::{CompilerError, Result};
+use crate::native::identity::NounIdentity;
 use crate::native::ut::types::FastHashSet;
 
 pub fn tag(noun: Noun, space: &NounSpace) -> Result<String> {
@@ -216,7 +217,7 @@ pub fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
     }
     // Avoid recursion: deep type/hoon nouns (hoon-138) can otherwise blow the Rust stack.
     let mut stack: Vec<(Noun, Noun)> = Vec::with_capacity(64);
-    let mut seen_cell_pairs: Option<FastHashSet<(u64, u64)>> = None;
+    let mut seen_cell_pairs: Option<FastHashSet<(NounIdentity, NounIdentity)>> = None;
     let mut cell_pairs_checked = 0usize;
     stack.push((a, b));
     while let Some((left, right)) = stack.pop() {
@@ -253,8 +254,8 @@ pub fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
                 .map_err(|err| CompilerError::Decode(format!("noun eq cell: {err}")))?;
             cell_pairs_checked = cell_pairs_checked.saturating_add(1);
             if cell_pairs_checked > 64 {
-                let left_raw = unsafe { left.as_raw() };
-                let right_raw = unsafe { right.as_raw() };
+                let left_raw = NounIdentity::of(left);
+                let right_raw = NounIdentity::of(right);
                 let pair_key = if left_raw <= right_raw {
                     (left_raw, right_raw)
                 } else {

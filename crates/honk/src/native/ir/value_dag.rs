@@ -9,11 +9,13 @@
 use nockvm::noun::{Noun, NounSpace};
 
 use crate::errors::{CompilerError, Result};
+use crate::native::identity::*;
 use crate::native::noun::slab_mug;
 use crate::native::ut::types::FastHashMap;
 
 /// Compile-local structural identity of one Nock value.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct ValueId(pub(crate) u32);
 
 #[derive(Clone, Copy, Debug)]
@@ -32,10 +34,10 @@ struct ValueEntry {
 #[derive(Default)]
 pub struct ValueArena {
     entries: Vec<ValueEntry>,
-    by_raw: FastHashMap<u64, ValueId>,
-    direct_atoms: FastHashMap<u64, ValueId>,
-    indirect_atom_buckets: FastHashMap<u32, Vec<ValueId>>,
-    cells: FastHashMap<(ValueId, ValueId), ValueId>,
+    by_raw: FastHashMap<NounIdentity, ValueId>,
+    direct_atoms: FastHashMap<AtomValue, ValueId>,
+    indirect_atom_buckets: FastHashMap<NounMug, Vec<ValueId>>,
+    cells: FastHashMap<CellKey<ValueId>, ValueId>,
 }
 
 impl ValueArena {
@@ -49,8 +51,8 @@ impl ValueArena {
     }
 
     #[inline]
-    fn raw(noun: Noun) -> u64 {
-        unsafe { noun.as_raw() }
+    fn raw(noun: Noun) -> NounIdentity {
+        NounIdentity::of(noun)
     }
 
     fn push(&mut self, noun: Noun, kind: ValueKind) -> ValueId {
@@ -73,6 +75,7 @@ impl ValueArena {
             .as_atom()
             .map_err(|err| CompilerError::Decode(format!("value atom: {err}")))?;
         if let Ok(value) = atom.as_u64() {
+            let value = AtomValue(value);
             if let Some(id) = self.direct_atoms.get(&value).copied() {
                 self.by_raw.insert(raw, id);
                 return Ok(id);
@@ -82,7 +85,7 @@ impl ValueArena {
             return Ok(id);
         }
 
-        let mug = slab_mug(noun, space);
+        let mug = NounMug(slab_mug(noun, space));
         if let Some(bucket) = self.indirect_atom_buckets.get(&mug) {
             for id in bucket.iter().copied() {
                 let prior = self
@@ -108,7 +111,7 @@ impl ValueArena {
         if let Some(id) = self.by_raw.get(&raw).copied() {
             return id;
         }
-        let key = (head, tail);
+        let key = CellKey { head, tail };
         if let Some(id) = self.cells.get(&key).copied() {
             self.by_raw.insert(raw, id);
             return id;

@@ -24,6 +24,7 @@ use num_bigint::BigUint;
 use super::leaf::Leaf;
 use super::ToNoun;
 use crate::errors::{CompilerError, Result};
+use crate::native::identity::NockOpcode;
 use crate::native::noun::noun_pair;
 
 /// A Nock axis. Arbitrary-size (Nock 0/9/10 axes are atoms, not `u64`) — RT-08.
@@ -99,7 +100,7 @@ pub enum Formula {
         body: Rc<Formula>,
     }, // [11 spot body]
     Op {
-        code: u8,
+        code: NockOpcode,
         args: Vec<Rc<Formula>>,
     }, // [code args…] for 3/4/5/7/8/12 pending typed variants
 }
@@ -164,7 +165,7 @@ impl Formula {
             }
             Formula::Op { code, args } => {
                 let mut parts = Vec::with_capacity(args.len() + 1);
-                parts.push(D(*code as u64));
+                parts.push(D(u64::from(code.0)));
                 for a in args {
                     parts.push(a.to_noun(dst));
                 }
@@ -244,7 +245,7 @@ pub fn comb(mal: Formula, buz: Formula) -> Formula {
             }
             // 1 fallthrough → [7 mal buz]
             return Formula::Op {
-                code: 7,
+                code: NockOpcode::COMPOSE,
                 args: vec![rc(mal), rc(buz)],
             };
         }
@@ -253,7 +254,7 @@ pub fn comb(mal: Formula, buz: Formula) -> Formula {
     if let Formula::Cell(h, t) = &mal {
         if is_slot_one(t) {
             return Formula::Op {
-                code: 8,
+                code: NockOpcode::PUSH,
                 args: vec![Rc::clone(h), rc(buz)],
             };
         }
@@ -263,7 +264,7 @@ pub fn comb(mal: Formula, buz: Formula) -> Formula {
         return mal;
     }
     Formula::Op {
-        code: 7,
+        code: NockOpcode::COMPOSE,
         args: vec![rc(mal), rc(buz)],
     }
 }
@@ -331,13 +332,13 @@ impl Formula {
                 )
             }
             3 | 4 => Formula::Op {
-                code: op as u8,
+                code: NockOpcode(op as u8),
                 args: vec![rc(Formula::from_noun(tail, space)?)],
             },
             5 | 7 | 8 | 12 => {
                 let (a, b) = pair(tail)?;
                 Formula::Op {
-                    code: op as u8,
+                    code: NockOpcode(op as u8),
                     args: vec![
                         rc(Formula::from_noun(a, space)?),
                         rc(Formula::from_noun(b, space)?),

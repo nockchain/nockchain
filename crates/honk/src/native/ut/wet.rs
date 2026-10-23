@@ -81,11 +81,11 @@ impl<'a> Ut<'a> {
         dox: &NRc<NTy>,
         hoon_noun: Noun,
     ) -> Result<bool> {
-        if self.fire_wet_rib_raw.contains(&(
-            native_type_id_usize(sut),
-            native_type_id_usize(dox),
-            unsafe { hoon_noun.as_raw() },
-        )) {
+        if self.fire_wet_rib_raw.contains(&WetRibKey {
+            subject: native_type_id(sut),
+            secondary_subject: native_type_id(dox),
+            gene: NounIdentity::of(hoon_noun),
+        }) {
             return Ok(true);
         }
         let space = self.slab.noun_space();
@@ -115,11 +115,11 @@ impl<'a> Ut<'a> {
         if self.fire_wet_rib_contains(&wet_core, &dox, hoon_identity)? {
             return Ok(());
         }
-        self.fire_wet_rib_raw.insert((
-            native_type_id_usize(&wet_core),
-            native_type_id_usize(&dox),
-            unsafe { hoon_identity.as_raw() },
-        ));
+        self.fire_wet_rib_raw.insert(WetRibKey {
+            subject: native_type_id(&wet_core),
+            secondary_subject: native_type_id(&dox),
+            gene: NounIdentity::of(hoon_identity),
+        });
         self.fire_wet_rib
             .push((wet_core.clone(), dox.clone(), hoon_identity));
         let result = (|| -> Result<()> {
@@ -134,11 +134,11 @@ impl<'a> Ut<'a> {
             Ok(())
         })();
         if let Some((entry_sut, entry_dox, entry_hoon)) = self.fire_wet_rib.pop() {
-            self.fire_wet_rib_raw.remove(&(
-                native_type_id_usize(&entry_sut),
-                native_type_id_usize(&entry_dox),
-                unsafe { entry_hoon.as_raw() },
-            ));
+            self.fire_wet_rib_raw.remove(&WetRibKey {
+                subject: native_type_id(&entry_sut),
+                secondary_subject: native_type_id(&entry_dox),
+                gene: NounIdentity::of(entry_hoon),
+            });
         }
         result
     }

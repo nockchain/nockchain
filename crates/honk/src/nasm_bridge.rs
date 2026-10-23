@@ -16,7 +16,13 @@
 use nockvm::noun::{Noun, NounSpace};
 
 use crate::errors::{CompilerError, Result};
+use crate::native::identity::{AtomValue, CellKey, NounIdentity};
 use crate::native::ut::types::FastHashMap;
+
+/// Identity within one bridge's canonical noun arena.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct NasmNounId(u32);
 
 #[derive(Default)]
 pub struct SlabToNockasm {
@@ -27,19 +33,19 @@ pub struct SlabToNockasm {
     /// Raw slab noun bits (allocation offset + tag, or direct-atom value) to
     /// intern id. Sound because slab nouns are immutable and a given raw
     /// value always denotes the same noun within one space.
-    slab_memo: FastHashMap<u64, u32>,
-    small_atoms: FastHashMap<u64, u32>,
+    slab_memo: FastHashMap<NounIdentity, NasmNounId>,
+    small_atoms: FastHashMap<AtomValue, NasmNounId>,
     big_atoms: std::collections::HashMap<
         Box<[u8]>,
-        u32,
+        NasmNounId,
         std::hash::BuildHasherDefault<crate::native::ut::types::FastHasher>,
     >,
-    cells: FastHashMap<(u32, u32), u32>,
+    cells: FastHashMap<CellKey<NasmNounId>, NasmNounId>,
 }
 
 enum Task {
     Visit(Noun),
-    Build { raw: u64 },
+    Build { raw: NounIdentity },
 }
 
 impl SlabToNockasm {
@@ -52,11 +58,11 @@ impl SlabToNockasm {
     /// matching the sharing the old single-list jam gave `lift_bundle`.
     pub fn convert(&mut self, root: Noun, space: &NounSpace) -> Result<nockasm::Noun> {
         let mut tasks = vec![Task::Visit(root)];
-        let mut values: Vec<u32> = Vec::new();
+        let mut values: Vec<NasmNounId> = Vec::new();
         while let Some(task) = tasks.pop() {
             match task {
                 Task::Visit(noun) => {
-                    let raw = unsafe { noun.as_raw() };
+                    let raw = NounIdentity::of(noun);
                     if let Some(&hit) = self.slab_memo.get(&raw) {
                         values.push(hit);
                         continue;
@@ -86,15 +92,24 @@ impl SlabToNockasm {
                     let head_id = values
                         .pop()
                         .expect("nasm bridge build frame missing head value");
-                    let id = match self.cells.get(&(head_id, tail_id)) {
+                    let id = match self.cells.get(&CellKey {
+                        head: head_id,
+                        tail: tail_id,
+                    }) {
                         Some(&id) => id,
                         None => {
                             let cell = nockasm::Noun::cell(
-                                self.canon[head_id as usize].clone(),
-                                self.canon[tail_id as usize].clone(),
+                                self.canon[head_id.0 as usize].clone(),
+                                self.canon[tail_id.0 as usize].clone(),
                             );
                             let id = self.intern(cell)?;
-                            self.cells.insert((head_id, tail_id), id);
+                            self.cells.insert(
+                                CellKey {
+                                    head: head_id,
+                                    tail: tail_id,
+                                },
+                                id,
+                            );
                             id
                         }
                     };
@@ -107,28 +122,28 @@ impl SlabToNockasm {
             .pop()
             .expect("nasm bridge traversal must produce a root value");
         debug_assert!(values.is_empty());
-        Ok(self.canon[id as usize].clone())
+        Ok(self.canon[id.0 as usize].clone())
     }
 
-    fn intern(&mut self, noun: nockasm::Noun) -> Result<u32> {
+    fn intern(&mut self, noun: nockasm::Noun) -> Result<NasmNounId> {
         let id = u32::try_from(self.canon.len()).map_err(|_| {
             CompilerError::Decode("nasm bridge exceeded u32 distinct nouns".to_string())
         })?;
         self.canon.push(noun);
-        Ok(id)
+        Ok(NasmNounId(id))
     }
 
-    fn small_atom(&mut self, value: u64) -> Result<u32> {
-        if let Some(&id) = self.small_atoms.get(&value) {
+    fn small_atom(&mut self, value: u64) -> Result<NasmNounId> {
+        if let Some(&id) = self.small_atoms.get(&AtomValue(value)) {
             return Ok(id);
         }
         let id = self.intern(nockasm::Noun::from(value))?;
-        self.small_atoms.insert(value, id);
+        self.small_atoms.insert(AtomValue(value), id);
         Ok(id)
     }
 
     /// Intern an atom given as (possibly zero-padded) little-endian bytes.
-    fn wide_atom(&mut self, bytes: &[u8]) -> Result<u32> {
+    fn wide_atom(&mut self, bytes: &[u8]) -> Result<NasmNounId> {
         let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
         let significant = &bytes[..end];
         if significant.len() <= 8 {

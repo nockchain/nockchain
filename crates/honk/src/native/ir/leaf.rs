@@ -18,6 +18,8 @@ use bytes::Bytes;
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace};
 
+use crate::native::identity::*;
+
 /// An owned, provenance-safe noun leaf.
 ///
 /// `Jammed` caches a content hash computed once at creation, so hash-consing the
@@ -33,7 +35,7 @@ pub enum Leaf {
     Direct(u64),
     /// Anything larger (big atoms, cells) as owned jam bytes + a cached content
     /// hash — provenance-free, cued into the destination slab by `to_noun`.
-    Jammed(Arc<[u8]>, u64),
+    Jammed(Arc<[u8]>, JamHash),
     /// A RAW noun + cached mug. Carried WITHOUT jam/cue round-trips — the
     /// jam-elimination win. Safe because the compile slab never recycles the
     /// address the noun points at (the frame arena was retired), so the noun
@@ -41,7 +43,7 @@ pub enum Leaf {
     /// on the LIVE compile path; the oracle path ([`Leaf::from_noun`]) uses
     /// `Jammed`. The two never share an interned table within one compile, so the
     /// cross-variant `PartialEq => false` is never exercised.
-    Noun(Noun, u32),
+    Noun(Noun, NounMug),
 }
 
 impl Leaf {
@@ -61,7 +63,7 @@ impl Leaf {
         let bytes: Arc<[u8]> = Arc::from(&scratch.jam()[..]);
         let mut hasher = DefaultHasher::new();
         bytes[..].hash(&mut hasher);
-        Leaf::Jammed(bytes, hasher.finish())
+        Leaf::Jammed(bytes, JamHash(hasher.finish()))
     }
 
     /// Capture `noun` as a LIVE-path leaf: atoms `<= u64` become `Direct`,
@@ -76,7 +78,7 @@ impl Leaf {
             }
         }
         // Carry the live noun as-is; cache its mug as the hash bucket.
-        Leaf::Noun(noun, crate::native::noun::slab_mug(noun, space))
+        Leaf::Noun(noun, NounMug(crate::native::noun::slab_mug(noun, space)))
     }
 
     /// Materialize the leaf into `dst` via a checked copy (no foreign pointer).

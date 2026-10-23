@@ -7,6 +7,7 @@
 
 pub mod formula;
 pub mod hot;
+pub mod identity;
 // Native compiler IR; see docs/native-compiler for the migration and
 // performance-validation record.
 pub mod ir;

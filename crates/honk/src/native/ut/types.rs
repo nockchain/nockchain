@@ -2,15 +2,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::sync::Arc;
 
-use hatch::ast::hoon::WingType;
 use nockapp::Noun;
 use nockvm::noun::{NounAllocator, NounSpace};
 use num_bigint::BigUint;
 
+use super::keys::*;
 use crate::errors::Result;
+use crate::native::identity::*;
 use crate::native::ir::formula_dag::FormulaId;
 use crate::native::ir::semi_dag::SemiId;
-use crate::native::ir::ty::{Type as NTy, TypeRef as NRc};
+use crate::native::ir::ty::{Type as NTy, TypeId, TypeRef as NRc};
 use crate::native::ut::{noun_eq, Ut};
 
 // Compiler inputs are not attacker-controlled; prefer a fast, non-cryptographic hasher for
@@ -133,36 +134,6 @@ where
     }
 }
 
-pub type CoreMintBoundaryKey = (u32, u32, u32, u8, u8, u64, u64, u64);
-// Native re-key (Phase-2 tail): the bran/seminoun subject is the DEEPENING type,
-// so the first field is the interned native `Rc` pointer (`NRc::as_ptr as u64`)
-// instead of a noun mug — lowering the deepening subject just to mug it was the
-// O(N^2) cost this nativization kills.
-pub type BranSemiMemoKey = (u64, u8, u64, u64, u64, usize);
-// Boundary-cache keys carry the active semantic/memo context (fan_context_key
-// for %rest/%hold scope, and for mint/mull the arm_epoch/placeholder context)
-// in addition to (mug, …, vet). These collapse to 0 in the steady state, so
-// adding them only forces a fresh (correct) recompute when the cached type
-// operation's result actually depends on context the mugs don't capture —
-// closing the same roswell-class stale-hit bug the miss memo had. See the
-// cache-context construction sites in ut/mod.rs.
-pub type MintBoundaryKey = (u32, u32, u8, u64, u64, u64, u64);
-pub type MullBoundaryKey = (u32, u32, u32, u8, u64, u64, u64, u64);
-pub type RedoBoundaryKey = (u32, u32, u8, u64);
-pub type RestBoundaryKey = (u32, u32, u8, u64);
-pub type NestBoundaryRawKey = (u64, u64, u64);
-pub type NestBoundaryKey = (u32, u32, u8, u64);
-pub type TypeBinaryBoundaryKey = (u32, u32, u8, u64);
-pub type CoolMemoKey = (u32, u32, u8, u64, u64);
-pub type ChipMemoKey = (u32, u8, u8, u8, u8, u64, u64, u64, u64);
-pub type WingAxisMemoKey = (u32, u64, u64);
-pub type LookMemoKey = (u64, u64);
-pub type HoldTypeRawMemoKey = (u64, u64);
-pub type HoldTypeMemoKey = (u32, u32);
-pub type HoldRepoRawMemoKey = (u64, u64, u64);
-pub type HoldRepoCoreRawMemoKey = (u64, u64, u64, u64, u64, u64);
-pub type HoldRepoCoreMemoKey = (u32, u32, u32, u32, u32, u64);
-
 #[derive(Clone)]
 pub struct BranSemiCacheEntry {
     // Native re-key (Phase-2 tail): the bran subject + the active hold scope are
@@ -174,108 +145,43 @@ pub struct BranSemiCacheEntry {
 }
 
 pub struct BoundaryMemoSet {
-    pub core_mint: BucketMemo<CoreMintBoundaryKey, CoreMintCacheEntry>,
-    pub mint: BucketMemo<MintBoundaryKey, MintCacheEntry>,
-    pub mull: BucketMemo<MullBoundaryKey, MullCacheEntry>,
-    pub redo: BucketMemo<RedoBoundaryKey, UnaryTypeBoundaryEntry>,
-    pub rest: BucketMemo<RestBoundaryKey, RestCacheEntry>,
-    pub nest_raw: RawMemoMap<NestBoundaryRawKey, bool>,
-    pub nest: BucketMemo<NestBoundaryKey, NestCacheEntry>,
-    pub crop: BucketMemo<TypeBinaryBoundaryKey, UnaryTypeBoundaryEntry>,
-    pub fuse: BucketMemo<TypeBinaryBoundaryKey, UnaryTypeBoundaryEntry>,
+    pub mint: BucketMemo<MintKey<NounMug>, MintCacheEntry>,
+    pub redo: BucketMemo<TypeBinaryKey<NounMug>, UnaryTypeBoundaryEntry>,
+    pub rest: BucketMemo<RestKey, RestCacheEntry>,
+    pub nest: BucketMemo<TypeBinaryKey<NounMug>, NestCacheEntry>,
 }
 
 impl Default for BoundaryMemoSet {
     fn default() -> Self {
         Self {
-            core_mint: Default::default(),
             mint: Default::default(),
-            mull: Default::default(),
             redo: Default::default(),
             rest: Default::default(),
-            nest_raw: Default::default(),
             nest: Default::default(),
-            crop: Default::default(),
-            fuse: Default::default(),
         }
     }
 }
 
 impl BoundaryMemoSet {
-    /// Drop every memoized type-operation result. These are pure functions of
-    /// their (already context-keyed) inputs, so a cleared entry just forces a
-    /// correct recompute. Used at frame-arena reclamation to evict entries whose
-    /// minted type/formula values lived in the reclaimed per-arm scratch.
+    /// Drop noun-boundary results; future calls recompute them in their context.
     pub fn clear(&mut self) {
-        self.core_mint.clear();
         self.mint.clear();
-        self.mull.clear();
         self.redo.clear();
         self.rest.clear();
-        self.nest_raw.clear();
         self.nest.clear();
-        self.crop.clear();
-        self.fuse.clear();
-    }
-}
-
-pub struct LookupMemoSet {
-    // ATOMIC FLIP (C6+C9): the find/find_raw/strict_term_port[_raw] caches were
-    // DORMANT (only `.clear()`ed, never read/written on the live path) and they
-    // embedded `Port` (whose shape changed to carry native types) — deleted here
-    // rather than re-keyed. The surviving entries do not embed `Port`; they remain
-    // dormant noun-keyed caches (re-key on native identity at C-final if revived).
-    pub strict_term_core_parts_raw: RawMemoMap<(u64, u64), Option<(Noun, Noun, Noun, Noun)>>,
-    pub cool: BucketMemo<CoolMemoKey, (Noun, Noun, WingType, Noun)>,
-    pub chip: BucketMemo<ChipMemoKey, (Noun, Noun)>,
-    pub wing_axis: BucketMemo<WingAxisMemoKey, (Noun, WingType, u64)>,
-    pub look: RawMemoMap<LookMemoKey, Option<(u64, Noun)>>,
-    pub loot: RawMemoMap<LookMemoKey, Option<(u64, Noun)>>,
-}
-
-impl Default for LookupMemoSet {
-    fn default() -> Self {
-        Self {
-            strict_term_core_parts_raw: Default::default(),
-            cool: Default::default(),
-            chip: Default::default(),
-            wing_axis: Default::default(),
-            look: Default::default(),
-            loot: Default::default(),
-        }
-    }
-}
-
-impl LookupMemoSet {
-    /// Drop every memoized find/lookup result (see `BoundaryMemoSet::clear`).
-    pub fn clear(&mut self) {
-        self.strict_term_core_parts_raw.clear();
-        self.cool.clear();
-        self.chip.clear();
-        self.wing_axis.clear();
-        self.look.clear();
-        self.loot.clear();
     }
 }
 
 pub struct HoldMemoSet {
-    pub repo_raw: RawMemoMap<u64, Noun>,
-    pub hold_type_raw: RawMemoMap<HoldTypeRawMemoKey, Noun>,
-    pub hold_type: BucketMemo<HoldTypeMemoKey, HoldTypeCacheEntry>,
-    pub hold_repo_raw: RawMemoMap<HoldRepoRawMemoKey, Noun>,
-    pub hold_repo_core_raw: RawMemoMap<HoldRepoCoreRawMemoKey, Noun>,
-    pub hold_repo_core: BucketMemo<HoldRepoCoreMemoKey, HoldRepoCoreCacheEntry>,
+    pub hold_type_raw: RawMemoMap<HoldKey<NounIdentity>, Noun>,
+    pub hold_type: BucketMemo<HoldKey<NounMug>, HoldTypeCacheEntry>,
 }
 
 impl Default for HoldMemoSet {
     fn default() -> Self {
         Self {
-            repo_raw: Default::default(),
             hold_type_raw: Default::default(),
             hold_type: Default::default(),
-            hold_repo_raw: Default::default(),
-            hold_repo_core_raw: Default::default(),
-            hold_repo_core: Default::default(),
         }
     }
 }
@@ -283,18 +189,14 @@ impl Default for HoldMemoSet {
 impl HoldMemoSet {
     /// Drop every memoized hold repo/type result (see `BoundaryMemoSet::clear`).
     pub fn clear(&mut self) {
-        self.repo_raw.clear();
         self.hold_type_raw.clear();
         self.hold_type.clear();
-        self.hold_repo_raw.clear();
-        self.hold_repo_core_raw.clear();
-        self.hold_repo_core.clear();
     }
 }
 
 #[derive(Default)]
 pub struct StructNounSet {
-    pub buckets: HashMap<u32, Vec<Noun>>,
+    pub buckets: HashMap<NounMug, Vec<Noun>>,
 }
 
 impl StructNounSet {
@@ -355,8 +257,8 @@ impl StructNounSet {
 
 #[derive(Default)]
 pub struct StructNounPairSet {
-    pub buckets: HashMap<(u32, u32), Vec<(Noun, Noun)>>,
-    pub raw_pairs: FastHashSet<(u64, u64)>,
+    pub buckets: HashMap<(NounMug, NounMug), Vec<(Noun, Noun)>>,
+    pub raw_pairs: FastHashSet<(NounIdentity, NounIdentity)>,
     pub pair_count: usize,
     pub signature_sum: u64,
     pub signature_xor: u64,
@@ -364,7 +266,7 @@ pub struct StructNounPairSet {
 
 #[derive(Clone)]
 pub struct HoldRepoFanContextBucket {
-    pub key: (u32, u32),
+    pub key: (NounMug, NounMug),
     pub pairs: Vec<(Noun, Noun)>,
 }
 
@@ -376,10 +278,10 @@ pub struct HoldRepoFanContextSnapshot {
 
 impl StructNounPairSet {
     #[inline]
-    fn pair_signature_component(key: (u32, u32)) -> u64 {
+    fn pair_signature_component(key: (NounMug, NounMug)) -> u64 {
         let mut hasher = FastHasher::default();
-        hasher.write_u32(key.0);
-        hasher.write_u32(key.1);
+        hasher.write_u32(key.0 .0);
+        hasher.write_u32(key.1 .0);
         hasher.finish()
     }
 
@@ -404,7 +306,7 @@ impl StructNounPairSet {
     }
 
     pub fn insert(&mut self, ut: &mut Ut, sut: Noun, ref_: Noun) -> Result<bool> {
-        let raw_key = (unsafe { sut.as_raw() }, unsafe { ref_.as_raw() });
+        let raw_key = (NounIdentity::of(sut), NounIdentity::of(ref_));
         if self.raw_pairs.contains(&raw_key) {
             return Ok(false);
         }
@@ -492,7 +394,7 @@ impl StructNounPairSet {
     }
 
     pub fn remove(&mut self, ut: &mut Ut, sut: Noun, ref_: Noun) -> Result<bool> {
-        let raw_key = (unsafe { sut.as_raw() }, unsafe { ref_.as_raw() });
+        let raw_key = (NounIdentity::of(sut), NounIdentity::of(ref_));
         let space = ut.slab.noun_space();
         let key = (ut.noun_mug_cached(sut), ut.noun_mug_cached(ref_));
         let mut removed = false;
@@ -525,9 +427,7 @@ impl StructNounPairSet {
                     {
                         bucket.swap_remove(idx);
                         self.raw_pairs
-                            .remove(&(unsafe { prior_sut.as_raw() }, unsafe {
-                                prior_ref.as_raw()
-                            }));
+                            .remove(&(NounIdentity::of(prior_sut), NounIdentity::of(prior_ref)));
                         removed = true;
                         remove_bucket = bucket.is_empty();
                         let component = Self::pair_signature_component(key);
@@ -548,9 +448,9 @@ impl StructNounPairSet {
 
 #[derive(Default)]
 pub struct NestTypeInterner {
-    pub raw_ids: HashMap<u64, u64>,
-    pub mug_ids: FastHashMap<u32, Vec<(Noun, u64)>>,
-    pub next_id: u64,
+    pub raw_ids: HashMap<NounIdentity, NestNounId>,
+    pub mug_ids: FastHashMap<NounMug, Vec<(Noun, NestNounId)>>,
+    pub next_id: NestNounId,
 }
 
 impl NestTypeInterner {
@@ -558,8 +458,8 @@ impl NestTypeInterner {
         Self::default()
     }
 
-    pub fn id_for(&mut self, ut: &mut Ut, noun: Noun) -> Result<u64> {
-        let raw = unsafe { noun.as_raw() };
+    pub fn id_for(&mut self, ut: &mut Ut, noun: Noun) -> Result<NestNounId> {
+        let raw = NounIdentity::of(noun);
         if let Some(id) = self.raw_ids.get(&raw) {
             return Ok(*id);
         }
@@ -576,22 +476,32 @@ impl NestTypeInterner {
         }
 
         let id = self.next_id;
-        self.next_id = self
-            .next_id
-            .checked_add(1)
-            .expect("nest type interner exhausted u64 ids");
+        self.next_id = NestNounId(
+            self.next_id
+                .0
+                .checked_add(1)
+                .expect("nest type interner exhausted u64 ids"),
+        );
         self.raw_ids.insert(raw, id);
         self.mug_ids.entry(mug).or_default().push((noun, id));
         Ok(id)
     }
 }
 
-#[derive(Default, Clone)]
-pub struct NestSeenSet {
-    pub ids: Vec<u64>,
+/// Ordered recursion guard whose ID domain cannot change after construction.
+/// ```compile_fail
+/// use honk::native::identity::NestNounId;
+/// use honk::native::ir::ty::TypeId;
+/// use honk::native::ut::types::NestSeenSet;
+/// let mut native = NestSeenSet::<TypeId>::new();
+/// native.insert_id(NestNounId::default());
+/// ```
+#[derive(Clone)]
+pub struct NestSeenSet<I = TypeId> {
+    pub ids: Vec<I>,
 }
 
-impl NestSeenSet {
+impl<I: Copy + Ord> NestSeenSet<I> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -600,17 +510,16 @@ impl NestSeenSet {
         self.ids.clear();
     }
 
-    pub fn snapshot(&self) -> Vec<u64> {
+    pub fn snapshot(&self) -> Vec<I> {
         self.ids.clone()
     }
 
-    /// Native-id variants (C8): the interned `Rc` pointer is a canonical type id,
-    /// so the seen-hold set keys directly on it instead of the noun interner.
-    pub fn contains_id(&self, id: u64) -> bool {
+    /// Membership in this set's ID domain (native TypeId by default).
+    pub fn contains_id(&self, id: I) -> bool {
         self.ids.binary_search(&id).is_ok()
     }
 
-    pub fn insert_id(&mut self, id: u64) -> bool {
+    pub fn insert_id(&mut self, id: I) -> bool {
         match self.ids.binary_search(&id) {
             Ok(_) => false,
             Err(idx) => {
@@ -620,7 +529,7 @@ impl NestSeenSet {
         }
     }
 
-    pub fn remove_id(&mut self, id: u64) -> bool {
+    pub fn remove_id(&mut self, id: I) -> bool {
         match self.ids.binary_search(&id) {
             Ok(idx) => {
                 self.ids.remove(idx);
@@ -629,7 +538,9 @@ impl NestSeenSet {
             Err(_) => false,
         }
     }
+}
 
+impl NestSeenSet<NestNounId> {
     pub fn contains(
         &mut self,
         ut: &mut Ut,
@@ -673,28 +584,34 @@ impl NestSeenSet {
     }
 }
 
-pub type NestTypeSet = NestSeenSet;
-
-#[derive(Default, Clone)]
-pub struct NestPairSet {
-    pub ids: Vec<(u64, u64)>,
+impl<I> Default for NestSeenSet<I> {
+    fn default() -> Self {
+        Self { ids: Vec::new() }
+    }
 }
 
-impl NestPairSet {
+pub type NestTypeSet = NestSeenSet;
+
+#[derive(Clone)]
+pub struct NestPairSet<I = TypeId> {
+    pub ids: Vec<(I, I)>,
+}
+
+impl<I: Copy + Ord> NestPairSet<I> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn snapshot(&self) -> Vec<(u64, u64)> {
+    pub fn snapshot(&self) -> Vec<(I, I)> {
         self.ids.clone()
     }
 
-    /// Native-id variants (C8): key directly on interned `Rc`-pointer ids.
-    pub fn contains_id(&self, sut_id: u64, ref_id: u64) -> bool {
+    /// Membership in this set's ID domain (native TypeId by default).
+    pub fn contains_id(&self, sut_id: I, ref_id: I) -> bool {
         self.ids.binary_search(&(sut_id, ref_id)).is_ok()
     }
 
-    pub fn insert_id(&mut self, sut_id: u64, ref_id: u64) -> bool {
+    pub fn insert_id(&mut self, sut_id: I, ref_id: I) -> bool {
         let key = (sut_id, ref_id);
         match self.ids.binary_search(&key) {
             Ok(_) => false,
@@ -705,7 +622,7 @@ impl NestPairSet {
         }
     }
 
-    pub fn remove_id(&mut self, sut_id: u64, ref_id: u64) -> bool {
+    pub fn remove_id(&mut self, sut_id: I, ref_id: I) -> bool {
         let key = (sut_id, ref_id);
         match self.ids.binary_search(&key) {
             Ok(idx) => {
@@ -715,7 +632,9 @@ impl NestPairSet {
             Err(_) => false,
         }
     }
+}
 
+impl NestPairSet<NestNounId> {
     pub fn contains(
         &mut self,
         ut: &mut Ut,
@@ -767,13 +686,19 @@ impl NestPairSet {
     }
 }
 
+impl<I> Default for NestPairSet<I> {
+    fn default() -> Self {
+        Self { ids: Vec::new() }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct NestMemoKey {
-    pub sut_id: u64,
-    pub ref_id: u64,
-    pub seg: Vec<u64>,
-    pub reg: Vec<u64>,
-    pub gil: Vec<(u64, u64)>,
+    pub sut_id: TypeId,
+    pub ref_id: TypeId,
+    pub seg: Vec<TypeId>,
+    pub reg: Vec<TypeId>,
+    pub gil: Vec<(TypeId, TypeId)>,
 }
 
 pub struct FastHasher {
@@ -926,18 +851,6 @@ pub enum Pony {
     Synthetic { typ: NRc<NTy>, formula: FormulaId },
 }
 
-#[derive(Clone, Debug)]
-pub struct CoreMintCacheEntry {
-    pub sut: Noun,
-    pub gol: Noun,
-    pub tomes_map: Noun,
-    pub prefix: Option<String>,
-    pub poly: Poly,
-    pub vet: bool,
-    pub core_type: Noun,
-    pub formula: Noun,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct MintCacheEntry {
     pub sut: Noun,
@@ -945,16 +858,6 @@ pub struct MintCacheEntry {
     pub gen: Noun,
     pub ty: Noun,
     pub formula: Noun,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct MullCacheEntry {
-    pub sut: Noun,
-    pub gol: Noun,
-    pub dox: Noun,
-    pub gen: Noun,
-    pub p_ty: Noun,
-    pub q_ty: Noun,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -983,16 +886,6 @@ pub struct HoldTypeCacheEntry {
     pub inner: Noun,
     pub hoon: Noun,
     pub hold: Noun,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct HoldRepoCoreCacheEntry {
-    pub hoon: Noun,
-    pub payload: Noun,
-    pub garb: Noun,
-    pub context: Noun,
-    pub tomes: Noun,
-    pub result: Noun,
 }
 
 #[derive(Clone, Debug)]

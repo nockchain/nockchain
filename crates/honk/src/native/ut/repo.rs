@@ -2,7 +2,7 @@ use super::*;
 
 impl<'a> Ut<'a> {
     #[cfg(test)]
-    fn collect_rest_leg_ids(&mut self, legs: &[(Noun, Noun)]) -> Result<Vec<u64>> {
+    fn collect_rest_leg_ids(&mut self, legs: &[(Noun, Noun)]) -> Result<Vec<FanLegId>> {
         let mut unique_leg_ids = Vec::new();
         for (inner, hoon_noun) in legs {
             let leg_id = self.hold_repo_fan_leg_intern_id(*inner, *hoon_noun)?;
@@ -15,7 +15,7 @@ impl<'a> Ut<'a> {
 
     fn with_active_rest_leg_ids<R>(
         &mut self,
-        leg_ids: &[u64],
+        leg_ids: &[FanLegId],
         body: impl FnOnce(&mut Self) -> Result<R>,
     ) -> Result<R> {
         if leg_ids.iter().any(|leg_id| {
@@ -58,7 +58,7 @@ impl<'a> Ut<'a> {
 
     pub(super) fn with_rest_leg_id<R>(
         &mut self,
-        leg_id: u64,
+        leg_id: FanLegId,
         body: impl FnOnce(&mut Self) -> Result<R>,
     ) -> Result<R> {
         self.with_active_rest_leg_ids(&[leg_id], body)
@@ -157,13 +157,19 @@ impl<'a> Ut<'a> {
     }
 
     pub(super) fn ty_hold_cached(&mut self, inner: Noun, hoon: Noun) -> Result<Noun> {
-        let raw_key = (unsafe { inner.as_raw() }, unsafe { hoon.as_raw() });
+        let raw_key = HoldKey {
+            subject: NounIdentity::of(inner),
+            gene: NounIdentity::of(hoon),
+        };
         if let Some(cached) = self.hold_memo.hold_type_raw.get(&raw_key) {
             return Ok(cached);
         }
 
         let space = self.slab.noun_space();
-        let key = (self.noun_mug_cached(inner), self.noun_mug_cached(hoon));
+        let key = HoldKey {
+            subject: self.noun_mug_cached(inner),
+            gene: self.noun_mug_cached(hoon),
+        };
         if let Some(entries) = self.hold_memo.hold_type.get(&key) {
             let inner_raw = unsafe { inner.as_raw() };
             let hoon_raw = unsafe { hoon.as_raw() };

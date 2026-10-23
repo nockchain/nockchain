@@ -7,18 +7,32 @@
 
 use num_bigint::BigUint;
 
+use crate::native::identity::*;
 use crate::native::ir::value_dag::ValueId;
 use crate::native::ut::types::FastHashMap;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct SemiId(pub(crate) u32);
 
 #[derive(Clone, Debug)]
 pub(crate) enum SemiNode {
     Complete(ValueId),
     Blocked,
-    Half { head: SemiId, tail: SemiId },
-    Lazy { fragment: BigUint, resolver_id: u64 },
+    Half {
+        head: SemiId,
+        tail: SemiId,
+    },
+    Lazy {
+        fragment: BigUint,
+        resolver_id: LazyResolverId,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LazySemiKey {
+    fragment: BigUint,
+    resolver_id: LazyResolverId,
 }
 
 #[derive(Default)]
@@ -26,9 +40,9 @@ pub(crate) struct SemiArena {
     entries: Vec<SemiNode>,
     complete: FastHashMap<ValueId, SemiId>,
     blocked: Option<SemiId>,
-    halves: FastHashMap<(SemiId, SemiId), SemiId>,
-    lazy: FastHashMap<(BigUint, u64), SemiId>,
-    by_raw: FastHashMap<u64, SemiId>,
+    halves: FastHashMap<CellKey<SemiId>, SemiId>,
+    lazy: FastHashMap<LazySemiKey, SemiId>,
+    by_raw: FastHashMap<NounIdentity, SemiId>,
 }
 
 impl SemiArena {
@@ -68,7 +82,7 @@ impl SemiArena {
     }
 
     pub(crate) fn half(&mut self, head: SemiId, tail: SemiId) -> SemiId {
-        let key = (head, tail);
+        let key = CellKey { head, tail };
         if let Some(id) = self.halves.get(&key).copied() {
             return id;
         }
@@ -77,24 +91,27 @@ impl SemiArena {
         id
     }
 
-    pub(crate) fn lazy(&mut self, fragment: BigUint, resolver_id: u64) -> SemiId {
-        let key = (fragment, resolver_id);
+    pub(crate) fn lazy(&mut self, fragment: BigUint, resolver_id: LazyResolverId) -> SemiId {
+        let key = LazySemiKey {
+            fragment,
+            resolver_id,
+        };
         if let Some(id) = self.lazy.get(&key).copied() {
             return id;
         }
         let id = self.push(SemiNode::Lazy {
-            fragment: key.0.clone(),
+            fragment: key.fragment.clone(),
             resolver_id,
         });
         self.lazy.insert(key, id);
         id
     }
 
-    pub(crate) fn raw_lookup(&self, raw: u64) -> Option<SemiId> {
+    pub(crate) fn raw_lookup(&self, raw: NounIdentity) -> Option<SemiId> {
         self.by_raw.get(&raw).copied()
     }
 
-    pub(crate) fn raw_register(&mut self, raw: u64, id: SemiId) {
+    pub(crate) fn raw_register(&mut self, raw: NounIdentity, id: SemiId) {
         self.by_raw.insert(raw, id);
     }
 }
@@ -113,8 +130,8 @@ mod tests {
         assert_eq!(blocked, arena.blocked());
         assert_eq!(arena.half(complete, blocked), arena.half(complete, blocked));
         assert_eq!(
-            arena.lazy(BigUint::from(42u32), 9),
-            arena.lazy(BigUint::from(42u32), 9)
+            arena.lazy(BigUint::from(42u32), LazyResolverId(9)),
+            arena.lazy(BigUint::from(42u32), LazyResolverId(9))
         );
     }
 }
