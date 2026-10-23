@@ -1,0 +1,26 @@
+[
+  {
+    "variant": "pilot-256-stream",
+    "stopped_at_nodes": 100000000,
+    "traversal_seconds": 44.846,
+    "including_drop_seconds": 45.118298785,
+    "VmHWM_KiB": 8479452,
+    "sample_count": 1
+  },
+  {
+    "variant": "pilot-256-oneshot",
+    "stopped_at_nodes": 100000000,
+    "traversal_seconds": 44.896,
+    "including_drop_seconds": 45.16992694,
+    "VmHWM_KiB": 8479988,
+    "sample_count": 1
+  },
+  {
+    "variant": "pilot-128-oneshot",
+    "stopped_at_nodes": 100000000,
+    "traversal_seconds": 35.625,
+    "including_drop_seconds": 35.845147036,
+    "VmHWM_KiB": 6917344,
+    "sample_count": 1
+  }
+]

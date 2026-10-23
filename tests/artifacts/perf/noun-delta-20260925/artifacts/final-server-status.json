@@ -1,0 +1,14 @@
+{
+  "checked_at_utc": "2026-09-25T18:58:21Z",
+  "production_service": "nockcloud-pool-leader.service",
+  "production_service_active": true,
+  "production_container_pid": 2033925,
+  "production_image": "sha256:16d6001a791b6f8c7dc28c8e9029ff228d9d324294174bc82bfcc5d139f7e169",
+  "grpc_health": "SERVING",
+  "candidate_service_active": false,
+  "candidate_main_pid": 0,
+  "active_noun_benchmark_units": 0,
+  "hashcons_linux_sha256": "051bac97b6ccfed260cd6bb0f2a4676fd47804fafc2c740698c1677114929375",
+  "backup_path": "/opt/nockcloud/backups/pma-storage-efficiency-20260925T1635Z/data",
+  "backup_sqlite_integrity_ok": true
+}

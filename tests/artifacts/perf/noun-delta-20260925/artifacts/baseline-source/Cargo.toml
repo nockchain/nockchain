@@ -1,0 +1,21 @@
+[package]
+name = "nockchain-noun-delta-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "=1.0.102"
+memmap2 = "=0.9.10"
+bincode = { version = "=2.0.1", features = ["derive", "serde"] }
+blake3 = { version = "=1.8.5", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = false
+
+[workspace]

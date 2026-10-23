@@ -1,0 +1,54 @@
+   Compiling nockchain-noun-delta-bench v0.1.0 (/tmp/nockchain-noun-delta-bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
+     Running unittests src/lib.rs (/tmp/nockchain-noun-delta-bench/target/debug/deps/nockchain_noun_delta_bench-79aec676acecd1d5)
+
+running 2 tests
+test pma::tests::v2_footer_checksum_and_capacity_are_checked ... ok
+test pma::tests::operative_v4_v5_validate_sidecar_and_preserve_source_bytes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/nockchain-noun-delta-bench/target/debug/deps/nockchain_noun_delta_bench-ead81778c107cd85)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/page_delta.rs (/tmp/nockchain-noun-delta-bench/target/debug/deps/page_delta-ddb907cfb72458ae)
+
+running 3 tests
+test tests::empty_and_shorter_targets_preserve_exact_length ... ok
+test tests::aligned_relocation_new_and_partial_chunks_reconstruct_exactly ... ok
+test tests::real_noun_root_is_read_through_mixed_virtual_chunks_without_mutation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/sequence.rs (/tmp/nockchain-noun-delta-bench/target/debug/deps/sequence-a28541d23348d5f7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/independent_oracle.rs (/tmp/nockchain-noun-delta-bench/target/debug/deps/independent_oracle-2259fd3a9c0d54f6)
+
+running 12 tests
+test state_axis_six_selects_state_not_full_arvo_subject ... ok
+test full_value_comparison_checks_both_sides_of_a_shared_pair ... ok
+test cyclic_graph_and_explicit_index_budget_fail_instead_of_partially_succeeding ... ok
+test relocated_and_differently_shared_values_have_same_content_root_and_reconstruct ... ok
+test serialized_delta_rejects_changed_payload_and_false_target_hash ... ok
+test encoded_storage_counts_match_actual_bytes_and_equal_state_layouts_are_not_interchangeable ... ok
+test incremental_chain_derives_indexes_without_base_reads_and_preserves_all_values ... ok
+test scalar_roots_preserve_numeric_boundaries_across_indirect_representations ... ok
+test reader_matches_independent_model_across_relocation_metadata_and_atom_encodings ... ok
+test reader_traverses_deep_state_without_recursive_test_oracle ... ok
+test changed_atom_and_large_atom_delta_chain_match_independent_values_and_hashes ... ok
+test deep_chain_index_and_delta_verification_use_independent_iterative_oracle ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+   Doc-tests nockchain_noun_delta_bench
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

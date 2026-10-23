@@ -100,6 +100,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         trace_opts: TraceOpts::default(),
         gc_interval: None,
         rotating_snapshot_interval_event_time: None,
+        epoch_compaction_interval_event_time: None,
         ephemeral: false,
         color: clap::ColorChoice::Auto,
         state_jam: Some(args.state_jam.to_string_lossy().into_owned()),

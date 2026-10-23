@@ -38,7 +38,8 @@ use crate::noun::slab::{Jammer, NockJammer, NounSlab};
 use crate::noun::slam;
 use crate::save::SaveableCheckpoint;
 use crate::snapshot::{
-    maybe_create_epoch_snapshot, maybe_create_rotating_snapshot, SnapshotManifest,
+    maybe_compact_epoch_snapshot, maybe_create_epoch_snapshot, maybe_create_rotating_snapshot,
+    SnapshotManifest,
 };
 use crate::utils::{
     create_context, current_da, durability, NOCK_STACK_SIZE, NOCK_STACK_SIZE_HUGE,
@@ -253,6 +254,7 @@ pub struct PmaConfig {
     pub open_existing: bool,
     pub create_snapshots: bool,
     pub rotating_snapshot_interval_event_time: Option<Duration>,
+    pub epoch_compaction_interval_event_time: Option<Duration>,
     pub(crate) restore_manifest: Option<SnapshotManifest>,
     pub gc_interval: Option<Duration>,
 }
@@ -716,6 +718,28 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
         test_jets: Vec<NounSlab>,
         trace: TraceOpts,
     ) -> Result<Self> {
+        let mut pma = pma;
+        if let Some(config) = pma.as_mut() {
+            config.rotating_snapshot_interval_event_time = config
+                .rotating_snapshot_interval_event_time
+                .filter(|interval| !interval.is_zero());
+            config.epoch_compaction_interval_event_time = config
+                .epoch_compaction_interval_event_time
+                .filter(|interval| !interval.is_zero());
+            if let Some(rotation) = config.rotating_snapshot_interval_event_time {
+                if config
+                    .epoch_compaction_interval_event_time
+                    .is_some_and(|compaction| compaction <= rotation)
+                {
+                    return Err(CrownError::Unknown(
+                        "epoch compaction interval must be strictly greater than rotating snapshot interval"
+                            .to_string(),
+                    ));
+                }
+            } else {
+                config.epoch_compaction_interval_event_time = None;
+            }
+        }
         let (action_sender, action_receiver) = mpsc::channel(1);
         let pma_timing = std::env::var_os("NOCK_PMA_TIMING")
             .is_some()
@@ -743,6 +767,7 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                         pma_gc_state,
                         create_snapshots,
                         rotating_snapshot_interval_event_time,
+                        epoch_compaction_interval_event_time,
                         restore_manifest,
                     ) = match pma {
                         Some(config) => {
@@ -754,6 +779,7 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                                 open_existing,
                                 create_snapshots,
                                 rotating_snapshot_interval_event_time,
+                                epoch_compaction_interval_event_time,
                                 restore_manifest,
                                 gc_interval,
                             } = config;
@@ -801,6 +827,7 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                                     }),
                                     create_snapshots,
                                     rotating_snapshot_interval_event_time,
+                                    epoch_compaction_interval_event_time,
                                     restore_manifest,
                                 ),
                                 Err(err) => {
@@ -809,7 +836,7 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                                 }
                             }
                         }
-                        None => (None, None, None, false, None, None),
+                        None => (None, None, None, false, None, None, None),
                     };
                     let event_log = if let Some(config) = event_log {
                         match EventLog::open(config.clone()) {
@@ -871,6 +898,7 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                         pma_gc_state,
                         create_snapshots,
                         rotating_snapshot_interval_event_time,
+                        epoch_compaction_interval_event_time,
                         event_log,
                         checkpoint,
                         &kernel_bytes,
@@ -1375,6 +1403,11 @@ fn serf_loop<C: SerfCheckpoint>(
                                             .saturating_add(
                                                 durable_event.event_processing_duration,
                                             );
+                                        serf.cumulative_event_processing_time_since_compaction =
+                                            serf.cumulative_event_processing_time_since_compaction
+                                                .saturating_add(
+                                                    durable_event.event_processing_duration,
+                                                );
                                     }
                                 });
                         }
@@ -1425,6 +1458,7 @@ fn serf_loop<C: SerfCheckpoint>(
                     if did_update {
                         let snapshot_start = Instant::now();
                         serf.maybe_create_rotating_snapshot();
+                        serf.maybe_compact_epoch_snapshot();
                         snapshot_stage_elapsed = Some(snapshot_start.elapsed());
                         debug!(
                             event_num = event_num_before,
@@ -1868,8 +1902,12 @@ pub struct Serf {
     pma_gc_state: Option<PmaGcState>,
     snapshot_creation_enabled: bool,
     rotating_snapshot_interval_event_time: Option<Duration>,
+    epoch_compaction_interval_event_time: Option<Duration>,
     cumulative_event_processing_time_since_snapshot: Duration,
-    /// Optional append-only event log used as the durability boundary.
+    cumulative_event_processing_time_since_compaction: Duration,
+    /// Next retry measured against the current last-success compute counter.
+    epoch_compaction_retry_at: Duration,
+    /// Optional accepted-event log used as the durability boundary.
     event_log: Option<EventLog>,
     /// Cancellation
     pub cancel_token: NockCancelToken,
@@ -1902,6 +1940,7 @@ impl Serf {
         pma_gc_state: Option<PmaGcState>,
         snapshot_creation_enabled: bool,
         rotating_snapshot_interval_event_time: Option<Duration>,
+        epoch_compaction_interval_event_time: Option<Duration>,
         mut event_log: Option<EventLog>,
         checkpoint: Option<C>,
         kernel_bytes: &[u8],
@@ -2088,6 +2127,30 @@ impl Serf {
             Duration::ZERO
         };
 
+        let cumulative_event_processing_time_since_compaction = if let Some(interval) =
+            epoch_compaction_interval_event_time.filter(|_| snapshot_creation_enabled)
+        {
+            match event_log.as_mut() {
+                Some(event_log) => {
+                    let compaction_event_num = event_log.compaction_event_num().map_err(|err| {
+                        CrownError::Unknown(format!(
+                            "serf: failed to load epoch compaction event number: {err}"
+                        ))
+                    })?;
+                    event_log
+                        .event_processing_time_after_capped(compaction_event_num, interval)
+                        .map_err(|err| {
+                            CrownError::Unknown(format!(
+                                "serf: failed to load cumulative event processing time since epoch compaction: {err}"
+                            ))
+                        })?
+                }
+                None => Duration::ZERO,
+            }
+        } else {
+            Duration::ZERO
+        };
+
         let mut serf = Self {
             ker_hash,
             arvo,
@@ -2097,7 +2160,10 @@ impl Serf {
             pma_gc_state,
             snapshot_creation_enabled,
             rotating_snapshot_interval_event_time,
+            epoch_compaction_interval_event_time,
             cumulative_event_processing_time_since_snapshot,
+            cumulative_event_processing_time_since_compaction,
+            epoch_compaction_retry_at: Duration::ZERO,
             event_log,
             event_num,
             cancel_token,
@@ -2772,6 +2838,40 @@ impl Serf {
                 let mut goof_slab = NounSlab::new();
                 goof_slab.copy_into(goof, &space);
                 Err(CrownError::KernelError(Some(goof_slab)))
+            }
+        }
+    }
+
+    fn maybe_compact_epoch_snapshot(&mut self) {
+        if !self.snapshot_creation_enabled {
+            return;
+        }
+        let Some(interval) = self.epoch_compaction_interval_event_time else {
+            return;
+        };
+        if self.cumulative_event_processing_time_since_compaction < interval
+            || self.cumulative_event_processing_time_since_compaction
+                < self.epoch_compaction_retry_at
+        {
+            return;
+        }
+        let Some(event_log) = self.event_log.as_mut() else {
+            return;
+        };
+        match maybe_compact_epoch_snapshot(
+            event_log, self.cumulative_event_processing_time_since_compaction,
+            self.epoch_compaction_interval_event_time,
+        ) {
+            Ok(true) => {
+                self.cumulative_event_processing_time_since_compaction = Duration::ZERO;
+                self.epoch_compaction_retry_at = Duration::ZERO;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                self.epoch_compaction_retry_at = self
+                    .cumulative_event_processing_time_since_compaction
+                    .saturating_add(interval);
+                warn!(error = %err, "epoch compaction failed; retry after another compute interval");
             }
         }
     }
@@ -3520,12 +3620,72 @@ mod tests {
             pma_gc_state: None,
             snapshot_creation_enabled: false,
             rotating_snapshot_interval_event_time: None,
+            epoch_compaction_interval_event_time: None,
             cumulative_event_processing_time_since_snapshot: Duration::ZERO,
+            cumulative_event_processing_time_since_compaction: Duration::ZERO,
+            epoch_compaction_retry_at: Duration::ZERO,
             event_log: None,
             cancel_token,
             event_num: Arc::new(AtomicU64::new(0)),
             metrics: None,
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn failed_epoch_compaction_retries_only_after_another_compute_interval() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let path = temp.path().join("event-log.sqlite3");
+        let mut event_log = EventLog::open(EventLogConfig { path: path.clone() })
+            .expect("open compaction retry event log");
+        event_log
+            .append_event(&EventLogEntry {
+                event_num: 1,
+                job_jam: vec![],
+                wire_source: "sys".to_string(),
+                wire_version: 1,
+                wire_tags_json: "[]".to_string(),
+                cause_hash: vec![0; 32],
+                job_hash: vec![0; 32],
+                event_processing_duration: Duration::from_secs(100),
+                created_at_ms: 0,
+            })
+            .expect("append historical compute time");
+        let interval = Duration::from_secs(10);
+        let restored = event_log
+            .event_processing_time_after_capped(0, interval)
+            .expect("restore due counter with excess historical compute time");
+        assert_eq!(restored, interval);
+        // A real storage error exercises the runtime error path without needing
+        // large PMA artifacts. Retrying would move the next retry deadline.
+        let conn = rusqlite::Connection::open(path).expect("open failure injection connection");
+        conn.execute("DROP TABLE snapshots", [])
+            .expect("inject snapshot query failure");
+        drop(conn);
+        let mut serf = dummy_serf();
+        serf.event_log = Some(event_log);
+        serf.snapshot_creation_enabled = true;
+        serf.epoch_compaction_interval_event_time = Some(interval);
+        serf.cumulative_event_processing_time_since_compaction = restored;
+
+        serf.maybe_compact_epoch_snapshot();
+        assert_eq!(serf.epoch_compaction_retry_at, Duration::from_secs(20));
+        assert_eq!(
+            serf.cumulative_event_processing_time_since_compaction,
+            Duration::from_secs(10)
+        );
+
+        serf.cumulative_event_processing_time_since_compaction = Duration::from_secs(19);
+        serf.maybe_compact_epoch_snapshot();
+        assert_eq!(serf.epoch_compaction_retry_at, Duration::from_secs(20));
+
+        serf.cumulative_event_processing_time_since_compaction = Duration::from_secs(20);
+        serf.maybe_compact_epoch_snapshot();
+        assert_eq!(serf.epoch_compaction_retry_at, Duration::from_secs(30));
+        assert_eq!(
+            serf.cumulative_event_processing_time_since_compaction,
+            Duration::from_secs(20)
+        );
     }
 
     fn load_jam_bytes(jam: &str) -> Vec<u8> {
@@ -3559,6 +3719,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             None,
             None::<SaveableCheckpoint>,

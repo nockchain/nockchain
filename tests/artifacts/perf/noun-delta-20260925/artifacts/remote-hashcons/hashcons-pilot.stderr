@@ -1,0 +1,11 @@
+hashcons_progress physical=10000000 canonical=8540907 new_cells=7161791 new_atoms=1379116 elapsed_secs=4.253 estimated_dictionary_bytes=1225785344 raw_memo_bytes=293601280
+hashcons_progress physical=20000000 canonical=10875607 new_cells=9436482 new_atoms=1439125 elapsed_secs=7.848 estimated_dictionary_bytes=1431306240 raw_memo_bytes=587202560
+hashcons_progress physical=30000000 canonical=12020351 new_cells=10563712 new_atoms=1456639 elapsed_secs=11.321 estimated_dictionary_bytes=1431306240 raw_memo_bytes=1174405120
+hashcons_progress physical=40000000 canonical=12837140 new_cells=11365826 new_atoms=1471314 elapsed_secs=14.367 estimated_dictionary_bytes=1431306240 raw_memo_bytes=1174405120
+hashcons_progress physical=50000000 canonical=13514331 new_cells=12033885 new_atoms=1480446 elapsed_secs=17.405 estimated_dictionary_bytes=1431306240 raw_memo_bytes=1174405120
+hashcons_progress physical=60000000 canonical=14105158 new_cells=12616013 new_atoms=1489145 elapsed_secs=21.213 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=70000000 canonical=14663043 new_cells=13168804 new_atoms=1494239 elapsed_secs=24.304 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=80000000 canonical=15131241 new_cells=13630122 new_atoms=1501119 elapsed_secs=27.354 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=90000000 canonical=15488412 new_cells=13981938 new_atoms=1506474 elapsed_secs=30.442 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+hashcons_progress physical=100000000 canonical=15967188 new_cells=14455757 new_atoms=1511431 elapsed_secs=33.536 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240
+Error: node limit 100000000 reached: physical=100000000 canonical=15967188 elapsed_secs=33.536 estimated_dictionary_bytes=1431306240 raw_memo_bytes=2348810240

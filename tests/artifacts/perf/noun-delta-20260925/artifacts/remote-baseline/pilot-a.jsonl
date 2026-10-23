@@ -1,0 +1,2 @@
+{"details":{"allocated_words":3569566993,"event_num":7373518,"kernel_hash":[60,57,33,215,178,173,180,141,246,170,17,43,5,92,228,152,187,165,38,245,19,245,201,197,45,31,6,243,195,8,84,112],"pma_words":8589934592,"root_raw":14987979563458557274},"seconds":0.000021481,"stage":"open"}
+{"details":{"error":"node limit 1000000 reached: visited=1000000 completed=999757 elapsed_secs=0.299 estimated_index_bytes=78651600 stack_frames=292","memory":["VmSize:\t27890840 kB","VmHWM:\t  111984 kB","VmRSS:\t   26268 kB"],"node_limit":1000000},"seconds":0.300759654,"stage":"pilot_stopped"}

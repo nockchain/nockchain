@@ -1,0 +1,11 @@
+index_progress visited=100000 completed=99785 atom_bytes=22254 elapsed_secs=0.035 estimated_index_bytes=7545040 stack_frames=264
+index_progress visited=200000 completed=199561 atom_bytes=31014 elapsed_secs=0.062 estimated_index_bytes=15081680 stack_frames=487
+index_progress visited=300000 completed=299772 atom_bytes=32674 elapsed_secs=0.091 estimated_index_bytes=30154960 stack_frames=279
+index_progress visited=400000 completed=399741 atom_bytes=35855 elapsed_secs=0.120 estimated_index_bytes=30154960 stack_frames=312
+index_progress visited=500000 completed=499710 atom_bytes=39360 elapsed_secs=0.152 estimated_index_bytes=39330000 stack_frames=344
+index_progress visited=600000 completed=599714 atom_bytes=43148 elapsed_secs=0.179 estimated_index_bytes=60301520 stack_frames=342
+index_progress visited=700000 completed=699591 atom_bytes=49565 elapsed_secs=0.205 estimated_index_bytes=60301520 stack_frames=470
+index_progress visited=800000 completed=799670 atom_bytes=50047 elapsed_secs=0.232 estimated_index_bytes=60301520 stack_frames=403
+index_progress visited=900000 completed=899648 atom_bytes=50662 elapsed_secs=0.260 estimated_index_bytes=60301520 stack_frames=426
+index_progress visited=1000000 completed=999757 atom_bytes=54827 elapsed_secs=0.299 estimated_index_bytes=78651600 stack_frames=291
+Error: node limit 1000000 reached: visited=1000000 completed=999757 elapsed_secs=0.299 estimated_index_bytes=78651600 stack_frames=292

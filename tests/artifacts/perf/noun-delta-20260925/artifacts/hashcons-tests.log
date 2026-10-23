@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/hashcons_oracle.rs (/tmp/nockchain-noun-delta-bench/target/debug/deps/hashcons_oracle-428f36f786dfc94d)
+
+running 5 tests
+test hashcons::tests::atom_candidate_collision_requires_exact_bytes_and_reuses_the_correct_alternative ... ok
+test exact_dictionary_coalesces_relocation_sharing_and_padded_small_atoms ... ok
+test delta_binds_retained_dictionary_namespace_beyond_current_root_value ... ok
+test changed_large_atom_payload_reconstructs_after_target_mapping_and_file_are_gone ... ok
+test deep_exact_dictionary_and_portable_root_preserve_ordered_cells ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s

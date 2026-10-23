@@ -1,0 +1,38 @@
+{
+  "build_seconds": {
+    "n": 20,
+    "min": 0.207070494,
+    "median": 0.21009175000000002,
+    "p95_nearest_rank": 0.211829478,
+    "max": 0.212117957
+  },
+  "encode_seconds": {
+    "n": 20,
+    "min": 0.005602126,
+    "median": 0.005742372,
+    "p95_nearest_rank": 0.005891475,
+    "max": 0.013370523
+  },
+  "decode_virtual_mount_seconds": {
+    "n": 20,
+    "min": 0.08499603,
+    "median": 0.085594152,
+    "p95_nearest_rank": 0.08635948,
+    "max": 0.086384196
+  },
+  "cold_stage_seconds": {
+    "open": 7.9972e-05,
+    "index_base": 254.966620622,
+    "index_target": 259.169144153,
+    "base_content_lookup": 17.795470803,
+    "delta_build": 0.212002056,
+    "delta_write_fsync": 0.047964308,
+    "delta_read_and_virtual_mount": 0.095136872,
+    "warm_summary": 6.105967036,
+    "full_structural_verification": 180.816619009,
+    "complete": 720.226558166
+  },
+  "delta_bytes": 83184519,
+  "target_used_bytes": 28639773280,
+  "delta_fraction_of_used_snapshot": 0.002904510387939775
+}

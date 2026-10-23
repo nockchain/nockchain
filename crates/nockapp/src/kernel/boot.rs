@@ -38,6 +38,8 @@ pub const DEFAULT_GC_INTERVAL_SECS: u64 = 60 * 60;
 const DEFAULT_GC_INTERVAL_SECS_STR: &str = "3600";
 const DEFAULT_ROTATING_SNAPSHOT_INTERVAL_EVENT_TIME_SECS: u64 = 15 * 60;
 const DEFAULT_ROTATING_SNAPSHOT_INTERVAL_EVENT_TIME_SECS_STR: &str = "900";
+const DEFAULT_EPOCH_COMPACTION_INTERVAL_EVENT_TIME_SECS: u64 = 30 * 60;
+const DEFAULT_EPOCH_COMPACTION_INTERVAL_EVENT_TIME_SECS_STR: &str = "1800";
 
 const DEFAULT_LOG_FILTER: &str = "info";
 const NOCK_PMA_INITIAL_WORDS_FOR_REGRESSION_ENV: &str = "NOCK_PMA_INITIAL_WORDS_FOR_REGRESSION";
@@ -246,6 +248,14 @@ pub struct Cli {
 
     #[arg(
         long,
+        help = "Set the epoch compaction interval in cumulative event-processing seconds. Must exceed the rotating snapshot interval. Use 'none' or '0' to disable; disabling rotation also disables compaction.",
+        default_value = DEFAULT_EPOCH_COMPACTION_INTERVAL_EVENT_TIME_SECS_STR,
+        value_parser = parse_optional_u64
+    )]
+    pub epoch_compaction_interval_event_time: Option<u64>,
+
+    #[arg(
+        long,
         help = "Run with in-memory NockStack state only, disabling PMA durability, event logs, snapshots, and GC."
     )]
     pub ephemeral: bool,
@@ -331,6 +341,29 @@ impl Cli {
                     Some(Duration::from_secs(value))
                 }
             })
+    }
+
+    fn normalized_epoch_compaction_interval_event_time(&self) -> std::io::Result<Option<Duration>> {
+        if self.ephemeral {
+            return Ok(None);
+        }
+        let Some(rotation) = self.normalized_rotating_snapshot_interval_event_time() else {
+            return Ok(None);
+        };
+        let Some(seconds) = self
+            .epoch_compaction_interval_event_time
+            .filter(|value| *value > 0)
+        else {
+            return Ok(None);
+        };
+        let interval = Duration::from_secs(seconds);
+        if interval <= rotation {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--epoch-compaction-interval-event-time must be strictly greater than --rotating-snapshot-interval-event-time",
+            ));
+        }
+        Ok(Some(interval))
     }
 }
 
@@ -445,6 +478,7 @@ mod tests {
         let mut cli = default_boot_cli(new);
         cli.gc_interval = None;
         cli.rotating_snapshot_interval_event_time = None;
+        cli.epoch_compaction_interval_event_time = None;
         cli.disable_fsync = true;
         cli
     }
@@ -486,6 +520,21 @@ mod tests {
                 SetupResult::ExportedState => panic!("unexpected export"),
             },
         )
+    }
+
+    async fn setup_test_app_with_compaction(data_dir: &Path) -> NockApp<NockJammer> {
+        let jam = load_test_jam_bytes();
+        let mut cli = durable_test_boot_cli(false);
+        cli.data_dir = Some(data_dir.to_path_buf());
+        cli.rotating_snapshot_interval_event_time = Some(1);
+        cli.epoch_compaction_interval_event_time = Some(3);
+        match setup_::<NockJammer>(&jam, cli, &[], "boot-test", None)
+            .await
+            .expect("setup compaction test app")
+        {
+            SetupResult::App(app) => app,
+            SetupResult::ExportedState => panic!("unexpected export"),
+        }
     }
 
     async fn try_setup_test_app_with_gc_interval(
@@ -846,6 +895,87 @@ INSERT INTO events (
     }
 
     #[test]
+    fn epoch_compaction_cli_defaults_and_disabling_follow_rotation() {
+        let mut cli = super::Cli::try_parse_from(["boot-test"]).expect("parse default cli");
+        assert_eq!(
+            cli.normalized_epoch_compaction_interval_event_time()
+                .unwrap(),
+            Some(Duration::from_secs(1800))
+        );
+        assert_eq!(
+            cli.normalized_rotating_snapshot_interval_event_time(),
+            Some(Duration::from_secs(900))
+        );
+        for value in ["none", "0"] {
+            let parsed = super::Cli::try_parse_from([
+                "boot-test", "--epoch-compaction-interval-event-time", value,
+            ])
+            .expect("parse disabled epoch compaction");
+            assert_eq!(
+                parsed
+                    .normalized_epoch_compaction_interval_event_time()
+                    .unwrap(),
+                None
+            );
+        }
+        for rotation in [None, Some(0)] {
+            cli.rotating_snapshot_interval_event_time = rotation;
+            assert_eq!(
+                cli.normalized_epoch_compaction_interval_event_time()
+                    .unwrap(),
+                None
+            );
+        }
+        cli.rotating_snapshot_interval_event_time = Some(900);
+        cli.ephemeral = true;
+        assert_eq!(
+            cli.normalized_epoch_compaction_interval_event_time()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn epoch_compaction_interval_must_strictly_exceed_rotation() {
+        let mut cli = super::default_boot_cli(false);
+        for seconds in [1, 899, 900] {
+            cli.epoch_compaction_interval_event_time = Some(seconds);
+            let error = cli
+                .normalized_epoch_compaction_interval_event_time()
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("strictly greater"));
+        }
+        cli.epoch_compaction_interval_event_time = Some(901);
+        assert_eq!(
+            cli.normalized_epoch_compaction_interval_event_time()
+                .unwrap(),
+            Some(Duration::from_secs(901))
+        );
+        cli.epoch_compaction_interval_event_time = None;
+        assert_eq!(
+            cli.normalized_epoch_compaction_interval_event_time()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_compaction_interval_fails_before_creating_data_directory() {
+        let temp = TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("invalid-compaction");
+        let mut cli = super::default_boot_cli(false);
+        cli.data_dir = Some(data_dir.clone());
+        cli.epoch_compaction_interval_event_time = Some(900);
+        let error = match setup_::<NockJammer>(&[], cli, &[], "boot-test", None).await {
+            Ok(_) => panic!("equal compaction and rotation intervals must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("strictly greater"));
+        assert!(!data_dir.exists());
+    }
+
+    #[test]
     fn normalized_gc_interval_defaults_enabled_and_filters_zero() {
         let mut cli = super::default_boot_cli(false);
         assert_eq!(
@@ -891,6 +1021,7 @@ INSERT INTO events (
         assert!(cli.ephemeral);
         assert_eq!(cli.gc_interval, None);
         assert_eq!(cli.rotating_snapshot_interval_event_time, None);
+        assert_eq!(cli.epoch_compaction_interval_event_time, None);
         assert!(cli.disable_fsync);
     }
 
@@ -901,6 +1032,7 @@ INSERT INTO events (
         assert!(!cli.ephemeral);
         assert_eq!(cli.gc_interval, None);
         assert_eq!(cli.rotating_snapshot_interval_event_time, None);
+        assert_eq!(cli.epoch_compaction_interval_event_time, None);
         assert!(cli.disable_fsync);
     }
 
@@ -1677,6 +1809,100 @@ INSERT INTO events (
 
     #[tokio::test(flavor = "current_thread")]
     #[cfg_attr(miri, ignore)]
+    async fn compaction_rebuilds_compute_cadence_and_recovers_from_epoch() {
+        let temp = TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("compaction-cadence-and-recovery");
+        let mut app = setup_test_app(&data_dir).await;
+        write_checkpoint_bootstrap_fixture(&app, &data_dir).await;
+        poke_inc(&app).await;
+        stop_app(&mut app).await;
+        drop(app);
+
+        // Accumulated compute time survives each restart. Two rotations are not
+        // enough to compact until the independent three-second threshold is met.
+        for event_num in [1, 3, 5] {
+            set_event_processing_duration_for_test(&data_dir, event_num, Duration::from_secs(1));
+            let mut app = setup_test_app_with_compaction(&data_dir).await;
+            poke_inc(&app).await;
+            wait_for_serf_idle(&app).await;
+            if event_num < 5 {
+                poke_inc(&app).await;
+            }
+            stop_app(&mut app).await;
+            drop(app);
+        }
+        {
+            let mut log = crate::event_log::EventLog::open(crate::event_log::EventLogConfig {
+                path: data_dir.join("event-log.sqlite3"),
+            })
+            .expect("open compacted event log");
+            assert_eq!(log.replay_floor().unwrap(), 4);
+            assert_eq!(log.compaction_event_num().unwrap(), 6);
+            assert_eq!(log.max_event_num().unwrap(), Some(6));
+            let tail = log.replay_events_after(4).unwrap();
+            assert_eq!(
+                tail.iter().map(|entry| entry.event_num).collect::<Vec<_>>(),
+                vec![5, 6]
+            );
+        }
+        let rotating = ready_rotating_snapshots(&data_dir);
+        assert_eq!(
+            rotating.iter().map(|row| row.3).collect::<Vec<_>>(),
+            vec![6, 4]
+        );
+
+        // A restart counts only compute after compaction head 6. Event 5 is
+        // retained for recovery, but must not count toward the next cadence.
+        let mut app = setup_test_app_with_compaction(&data_dir).await;
+        poke_inc(&app).await;
+        stop_app(&mut app).await;
+        drop(app);
+        set_event_processing_duration_for_test(&data_dir, 7, Duration::from_secs(2));
+        let mut app = setup_test_app_with_compaction(&data_dir).await;
+        poke_inc(&app).await;
+        wait_for_serf_idle(&app).await;
+        stop_app(&mut app).await;
+        drop(app);
+        {
+            let mut log = crate::event_log::EventLog::open(crate::event_log::EventLogConfig {
+                path: data_dir.join("event-log.sqlite3"),
+            })
+            .expect("open event log after restart");
+            assert_eq!(log.replay_floor().unwrap(), 4);
+            assert_eq!(log.compaction_event_num().unwrap(), 6);
+        }
+
+        // The independent epoch remains usable after both retained rotations
+        // become unreadable, and replays every accepted event after its floor.
+        for (_, pma_path, _, _) in ready_rotating_snapshots(&data_dir) {
+            fs::write(pma_path, b"corrupt rotating snapshot").expect("corrupt rotating snapshot");
+        }
+        clear_pma_files(&data_dir);
+        let mut app = setup_test_app(&data_dir).await;
+        assert_counter_state(&mut app, 8).await;
+        stop_app(&mut app).await;
+        drop(app);
+
+        // Neither an expired checkpoint nor fresh state can recover a pruned
+        // prefix when every eligible snapshot is unavailable.
+        for (_, _, pma_path, _, _) in ready_snapshots(&data_dir) {
+            fs::write(pma_path, b"corrupt epoch snapshot").expect("corrupt epoch snapshot");
+        }
+        clear_pma_files(&data_dir);
+        let error = match try_setup_test_app(&data_dir, None).await {
+            Ok(_) => panic!("compacted log must require an eligible recovery base"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("no valid boot base at or after compacted event log replay floor 4"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg_attr(miri, ignore)]
     async fn falls_back_from_corrupt_newest_rotating_snapshot() {
         let temp = TempDir::new().expect("tempdir");
         let data_dir = temp.path().join("rotating-fallback");
@@ -2012,6 +2238,21 @@ async fn select_boot_state<J: Jammer>(
         .transpose()?
         .unwrap_or(0);
 
+    let replay_floor = recovery_event_log
+        .as_mut()
+        .map(|event_log| {
+            event_log.replay_floor().map_err(|err| {
+                CrownError::Unknown(format!("failed to read event log replay floor: {err}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if replay_floor > event_log_max {
+        return Err(CrownError::Unknown(format!(
+            "event log replay floor {replay_floor} exceeds accepted event head {event_log_max}"
+        )));
+    }
+
     if let Some(ExistingPmaStatus::Valid { path, event_num }) = existing_pma.as_ref() {
         if event_log_max == 0 && *event_num > 0 {
             if !event_log_policy.preexisting && !event_log_policy.allow_empty_bootstrap {
@@ -2106,6 +2347,13 @@ async fn select_boot_state<J: Jammer>(
             ))
         })?;
         for snapshot in order_snapshot_candidates(active_snapshot_id, ready_snapshots) {
+            if snapshot.event_num < replay_floor {
+                warn!(
+                    "Ignoring snapshot {} event_num={} because it predates event log replay floor {}",
+                    snapshot.pma_path, snapshot.event_num, replay_floor
+                );
+                continue;
+            }
             if snapshot.event_num > event_log_max {
                 warn!(
                     "Snapshot {} event_num={} is ahead of event log max {}; marking failed",
@@ -2206,6 +2454,18 @@ async fn select_boot_state<J: Jammer>(
             }
         })?;
 
+    let checkpoint_candidate =
+        checkpoint_candidate.filter(|(_, summary)| {
+            if summary.event_num < replay_floor {
+                warn!(
+                "Ignoring checkpoint {} event_num={} because it predates event log replay floor {}",
+                summary.path.display(), summary.event_num, replay_floor
+            );
+                false
+            } else {
+                true
+            }
+        });
     if let Some((checkpoint, summary)) = checkpoint_candidate {
         let checkpoint_bootstraps_empty_event_log = recovery_event_log.is_some()
             && event_log_max == 0
@@ -2283,6 +2543,12 @@ async fn select_boot_state<J: Jammer>(
         }
     }
 
+    if replay_floor > 0 {
+        return Err(CrownError::Unknown(format!(
+            "no valid boot base at or after compacted event log replay floor {replay_floor} can recover accepted event head {event_log_max}"
+        )));
+    }
+
     if event_log_max > 0 {
         if let Some(event_log) = recovery_event_log.as_mut() {
             let replay_entries = event_log.replay_events_after(0).map_err(|err| {
@@ -2335,6 +2601,9 @@ pub fn default_boot_cli(new: bool) -> Cli {
         rotating_snapshot_interval_event_time: Some(
             DEFAULT_ROTATING_SNAPSHOT_INTERVAL_EVENT_TIME_SECS,
         ),
+        epoch_compaction_interval_event_time: Some(
+            DEFAULT_EPOCH_COMPACTION_INTERVAL_EVENT_TIME_SECS,
+        ),
         ephemeral: false,
         new,
         trace_opts: Default::default(),
@@ -2357,6 +2626,7 @@ pub fn ephemeral_test_boot_cli(new: bool) -> Cli {
     cli.ephemeral = true;
     cli.gc_interval = None;
     cli.rotating_snapshot_interval_event_time = None;
+    cli.epoch_compaction_interval_event_time = None;
     cli.disable_fsync = true;
     cli
 }
@@ -2575,8 +2845,11 @@ pub async fn setup_<J: Jammer + Send + 'static>(
     if cli.ephemeral {
         cli.gc_interval = None;
         cli.rotating_snapshot_interval_event_time = None;
+        cli.epoch_compaction_interval_event_time = None;
         cli.disable_fsync = true;
     }
+    let epoch_compaction_interval_event_time =
+        cli.normalized_epoch_compaction_interval_event_time()?;
     durability::set_fsync_disabled(cli.disable_fsync);
     let nock_test_jets_env = std::env::var("NOCK_TEST_JETS").unwrap_or_default();
     let test_jets = parse_test_jets(nock_test_jets_env.as_str());
@@ -2685,6 +2958,11 @@ pub async fn setup_<J: Jammer + Send + 'static>(
     } else {
         info!("Rotating snapshots disabled");
     }
+    if let Some(interval) = epoch_compaction_interval_event_time {
+        info!("Epoch compaction interval event time: {:?}", interval);
+    } else {
+        info!("Epoch compaction disabled");
+    }
     if ephemeral {
         info!("Ephemeral NockStack active; PMA durability, event log, snapshots, and GC disabled");
     } else {
@@ -2753,6 +3031,7 @@ pub async fn setup_<J: Jammer + Send + 'static>(
                     open_existing: pma_open_existing,
                     create_snapshots: true,
                     rotating_snapshot_interval_event_time,
+                    epoch_compaction_interval_event_time,
                     restore_manifest: snapshot_manifest.clone(),
                     gc_interval,
                 })
