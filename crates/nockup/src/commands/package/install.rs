@@ -132,20 +132,28 @@ pub async fn run() -> Result<()> {
             );
         }
 
-        // Create symlinks for .hoon files
-        // If install_path is specified (from registry), preserve directory structure
-        // Otherwise, link to hoon/lib/ and hoon/sur/
-        if let (Some(ref install_path), Some(ref files)) = (&pkg.install_path, &pkg.source_files) {
-            println!("install_path: {:?}", install_path);
-            link_registry_package(
-                install_dir.as_path(),
-                hoon_dir.as_path(),
-                install_path,
-                &pkg.name,
-                files,
-            )?;
+        // Create symlinks under hoon/. When install_path is set, preserve directory layout.
+        if let Some(ref install_path) = &pkg.install_path {
+            match &pkg.source_files {
+                Some(files) if !files.is_empty() => {
+                    link_registry_package(
+                        install_dir.as_path(),
+                        hoon_dir.as_path(),
+                        install_path,
+                        &pkg.name,
+                        files,
+                    )?;
+                }
+                _ => {
+                    link_install_tree(
+                        install_dir.as_path(),
+                        hoon_dir.as_path(),
+                        install_path,
+                        &pkg.name,
+                    )?;
+                }
+            }
         } else {
-            println!("No install_path specified, linking to hoon/lib/ and hoon/sur/");
             link_package_files(
                 install_dir.as_path(),
                 lib_dir.as_path(),
@@ -222,6 +230,134 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Build a symlink target relative to `link_path` pointing at
+/// `hoon/packages/<package_dir_name>/<package_relative>`.
+fn packages_relative_symlink_target(
+    link_path: &Path,
+    hoon_dir: &Path,
+    package_dir_name: &str,
+    package_relative: &Path,
+) -> Result<PathBuf> {
+    let rel = link_path.strip_prefix(hoon_dir).with_context(|| {
+        format!(
+            "link path {} is not under hoon dir {}",
+            link_path.display(),
+            hoon_dir.display()
+        )
+    })?;
+    let ups = rel
+        .parent()
+        .map(|p| p.components().count())
+        .unwrap_or(0);
+    let mut target = PathBuf::new();
+    for _ in 0..ups {
+        target.push("..");
+    }
+    target.push("packages");
+    target.push(package_dir_name);
+    target.push(package_relative);
+    Ok(target)
+}
+
+/// Symlink every file under `package_dir` into `hoon/<install_path>/`, preserving paths.
+/// Used for `hoon/jams` and other non-desk trees without a `files` list.
+fn link_install_tree(
+    package_dir: &Path,
+    hoon_dir: &Path,
+    install_path: &str,
+    package_name: &str,
+) -> Result<()> {
+    let package_dir_name = package_dir_basename(package_dir)?;
+    let relative_path = install_path.strip_prefix("hoon/").unwrap_or(install_path);
+    let target_root = hoon_dir.join(relative_path);
+
+    fn link_tree(
+        current: &Path,
+        package_dir: &Path,
+        hoon_dir: &Path,
+        target_root: &Path,
+        package_dir_name: &str,
+        relative_path: &str,
+    ) -> Result<()> {
+        for entry in fs::read_dir(current)
+            .with_context(|| format!("Failed to read directory {}", current.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                link_tree(
+                    &path,
+                    package_dir,
+                    hoon_dir,
+                    target_root,
+                    package_dir_name,
+                    relative_path,
+                )?;
+            } else if path.is_file() {
+                let rel = path
+                    .strip_prefix(package_dir)
+                    .with_context(|| format!("path not under package root: {}", path.display()))?;
+                let link_path = target_root.join(rel);
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create directory {}", parent.display())
+                    })?;
+                }
+                if link_path.exists() || link_path.is_symlink() {
+                    fs::remove_file(&link_path).with_context(|| {
+                        format!("Failed to remove existing symlink {}", link_path.display())
+                    })?;
+                }
+                let relative_target = packages_relative_symlink_target(
+                    &link_path,
+                    hoon_dir,
+                    package_dir_name,
+                    rel.as_ref(),
+                )?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&relative_target, &link_path).with_context(|| {
+                    format!(
+                        "Failed to create symlink {} -> {}",
+                        link_path.display(),
+                        relative_target.display()
+                    )
+                })?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(&relative_target, &link_path).with_context(
+                    || {
+                        format!(
+                            "Failed to create symlink {} -> {}",
+                            link_path.display(),
+                            relative_target.display()
+                        )
+                    },
+                )?;
+                println!(
+                    "    {} Linked {} to hoon/{}/",
+                    "🔗".cyan(),
+                    rel.display(),
+                    relative_path.cyan()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fs::create_dir_all(&target_root).with_context(|| {
+        format!("Failed to create directory {}", target_root.display())
+    })?;
+    link_tree(
+        package_dir,
+        package_dir,
+        hoon_dir,
+        &target_root,
+        &package_dir_name,
+        relative_path,
+    )
+    .with_context(|| format!("Failed to link install tree for package {}", package_name))?;
+    Ok(())
+}
+
 /// Create symlinks for registry packages that preserve directory structure
 /// For example:
 /// - nockchain/common/zose with install_path="common" and files=["zose.hoon"]
@@ -238,15 +374,12 @@ fn link_registry_package(
     let package_dir_name = package_dir_basename(package_dir)?;
 
     // Strip "hoon/" prefix from install_path if present (it's already included in hoon_dir)
-    println!("install_path before stripping: {:?}", install_path);
     let relative_path = install_path.strip_prefix("hoon/").unwrap_or(install_path);
-    println!("relative_path: {:?}", relative_path);
 
     // Create the target directory structure in hoon/
     let target_dir = hoon_dir.join(relative_path);
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("Failed to create directory {}", target_dir.display()))?;
-    println!("  source_files: {:?}", source_files);
 
     if !source_files.is_empty() {
         // Link each specified file
@@ -257,7 +390,11 @@ fn link_registry_package(
             }
 
             let link_path = target_dir.join(filename);
-            println!("  link_path: {:?}", link_path);
+            if let Some(parent) = link_path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create directory {}", parent.display())
+                })?;
+            }
 
             // Remove existing symlink if it exists
             if link_path.exists() || link_path.is_symlink() {
@@ -266,18 +403,12 @@ fn link_registry_package(
                 })?;
             }
 
-            // Create relative symlink
-            // Calculate path from target_dir back to packages/
-            // For hoon/common/, we need: ../../packages/package@version/file
-            let depth = relative_path.split('/').filter(|s| !s.is_empty()).count();
-            let mut relative_target = PathBuf::new();
-            for _ in 0..depth {
-                relative_target.push("..");
-            }
-            relative_target.push("packages");
-            relative_target.push(Path::new(&package_dir_name));
-            relative_target.push(filename);
-            println!("  relative_target: {:?}", relative_target);
+            let relative_target = packages_relative_symlink_target(
+                &link_path,
+                hoon_dir,
+                &package_dir_name,
+                Path::new(filename),
+            )?;
 
             #[cfg(unix)]
             {

@@ -294,6 +294,7 @@ impl Resolver {
                 tag,
                 branch,
                 path,
+                install_path,
                 ..
             } => {
                 let url = git.as_ref().ok_or_else(|| {
@@ -306,8 +307,8 @@ impl Resolver {
                     tag: tag.clone(),
                     branch: branch.clone(),
                     path: path.clone(),
-                    install_path: None, // Don't auto-set for manifest packages; let install.rs handle it
-                    file: None,         // Multiple files handled separately in source_files
+                    install_path: install_path.clone(),
+                    file: None, // Multiple files handled separately in source_files
                 })
             }
         }
