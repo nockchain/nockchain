@@ -473,7 +473,7 @@ pub mod util {
         for i in (0..len).rev() {
             let new_atom = unsafe {
                 let (mut new_indirect, new_slice) =
-                    IndirectAtom::new_raw_mut_bitslice(stack, step << bloq);
+                    IndirectAtom::new_raw_mut_bitslice(stack, bite_to_word(bloq, step)?);
                 chop(
                     bloq,
                     i * step,
@@ -950,6 +950,20 @@ mod tests {
             ],
         );
         assert_jet(c, jet_rip, sam, res);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_rip_rejects_oversized_block() {
+        // bloq 46 with step 2 makes each block 2^47 bits, over MAX_BIT_LENGTH.
+        // The jet must reject it (BAIL_FAIL) via the shared `bite_to_word` bound
+        // check rather than attempt the allocation; the fast path previously used
+        // a raw, unchecked `step << bloq` (also a 64x over-allocation).
+        let c = &mut init_context();
+        let (_a0, _a24, _a63, _a96, a128) = atoms(&mut c.stack);
+        let bite = T(&mut c.stack, &[D(46), D(2)]);
+        let sam = T(&mut c.stack, &[bite, a128]);
+        assert_jet_err(c, jet_rip, sam, BAIL_FAIL);
     }
 
     #[test]
