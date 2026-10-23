@@ -100,3 +100,24 @@ rust_binary(
         "//crates/zkvm-jetpack",
     ] + all_crate_deps(),
 )
+
+# kick binary: fires the build traps honk --arbitrary emits. It shares honk's
+# evaluation environment through honk_lib (see crates/honk/src/eval.rs) and
+# embeds none of the prelude assets, so it needs neither compile_data nor the
+# cache-namespace fingerprint.
+rust_binary(
+    name = "kick",
+    srcs = ["src/bin/kick.rs"],
+    aliases = aliases(),
+    crate_name = "kick",
+    crate_root = "src/bin/kick.rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        ":honk_lib",
+        "//crates/nockapp",
+        "//crates/nockvm/rust/nockvm",
+    ] + all_crate_deps(),
+)
