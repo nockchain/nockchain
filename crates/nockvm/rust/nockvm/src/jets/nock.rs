@@ -434,7 +434,8 @@ mod tests {
     use nockvm_macros::tas;
 
     use super::*;
-    use crate::jets::util::test::{assert_jet, init_context};
+    use crate::interpreter::{Error, Mote};
+    use crate::jets::util::test::{assert_jet, assert_jet_err, init_context};
     use crate::mem::NockStack;
     use crate::noun::{D, T};
 
@@ -485,6 +486,79 @@ mod tests {
         let trace = T(stack, &[hunk, D(0)]);
         let expected = T(stack, &[D(2), trace]);
         assert_jet(context, jet_mink, sample, expected);
+    }
+
+    // Regression for nockchain#156. The two tests above cover the explicit `[~ ~]`
+    // "nothing here" answer, which `interpreter.rs` detects by shape and turns into
+    // `Error::Deterministic` directly -- `util::mink`'s `Error::ScryCrashed` arm (the
+    // scry-stack-identity comparison that decides whether a crash belongs to *this*
+    // mink call or to an ancestor one) is never exercised by those. The two tests
+    // below drive a real Nock crash (an invalid axis-0 fetch, not a well-formed
+    // answer) through that arm instead, for both outcomes of the comparison.
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn test_mink_scry_crash_owned_by_this_mink_is_deterministic_exit() {
+        // The crashing handler is the one *this* mink call itself pushes, so after
+        // the failed scry pops it back off, the scry stack matches this call's own
+        // snapshot exactly -- `util::mink` must own the crash and collapse it to a
+        // Deterministic exit rather than leaving it as a raw ScryCrashed.
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+
+        let crash_formula = T(stack, &[D(0), D(0)]); // axis 0: guaranteed Nock bail
+        let handler = T(stack, &[crash_formula, D(0), D(0)]);
+        let reff_formula = T(stack, &[D(1), D(7)]);
+        let path_formula = T(stack, &[D(1), D(13)]);
+        let form = T(stack, &[D(12), reff_formula, path_formula]);
+        let nock = T(stack, &[D(0), form]);
+        let sample = T(stack, &[nock, handler]);
+
+        assert_jet_err(
+            context,
+            jet_mink,
+            sample,
+            JetErr::Fail(Error::Deterministic(Mote::Exit, D(0))),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn test_mink_nested_scry_crash_not_owned_forwards_as_scry_crashed() {
+        // Simulate an ancestor virtualization already in progress by seeding the
+        // scry stack with its handler before this (the "inner") mink call pushes
+        // its own on top -- this is exactly the state a real nested `+mink` call
+        // would observe, and `mink`'s comparison can't tell the difference. This
+        // call's own handler doesn't answer directly: it recurses into another
+        // scry, which -- after this handler is popped back off the top -- reaches
+        // down to the ancestor's handler, where the crash actually happens.
+        let context = &mut init_context();
+        let stack = &mut context.stack;
+
+        let crash_formula = T(stack, &[D(0), D(0)]); // axis 0: guaranteed Nock bail
+        let ancestor_handler = T(stack, &[crash_formula, D(0), D(0)]);
+        context.scry_stack = T(stack, &[ancestor_handler, D(0)]);
+
+        let nested_reff_formula = T(stack, &[D(1), D(70)]);
+        let nested_path_formula = T(stack, &[D(1), D(130)]);
+        let nested_form = T(stack, &[D(12), nested_reff_formula, nested_path_formula]);
+        let own_handler = T(stack, &[nested_form, D(0), D(0)]);
+
+        let reff_formula = T(stack, &[D(1), D(7)]);
+        let path_formula = T(stack, &[D(1), D(13)]);
+        let form = T(stack, &[D(12), reff_formula, path_formula]);
+        let nock = T(stack, &[D(0), form]);
+        let sample = T(stack, &[nock, own_handler]);
+
+        // Not collapsed to Deterministic: the scry stack after the crash (emptied
+        // of both handlers) no longer matches this call's own snapshot (which still
+        // had the ancestor's handler on it), so the crash isn't this call's to own.
+        assert_jet_err(
+            context,
+            jet_mink,
+            sample,
+            JetErr::Fail(Error::ScryCrashed(D(0))),
+        );
     }
 
     #[test]
