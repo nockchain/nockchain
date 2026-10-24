@@ -8,20 +8,20 @@ This is a description of the code as it exists today. It is not a design proposa
 
 The relevant code lives primarily in:
 
-- `crates/nockvm/rust/nockvm/src/interpreter.rs`
-- `crates/nockvm/rust/nockvm/src/jets/cold.rs`
-- `crates/nockvm/rust/nockvm/src/jets/warm.rs`
-- `crates/nockvm/rust/nockvm/src/jets/hot.rs`
-- `crates/nockvm/rust/nockvm/src/trace/mod.rs`
-- `crates/nockvm/rust/nockvm/src/trace/tracing_backend.rs`
-- `crates/nockvm/rust/nockvm/src/site.rs`
-- `crates/nockvm/rust/nockvm/src/hamt.rs`
-- `crates/nockvm/rust/nockvm/src/unifying_equality.rs`
+- `crates/lib/nockvm/rust/nockvm/src/interpreter.rs`
+- `crates/lib/nockvm/rust/nockvm/src/jets/cold.rs`
+- `crates/lib/nockvm/rust/nockvm/src/jets/warm.rs`
+- `crates/lib/nockvm/rust/nockvm/src/jets/hot.rs`
+- `crates/lib/nockvm/rust/nockvm/src/trace/mod.rs`
+- `crates/lib/nockvm/rust/nockvm/src/trace/tracing_backend.rs`
+- `crates/lib/nockvm/rust/nockvm/src/site.rs`
+- `crates/lib/nockvm/rust/nockvm/src/hamt.rs`
+- `crates/lib/nockvm/rust/nockvm/src/unifying_equality.rs`
 
 Persistence and serialization code is also relevant because the cold state is stored and moved around as a runtime object:
 
-- `crates/nockapp/src/kernel/form.rs`
-- `crates/nockapp/src/nockapp/export.rs`
+- `crates/lib/nockapp/src/kernel/form.rs`
+- `crates/lib/nockapp/src/nockapp/export.rs`
 
 ## Executive Summary
 

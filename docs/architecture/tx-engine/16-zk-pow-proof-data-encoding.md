@@ -173,4 +173,4 @@ Block validation evaluates the puzzle binding and this canonicality predicate be
 - Hoon FRI producer: `hoon/common/ztd/six.hoon`
 - Hoon packed polynomial and canonicalization definitions: `hoon/common/ztd/one.hoon`
 - Consensus proof admission: `hoon/apps/dumbnet/inner.hoon`, `hoon/apps/dumbnet/lib/types.hoon`
-- Rust noun codec and stream-window types: `crates/zkvm-jetpack/src/form/proof.rs`, `crates/nockchain-math/src/convert.rs`
+- Rust noun codec and stream-window types: `crates/lib/zkvm-jetpack/src/form/proof.rs`, `crates/lib/nockchain-math/src/convert.rs`

@@ -1,0 +1,36 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:tools/bazel/lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "nockchain-math",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "default",
+        "bazel_build",
+    ],
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/lib/noun-serde-derive",
+        "//crates/lib/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/lib/nockvm/rust/ibig",
+        "//crates/lib/nockvm/rust/nockvm",
+        "//crates/lib/noun-serde",
+    ] + all_crate_deps(),
+)
+
+# Unit tests for nockchain-math
+rust_test(
+    name = "nockchain_math_unit_tests",
+    size = "small",
+    crate = ":nockchain-math",
+)

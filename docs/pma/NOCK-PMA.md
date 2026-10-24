@@ -2,13 +2,13 @@
 
 > Historical low-level design note. For current public-release guidance, prefer [`DESIGN.md`](./DESIGN.md), [`DURABILITY-OPERATIONS.md`](./DURABILITY-OPERATIONS.md), and [`NOUN-PROVENANCE-AND-BRANDED-HANDLES.md`](./NOUN-PROVENANCE-AND-BRANDED-HANDLES.md).
 
-The live nockvm still runs on the contiguous arena defined in `open/crates/nockvm/rust/nockvm/src/mem.rs`. That module owns the `Memory` abstraction (wrapping either `memmap2::MmapMut` or `malloc`) and the `NockStack`, a single slab that tracks `frame_offset`, `stack_offset`, and `alloc_offset` as word counts off of a base pointer. Every noun the VM manipulates lives inside that slab until it is explicitly copied into a PMA image.
+The live nockvm still runs on the contiguous arena defined in `open/crates/lib/nockvm/rust/nockvm/src/mem.rs`. That module owns the `Memory` abstraction (wrapping either `memmap2::MmapMut` or `malloc`) and the `NockStack`, a single slab that tracks `frame_offset`, `stack_offset`, and `alloc_offset` as word counts off of a base pointer. Every noun the VM manipulates lives inside that slab until it is explicitly copied into a PMA image.
 
 - `Memory::allocate` chooses mmap vs. malloc and hands back a base pointer that stays immutable for the life of the VM; all in-VM pointers today are literal `base + offset` derivations performed via `derive_ptr()`, not tagged offsets.
 
 - `NockStack` models both stack frames and bump-allocation via its `west`/`east` orientation flag, the `AllocationType` enum, and the `pc` (pre-copy) bit that gates when frame flipping or preservation can occur. The reserved slots at the bottom of each frame cache the previous frame/stack/alloc pointers so that copying collectors and frame pops can restore provenance without chasing raw pointers.
 
-- `open/crates/nockvm/rust/nockvm/src/noun.rs` consumes the stack API through `NounAllocator`, layering
+- `open/crates/lib/nockvm/rust/nockvm/src/noun.rs` consumes the stack API through `NounAllocator`, layering
 the tag scheme (direct vs. indirect atoms vs. cells) and the forwarding-pointer rules that keep
 structural sharing intact while slabs are copied between frames or into the PMA. Helper modules such
 as `jets.rs` and `flog.rs` lean on `Preserve`/`preserve_with` from `mem.rs` to ensure nouns stay pinned
@@ -28,7 +28,7 @@ Relevant history:
 ## Epoch History
 
 1. 2025-03-28: PR #1167, titled “Offsets, not aliasing” and authored by Chris Allen (`@bitemyapp`).
-  - This branch (commit e4adb5a8c, 2025‑03‑28) is where the NockStack struct stopped storing live frame/stack/alloc raw pointers and instead began recording `frame_offset`, `stack_offset`, and `alloc_offset` word counts from the slab’s base pointer. The change also introduced `derive_ptr()`/`frame_pointer()` helpers so every access reconstructs a pointer from the base plus offset, and `MemoryState` now snapshots offsets instead of raw pointers (see history at commit e4adb5a8c affecting `open/crates/nockvm/rust/nockvm/src/mem.rs`)
+  - This branch (commit e4adb5a8c, 2025‑03‑28) is where the NockStack struct stopped storing live frame/stack/alloc raw pointers and instead began recording `frame_offset`, `stack_offset`, and `alloc_offset` word counts from the slab’s base pointer. The change also introduced `derive_ptr()`/`frame_pointer()` helpers so every access reconstructs a pointer from the base plus offset, and `MemoryState` now snapshots offsets instead of raw pointers (see history at commit e4adb5a8c affecting `open/crates/lib/nockvm/rust/nockvm/src/mem.rs`)
 2. 2025‑05‑19 · commit 00d288b1 · PR #1554 “Incremental hierarchy for hoonc”
   - Focused on reducing allocator overhead when running hoonc by (a) allowing builds to short-circuit
   OOM checks via a `no_check_oom` feature, (b) dropping the expensive assert_no_alloc::permit_alloc
@@ -95,7 +95,7 @@ Make sure your build and test/validation entrypoints you use to iterate on your 
   * _There is no legacy tracing JSON profiling for Nock in NockVM_. If there is, I simply forgot to merge the branch deleting it. If it exists, delete it. Please don't use it. Tracy subsumes any need for this and it was wasting bytes and developer time.
   * There, however, is _tracing for Nock in NockVM_: use tracy. [watch my youtube video](https://www.youtube.com/watch?v=Z1UA0SzZd6Q)
   * Linux only unified nock + native stack profiling: tracy profiler again. make sure you align the locally compiled version of the tracy profiler GUI and the library version in the Cargo project. Look at the repo makefile.
-    - `macOS` works with Tracy fine, client and server-side but you're going to get the nock traces by default, native (20 khz!) stack samples in Tracy only work on Windows and Linux. No, I don't know why they refuse to support it on macOS. Because they definitely could. They just choose not to. This has a solution: _use Docker_ (do I need to say it again? Look at the `docker-*` Makefile targets and the `docker/` folder I wrote for this)
+    - `macOS` works with Tracy fine, client and server-side but you're going to get the nock traces by default, native (20 khz!) stack samples in Tracy only work on Windows and Linux. No, I don't know why they refuse to support it on macOS. Because they definitely could. They just choose not to. This has a solution: _use Docker_ (do I need to say it again? Look at the `docker-*` Makefile targets and the `tools/docker/` folder I wrote for this)
     - I would strongly encourage you to take advantage of `tracy`'s `ondemand` mode (look at the Cargo features specified for `tracing-tracy`) so that you aren't eating the profiling overhead when the nockapp first boots and loads the slab, but I won't blame you if that's more faffing about than you have patience for.
 
 # Writing tests gooder
@@ -138,7 +138,7 @@ After you've established whether the tag bits signify whether a value is a direc
 
 Before (current master) ― four discriminants only: direct atom, indirect atom, cell, forwarding pointer.
 
-All allocated variants currently hold raw pointers produced by `NockStack::derive_ptr()` (`open/crates/nockvm/rust/nockvm/src/mem.rs`).
+All allocated variants currently hold raw pointers produced by `NockStack::derive_ptr()` (`open/crates/lib/nockvm/rust/nockvm/src/mem.rs`).
 
 ```rust
 /// Mirrors the actual constants in noun.rs.

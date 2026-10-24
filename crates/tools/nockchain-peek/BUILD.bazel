@@ -1,0 +1,41 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("//:tools/bazel/lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "nockchain-peek-lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    aliases = aliases(),
+    crate_name = "nockchain_peek",
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/lib/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/lib/nockapp",
+        "//crates/lib/nockapp-grpc",
+        "//crates/lib/nockvm/rust/nockvm",
+        "//crates/lib/zkvm-jetpack",
+    ] + all_crate_deps(),
+)
+
+rust_binary(
+    name = "nockchain-peek",
+    srcs = ["src/main.rs"],
+    aliases = aliases(),
+    edition = "2021",
+    deps = [
+        ":nockchain-peek-lib",
+        "//crates/lib/kernels/nockchain-peek:kernels-open-nockchain-peek",
+        "//crates/lib/nockapp-grpc",
+    ] + all_crate_deps(),
+)

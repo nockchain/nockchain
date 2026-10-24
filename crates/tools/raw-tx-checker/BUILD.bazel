@@ -1,0 +1,23 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//:tools/bazel/lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_binary(
+    name = "raw-tx-checker",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    edition = "2021",
+    deps = [
+        "//crates/lib/nockchain-math",
+        "//crates/lib/nockchain-types",
+        "//crates/lib/nockvm/rust/nockvm",
+        "//crates/lib/noun-serde",
+        "//crates/lib/zkvm-jetpack",
+    ] + all_crate_deps(),
+)

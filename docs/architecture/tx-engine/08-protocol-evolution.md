@@ -4,7 +4,7 @@
 
 Nockchain uses **height-gated hard cutovers** for consensus-critical upgrades. Unlike Bitcoin's BIP 9/BIP 8 miner-signaling soft fork mechanism, Nockchain upgrades activate at a predetermined block height with no signaling period. All nodes must upgrade before the activation height or risk forking.
 
-This approach is documented in `changelog/protocol/SPECIFICATION.md` and reflected in the protocol changelog entries.
+This approach is documented in `docs/protocol/upgrades/SPECIFICATION.md` and reflected in the protocol changelog entries.
 
 ### Comparison: Bitcoin BIP Activation vs Nockchain Height-Gating
 
@@ -19,7 +19,7 @@ This approach is documented in `changelog/protocol/SPECIFICATION.md` and reflect
 
 ## Protocol Changelog
 
-All consensus-critical changes are documented in `changelog/protocol/`, with a structured frontmatter format:
+All consensus-critical changes are documented in `docs/protocol/upgrades/`, with a structured frontmatter format:
 
 ```toml
 version = "0.1.11"
@@ -46,7 +46,7 @@ The original transaction engine, defined entirely in `hoon/common/tx-engine-0.ho
 
 ### Protocol 009: SegWit Cutover (Block 37350)
 
-**File**: `changelog/protocol/009-legacy-segwit-cutover-initial.md`
+**File**: `docs/protocol/upgrades/009-legacy-segwit-cutover-initial.md`
 
 The most significant upgrade — introduced the V0/V1 split. This is Nockchain's "SegWit moment."
 
@@ -71,19 +71,19 @@ The most significant upgrade — introduced the V0/V1 split. This is Nockchain's
 
 ### Protocol 010: V1-Phase Finalization (Block 39000)
 
-**File**: `changelog/protocol/010-legacy-v1-phase-39000.md`
+**File**: `docs/protocol/upgrades/010-legacy-v1-phase-39000.md`
 
 Finalized the V1-phase boundary. The initial plan (Protocol 009) set `v1-phase = 37350`, and Protocol 010 confirmed the transition period ended cleanly at block 39000.
 
 ### Protocol 011: LMP Axis Hotfix
 
-**File**: `changelog/protocol/011-legacy-lmp-axis-hotfix.md`
+**File**: `docs/protocol/upgrades/011-legacy-lmp-axis-hotfix.md`
 
 A targeted fix for a lock merkle proof issue related to axis handling — addressed a specific vulnerability or edge case before the Bythos comprehensive fix.
 
 ### Protocol 012: Bythos (Block 54000)
 
-**File**: `changelog/protocol/012-bythos.md`
+**File**: `docs/protocol/upgrades/012-bythos.md`
 
 A consensus-critical upgrade addressing two issues discovered after the initial SegWit cutover.
 
@@ -105,7 +105,7 @@ A consensus-critical upgrade addressing two issues discovered after the initial 
 
 ### Protocol 013: Nous (Draft, Non-Consensus)
 
-**File**: `changelog/protocol/013-nous.md`
+**File**: `docs/protocol/upgrades/013-nous.md`
 
 A networking-layer upgrade (not tx-engine). Adds batched transport requests for the libp2p request-response protocol. Included here for completeness — it does not change transaction formats or consensus rules.
 
@@ -149,7 +149,7 @@ The Hoon kernel manages this migration during node startup. The Rust networking 
 
 Nockchain upgrades follow a predictable pattern:
 
-1. **Protocol spec published** in `changelog/protocol/` with all technical details
+1. **Protocol spec published** in `docs/protocol/upgrades/` with all technical details
 2. **Software updated** to include new rules, gated by activation height
 3. **Operators deploy** updated software before activation
 4. **Activation height reached** — new rules take effect network-wide

@@ -1,0 +1,78 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:tools/bazel/lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+load("//tools/bazel/rust:defs.bzl", "rust_test_with_miri")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+# Source closure hashed into honk's cache-namespace fingerprint (see
+# //crates/tools/honk:native_compiler_fingerprint_env). Sources, not rlibs, so the
+# fingerprint is identical across configurations of the same tree.
+filegroup(
+    name = "fingerprint_srcs",
+    srcs = glob(["src/**/*.rs"]),
+)
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "nockvm",
+    srcs = glob(["src/**/*.rs"]),
+    crate_features = [
+        "default",
+        "mmap",
+    ],
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/lib/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/lib/nockvm/rust/ibig",
+        "//crates/lib/nockvm/rust/murmur3",
+        "//crates/lib/nockvm/rust/nockvm_crypto",
+    ] + all_crate_deps(),
+)
+
+rust_test(
+    name = "nockvm_pma_regression_tests",
+    size = "small",
+    srcs = glob([
+        "tests/pma_regressions.rs",
+        "tests/pma_regressions/**/*.rs",
+    ]),
+    crate_root = "tests/pma_regressions.rs",
+    edition = "2021",
+    deps = [":nockvm"],
+)
+
+# Unit tests for nockvm
+rust_test(
+    name = "nockvm_unit_tests",
+    # Many nockvm tests involve jet testing which can be memory intensive
+    size = "small",
+    crate = ":nockvm",
+    crate_features = [
+        "default",
+        "mmap",
+    ],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test_with_miri(
+    name = "nockvm_unit_tests_miri",
+    size = "small",
+    crate = ":nockvm",
+    crate_features = [
+        "default",
+        "mmap",
+    ],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

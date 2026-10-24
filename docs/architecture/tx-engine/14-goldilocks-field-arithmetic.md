@@ -8,7 +8,7 @@ The foundational arithmetic is defined in two Hoon files:
 - `hoon/common/ztd/one.hoon` (~1390 lines): base field types, operations, array utilities
 - `hoon/common/ztd/two.hoon` (~1716 lines): extension field, polynomial arithmetic, NTT/FFT
 
-With Rust mirrors in `crates/nockchain-math/src/belt.rs`, `felt.rs`, `bpoly.rs`, and `poly.rs`.
+With Rust mirrors in `crates/lib/nockchain-math/src/belt.rs`, `felt.rs`, `bpoly.rs`, and `poly.rs`.
 
 ## Why Goldilocks?
 
@@ -57,7 +57,7 @@ The choice of p = 2^64 − 2^32 + 1 is driven by four properties:
 ++  ordered-root  :: primitive root of unity of given order
 ```
 
-Rust mirror (`crates/nockchain-math/src/belt.rs`):
+Rust mirror (`crates/lib/nockchain-math/src/belt.rs`):
 
 ```rust
 pub const PRIME: u64 = 18446744069414584321;
@@ -182,7 +182,7 @@ The irreducible polynomial is x³ − x − 1 (stored as `[1, p-1, 0, 1]` using 
 | `frip` | Felt → list of Belts (decompose) |
 | `frep` | List of Belts → Felt (compose) |
 
-The Rust mirror in `crates/nockchain-math/src/felt.rs` provides equivalent operations. Note that the Cheetah curve uses a *different* extension — Fp^6 = Fp[X]/(X^6 − 7) — implemented directly in `cheetah.rs` rather than through the general felt machinery.
+The Rust mirror in `crates/lib/nockchain-math/src/felt.rs` provides equivalent operations. Note that the Cheetah curve uses a *different* extension — Fp^6 = Fp[X]/(X^6 − 7) — implemented directly in `cheetah.rs` rather than through the general felt machinery.
 
 ### Polynomial Arithmetic
 
@@ -251,10 +251,10 @@ These tree structure utilities are used for noun hashing (extracting the leaf se
 
 | Hoon | Rust File | Key Types/Functions |
 |---|---|---|
-| Belt operations | `crates/nockchain-math/src/belt.rs` | `Belt`, `PRIME`, Add/Sub/Mul/Neg impls, `inv()`, `pow()` |
-| Felt operations | `crates/nockchain-math/src/felt.rs` | `Felt`, Karatsuba multiplication |
-| Polynomial ops | `crates/nockchain-math/src/poly.rs`, `bpoly.rs` | `bpoly_to_vec`, `init_bpoly`, polynomial arithmetic |
-| Mary/array | `crates/nockchain-math/src/structs.rs` | Array manipulation utilities |
+| Belt operations | `crates/lib/nockchain-math/src/belt.rs` | `Belt`, `PRIME`, Add/Sub/Mul/Neg impls, `inv()`, `pow()` |
+| Felt operations | `crates/lib/nockchain-math/src/felt.rs` | `Felt`, Karatsuba multiplication |
+| Polynomial ops | `crates/lib/nockchain-math/src/poly.rs`, `bpoly.rs` | `bpoly_to_vec`, `init_bpoly`, polynomial arithmetic |
+| Mary/array | `crates/lib/nockchain-math/src/structs.rs` | Array manipulation utilities |
 
 The Rust implementations are jets — they accelerate the Hoon computations while maintaining bit-exact compatibility. The Hoon definitions remain authoritative.
 

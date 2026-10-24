@@ -1,8 +1,4 @@
 # Root BUILD file for the nockchain workspace.
-#
-# Tracked as BUILD.open.bazel and renamed to BUILD.bazel by the export
-# pipeline, so it only marks a Bazel package once this directory is the
-# repository root.
 
 package(default_visibility = ["//visibility:public"])
 
@@ -34,20 +30,20 @@ filegroup(
 # Convenience aliases for the primary binaries.
 alias(
     name = "nockchain",
-    actual = "//crates/nockchain",
+    actual = "//crates/apps/nockchain",
 )
 
 alias(
     name = "nockchain-wallet",
-    actual = "//crates/nockchain-wallet",
+    actual = "//crates/apps/nockchain-wallet",
 )
 
 alias(
     name = "hoonc",
-    actual = "//crates/hoonc:hoonc_bin",
+    actual = "//crates/tools/hoonc:hoonc_bin",
 )
 
-# All kernel jam files compiled from Hoon sources via rules_hoon.
+# All kernel jam files compiled from Hoon sources.
 alias(
     name = "kernels",
     actual = "//assets:kernels",

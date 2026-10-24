@@ -52,14 +52,14 @@ The peek action path does not preserve PMA state:
 
 Relevant code:
 
-- `open/crates/nockapp/src/kernel/form.rs`: `SerfAction::Peek`
-- `open/crates/nockapp/src/kernel/form.rs`: `Serf::peek`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `SerfAction::Peek`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `Serf::peek`
 
 The interpreter also snapshots and restores runtime context on errors:
 
-- `open/crates/nockvm/rust/nockvm/src/interpreter.rs`: `Context::save`
-- `open/crates/nockvm/rust/nockvm/src/interpreter.rs`: `Context::restore`
-- `open/crates/nockvm/rust/nockvm/src/interpreter.rs`: `exit`
+- `open/crates/lib/nockvm/rust/nockvm/src/interpreter.rs`: `Context::save`
+- `open/crates/lib/nockvm/rust/nockvm/src/interpreter.rs`: `Context::restore`
+- `open/crates/lib/nockvm/rust/nockvm/src/interpreter.rs`: `exit`
 
 So failed peeks should not explain persistent PMA allocation growth by
 themselves.
@@ -79,10 +79,10 @@ accepts a `%crud` replacement. Peeks do not use this path.
 
 Relevant code:
 
-- `open/crates/nockapp/src/kernel/form.rs`: `SerfAction::Poke`
-- `open/crates/nockapp/src/kernel/form.rs`: `do_poke`
-- `open/crates/nockapp/src/kernel/form.rs`: `poke_swap`
-- `open/crates/nockapp/src/kernel/form.rs`: `capture_accepted_event`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `SerfAction::Poke`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `do_poke`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `poke_swap`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `capture_accepted_event`
 
 However, accepted startup pokes alone do not fully explain growth at the same
 event boundary during repeated boot/load loops.
@@ -95,9 +95,9 @@ loaded into the current kernel, which runs Hoon-level `+load` migration.
 
 Relevant code:
 
-- `open/crates/nockapp/src/kernel/form.rs`: `inspect_existing_pma`
-- `open/crates/nockapp/src/kernel/boot.rs`: PMA boot selection
-- `open/crates/nockapp/src/kernel/form.rs`: `Serf::new`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `inspect_existing_pma`
+- `open/crates/lib/nockapp/src/kernel/boot.rs`: PMA boot selection
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `Serf::new`
 
 In `Serf::new`, after loading the old kernel state through the current kernel,
 the code calls:
@@ -127,9 +127,9 @@ trailer allocation offset.
 
 Relevant code:
 
-- `open/crates/nockvm/rust/nockvm/src/pma.rs`: `Pma::raw_alloc`
-- `open/crates/nockvm/rust/nockvm/src/pma.rs`: `Pma::persist_metadata`
-- `open/crates/nockvm/rust/nockvm/src/pma.rs`: `Pma::open_with_min_inner`
+- `open/crates/lib/nockvm/rust/nockvm/src/pma.rs`: `Pma::raw_alloc`
+- `open/crates/lib/nockvm/rust/nockvm/src/pma.rs`: `Pma::persist_metadata`
+- `open/crates/lib/nockvm/rust/nockvm/src/pma.rs`: `Pma::open_with_min_inner`
 
 On reopen, the PMA allocation offset is restored from the trailer. This means an
 interrupted or repeated boot-time copy can leave a larger PMA allocation offset
@@ -159,14 +159,14 @@ is active:
 
 Relevant code:
 
-- `open/crates/nockapp/src/kernel/form.rs`: `copy_durable_state_to_pma`
-- `open/crates/nockapp/src/kernel/form.rs`: `copy_runtime_state_to_pma`
-- `open/crates/nockapp/src/kernel/form.rs`: `preserve_event_update_leftovers_with_pre_persist`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `copy_durable_state_to_pma`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `copy_runtime_state_to_pma`
+- `open/crates/lib/nockapp/src/kernel/form.rs`: `preserve_event_update_leftovers_with_pre_persist`
 
 This is suspicious because PMA docs say runtime caches are not persisted or
 restored as durable state:
 
-- `open/PMA-FAQ.md`: "PMA does not persist or restore derived runtime caches"
+- `docs/pma/faq.md`: "PMA does not persist or restore derived runtime caches"
 - `open/docs/pma/DESIGN.md`: "The durable PMA state is only the Arvo/kernel
   state"
 

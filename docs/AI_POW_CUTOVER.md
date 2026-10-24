@@ -24,7 +24,7 @@ retaining existing sparse checkpoints. The existing incoming-block checkpoint
 admission machinery enforces these pins. This changes neither Legacy circuits,
 keys, nor proof rules. Source provenance, generator checks, and
 the fixed checksum are recorded in the
-[protocol specification](../changelog/protocol/017-anthropos.md#immediate-canonical-history-policy).
+[protocol specification](protocol/upgrades/017-anthropos.md#immediate-canonical-history-policy).
 
 The generated checkpoint data consists of 29 bounded literal chunks: 28 of
 1,000 rows and a final 500 rows. Inert literals disable source-debug wrappers.
@@ -90,9 +90,9 @@ predecessor 169,999. The 170,000 ZK reference is 100 billion Tip5 hashes/s;
 its AI reference doubles from 10 to 20 ExaMAC/s. The historical 154,500 ZK reference of
 56 billion Tip5 hashes/s and historical accumulated work are preserved.
 The exact targets, intervals, and work conversion are in the
-[protocol specification](../changelog/protocol/017-anthropos.md#subsequent-reset-at-height-170000).
+[protocol specification](protocol/upgrades/017-anthropos.md#subsequent-reset-at-height-170000).
 Pearl transaction inclusion and nonce limits remain specified in
-[Logos](../changelog/protocol/016-logos.md#pearl-transaction-commitment).
+[Logos](protocol/upgrades/016-logos.md#pearl-transaction-commitment).
 
 Separately, updated transaction validation applies **immediately at every
 spending height**. Fund-recovery maturity instead uses the shared configured

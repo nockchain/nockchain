@@ -4,7 +4,7 @@
 
 Nockchain uses **Schnorr signatures** over the **Cheetah elliptic curve** — a STARK-friendly curve defined over a sextic extension of the Goldilocks prime field. The Cheetah curve was designed by Toposware specifically for efficient verification both natively and inside zero-knowledge proof circuits.
 
-The Rust implementation is in `crates/nockchain-math/src/crypto/cheetah.rs` (~455 lines). The Hoon types are authoritative in `tx-engine-1.hoon`, with Rust serialization mirrors in `crates/nockchain-types/src/tx_engine/`.
+The Rust implementation is in `crates/lib/nockchain-math/src/crypto/cheetah.rs` (~455 lines). The Hoon types are authoritative in `tx-engine-1.hoon`, with Rust serialization mirrors in `crates/lib/nockchain-types/src/tx_engine/`.
 
 ## Why Not secp256k1 or Ed25519?
 
@@ -52,7 +52,7 @@ The degree-6 extension is a carefully chosen balance:
 ## Point Representation
 
 ```rust
-// crates/nockchain-math/src/crypto/cheetah.rs:60-65
+// crates/lib/nockchain-math/src/crypto/cheetah.rs:60-65
 pub struct CheetahPoint {
     pub x: F6lt,    // x-coordinate in Fp^6
     pub y: F6lt,    // y-coordinate in Fp^6
@@ -96,7 +96,7 @@ The reduction by the irreducible polynomial X^6 − 7 appears in `f6_mul` as add
 The addition formula for non-special cases:
 
 ```rust
-// crates/nockchain-math/src/crypto/cheetah.rs:262-271
+// crates/lib/nockchain-math/src/crypto/cheetah.rs:262-271
 pub fn ch_add_unsafe(p: CheetahPoint, q: CheetahPoint) -> Result<CheetahPoint, JetErr> {
     let slope = f6_div(&f6_sub(&p.y, &q.y), &f6_sub(&p.x, &q.x))?;
     let x_out = f6_sub(&f6_square(&slope), &f6_add(&p.x, &q.x));
@@ -108,7 +108,7 @@ pub fn ch_add_unsafe(p: CheetahPoint, q: CheetahPoint) -> Result<CheetahPoint, J
 The doubling formula uses the curve equation's derivative (3x² + a where a = 1 for Cheetah):
 
 ```rust
-// crates/nockchain-math/src/crypto/cheetah.rs:228-240
+// crates/lib/nockchain-math/src/crypto/cheetah.rs:228-240
 pub fn ch_double_unsafe(x: &F6lt, y: &F6lt) -> Result<CheetahPoint, JetErr> {
     let slope = f6_div(
         &f6_add(&f6_scal(Belt(3), &f6_square(x)), &F6_ONE),  // 3x² + 1
@@ -123,7 +123,7 @@ pub fn ch_double_unsafe(x: &F6lt, y: &F6lt) -> Result<CheetahPoint, JetErr> {
 ## Curve Validation
 
 ```rust
-// crates/nockchain-math/src/crypto/cheetah.rs:114-121
+// crates/lib/nockchain-math/src/crypto/cheetah.rs:114-121
 pub fn in_curve(&self) -> bool {
     if *self == A_ID { return true; }
     let scaled = ch_scal_big(&G_ORDER, self)
@@ -195,7 +195,7 @@ Currently verifies each signature independently. Schnorr's linearity enables fut
 ### SchnorrPubkey
 
 ```rust
-// crates/nockchain-types/src/tx_engine/common/mod.rs:15-16
+// crates/lib/nockchain-types/src/tx_engine/common/mod.rs:15-16
 pub struct SchnorrPubkey(pub CheetahPoint);
 ```
 
@@ -204,7 +204,7 @@ A public key is a point on the Cheetah curve. It derives `NounEncode`/`NounDecod
 ### SchnorrSignature
 
 ```rust
-// crates/nockchain-types/src/tx_engine/common/mod.rs:30-34
+// crates/lib/nockchain-types/src/tx_engine/common/mod.rs:30-34
 pub struct SchnorrSignature {
     pub chal: [Belt; 8],  // Challenge scalar as 8 base field elements
     pub sig: [Belt; 8],   // Response scalar as 8 base field elements
@@ -216,7 +216,7 @@ In Hoon, challenge and response are raw `@ux` atoms. The Rust serialization repr
 ### PkhSignatureEntry
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:296-301
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:296-301
 pub struct PkhSignatureEntry {
     pub hash: Hash,                   // The pubkey hash being satisfied
     pub pubkey: SchnorrPubkey,        // The actual public key
@@ -238,7 +238,7 @@ The message signed by a Schnorr signature is the **sig-hash** of the transaction
 Public keys use Base58 serialization:
 
 ```rust
-// crates/nockchain-math/src/crypto/cheetah.rs:67-81
+// crates/lib/nockchain-math/src/crypto/cheetah.rs:67-81
 const BYTES: usize = 97;  // 1 prefix + 12 Belt elements × 8 bytes each
 
 pub fn into_base58(&self) -> Result<String, CheetahError> {
@@ -260,7 +260,7 @@ Decoding includes `in_curve()` validation to reject points not on the curve.
 The `Signature` type in the witness is a z-map (hash-ordered persistent tree) of `(SchnorrPubkey → SchnorrSignature)` pairs:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/common/mod.rs:36-48
+// crates/lib/nockchain-types/src/tx_engine/common/mod.rs:36-48
 pub struct Signature(pub Vec<(SchnorrPubkey, SchnorrSignature)>);
 
 impl NounEncode for Signature {
@@ -280,7 +280,7 @@ Signatures are stored in a z-map keyed by public key, ensuring deterministic ord
 ## The `trunc_g_order` Function
 
 ```rust
-// crates/nockchain-math/src/crypto/cheetah.rs:332-339
+// crates/lib/nockchain-math/src/crypto/cheetah.rs:332-339
 pub fn trunc_g_order(a: &[u64]) -> UBig {
     let mut result = UBig::from(a[0]);
     result += &*P_BIG * UBig::from(a[1]);
@@ -298,14 +298,14 @@ The Nock VM also includes Ed25519 jets for non-consensus cryptographic operation
 
 | Jet | Location | Purpose |
 |---|---|---|
-| `jet_sign` | `crates/nockvm/rust/nockvm/src/jets/lock/ed.rs` | Ed25519 signing |
+| `jet_sign` | `crates/lib/nockvm/rust/nockvm/src/jets/lock/ed.rs` | Ed25519 signing |
 | `jet_veri` | same | Ed25519 verification |
 | `jet_puck` | same | Public key derivation |
 | `jet_shar` | same | Shared secret (X25519) |
 
 These are available in the VM for application-level cryptography (e.g., key derivation, off-chain signatures) but are not used in the consensus-critical transaction engine. The transaction engine exclusively uses Schnorr over Cheetah for on-chain authentication.
 
-Additionally, `crates/nockchain-math/src/crypto/argon2.rs` provides Argon2 key derivation — used for wallet password hashing, not consensus operations.
+Additionally, `crates/lib/nockchain-math/src/crypto/argon2.rs` provides Argon2 key derivation — used for wallet password hashing, not consensus operations.
 
 ## Comparison with Bitcoin's Signature Evolution
 

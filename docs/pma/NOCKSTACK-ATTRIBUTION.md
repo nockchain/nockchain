@@ -13,7 +13,7 @@ Below is a targeted, actionable plan to bucket memory into **NockStack**, **PMA*
 Find the stack size used by your runtime (e.g. `StackSize::Normal`), then compute bytes:
 
 - Find the size constant:
-  - `rg -n "StackSize|NOCK_STACK_SIZE" crates/nockapp/src/kernel/boot.rs`
+  - `rg -n "StackSize|NOCK_STACK_SIZE" crates/lib/nockapp/src/kernel/boot.rs`
 - Compute:
   - `stack_bytes = stack_words * 8`
 

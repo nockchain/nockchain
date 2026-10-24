@@ -6,18 +6,18 @@ For compiler parity targets, the native artifact and canonical compiler artifact
 
 Target files involved in the current `hoon-138.hoon` arbitrary parity path:
 
-- `crates/hoonc/hoon/hoon-138.hoon`
+- `crates/tools/hoonc/hoon/hoon-138.hoon`
 - `hoon/common/hoon.hoon`
-- `crates/honk/test-assets/BUILD.bazel`
-- `crates/honk/test-assets/compiler_artifact_parity_test.sh`
+- `crates/tools/honk/test-assets/BUILD.bazel`
+- `crates/tools/honk/test-assets/compiler_artifact_parity_test.sh`
 
-`crates/hoonc/hoon/hoon-138.hoon` and `hoon/common/hoon.hoon` are the same source text. Keep that invariant in mind when diagnosing parity: a diff between artifacts is usually caused by compiler, parser, source spot, environment, or rule behavior rather than different Hoon source.
+`crates/tools/hoonc/hoon/hoon-138.hoon` and `hoon/common/hoon.hoon` are the same source text. Keep that invariant in mind when diagnosing parity: a diff between artifacts is usually caused by compiler, parser, source spot, environment, or rule behavior rather than different Hoon source.
 
 ## Diagnostic workflow
 
 1. Run the byte-for-byte parity test first:
    ```bash
-   bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+   bazel test //crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test
    ```
 
 2. If it fails, use JAM-aware structural diff tooling to find the first semantic or metadata difference.

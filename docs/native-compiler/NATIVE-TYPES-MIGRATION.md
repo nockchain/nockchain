@@ -137,7 +137,7 @@ real, and must rebuild exact Hoon treaps — RT-07).
 ### 2.2 The gate is strict `cmp`, not dir-hash-tolerant (RT-02)
 
 `just honk-parity` today passes byte-equality **or** a dir-hash-only difference
-(`justfile:87-97`, echoed `OSS-NEXT-PLAN.md:49`), while `README.md:20-26` calls
+(`justfile:87-97`), while `README.md:20-26` calls
 byte-for-byte the acceptance criterion and structural compare diagnostic-only.
 For migration acceptance we **split the gates**:
 - **Acceptance gate:** strict `cmp` byte-equality of the output jam.
@@ -352,8 +352,7 @@ canonical so `Rc::ptr_eq` is exact and the triple collapses — **conditional on
 The plan must **not** claim caches just disappear. Boundary keys carry semantic
 context — `vet`, fan context, arm epoch, placeholder context — to avoid
 roswell-class stale hits (`types.rs:133-162`); the H2 audit found seven surfaces
-with `%rest`/`%hold` context omissions and accepted a roswell slowdown to fix them
-(`OSS-NEXT-PLAN.md:57-61`); frame invalidation clears many caches but
+with `%rest`/`%hold` context omissions and accepted a roswell slowdown to fix them; frame invalidation clears many caches but
 intentionally **not** lazy resolvers (`7479-7521`). Identity-keyed native caches
 that drop this context reintroduce stale hits even with perfect `Rc` equality.
 

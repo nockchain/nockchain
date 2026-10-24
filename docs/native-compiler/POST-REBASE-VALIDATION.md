@@ -20,12 +20,12 @@ byte-identical to hoonc. All six production kernels also pass Bazel's strict
 | `cargo test --release -p hatch --lib` | 278 passed |
 | `cargo test --release -p nockvm --lib` | 183 passed; 4 pre-existing ignored |
 | Honk Clippy, all targets, no dependency linting, warnings denied | pass |
-| `bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test` | pass; exact byte equality |
+| `bazel test //crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test` | pass; exact byte equality |
 | `bazel test //assets/native:kernel_parity_test` | 6/6 pass; Dumbnet, Wallet, Miner, Peek, Bridge, Roswell |
 | `git diff --check` | pass |
 
 `cargo fmt --all -- --check` reports three formatting differences in the
-unchanged upstream `crates/bridge/src/main.rs`. The Rust files touched by this
+unchanged upstream `crates/bridge/bridge/src/main.rs`. The Rust files touched by this
 cleanup pass `rustfmt --check`; this branch has no diff from `origin/master` in
 the reported Bridge file.
 

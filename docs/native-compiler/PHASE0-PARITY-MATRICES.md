@@ -16,7 +16,7 @@ Together, these define Phase 0 (planning and design artifacts) for per-expressio
 
 ## 1. Canonical Arms In Scope
 
-The eight arms are the strict type-resolution / wing-path-resolution core of the native compiler's type-checking (`++ut` in hoon-138, implemented natively in honk's `crates/honk/src/native/ut/{find,repo}.rs`):
+The eight arms are the strict type-resolution / wing-path-resolution core of the native compiler's type-checking (`++ut` in hoon-138, implemented natively in honk's `crates/tools/honk/src/native/ut/{find,repo}.rs`):
 
 | Arm | File | Lines | Status | Purpose |
 |-----|------|-------|--------|---------|
@@ -240,7 +240,7 @@ fn find_oracle_leaf_axis_path() {
 
 ### 3.3 Test Harness Structure
 
-**File**: `crates/honk/tests/compiler_oracle.rs` (new)
+**File**: `crates/tools/honk/tests/compiler_oracle.rs` (new)
 
 **Sections**:
 ```rust
@@ -295,7 +295,7 @@ mod oracle_harness {
 **Option B: Batch pre-compilation** (fast, requires setup)
 - Before tests run, invoke a harness script:
   ```bash
-  ./crates/honk/test-assets/generate-oracle-jams.sh
+  ./crates/tools/honk/test-assets/generate-oracle-jams.sh
   ```
 - Generates `test-assets/oracle-jams/{find,fond,repo,...}/*.jam` indexed by test name
 - Tests load these golden jams from disk
@@ -306,7 +306,7 @@ mod oracle_harness {
 ### 3.5 Honk-Side Implementation
 
 ```rust
-// In crates/honk/tests/compiler_mint.rs or new compiler_oracle.rs
+// In crates/tools/honk/tests/compiler_mint.rs or new compiler_oracle.rs
 
 use honk::native::ut::{Ut, ty_noun, ty_atom, ty_cell, ty_face, ty_core, ...};
 use nockapp::noun::slab::NounSlab;
@@ -452,7 +452,7 @@ x
 
 ### 4.2 Corpus Organization
 
-**File**: `crates/honk/test-assets/parity-matrix-corpus.hoon` (source) or `crates/honk/tests/oracle_corpus/` (directory of .hoon files)
+**File**: `crates/tools/honk/test-assets/parity-matrix-corpus.hoon` (source) or `crates/tools/honk/tests/oracle_corpus/` (directory of .hoon files)
 
 **Structure**:
 ```
@@ -659,7 +659,7 @@ fn repo_oracle_face_unwrap() {
 
 ### 5.3 Oracle Generation Script
 
-**File**: `crates/honk/scripts/generate-oracle-jams.sh`
+**File**: `crates/tools/honk/scripts/generate-oracle-jams.sh`
 
 ```bash
 #!/bin/bash
@@ -759,7 +759,7 @@ fn assert_formula_matches_oracle(
 
 Some mismatches may be **intentional** (e.g., a known divergence in honk from hoonc that is documented and accepted). A **waiver registry** allows tests to pass conditionally:
 
-**File**: `crates/honk/tests/oracle-waivers.toml` (future)
+**File**: `crates/tools/honk/tests/oracle-waivers.toml` (future)
 
 ```toml
 [[waiver]]
@@ -953,7 +953,6 @@ Output: [describe outputs]
 ## Appendix B: Useful References
 
 - **TODOS.md**: Items #11 (hoonc-oracle fixtures), #15 (find/fend/fund/fond parity matrices)
-- **OSS-NEXT-PLAN.md**: Phase 0 design artifacts, deferred follow-ups
 - **find.rs**: Lines 38-81 (find/fond/fend/fund current implementation)
 - **repo.rs**: Lines 174-205 (repo current implementation)
 - **compiler_mint.rs**: Lines 2452–2459 (strict semantic tests, intentionally no hoonc)

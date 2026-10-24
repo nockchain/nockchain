@@ -1,0 +1,8 @@
+# BuildKit reads this file (Dockerfile.dockerignore next to the -f Dockerfile)
+# when building `tools/docker/Dockerfile` with the repository root as context. The
+# Dockerfile is read directly via -f, so the context only needs the binary that
+# the image COPYs in; everything else is excluded to keep the context small.
+**
+!target/
+!target/release/
+!target/release/nockchain

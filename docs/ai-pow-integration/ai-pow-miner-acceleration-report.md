@@ -33,7 +33,7 @@ Use a miner-owned `SearchBackend` and an ordered batch scheduler. Give a dedicat
 
 ### Stage 3 — CUDA isolation
 
-Keep `crates/ai-pow-miner-cuda` explicitly excluded from the root workspace. Share node-gated CLI parsing with the CPU binary. Target portable `sm_80` PTX and reject devices below compute capability 8.0. Keep one persistent CUDA context, stream, allocation set, and work-fingerprint-keyed session per process.
+Keep `crates/apps/ai-pow-miner-cuda` explicitly excluded from the root workspace. Share node-gated CLI parsing with the CPU binary. Target portable `sm_80` PTX and reject devices below compute capability 8.0. Keep one persistent CUDA context, stream, allocation set, and work-fingerprint-keyed session per process.
 
 ### Stage 4 — canonical MoE CUDA
 
@@ -67,7 +67,7 @@ RUSTFLAGS='-C target-cpu=native' cargo test -p ai-pow-miner --features node
 162 passed; 9 ignored
 
 cargo fmt --check -p ai-pow-miner
-cargo +nightly-2026-04-03 fmt --manifest-path crates/ai-pow-miner-cuda/Cargo.toml --check
+cargo +nightly-2026-04-03 fmt --manifest-path crates/apps/ai-pow-miner-cuda/Cargo.toml --check
 ```
 
 The root `Cargo.lock` has no `cuda-oxide`, `cuda-core`, `cuda-device`, or `cuda-bindings` entry.
@@ -83,7 +83,7 @@ A continuation host requires all of the following:
 - The pinned `nightly-2026-04-03` toolchain with `rust-src`, `rustc-dev`, and `llvm-tools`.
 - Clang/libclang and `cargo oxide` required by the pinned cuda-oxide revision.
 
-The isolated package defaults to portable `sm_80` PTX in `crates/ai-pow-miner-cuda/.cargo/cuda-oxide.toml`. The driver may JIT that PTX only on later compatible NVIDIA devices; it does not make non-NVIDIA or pre-Ampere hardware supported.
+The isolated package defaults to portable `sm_80` PTX in `crates/apps/ai-pow-miner-cuda/.cargo/cuda-oxide.toml`. The driver may JIT that PTX only on later compatible NVIDIA devices; it does not make non-NVIDIA or pre-Ampere hardware supported.
 
 ## Proposed next steps
 
@@ -98,10 +98,10 @@ The isolated package defaults to portable `sm_80` PTX in `crates/ai-pow-miner-cu
 
 ## Source ownership
 
-- `crates/ai-pow/src/matmul.rs` defines tile-state recurrence and wrapping behavior.
-- `crates/ai-pow/src/pearl_compat.rs`, `prng.rs`, and `commit.rs` define the byte-exact transcript and device-port inputs.
-- `crates/ai-pow-miner/src/canonical.rs` owns canonical preparation, scalar validation, and the proof handoff.
-- `crates/ai-pow-miner/src/pearl_mining.rs` owns dense attempt ordering, accounting, cancellation, and CPU-default behavior.
-- `crates/ai-pow-miner/src/search.rs` defines the backend and scheduler contract.
-- `crates/ai-pow-miner/src/run.rs` injects the backend into the node driver and preserves generation safety.
-- `crates/ai-pow-miner-cuda/` owns the isolated CUDA CLI, runtime session, future device modules, and GPU-only tests.
+- `crates/lib/ai-pow/src/matmul.rs` defines tile-state recurrence and wrapping behavior.
+- `crates/lib/ai-pow/src/pearl_compat.rs`, `prng.rs`, and `commit.rs` define the byte-exact transcript and device-port inputs.
+- `crates/apps/ai-pow-miner/src/canonical.rs` owns canonical preparation, scalar validation, and the proof handoff.
+- `crates/apps/ai-pow-miner/src/pearl_mining.rs` owns dense attempt ordering, accounting, cancellation, and CPU-default behavior.
+- `crates/apps/ai-pow-miner/src/search.rs` defines the backend and scheduler contract.
+- `crates/apps/ai-pow-miner/src/run.rs` injects the backend into the node driver and preserves generation safety.
+- `crates/apps/ai-pow-miner-cuda/` owns the isolated CUDA CLI, runtime session, future device modules, and GPU-only tests.

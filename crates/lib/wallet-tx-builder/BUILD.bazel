@@ -1,0 +1,42 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:tools/bazel/lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "wallet-tx-builder",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    edition = "2021",
+    deps = [
+        "//crates/lib/nockapp",
+        "//crates/lib/nockchain-math",
+        "//crates/lib/nockchain-types",
+        "//crates/lib/nockvm/rust/nockvm",
+        "//crates/lib/noun-serde",
+    ] + all_crate_deps(),
+)
+
+rust_test(
+    name = "wallet_tx_builder_unit_tests",
+    size = "small",
+    timeout = "moderate",
+    compile_data = [
+        "//crates/lib/wallet-tx-builder/tests/fixtures:note_data_fixtures.jam",
+        "//crates/lib/wallet-tx-builder/tests/fixtures:withdrawal_tx_fixtures.jam",
+    ],
+    crate = ":wallet-tx-builder",
+    data = [
+        "//crates/lib/wallet-tx-builder/tests/fixtures:note_data_fixtures.jam",
+        "//crates/lib/wallet-tx-builder/tests/fixtures:withdrawal_tx_fixtures.jam",
+    ],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

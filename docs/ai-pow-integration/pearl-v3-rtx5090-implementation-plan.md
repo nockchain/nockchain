@@ -10,9 +10,9 @@ The implementation uses the architecture in `pearl-v3-rtx5090-architecture.md` a
 
 Add new files only:
 
-- `crates/ai-pow-miner-cuda/csrc/ai_pow_v3_peak.cu`
-- `crates/ai-pow-miner-cuda/csrc/ai_pow_v3_peak.h`
-- `crates/ai-pow-miner-cuda/csrc/test_ai_pow_v3_peak.cu`
+- `crates/apps/ai-pow-miner-cuda/csrc/ai_pow_v3_peak.cu`
+- `crates/apps/ai-pow-miner-cuda/csrc/ai_pow_v3_peak.h`
+- `crates/apps/ai-pow-miner-cuda/csrc/test_ai_pow_v3_peak.cu`
 
 The kernel starts from the measured Pearl $256 \times 128 \times 64$ Tensor Core main loop. Remove Pearl process state, Gateway state, and nonce-generation code. Retain only full-grid GEMM, transcript construction, keyed BLAKE3, target comparison, and lowest-ordinal selection.
 

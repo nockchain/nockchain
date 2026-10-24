@@ -1,10 +1,15 @@
 package(default_visibility = ["//visibility:public"])
 
+# Compiler-error fixtures are not part of the compilable Hoon source set.
 filegroup(
     name = "files",
-    srcs = glob([
-        "**/*.hoon",
-    ]),
+    srcs = glob(
+        ["**/*.hoon"],
+        exclude = ["compiler-errors/**"],
+    ),
 )
 
-exports_files(glob(["**/*.hoon"]))
+exports_files(glob(
+    ["**/*.hoon"],
+    exclude = ["compiler-errors/**"],
+))

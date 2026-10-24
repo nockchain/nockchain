@@ -95,8 +95,8 @@ Private operator credentials are taken from the node's configured environment, o
 Use a local Docker daemon and Docker CLI. Build **Linux binaries for that daemon's architecture** before building these images; host macOS executables cannot be copied into a Linux runtime image.
 
 ```bash
-docker build -f docker/Dockerfile -t nockchain-e2e:latest .
-docker build -f docker/Dockerfile.zk-pow-miner -t zk-pow-miner-e2e:latest .
+docker build -f tools/docker/Dockerfile -t nockchain-e2e:latest .
+docker build -f tools/docker/Dockerfile.zk-pow-miner -t zk-pow-miner-e2e:latest .
 cargo run -p nockchain-e2e -- run tests/e2e/scenarios/two_nodes_sync.yaml \
   --docker --docker-image nockchain-e2e:latest \
   --docker-miner-image zk-pow-miner-e2e:latest

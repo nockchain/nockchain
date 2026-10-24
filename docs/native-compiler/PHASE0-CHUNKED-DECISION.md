@@ -51,7 +51,7 @@ The chunked mint was designed to **bound peak working memory** during canonical 
 
 ### 2. Routing Path (ACTIVE)
 
-**File:** `/Users/callen/work/nockchain/crates/honk/src/bin/honk.rs`
+**File:** `/Users/callen/work/nockchain/crates/tools/honk/src/bin/honk.rs`
 
 **Decision point:** `mint_honc_formula_with_ut` (line 2603)
 
@@ -80,7 +80,7 @@ fn mint_honc_formula_with_ut(
 
 ### 3. Byte-Exactness Validation
 
-**Monolithic equivalence test:** `chunked_tisgar_chain_matches_monolithic_mint` (in `crates/honk/src/native/ut/test.rs`)
+**Monolithic equivalence test:** `chunked_tisgar_chain_matches_monolithic_mint` (in `crates/tools/honk/src/native/ut/test.rs`)
 
 ```rust
 #[test]
@@ -206,7 +206,7 @@ This requires explicit opt-in: `HONK_CHUNKED_PRELUDE=1 honk …`
 
 #### Step 3: Update the Test Comment
 
-**File:** `crates/honk/src/native/ut/test.rs`
+**File:** `crates/tools/honk/src/native/ut/test.rs`
 
 Add to `chunked_tisgar_chain_matches_monolithic_mint`:
 
@@ -328,9 +328,9 @@ if env::var_os("HONK_CHUNKED_PRELUDE").is_some() &&
 
 | File | Change | Reason |
 |------|--------|--------|
-| `crates/honk/src/bin/honk.rs:2615` | Add `HONK_CHUNKED_PRELUDE` gate | Gating logic |
-| `crates/honk/src/bin/honk.rs:2486-2510` | Update docstring | Clarify quarantine status |
-| `crates/honk/src/native/ut/test.rs` | Add quarantine note to test | Document scope |
+| `crates/tools/honk/src/bin/honk.rs:2615` | Add `HONK_CHUNKED_PRELUDE` gate | Gating logic |
+| `crates/tools/honk/src/bin/honk.rs:2486-2510` | Update docstring | Clarify quarantine status |
+| `crates/tools/honk/src/native/ut/test.rs` | Add quarantine note to test | Document scope |
 | `docs/native-compiler/PHASE0-CHUNKED-DECISION.md` | Create this document | Rationale & evidence |
 | `docs/native-compiler/TODOS-PERF.md` | Update Step 2 section | Reference quarantine decision |
 | (Optional) Harness code | Add parity assertion | Prevent misuse |
@@ -350,7 +350,6 @@ if env::var_os("HONK_CHUNKED_PRELUDE").is_some() &&
 
 ## Related Documents and Tasks
 
-- **OSS-NEXT-PLAN.md § Step 2:** Memory bounding via chunked prelude (background)
 - **TODOS-PERF.md:** Step 2 progress notes; will reference this decision
 - **NATIVE-TYPES-MIGRATION.md § §9:** Branch hygiene (RT-18); this decision fulfills it
 - **Task H7-E** (to be created): Spot preservation for chunked dbug=true byte-exactness
@@ -360,19 +359,19 @@ if env::var_os("HONK_CHUNKED_PRELUDE").is_some() &&
 ## Appendix: Code Locations
 
 ### Chunked Mint Entry Point
-**File:** `/Users/callen/work/nockchain/crates/honk/src/bin/honk.rs`
+**File:** `/Users/callen/work/nockchain/crates/tools/honk/src/bin/honk.rs`
 - Lines 2534–2601: `mint_honc_prelude_chunked` function
 - Lines 2501–2510: `peel_transparent` helper
 - Lines 2603–2617: Routing in `mint_honc_formula_with_ut`
 - Lines 2512–2532: `prelude_variant_name` helper
 
 ### Chunked Layer Mint (Ut Layer)
-**File:** `/Users/callen/work/nockchain/crates/honk/src/native/ut/mod.rs`
+**File:** `/Users/callen/work/nockchain/crates/tools/honk/src/native/ut/mod.rs`
 - Lines 11964–12004: `mint_tisgar_chain_chunked` function (core layer logic)
 - Lines 11958–11963: Docstring with invariant description
 
 ### Byte-Exactness Test
-**File:** `/Users/callen/work/nockchain/crates/honk/src/native/ut/test.rs`
+**File:** `/Users/callen/work/nockchain/crates/tools/honk/src/native/ut/test.rs`
 - Test: `chunked_tisgar_chain_matches_monolithic_mint`
 - Validates chunked output equals monolithic under normal conditions
 

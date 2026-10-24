@@ -2,7 +2,7 @@
 ## honk native-types migration (NATIVE-TYPES-MIGRATION.md §3.8)
 
 **Status:** Phase-0 Design Artifact  
-**Scope:** Complete inventory of EVERY cache/memo in `crates/honk/src/native/ut/` (`mod.rs`, `types.rs`, `find.rs`, `repo.rs`)  
+**Scope:** Complete inventory of EVERY cache/memo in `crates/tools/honk/src/native/ut/` (`mod.rs`, `types.rs`, `find.rs`, `repo.rs`)  
 **Purpose:** Define which caches DELETE, RE-KEY, or PRESERVE-TO-BASE-ANALOGUE, documenting which semantic context fields MUST survive the native migration to avoid roswell-class stale hits.
 
 ---
@@ -14,7 +14,7 @@ The honk noun `ut` carries **semantic execution context** beyond structural noun
 - **Memo context**: arm recursion epoch + in-progress placeholder signatures  
 - **Invalidation**: frame-arena reclamation clears many caches; lazy resolvers deliberately persist
 
-The H2 work (OSS-NEXT-PLAN §5.1) added context keying to 7 boundary surfaces to fix roswell-class stale hits where naive `(mug, mug)` keys reused entries under different fan scope. **Naive Rc-identity keying in native would reintroduce these bugs** unless context is retained. This matrix proves which caches have no semantic dependency (safe to DELETE), which need context preservation (RE-KEY), and which substitute with lazy resolver classes (PRESERVE-TO-BASE-ANALOGUE).
+The H2 work added context keying to 7 boundary surfaces to fix roswell-class stale hits where naive `(mug, mug)` keys reused entries under different fan scope. **Naive Rc-identity keying in native would reintroduce these bugs** unless context is retained. This matrix proves which caches have no semantic dependency (safe to DELETE), which need context preservation (RE-KEY), and which substitute with lazy resolver classes (PRESERVE-TO-BASE-ANALOGUE).
 
 ---
 
@@ -44,7 +44,7 @@ All boundary memo caches live in `BoundaryMemoSet` (types.rs:171–218). They ca
 **Notes:**
 - Keyword: "exactly like the sibling core_mint cache — include the full context (fan + arm epoch + placeholder), all of which collapse to 0 in the steady state" (mod.rs:3020–3021).
 - Emission: mint_cache_lookup (mod.rs:3034–3058), mint_cache_store (3060–3098), mint_boundary_lookup_exact (3101–3125, test-only), mint_boundary_store_exact (3128–3165, test-only).
-- H2 Addition: arm_epoch and placeholder were added in the H2 cache-key-correctness work (OSS-NEXT-PLAN.md:57–61) to prevent roswell redo-match slowdown. Dropping them would reintroduce the bug.
+- H2 Addition: arm_epoch and placeholder were added in the H2 cache-key-correctness work to prevent roswell redo-match slowdown. Dropping them would reintroduce the bug.
 
 ---
 
@@ -376,7 +376,7 @@ These are NOT caches but are used to compute cache context keys. Listed for comp
 ## Critical Findings (RT-14 Materialized)
 
 ### Finding 1: H2 Fan Context Is Load-Bearing in 8 Caches
-The H2 work (OSS-NEXT-PLAN.md:57–61) added `fan_context_key` to boundary keys to fix roswell-class stale hits when the same type operation is memoized under different %rest scopes. **Deleting this field in native would reintroduce the bug.** All 8 boundary caches (core_mint, mint, mull, redo, rest, crop, fuse, fish, nest) MUST retain fan_context_key.
+The H2 work added `fan_context_key` to boundary keys to fix roswell-class stale hits when the same type operation is memoized under different %rest scopes. **Deleting this field in native would reintroduce the bug.** All 8 boundary caches (core_mint, mint, mull, redo, rest, crop, fuse, fish, nest) MUST retain fan_context_key.
 
 ### Finding 2: Hold Repo Is Fan-Context-Critical
 hold_repo (hold_repo_core cache) expands a %hold by recursively expanding its inner type and re-minting the gene. This expansion is fan-scope-sensitive: if %rest activates a different leg, the same %hold expands to a different result. **The hold_repo_core cache must include fan_context_key to prevent incorrect reuse across fan scopes.**
@@ -436,7 +436,6 @@ Before advancing Phase 1 → Phase 2, the cache matrix must be validated:
 ## References
 
 - **NATIVE-TYPES-MIGRATION.md** § 3.8 (cache matrix deliverable), § 3.3 (canonicality), § 3.5 (lazy lifetime), § 3.6 (%hold finite), § 3.7 (fan scope).
-- **OSS-NEXT-PLAN.md** § 5.1 (H2 cache-key-correctness work), § 5.2–5.3 (timeline).
 - **FINDING-JET-NORMALIZATION.md**, **BATTERIES-MATCHES-STRUCTURAL-EQUALITY.md** (context for mack/formula-consumer work).
 - **SLAB-PMA-COMINGLING.md** (musk/nockvm context lifetime).
 

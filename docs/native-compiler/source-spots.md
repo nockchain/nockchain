@@ -22,7 +22,7 @@ Important constraints:
 
 Relevant implementation area:
 
-- `crates/hatch/src/utils.rs`
+- `crates/tools/hatch/src/utils.rs`
 
 ## Test expectations
 
@@ -30,5 +30,5 @@ For parser changes that affect compiler parity, run parser unit tests in release
 
 ```bash
 cargo test --release -p hatch --lib
-bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+bazel test //crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test
 ```

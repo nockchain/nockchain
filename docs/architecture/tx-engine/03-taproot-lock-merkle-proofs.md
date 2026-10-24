@@ -55,7 +55,7 @@ When spending a V1 note, the spender provides a `lock-merkle-proof` that reveals
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:339-344
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:339-344
 pub enum LockMerkleProof {
     Full(LockMerkleProofFull),  // Post-Bythos: axis committed in hash
     Stub(LockMerkleProofStub),  // Pre-Bythos: axis not committed
@@ -96,7 +96,7 @@ When a lock tree has multiple branches, the axis tells the validator which leaf 
 ## Merkle Proof Structure
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:408-412
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:408-412
 pub struct MerkleProof {
     pub root: Hash,        // The expected root hash (matches Name.first)
     pub path: Vec<Hash>,   // Sibling hashes from leaf to root
@@ -119,7 +119,7 @@ The hash commitment for a lock Merkle proof is computed differently for stub and
 
 ### Stub Hashable (Pre-Bythos)
 
-From `changelog/protocol/012-bythos.md`:
+From `docs/protocol/upgrades/012-bythos.md`:
 
 ```hoon
 :+  hash+(hash:spend-condition spend-condition.form)

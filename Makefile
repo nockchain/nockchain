@@ -36,7 +36,7 @@ DOCKER_P2P_PORT ?= 30000
 DOCKER_DATA_DIR ?= $(CURDIR)/.data.nockchain
 DOCKER_NOCKCHAIN_ENVS ?=
 DOCKER_NOCKCHAIN_ARGS ?=
-DOCKER_METRICS_COMPOSE ?= docker/docker-compose.metrics.yml
+DOCKER_METRICS_COMPOSE ?= tools/docker/docker-compose.metrics.yml
 DOCKER_METRICS_NETWORK ?= nockchain-metrics
 INFLUXDB_VERSION ?= 2.7
 TELEGRAF_VERSION ?= 1.30
@@ -70,7 +70,7 @@ build-rust:
 
 .PHONY: contracts-deps
 contracts-deps: ## Install Solidity dependencies for bridge crate
-		$(MAKE) -C crates/bridge/contracts deps
+		$(MAKE) -C crates/bridge/bridge/contracts deps
 
 .PHONY: build-nockchain-jemalloc
 build-nockchain-jemalloc:
@@ -104,7 +104,7 @@ docker-nockchain-pma-persist: docker-nockchain-build
 
 .PHONY: docker-nockchain-build
 docker-nockchain-build:
-	docker build -f docker/Dockerfile -t $(DOCKER_IMAGE) .
+	docker build -f tools/docker/Dockerfile -t $(DOCKER_IMAGE) .
 # --checkpoint-mode stream \
 .PHONY: docker-nockchain-run
 docker-nockchain-run:
@@ -191,12 +191,12 @@ build-hoonc-tracing: nuke-hoonc-data ## Build hoonc with tracing
 .PHONY: install-hoonc
 install-hoonc: nuke-hoonc-data ## Install hoonc from this repo
 	$(call show_env_vars)
-	cargo install --locked --force --path crates/hoonc --bin hoonc
+	cargo install --locked --force --path crates/tools/hoonc --bin hoonc
 
 .PHONY: update-hoonc
 update-hoonc:
 	$(call show_env_vars)
-	cargo install --locked --path crates/hoonc --bin hoonc
+	cargo install --locked --path crates/tools/hoonc --bin hoonc
 
 .PHONY: build-nockchain
 build-nockchain: assets/dumb.jam assets/miner.jam
@@ -206,17 +206,17 @@ build-nockchain: assets/dumb.jam assets/miner.jam
 .PHONY: install-nockchain
 install-nockchain: assets/dumb.jam assets/miner.jam
 	$(call show_env_vars)
-	cargo install --locked --force --path crates/nockchain --bin nockchain
+	cargo install --locked --force --path crates/apps/nockchain --bin nockchain
 
 .PHONY: install-nockchain-wallet
 install-nockchain-wallet: assets/wal.jam
 	$(call show_env_vars)
-	cargo install --locked --force --path crates/nockchain-wallet --bin nockchain-wallet
+	cargo install --locked --force --path crates/apps/nockchain-wallet --bin nockchain-wallet
 
 .PHONY: install-nockchain-peek
 install-nockchain-peek: assets/peek.jam
 	$(call show_env_vars)
-	cargo install --locked --force --path crates/nockchain-peek --bin nockchain-peek
+	cargo install --locked --force --path crates/tools/nockchain-peek --bin nockchain-peek
 
 
 # Only the default compiler needs a local build; explicit commands/paths are used as-is.
@@ -259,7 +259,7 @@ HONK_ASSET_WORKDIR=target/honk-assets
 HONK_WRAPPER_ASSET_DIR=$(HONK_ASSET_WORKDIR)/wrapper-assets
 HONK_HOONC_OCTS_TYPED_DYNOCK=$(HONK_ASSET_WORKDIR)/data-import-typed-dynock.jam
 HONK_HOONC ?= cargo run --release -p hoonc --bin hoonc --
-HONK_ASSET_TARGETS=assets/honc-cold-138.jam crates/honk/assets/hoonc-octs-type-138.jam
+HONK_ASSET_TARGETS=assets/honc-cold-138.jam crates/tools/honk/assets/hoonc-octs-type-138.jam
 
 .PHONY: build-honk-assets
 build-honk-assets: $(HONK_ASSET_TARGETS) ## Build cached honk compiler assets
@@ -270,9 +270,9 @@ assets/honc-cold-138.jam: ensure-dirs honk-cargo-build hoon/common/hoon.hoon $(H
 	$(HONK_RUN_ENV) $(HONK_BIN) --new --dump-wrapper-assets $(HONK_WRAPPER_ASSET_DIR) --prelude hoon/common/hoon.hoon hoon
 	cp $(HONK_WRAPPER_ASSET_DIR)/honc-cold-138.jam $@
 
-crates/honk/assets/hoonc-octs-type-138.jam: ensure-dirs hoon/probes/hoon-compiler/hoonc_octs_type_probe.hoon hoon/jams/small-blocks.jam $(HOON_SRCS)
+crates/tools/honk/assets/hoonc-octs-type-138.jam: ensure-dirs hoon/probes/hoon-compiler/hoonc_octs_type_probe.hoon hoon/jams/small-blocks.jam $(HOON_SRCS)
 	$(call show_env_vars)
-	mkdir -p crates/honk/assets $(HONK_ASSET_WORKDIR)
+	mkdir -p crates/tools/honk/assets $(HONK_ASSET_WORKDIR)
 	rm -f data-import-typed-dynock.jam $(HONK_HOONC_OCTS_TYPED_DYNOCK)
 	$(HONK_HOONC) $(HOONC_FLAGS) --dynock-typed --output data-import-typed-dynock.jam hoon/probes/hoon-compiler/hoonc_octs_type_probe.hoon hoon
 	mv data-import-typed-dynock.jam $(HONK_HOONC_OCTS_TYPED_DYNOCK)

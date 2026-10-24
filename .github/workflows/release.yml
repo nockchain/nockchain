@@ -156,7 +156,7 @@ jobs:
         if: matrix.use_zigbuild == true
         run: |
           echo "Building native x86_64 hoonc for .jam generation..."
-          cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked
+          cargo build --release --bin hoonc --manifest-path crates/tools/hoonc/Cargo.toml --locked
           # Save it with a different name
           cp target/release/hoonc target/release/hoonc-native
           file target/release/hoonc-native
@@ -169,10 +169,10 @@ jobs:
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin hoon --manifest-path crates/hoon/Cargo.toml --locked --target ${{ matrix.target }}
+            cargo zigbuild --release --bin hoon --manifest-path crates/lib/hoon/Cargo.toml --locked --target ${{ matrix.target }}
             file target/${{ matrix.target }}/release/hoon
           else
-            cargo build --release --bin hoon --manifest-path crates/hoon/Cargo.toml --locked
+            cargo build --release --bin hoon --manifest-path crates/lib/hoon/Cargo.toml --locked
             file target/release/hoon
           fi
 
@@ -184,10 +184,10 @@ jobs:
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked --target ${{ matrix.target }}
+            cargo zigbuild --release --bin hoonc --manifest-path crates/tools/hoonc/Cargo.toml --locked --target ${{ matrix.target }}
             file target/${{ matrix.target }}/release/hoonc
           else
-            cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked
+            cargo build --release --bin hoonc --manifest-path crates/tools/hoonc/Cargo.toml --locked
             file target/release/hoonc
           fi
 
@@ -225,10 +225,10 @@ jobs:
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockup --manifest-path crates/nockup/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
+            cargo zigbuild --release --bin nockup --manifest-path crates/tools/nockup/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
             file target/${{ matrix.target }}/release/nockup
           else
-            cargo build --release --bin nockup --manifest-path crates/nockup/Cargo.toml --locked
+            cargo build --release --bin nockup --manifest-path crates/tools/nockup/Cargo.toml --locked
             file target/release/nockup
           fi
 
@@ -239,10 +239,10 @@ jobs:
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --target ${{ matrix.target }}
+            cargo zigbuild --release --bin nockchain --manifest-path crates/apps/nockchain/Cargo.toml --target ${{ matrix.target }}
             file target/${{ matrix.target }}/release/nockchain
           else
-            cargo build --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --locked
+            cargo build --release --bin nockchain --manifest-path crates/apps/nockchain/Cargo.toml --locked
             file target/release/nockchain
           fi
 
@@ -253,10 +253,10 @@ jobs:
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --target ${{ matrix.target }}
+            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/apps/nockchain-wallet/Cargo.toml --target ${{ matrix.target }}
             file target/${{ matrix.target }}/release/nockchain-wallet
           else
-            cargo build --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --locked
+            cargo build --release --bin nockchain-wallet --manifest-path crates/apps/nockchain-wallet/Cargo.toml --locked
             file target/release/nockchain-wallet
           fi
 
@@ -487,7 +487,7 @@ jobs:
           COMMIT_SHORT=$(echo $COMMIT_SHA | cut -c1-7)
           
           # Get nockup version from the workspace
-          NOCKUP_VERSION=$(grep '^version[[:space:]]*=' crates/nockup/Cargo.toml | sed 's/.*=[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
+          NOCKUP_VERSION=$(grep '^version[[:space:]]*=' crates/tools/nockup/Cargo.toml | sed 's/.*=[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
           
           if [ -z "$NOCKUP_VERSION" ]; then
               echo "Error: Could not extract nockup version" >&2

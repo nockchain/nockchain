@@ -19,7 +19,7 @@ grows; the boundary (and thus the transient noun (re)builds) shrinks. The memory
 win grows monotonically — internal deepened subjects become shared `Rc`. At
 completion the boundary is the OUTPUT only, and noun type construction is gone.
 
-VALIDATION each step: `crates/honk/test-assets/native-parity/shadow_gate.sh`
+VALIDATION each step: `crates/tools/honk/test-assets/native-parity/shadow_gate.sh`
 (fast fixtures, byte-identical output). Full kernel byte-parity at completion.
 Do NOT run full-kernel flag-on as a routine gate (O(n^2) until flipped).
 

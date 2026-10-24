@@ -1,10 +1,10 @@
 # honk native-compiler TODOs
 
-Status reconciled 2026-06-15 against branch `fwd/bitemyapp/native-compiler-pma-hell-4`. Most of the original correctness list is resolved; see `docs/OSS-NEXT-PLAN.md` for the full work log. Resolved items are summarized first, then the active list.
+Status reconciled 2026-06-15 against branch `fwd/bitemyapp/native-compiler-pma-hell-4`. Most of the original correctness list is resolved; Resolved items are summarized first, then the active list.
 
 ## Resolved
 
-- **Missing canonical octs type silently downgraded `/*` parity** (H1a): `build.rs` hard-errors when `crates/honk/assets/hoonc-octs-type-138.jam` is missing/empty (env override aside); the runtime no longer falls back to a local `[p=@ud q=@]` for data imports.
+- **Missing canonical octs type silently downgraded `/*` parity** (H1a): `build.rs` hard-errors when `crates/tools/honk/assets/hoonc-octs-type-138.jam` is missing/empty (env override aside); the runtime no longer falls back to a local `[p=@ud q=@]` for data imports.
 - **Artifact parse keeps docs disabled** (H1d): retained intentionally — docs-disabled parse is the byte-parity-correct input (the six kernels are byte-exact this way; doc-enabled parsing perturbs emitted dbug/spot nouns).
 - **Batch-mode state-dependent miscompile** (H2b): the miss-memo key carries full fan + memo context; batch persistence is gated behind the `honk-batch-parity` byte check rather than per-entry state resets.
 - **Semantic cache keys omitted %rest/fan context** (H2a): centralized typed cache-key builders now carry the full `CacheContextKey` (vet + fan_context + arm_epoch + placeholder) across mint/mull/redo/rest/fish/nest.
