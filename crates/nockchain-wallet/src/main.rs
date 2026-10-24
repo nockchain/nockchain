@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use clap::Parser;
 #[cfg(test)]
@@ -184,7 +185,17 @@ fn resolve_ergonomic_outputs_and_fee(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), NockAppError> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), NockAppError> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("default provider already set elsewhere");
@@ -254,10 +265,7 @@ async fn main() -> Result<(), NockAppError> {
                 );
                 return Ok(());
             }
-            Err(e) => {
-                error!("Command failed: {}", e);
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
     }
 
@@ -683,10 +691,7 @@ async fn main() -> Result<(), NockAppError> {
                 let skin = MadSkin::default_dark();
                 println!("{}", skin.term_text(&markdown));
             }
-            Err(e) => {
-                error!("Command failed: {}", e);
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
         return Ok(());
     }
@@ -887,10 +892,7 @@ async fn main() -> Result<(), NockAppError> {
             }
             Ok(())
         }
-        Err(e) => {
-            error!("Command failed: {}", e);
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 
