@@ -4,7 +4,7 @@
 
 Tip5 is the cryptographic hash function used throughout Nockchain for commitments, Merkle trees, data structure ordering, and transaction IDs. It belongs to the family of **algebraic sponge hashes** (alongside Poseidon, Neptune, and Rescue) — hash functions designed to be efficient both natively and inside zero-knowledge proof circuits.
 
-The authoritative implementation is in Hoon (`hoon/common/ztd/three.hoon`), with a Rust jet in `crates/nockchain-math/src/tip5/`.
+The authoritative implementation is in Hoon (`hoon/common/ztd/three.hoon`), with a Rust jet in `crates/lib/nockchain-math/src/tip5/`.
 
 ## Design Parameters
 
@@ -173,12 +173,12 @@ Used in the STARK proof system for Fiat-Shamir challenges.
 
 The Rust jet mirrors the Hoon implementation exactly:
 
-**Constants** (`crates/nockchain-math/src/tip5/mod.rs`):
+**Constants** (`crates/lib/nockchain-math/src/tip5/mod.rs`):
 - `LOOKUP_TABLE`: 256-byte S-box for the Fermat map
 - `ROUND_CONSTANTS`: 112 `u64` values (7 rounds × 16 state elements)
 - `MDS_MATRIX_MONT`: 16×16 matrix in Montgomery representation
 
-**Functions** (`crates/nockchain-math/src/tip5/hash.rs`):
+**Functions** (`crates/lib/nockchain-math/src/tip5/hash.rs`):
 - `permute(sponge: &mut [u64; 16])`: applies 7 rounds in-place
 - `hash_varlen(input: &[u64]) -> [u64; 5]`: variable-length hash
 - `hash_10(input: &[u64; 10]) -> [u64; 5]`: fixed 10-element hash

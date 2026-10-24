@@ -1,4 +1,4 @@
-load("//:rules_hoon/defs.bzl", "honk_library")
+load("//:tools/bazel/hoon/defs.bzl", "honk_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -165,15 +165,15 @@ test_suite(
         args = [
             kernel,
             "kernel",
-            "$(rootpath //crates/hoonc:hoonc_bin)",
-            "$(rootpath //crates/honk:honk)",
+            "$(rootpath //crates/tools/hoonc:hoonc_bin)",
+            "$(rootpath //crates/tools/honk:honk)",
             "$(rootpath {})".format(KERNELS[kernel][0]),
             "hoon",
         ],
         data = [
             KERNELS[kernel][0],
-            "//crates/honk:honk",
-            "//crates/hoonc:hoonc_bin",
+            "//crates/tools/honk:honk",
+            "//crates/tools/hoonc:hoonc_bin",
         ] + KERNELS[kernel][1],
         tags = [
             "benchmark",

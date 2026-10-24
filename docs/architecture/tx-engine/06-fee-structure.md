@@ -14,7 +14,7 @@ The rationale: witness data does not contribute to the UTXO set and is only need
 
 Nockchain's fee model evolved through two phases, ultimately arriving at the same principle: **witness (input) data should cost less than output data**.
 
-All fee logic is defined in Hoon (`hoon/common/tx-engine-1.hoon`), which is the authoritative source. The Rust types in `crates/nockchain-types/` carry the `BlockchainConstants` structure for deserialization but do not implement fee calculation.
+All fee logic is defined in Hoon (`hoon/common/tx-engine-1.hoon`), which is the authoritative source. The Rust types in `crates/lib/nockchain-types/` carry the `BlockchainConstants` structure for deserialization but do not implement fee calculation.
 
 ### Pre-Bythos Fee Model (Before Block 54000)
 

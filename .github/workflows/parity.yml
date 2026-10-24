@@ -4,7 +4,7 @@ name: Compiler parity
 # compiler): each kernel plus the hoon-138 arbitrary self-mint, one job per
 # artifact pairing so they run in parallel. Every test is a strict `cmp` of
 # two Bazel-built jams (see assets/native/BUILD.bazel and
-# crates/honk/test-assets/BUILD.bazel) — no dir-hash waiver: both compilers
+# crates/tools/honk/test-assets/BUILD.bazel) — no dir-hash waiver: both compilers
 # run sandboxed over identical dependency trees, so the artifacts must agree
 # on every byte, including the directory-hash leaf.
 #
@@ -20,12 +20,12 @@ on:
   push:
     branches: ["master", "nightly"]
     paths:
-      - "crates/honk/**"
+      - "crates/tools/honk/**"
       - ".github/workflows/parity.yml"
   pull_request:
     branches: ["master", "nightly"]
     paths:
-      - "crates/honk/**"
+      - "crates/tools/honk/**"
       - ".github/workflows/parity.yml"
 
 permissions:
@@ -74,7 +74,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Test type-checking parity probes (hoonc vs honk, strict cmp)
-        run: bazel test //crates/honk/test-assets/type-probes:all_parity_test
+        run: bazel test //crates/tools/honk/test-assets/type-probes:all_parity_test
 
   hoon-138-parity:
     if: github.repository == 'nockchain/nockchain'
@@ -91,7 +91,7 @@ jobs:
       # Serialize the two heavy compiles (see the kernel job note); the honk
       # self-mint alone peaks ~14GB RSS.
       - name: Build hoonc hoon-138 reference
-        run: bazel build //crates/honk/test-assets:hoon_138_ref
+        run: bazel build //crates/tools/honk/test-assets:hoon_138_ref
 
       - name: Test hoon-138 self-mint parity (hoonc vs honk native, strict cmp)
-        run: bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+        run: bazel test //crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test

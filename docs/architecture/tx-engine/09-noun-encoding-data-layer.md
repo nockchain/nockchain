@@ -2,7 +2,7 @@
 
 ## Architecture: Hoon as Source of Truth
 
-A critical architectural point: **Hoon is the source of truth** for all type definitions and validation logic in the Nockchain transaction engine. The Rust type definitions in `crates/nockchain-types/` are serialization/deserialization mirrors — they exist to encode and decode Hoon nouns for networking and application layers, but they do not define the canonical semantics.
+A critical architectural point: **Hoon is the source of truth** for all type definitions and validation logic in the Nockchain transaction engine. The Rust type definitions in `crates/lib/nockchain-types/` are serialization/deserialization mirrors — they exist to encode and decode Hoon nouns for networking and application layers, but they do not define the canonical semantics.
 
 This means:
 - **Consensus validation runs in Nock**: The Hoon kernel executing on the Nock VM is what actually validates transactions, computes fees, checks witnesses, and updates balances
@@ -29,7 +29,7 @@ Transaction (as a noun):
 The Rust codebase uses `NounEncode` and `NounDecode` traits to bridge between typed Rust structs and untyped Nock nouns:
 
 ```rust
-// Example from crates/nockchain-types/src/tx_engine/v1/tx.rs:25-31
+// Example from crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:25-31
 impl NounEncode for RawTx {
     fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
         let version = self.version.to_noun(allocator);
@@ -55,7 +55,7 @@ This creates a noun cell tree: `[version [id spends]]` — matching the Hoon typ
 Because nouns are untyped, version discrimination happens by **examining the shape** of the data. For example, the `Note` enum:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/note.rs:77-84
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:77-84
 impl NounDecode for Note {
     fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let hed = noun.as_cell()?.head();
@@ -72,7 +72,7 @@ V0 notes have a `NoteHead` (a cell) as their first element; V1 notes have a `Ver
 Similarly, `LockMerkleProof` discriminates stub vs full:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:394-406
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:394-406
 impl NounDecode for LockMerkleProof {
     fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         if let Ok(full) = LockMerkleProofFull::from_noun(noun) {
@@ -132,7 +132,7 @@ Nockchain uses **Tip5** as its universal hash function for:
 Tip5 produces a 5-element tuple of field elements (`[Belt; 5]`), where each `Belt` is a `u64` reduced modulo a prime:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/common/mod.rs:149-150
+// crates/lib/nockchain-types/src/tx_engine/common/mod.rs:149-150
 pub struct Hash(pub [Belt; 5]);
 ```
 

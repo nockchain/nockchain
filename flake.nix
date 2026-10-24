@@ -11,7 +11,8 @@
     };
 
     foundry = {
-      url = "github:shazow/foundry.nix/monthly";
+      # Match the immutable Foundry 1.8.6 release used by Bazel.
+      url = "github:shazow/foundry.nix/00775ebb91f1d64f6799764ddc471d2d68b4f9a9";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -27,6 +28,11 @@
             fenix.overlays.default
             foundry.overlay
             (final: prev: {
+              foundry-bin = prev.foundry-bin.overrideAttrs (old: {
+                # Forge and Cast link libudev for hardware-wallet support on Linux.
+                buildInputs = (old.buildInputs or [])
+                  ++ prev.lib.optionals prev.stdenv.isLinux [ prev.udev ];
+              });
               cargo-sort = prev.rustPlatform.buildRustPackage rec {
                 pname = "cargo-sort";
                 version = "2.0.2";

@@ -26,7 +26,7 @@ A `spend-condition` is a list of lock primitives (AND logic):
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:478-484
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:478-484
 pub enum LockPrimitive {
     Pkh(Pkh),       // %pkh - Pay-to-public-key-hash (M-of-N Schnorr)
     Tim(LockTim),   // %tim - Timelock constraints
@@ -42,7 +42,7 @@ Defined in Hoon as `[%pkh m=@ hashes=(z-set hash)]`: a threshold `m` and a set o
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:534-539
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:534-539
 pub struct Pkh {
     pub m: u64,            // Required signature count (threshold)
     pub hashes: Vec<Hash>, // z-set of public key hashes
@@ -70,7 +70,7 @@ The Pkh primitive uses **public key hashes** rather than public keys directly. T
 The `PkhSignature` in the witness provides the satisfying data:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:296-301
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:296-301
 pub struct PkhSignatureEntry {
     pub hash: Hash,                   // The pubkey hash being satisfied
     pub pubkey: SchnorrPubkey,        // The actual public key
@@ -164,7 +164,7 @@ Hax requires the spender to reveal preimages whose hashes match the committed va
 The `hax` field in the Witness provides preimage revelations:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:253-258
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:253-258
 pub struct HaxPreimage {
     pub hash: Hash,
     pub value: bytes::Bytes,  // Jammed noun bytes
@@ -229,7 +229,7 @@ admission share this rule; ordinary lock-condition handling is unchanged.
 A `SpendCondition` is a **list** of `LockPrimitive` values. All primitives in the list must be satisfied — AND logic:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:442-443
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:442-443
 pub struct SpendCondition(pub Vec<LockPrimitive>);
 ```
 

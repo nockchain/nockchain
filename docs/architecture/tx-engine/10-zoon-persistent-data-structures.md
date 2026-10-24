@@ -225,9 +225,9 @@ The ordering functions and z-map/z-set operations are jetted in Rust for perform
 
 | Hoon | Rust File | Key Functions |
 |---|---|---|
-| `tip`, `double-tip`, `gor-tip`, `mor-tip`, `dor-tip`, `lth-tip` | `crates/nockchain-math/src/zoon/common.rs` | `TipHasher` trait, `DefaultTipHasher` |
-| `z-map put` | `crates/nockchain-math/src/zoon/zmap.rs` | `z_map_put()`, `z_map_rep()` |
-| `z-set put/bif/dif` | `crates/nockchain-math/src/zoon/zset.rs` | `z_set_put()`, `z_set_bif()`, `z_set_dif()` |
+| `tip`, `double-tip`, `gor-tip`, `mor-tip`, `dor-tip`, `lth-tip` | `crates/lib/nockchain-math/src/zoon/common.rs` | `TipHasher` trait, `DefaultTipHasher` |
+| `z-map put` | `crates/lib/nockchain-math/src/zoon/zmap.rs` | `z_map_put()`, `z_map_rep()` |
+| `z-set put/bif/dif` | `crates/lib/nockchain-math/src/zoon/zset.rs` | `z_set_put()`, `z_set_bif()`, `z_set_dif()` |
 
 The `TipHasher` trait abstracts the hash function:
 

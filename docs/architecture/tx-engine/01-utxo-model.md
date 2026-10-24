@@ -8,7 +8,7 @@ Nockchain uses an unspent transaction output (UTXO) model, where all on-chain va
 
 A **note** is Nockchain's UTXO. It represents a discrete unit of value locked under specific spending conditions. Notes exist in two versions, reflecting the protocol's evolution.
 
-All note types are defined authoritatively in Hoon (`hoon/common/tx-engine-0.hoon` and `tx-engine-1.hoon`). The Rust structs in `crates/nockchain-types/` are serialization mirrors that encode/decode Hoon nouns for networking and applications.
+All note types are defined authoritatively in Hoon (`hoon/common/tx-engine-0.hoon` and `tx-engine-1.hoon`). The Rust structs in `crates/lib/nockchain-types/` are serialization mirrors that encode/decode Hoon nouns for networking and applications.
 
 ### NoteV0 (Genesis)
 
@@ -31,7 +31,7 @@ The Hoon type definition (authoritative):
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v0/note.rs:99-102
+// crates/lib/nockchain-types/src/tx_engine/v0/note.rs:99-102
 pub struct NoteV0 {
     pub head: NoteHead,    // version, origin_page, timelock
     pub tail: NoteTail,    // name, lock, source, assets
@@ -64,7 +64,7 @@ Hoon type definition (authoritative, from `tx-engine-1.hoon`):
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/note.rs:58-65
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:58-65
 pub struct NoteV1 {
     pub version: Version,       // always V1
     pub origin_page: BlockHeight,
@@ -91,7 +91,7 @@ A **Name** (`nname` in Hoon) uniquely identifies a note within the UTXO set. Def
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/common/mod.rs:266-270
+// crates/lib/nockchain-types/src/tx_engine/common/mod.rs:266-270
 pub struct Name {
     pub first: Hash,    // lock root hash
     pub last: Hash,     // source-derived hash (parent hash of transaction)
@@ -127,7 +127,7 @@ Authoritative Hoon type (`tx-engine-0.hoon:1389`, named `++sig`):
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v0/note.rs:39
+// crates/lib/nockchain-types/src/tx_engine/v0/note.rs:39
 pub struct Lock {
     pub keys_required: u64,         // M (Hoon: m=@udD, max 255)
     pub pubkeys: Vec<SchnorrPubkey>, // N public keys (Hoon: z-set)
@@ -143,7 +143,7 @@ In V1, the lock concept was generalized to a **tree of spend conditions** (see [
 ## Asset Denomination
 
 ```rust
-// crates/nockchain-types/src/tx_engine/common/mod.rs:82
+// crates/lib/nockchain-types/src/tx_engine/common/mod.rs:82
 pub struct Nicks(pub usize);
 ```
 
@@ -158,14 +158,14 @@ The choice of 2^16 as the subdivision factor (vs Bitcoin's 10^8) reflects Nockch
 The full UTXO set is called the **balance** — a persistent sorted map (`z-map`) from Names to Notes:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/note.rs:23
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:23
 pub struct Balance(pub Vec<(Name, Note)>);
 ```
 
 Where `Note` is a version-discriminated enum:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/note.rs:53-56
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:53-56
 pub enum Note {
     V0(NoteV0),
     V1(NoteV1),
@@ -177,7 +177,7 @@ Discrimination is structural: V0 notes have a cell (pair) as their head element;
 ## Source: Provenance Tracking
 
 ```rust
-// crates/nockchain-types/src/tx_engine/common/mod.rs:134-137
+// crates/lib/nockchain-types/src/tx_engine/common/mod.rs:134-137
 pub struct Source {
     pub hash: Hash,
     pub is_coinbase: bool,
@@ -191,7 +191,7 @@ Every note tracks its origin: whether it was created by a coinbase (mining rewar
 ### V0 Transaction
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v0/tx.rs:95-100
+// crates/lib/nockchain-types/src/tx_engine/v0/tx.rs:95-100
 pub struct RawTx {
     pub id: TxId,
     pub inputs: Inputs,               // z-map of (Name → Input)
@@ -205,7 +205,7 @@ V0 transactions embed the full note in each input (`Input { note, spend }`), and
 ### V1 Transaction
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:19-23
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:19-23
 pub struct RawTx {
     pub version: Version,
     pub id: TxId,

@@ -23,10 +23,10 @@ note-data=(z-map @tas *)
 Rust serialization mirror (represents the z-map as a list of key-value pairs with jammed noun blobs):
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/note.rs:98-99
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:98-99
 pub struct NoteData(pub Vec<NoteDataEntry>);
 
-// crates/nockchain-types/src/tx_engine/v1/note.rs:115-120
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:115-120
 pub struct NoteDataEntry {
     pub key: String,       // @tas (Hoon "cord" / symbol string)
     pub blob: bytes::Bytes, // Jammed noun (arbitrary serialized Nock data)
@@ -38,7 +38,7 @@ pub struct NoteDataEntry {
 Note data flows from transaction outputs (seeds) to the notes they create:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:158-165
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:158-165
 pub struct Seed {
     pub output_source: Option<Source>,
     pub lock_root: Hash,
@@ -54,7 +54,7 @@ When a transaction is applied to the balance:
 3. The resulting `NoteV1` carries this data for its entire lifetime
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/note.rs:58-65
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:58-65
 pub struct NoteV1 {
     pub version: Version,
     pub origin_page: BlockHeight,
@@ -69,7 +69,7 @@ pub struct NoteV1 {
 Note data entries use Hoon's `@tas` (text atom symbol) for keys and **jammed nouns** for values. A jammed noun is a compressed binary serialization of an arbitrary Nock value — it can represent any data structure expressible in Nock:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/note.rs:128-145
+// crates/lib/nockchain-types/src/tx_engine/v1/note.rs:128-145
 impl NounEncode for NoteData {
     fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
         self.0.iter().fold(D(0), |map, entry| {

@@ -9,4 +9,4 @@ note under `open/docs/native-compiler/` instead.
 
 Primary parser crate:
 
-- `hatch` at `open/crates/hatch/`
+- `hatch` at `open/crates/tools/hatch/`

@@ -38,7 +38,7 @@ just to satisfy the API requirement, but this is obviously not a real solution.
 - ✅ We have a clean baseline after selectively opting out of fmt/clippy per user guidance.
 - ✅ Perf baselines captured (`cargo test --release -p nockvm`, `criterion` microbenches); use them when validating further steps.
 
-## Phase 1 – Arena metadata & pointer math (`open/crates/nockvm/rust/nockvm/src/mem.rs`)
+## Phase 1 – Arena metadata & pointer math (`open/crates/lib/nockvm/rust/nockvm/src/mem.rs`)
 
 ✅ **Done**
 
@@ -47,7 +47,7 @@ just to satisfy the API requirement, but this is obviously not a real solution.
 3. Allocators (`struct_alloc`, `alloc_cell`, preserve paths, slab copies) tag offsets immediately; forwarding pointers also store offsets.
 4. Every stack consumer installs the arena via TLS guards; unit tests, doctests, integration tests now all use small helpers/guards so we no longer see `Arena::with_current` panics.
 
-## Phase 2 – Tagged pointer representation (`open/crates/nockvm/rust/nockvm/src/noun.rs`)
+## Phase 2 – Tagged pointer representation (`open/crates/lib/nockvm/rust/nockvm/src/noun.rs`)
 
 ✅ **Done**
 
@@ -64,7 +64,7 @@ just to satisfy the API requirement, but this is obviously not a real solution.
 - `Hamt`, `WarmEntry`, `Hot`, `Cold`, `Batteries*`, and `NounList` now participate in the retag walker, meaning the caches no longer rely on another preserve pass to shed stack pointers.
 - Regression coverage: `hamt_retag_converts_entries_to_offsets` asserts HAMT keys/values are PMA-safe, and the existing debug sweep stays enabled under `debug_assertions` for extra safety when running integration tests.
 
-## Phase 4 – Interpreter/context plumbing (`open/crates/nockvm/rust/nockvm/src/interpreter.rs` and friends)
+## Phase 4 – Interpreter/context plumbing (`open/crates/lib/nockvm/rust/nockvm/src/interpreter.rs` and friends)
 
 ✅/⚠️
 
@@ -95,7 +95,7 @@ Until this phase is complete, running `nockchain-api` will exercise the memfd PM
    - The serf now runs a debug-only sweep (`debug_assert_offsets`) after each `preserve_event_update_leftovers` that panics if any noun still carries a stack pointer. Running the existing integration tests with `debug_assertions` enabled exercises this automatically.
 
 2. **Integration / system tests:**
-   - Existing `nockapp` integration tests (`open/crates/nockapp/tests/integration.rs`) should be run under both `mmap` and `malloc` features to catch regressions.
+   - Existing `nockapp` integration tests (`open/crates/lib/nockapp/tests/integration.rs`) should be run under both `mmap` and `malloc` features to catch regressions.
    - Add a new test that imports a checkpoint, clones the arena into a fake replica, and runs a peek to validate that offsets stay stable after remapping.
    - For OS-level validation that paging behaves correctly with the memfd-backed slab:
      1. Launch a nockapp instance with a very large snapshot so the slab consumes multiple gigabytes.
@@ -114,7 +114,7 @@ Until this phase is complete, running `nockchain-api` will exercise the memfd PM
 
 5. **Documentation & rollout:**
    - Update `NOCK-PMA.md` with actual code snippets once implemented.
-   - Document the new invariants in `open/crates/nockvm/DEVELOPERS.md` (how the arena/offset dance works, expectations for jets).
+   - Document the new invariants in `open/crates/lib/nockvm/DEVELOPERS.md` (how the arena/offset dance works, expectations for jets).
    - Provide a migration note in `CHANGELOG.md` describing the new noun representation.
 
 ## Sequencing & Code Review Checklist
@@ -131,12 +131,12 @@ To run `nockchain-api` on the memfd-backed PMA and collect resident memory data 
 
 1. ✅ **Phase 3 retagging** is in place, so snapshots/peeks never see stack pointers and the leader slab is PMA-safe.
 2. **Replica overlay (Phase 5)** remains pending for multi-replica peek scaling; it is not required for the immediate single-serf RSS study but must land before we farm peeks to read-only stacks.
-3. The `nockapp::kernel::boot::Cli` now takes `--data-dir` (full path to the checkpoints directory) and `nockchain-cli` exposes `--identity-path`, so `cargo run -p nockchain-api -- --data-dir test-api/.data.nockchain --identity-path test-api/.nockchain_identity ...` boots directly on the canned 2.5 GiB snapshot. See `open/crates/nockchain-api/README.md` for the exact command and notes on the `nockvm.pma.*` metrics to watch.
+3. The `nockapp::kernel::boot::Cli` now takes `--data-dir` (full path to the checkpoints directory) and `nockchain-cli` exposes `--identity-path`, so `cargo run -p nockchain-api -- --data-dir test-api/.data.nockchain --identity-path test-api/.nockchain_identity ...` boots directly on the canned 2.5 GiB snapshot. See `open/crates/apps/nockchain-api/README.md` for the exact command and notes on the `nockvm.pma.*` metrics to watch.
 3. **Operational checklist** for perf/memory studies:
    - Start `nockchain-api` with `NOCKVM_MEMFD_STACK=1` (or a dedicated env) and the replica flag.
    - Use `gnort` metrics (`nockvm.pma.*`) to monitor residency, touched pages, and post-peek ratios.
    - Record `/proc/$PID/smaps` while issuing peeks via gRPC (simulate pokes concurrently) to ensure the kernel is paging unused chunks.
    - Compare RSS vs. the old anonymous mmap builds.
-4. **Docs/tests**: update `PMA-NOW.md` (this file) whenever steps shift, and add a “replica smoke test” under `open/crates/nockapp/tests` once Phase 5 lands.
+4. **Docs/tests**: update `PMA-NOW.md` (this file) whenever steps shift, and add a “replica smoke test” under `open/crates/lib/nockapp/tests` once Phase 5 lands.
 
 This plan gets us to position-independent nouns with measured, reviewable steps, unlocking the mmap CoW replicas without jeopardizing interpreter performance.

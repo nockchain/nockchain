@@ -1,9 +1,6 @@
 """
 Bazel module definition for the nockchain workspace.
 
-This file is the root MODULE.bazel when this directory is the repository
-root; every //... label below refers to that layout.
-
 Build with the pinned Bazel version from .bazelversion (bazelisk reads it):
 
     bazel build //...
@@ -74,8 +71,8 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["forge", "cast", "anvil", "chisel"])
 """,
-    integrity = "sha256-c2QLAb2e0p/bSWUIUJk3H4zw277D4ghs9UVk78Tc/og=",
-    urls = ["https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_amd64.tar.gz"],
+    integrity = "sha256-WIUBBphAOPOnIA84pBgsjLQj06T0x4SOrLwkU+a8Nfw=",
+    urls = ["https://github.com/foundry-rs/foundry/releases/download/v1.8.6/foundry_v1.8.6_linux_amd64.tar.gz"],
 )
 
 http_archive(
@@ -85,8 +82,8 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["forge", "cast", "anvil", "chisel"])
 """,
-    integrity = "sha256-s78XUr4Gbgh3kRch4GJAWBcciPxWFuIok3/kYgtBxA0=",
-    urls = ["https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_darwin_arm64.tar.gz"],
+    integrity = "sha256-1rwF7pN7Qwi97UlgaHKMi6FAq+Sd11J/N+AlvDNbkew=",
+    urls = ["https://github.com/foundry-rs/foundry/releases/download/v1.8.6/foundry_v1.8.6_darwin_arm64.tar.gz"],
 )
 
 http_archive(
@@ -163,7 +160,7 @@ crates.annotation(
     crate = "aws-lc-sys",
     patch_args = ["-p1"],
     patches = ["//third_party/patches:aws-lc-sys-macos-cflags-version-min.patch"],
-    version = "0.40.0",
+    version = "0.46.0",
 )
 crates.annotation(
     build_script_data_glob = ["tracy/**"],

@@ -10,7 +10,7 @@ Bitcoin's Segregated Witness (BIP 141, activated August 2017) introduced a funda
 
 ## Nockchain's Witness Separation
 
-Nockchain's V1 transaction engine (Protocol 009, activated at block 37350) implements an analogous separation. The design is documented as the "segwit cutover" in `changelog/protocol/009-legacy-segwit-cutover-initial.md`.
+Nockchain's V1 transaction engine (Protocol 009, activated at block 37350) implements an analogous separation. The design is documented as the "segwit cutover" in `docs/protocol/upgrades/009-legacy-segwit-cutover-initial.md`.
 
 ### V0 Model: Embedded Signatures
 
@@ -28,7 +28,7 @@ In V0, spending proofs were embedded directly in the input. The authoritative Ho
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v0/tx.rs:51-54
+// crates/lib/nockchain-types/src/tx_engine/v0/tx.rs:51-54
 pub struct Input {
     pub note: NoteV0,     // The full UTXO being spent (embedded!)
     pub spend: Spend,     // Contains signature directly
@@ -55,7 +55,7 @@ V1 introduces a clean separation. The authoritative Hoon type definitions:
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:90-94
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:90-94
 pub enum Spend {
     Legacy(Spend0),    // Tag %0: bridge spend (v0 note → v1 output)
     Witness(Spend1),   // Tag %1: native v1 spend with separate witness
@@ -85,7 +85,7 @@ This is analogous to Bitcoin's P2SH-wrapped SegWit outputs, which allowed SegWit
 Rust serialization mirror:
 
 ```rust
-// crates/nockchain-types/src/tx_engine/v1/tx.rs:167-174
+// crates/lib/nockchain-types/src/tx_engine/v1/tx.rs:167-174
 pub struct Witness {
     pub lock_merkle_proof: LockMerkleProof,
     pub pkh_signature: PkhSignature,
@@ -151,7 +151,7 @@ The cutover is enforced by a strict height-based rule matrix:
 | `< v1-phase` (37350) | Allowed | Rejected | V0 (sig-keyed) |
 | `≥ v1-phase` (37350) | Rejected | Required | V1 (lock-hash-rooted) |
 
-From `changelog/protocol/009-legacy-segwit-cutover-initial.md`:
+From `docs/protocol/upgrades/009-legacy-segwit-cutover-initial.md`:
 > At `height >= v1-phase`: v1 raw transactions are required. v0 raw transactions are rejected (`%v0-tx-after-cutoff`).
 
 This is a **hard cutover**, not a gradual transition. All nodes must agree on the same rules at the same height.

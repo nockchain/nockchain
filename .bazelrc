@@ -1,6 +1,4 @@
 # Bazel configuration for the nockchain workspace.
-#
-# Takes effect when this directory is the workspace root.
 
 # Optional, untracked local overrides.
 try-import %workspace%/.bazelrc.local
@@ -50,6 +48,10 @@ common:macos --host_action_env=DEVELOPER_DIR
 common:macos --action_env=MACOSX_DEPLOYMENT_TARGET
 common:macos --host_action_env=MACOSX_DEPLOYMENT_TARGET
 
+# The pinned toolchain's debug stripping can misalign Mach-O LINKEDIT pools.
+# Keep host proc-macro libraries loadable; shipped target binaries stay stripped.
+common:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cstrip=none
+
 # Prefer Bazel-managed prebuilt protoc from the protobuf module.
 common --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
 # Bazel <9 needs explicit proto toolchain resolution.
@@ -62,9 +64,7 @@ build:clippy --output_groups=+clippy_checks
 common:clippy --@rules_rust//rust/settings:extra_rustc_flag=-Dwarnings
 common:clippy --@rules_rust//rust/settings:clippy_flag=-Dclippy::unwrap_used
 common:clippy --@rules_rust//rust/settings:clippy_flag=-Aclippy::missing_safety_doc
-# Allowed for the nightly-2026-04-03 toolchain bump: lints the newer clippy newly
-# flags on pre-existing code (deferred to a dedicated cleanup; mirrors the root
-# .bazelrc and [workspace.lints.clippy] in the generated Cargo.toml).
+# Match [workspace.lints.clippy] in Cargo.toml for nightly-2026-04-03.
 common:clippy --@rules_rust//rust/settings:clippy_flag=-Aclippy::result_large_err
 common:clippy --@rules_rust//rust/settings:clippy_flag=-Aclippy::unnecessary_cast
 common:clippy --@rules_rust//rust/settings:clippy_flag=-Aclippy::unnecessary_sort_by

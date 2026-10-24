@@ -1,5 +1,5 @@
 # Bazel-driven equivalents of the recipes below. Invoke as `just bazel <recipe>`.
-mod bazel 'bazel.just'
+mod bazel 'tools/bazel/recipes.just'
 
 # List available recipes, including nested modules (default).
 default:
@@ -22,9 +22,9 @@ honc-cold-138-asset:
     cp target/honk-assets/wrapper-assets/honc-cold-138.jam assets/honc-cold-138.jam
 
 hoonc-octs-type-138-asset:
-    mkdir -p crates/honk/assets target/honk-assets
+    mkdir -p crates/tools/honk/assets target/honk-assets
     target/release/hoonc --dynock-typed --output target/honk-assets/data-import-typed-dynock.jam hoon/probes/hoon-compiler/hoonc_octs_type_probe.hoon hoon
-    target/release/extract-hoonc-octs-type target/honk-assets/data-import-typed-dynock.jam crates/honk/assets/hoonc-octs-type-138.jam
+    target/release/extract-hoonc-octs-type target/honk-assets/data-import-typed-dynock.jam crates/tools/honk/assets/hoonc-octs-type-138.jam
 
 # Each kernel uses a fresh `--new` data dir (target/hoonc-new) so hoonc never
 # reuses a warm cache: a clean cold build, good for timing and repeatable across
@@ -151,18 +151,18 @@ honk-parity:
 # guard remains in place as a regression ceiling. Build honk + hoonc first
 # (`just build`).
 honk-138-parity:
-    crates/honk/test-assets/honk_138_native_parity.sh
+    crates/tools/honk/test-assets/honk_138_native_parity.sh
 
 # Native-types migration (docs/native-compiler/NATIVE-TYPES-MIGRATION.md) Phase-0
 # harnesses. native-parity-dual: strict-cmp acceptance gate (§2.2/RT-02) — honk
 # vs hoonc reference, dir-hash-only diffs reported WAIVED. Pass kernel name(s) to
 # filter, e.g. `just native-parity-dual dumb`.
 native-parity-dual *args:
-    bash crates/honk/test-assets/native-parity/dual_run.sh {{args}}
+    bash crates/tools/honk/test-assets/native-parity/dual_run.sh {{args}}
 
 # Regenerate ("regen") or verify ("check") the emitted-formula golden corpus.
 native-goldens mode="check":
-    bash crates/honk/test-assets/native-parity/regen_goldens.sh {{mode}}
+    bash crates/tools/honk/test-assets/native-parity/regen_goldens.sh {{mode}}
 
 # Gate: honk must compile the roswell kernel in under 60 seconds
 # (cargo build excluded). Diagnose failures with NATIVE_HOON_TRACE=1 and

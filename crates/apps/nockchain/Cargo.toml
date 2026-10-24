@@ -1,0 +1,79 @@
+[package]
+name = "nockchain"
+build = "build.rs"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[features]
+bazel_build = []
+# jemalloc is now REQUIRED (see main.rs) — this feature is a no-op kept for
+# backward compatibility with existing `--features jemalloc` build commands.
+jemalloc = []
+tracing-heap = ["tracy-client"]
+
+[dependencies]
+
+bs58.workspace = true
+chaff.workspace = true
+clap.workspace = true
+equix.workspace = true
+futures.workspace = true
+ibig.workspace = true
+kernels-open-dumb = { workspace = true }
+libp2p = { workspace = true, features = [
+    "ping",
+    "kad",
+    "identify",
+    "quic",
+    "tls",
+    "dns",
+    "tokio",
+    "macros",
+    "request-response",
+    "cbor",
+] }
+nockapp.workspace = true
+nockapp-grpc.workspace = true
+nockchain-libp2p-io.workspace = true
+nockchain-math.workspace = true
+nockchain-types.workspace = true
+nockvm.workspace = true
+nockvm_macros.workspace = true
+noun-serde.workspace = true
+num_cpus = { workspace = true }
+rand = { workspace = true }
+tempfile = { workspace = true }
+termcolor.workspace = true
+tikv-jemallocator = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracy-client = { workspace = true, optional = true }
+
+zkvm-jetpack.workspace = true
+ai-pow-jets.workspace = true
+
+[build-dependencies]
+vergen = { workspace = true, features = [
+    "build",
+    "cargo",
+    "git",
+    "gitcl",
+    "rustc",
+    "si",
+] }
+
+[dev-dependencies]
+blake3.workspace = true
+kernels-open-miner = { workspace = true }
+libc.workspace = true
+memmap2.workspace = true
+nockchain-math.workspace = true
+nockchain-mining-common.workspace = true
+ai-pow = { path = "../../lib/ai-pow", features = ["zk"] }
+ai-pow-miner = { path = "../ai-pow-miner", features = ["node"] }
+ai-pow-zk = { path = "../../lib/ai-pow-zk" }
+zk-pow-miner = { path = "../zk-pow-miner" }
+
+[lints]
+workspace = true

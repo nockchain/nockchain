@@ -1,0 +1,36 @@
+[package]
+name = "honk"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[[bin]]
+name = "honk"
+path = "src/bin/honk.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+chumsky = "0.10"
+hatch = { path = "../hatch" }
+bytes = { workspace = true }
+honc-cold-138 = { path = "../../lib/honc-cold-138" }
+hoonc = { path = "../hoonc" }
+nockapp = { path = "../../lib/nockapp" }
+nockasm = { git = "https://github.com/bitemyapp/nockasm.git", rev = "9473f4ba3f30bbc06865a05fc098c8a45957bec7" }
+nockvm = { path = "../../lib/nockvm/rust/nockvm", features = ["sham_hints"] }
+num-bigint = { version = "0.4.6", features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+smallvec = { workspace = true }
+stacker = "0.1"
+thiserror = { workspace = true }
+tikv-jemallocator = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
+zkvm-jetpack.workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -9,7 +9,7 @@ test-follower
 target
 assets/*.jam
 !assets/honc-cold-138.jam
-!crates/nockapp/test-jams
+!crates/lib/nockapp/test-jams
 keys.export
 replay-checkpoints-51094
 nockchain-api-checkpoints-backup

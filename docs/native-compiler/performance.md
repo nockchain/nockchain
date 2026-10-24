@@ -62,7 +62,7 @@ samples before the switch.
 
 ## Useful workload
 
-`crates/hoonc/hoon/hoon-138.hoon` arbitrary compilation is a useful stress case because it exercises parser source spots, compiler type operations, and large emitted artifacts in a single parity target.
+`crates/tools/hoonc/hoon/hoon-138.hoon` arbitrary compilation is a useful stress case because it exercises parser source spots, compiler type operations, and large emitted artifacts in a single parity target.
 
 ## Kernel serialization benchmark
 

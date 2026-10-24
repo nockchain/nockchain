@@ -6,7 +6,7 @@ Companion to `DOR-DEEP-EQUALITY.md`, `TODOS-PERF.md`, and
 
 ## Correction first: honk does not touch the PMA today
 
-`grep -i pma` over `crates/honk/src` returns nothing. Both eval contexts are
+`grep -i pma` over `crates/tools/honk/src` returns nothing. Both eval contexts are
 bare NockStacks with no PMA installed:
 
 - `create_eval_context` — `src/bin/honk.rs:3084`

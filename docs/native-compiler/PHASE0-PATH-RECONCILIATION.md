@@ -13,20 +13,20 @@ This document reconciles stale `open/` paths and outdated commands in the native
 
 | Stale Reference | File:Line | In-Repo Equivalent | Type |
 |---|---|---|---|
-| `open/crates/honk/` | README.md:11 | `crates/honk/` | directory |
-| `open/crates/hoonc/hoon/hoon-138.hoon` | README.md:12 | `crates/hoonc/hoon/hoon-138.hoon` | file |
-| `open/crates/hatch/` | README.md:13 | `crates/hatch/` | directory |
+| `open/crates/tools/honk/` | README.md:11 | `crates/tools/honk/` | directory |
+| `open/crates/tools/hoonc/hoon/hoon-138.hoon` | README.md:12 | `crates/tools/hoonc/hoon/hoon-138.hoon` | file |
+| `open/crates/tools/hatch/` | README.md:13 | `crates/tools/hatch/` | directory |
 | `open/hoon/common/hoon.hoon` | README.md:14 | `hoon/common/hoon.hoon` | file |
 | `open/docs/native-parser/` | README.md:5 | `docs/native-parser/` (if exists) | directory reference |
-| `open/crates/hoonc/hoon/hoon-138.hoon` | artifact-parity.md:9 | `crates/hoonc/hoon/hoon-138.hoon` | file |
+| `open/crates/tools/hoonc/hoon/hoon-138.hoon` | artifact-parity.md:9 | `crates/tools/hoonc/hoon/hoon-138.hoon` | file |
 | `open/hoon/common/hoon.hoon` | artifact-parity.md:10 | `hoon/common/hoon.hoon` | file |
-| `open/crates/honk/test-assets/BUILD.bazel` | artifact-parity.md:11 | `crates/honk/test-assets/` (check existence) | directory |
-| `open/crates/honk/test-assets/compiler_artifact_parity_test.sh` | artifact-parity.md:12 | `crates/honk/test-assets/compiler_artifact_parity_test.sh` | file |
-| `open/crates/hoonc/hoon/hoon-138.hoon` | artifact-parity.md:14 | `crates/hoonc/hoon/hoon-138.hoon` | file |
+| `open/crates/tools/honk/test-assets/BUILD.bazel` | artifact-parity.md:11 | `crates/tools/honk/test-assets/` (check existence) | directory |
+| `open/crates/tools/honk/test-assets/compiler_artifact_parity_test.sh` | artifact-parity.md:12 | `crates/tools/honk/test-assets/compiler_artifact_parity_test.sh` | file |
+| `open/crates/tools/hoonc/hoon/hoon-138.hoon` | artifact-parity.md:14 | `crates/tools/hoonc/hoon/hoon-138.hoon` | file |
 | `open/hoon/common/hoon.hoon` | artifact-parity.md:14 | `hoon/common/hoon.hoon` | file |
-| `open/crates/honk/assets/hoonc-octs-type-138.jam` | README.md:44 | `crates/honk/assets/hoonc-octs-type-138.jam` | file |
-| `open/crates/hatch/src/utils.rs` | source-spots.md:25 | `crates/hatch/src/utils.rs` | file |
-| `open/crates/hoonc/hoon/hoon-138.hoon` | performance.md:26 | `crates/hoonc/hoon/hoon-138.hoon` | file |
+| `open/crates/tools/honk/assets/hoonc-octs-type-138.jam` | README.md:44 | `crates/tools/honk/assets/hoonc-octs-type-138.jam` | file |
+| `open/crates/tools/hatch/src/utils.rs` | source-spots.md:25 | `crates/tools/hatch/src/utils.rs` | file |
+| `open/crates/tools/hoonc/hoon/hoon-138.hoon` | performance.md:26 | `crates/tools/hoonc/hoon/hoon-138.hoon` | file |
 
 ---
 
@@ -34,7 +34,7 @@ This document reconciles stale `open/` paths and outdated commands in the native
 
 | Historical stale target | Current target | Status |
 |---|---|---|
-| `//open/crates/honk/test-assets:hoon_138_arbitrary_parity_test` | `//crates/honk/test-assets:hoon_138_arbitrary_parity_test` | strict byte-parity target |
+| `//open/crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test` | `//crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test` | strict byte-parity target |
 | `//open/assets/native:kernel_parity_test` | `//assets/native:kernel_parity_test` | six strict byte-parity targets |
 
 The current targets exist in this checkout and use `cmp`; there is no
@@ -50,21 +50,21 @@ directory-hash waiver in either Bazel acceptance gate.
 ```bash
 cargo build --release -p honk
 # or via Bazel:
-bazel build //crates/honk:honk
+bazel build //crates/tools/honk:honk
 ```
 
 **Build hatch (parser):**
 ```bash
 cargo build --release -p hatch
 # or via Bazel:
-bazel build //crates/hatch
+bazel build //crates/tools/hatch
 ```
 
 **Build hoonc (canonical reference compiler):**
 ```bash
 cargo build --release -p hoonc
 # or via Bazel:
-bazel build //crates/hoonc
+bazel build //crates/tools/hoonc
 ```
 
 ---
@@ -82,12 +82,12 @@ just honk-138-parity
 
 **Bazel:**
 ```bash
-bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+bazel test //crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test
 ```
 
 **What it does:**
-- Invokes `crates/honk/test-assets/honk_138_native_parity.sh`
-- Compiles `hoon/common/hoon.hoon` (= `crates/hoonc/hoon/hoon-138.hoon`) with both compilers
+- Invokes `crates/tools/honk/test-assets/honk_138_native_parity.sh`
+- Compiles `hoon/common/hoon.hoon` (= `crates/tools/hoonc/hoon/hoon-138.hoon`) with both compilers
 - Compares artifacts with strict `cmp` (byte-exact)
 - Runs under RSS guard (75% physical RAM ceiling) to catch memory blowup safely
 - **Current status:** the native mint completes under the RSS guard and must be
@@ -234,7 +234,7 @@ target remains an open near miss.
 
 **Current status:** PRODUCTIZED for the `HONK_NATIVE_PARITY=1` self-mint route.
 
-- **Where:** `crates/honk/src/bin/honk.rs` lines 2603–2617 (canonical prelude routing when peeled root is `=<`)
+- **Where:** `crates/tools/honk/src/bin/honk.rs` lines 2603–2617 (canonical prelude routing when peeled root is `=<`)
 - **Parity configuration:** the prelude is intentionally parsed with
   `dbug=false`, and the whole hoon-138 artifact is byte-exact against hoonc.
 - **Remaining limitation:** a future caller enabling prelude `dbug` must
@@ -252,7 +252,7 @@ diagnostic path.
 
 **Current Bazel acceptance behavior:**
 ```bash
-bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+bazel test //crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test
 bazel test //assets/native:kernel_parity_test
 # Both compare with cmp and reject every byte difference.
 ```
@@ -267,10 +267,10 @@ require a named waiver rather than a silent pass.
 
 | Task | Cargo | Bazel | Status |
 |---|---|---|---|
-| **Build honk binary** | `cargo build --release -p honk` | `bazel build //crates/honk:honk` | canonical |
-| **Build hatch parser** | `cargo build --release -p hatch` | `bazel build //crates/hatch` | canonical |
-| **Build hoonc (reference)** | `cargo build --release -p hoonc` | `bazel build //crates/hoonc` | canonical |
-| **Arbitrary hoon-138 parity** | `just honk-138-parity` | `bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test` | strict byte parity; RSS ceiling in local script |
+| **Build honk binary** | `cargo build --release -p honk` | `bazel build //crates/tools/honk:honk` | canonical |
+| **Build hatch parser** | `cargo build --release -p hatch` | `bazel build //crates/tools/hatch` | canonical |
+| **Build hoonc (reference)** | `cargo build --release -p hoonc` | `bazel build //crates/tools/hoonc` | canonical |
+| **Arbitrary hoon-138 parity** | `just honk-138-parity` | `bazel test //crates/tools/honk/test-assets:hoon_138_arbitrary_parity_test` | strict byte parity; RSS ceiling in local script |
 | **Kernel parity (dumb only)** | direct native build + `cmp` | `bazel test //assets/native:dumb_parity_test` | strict byte parity |
 | **All six kernel parity** | local build + diagnostics | `bazel test //assets/native:kernel_parity_test` | strict byte parity |
 | **Roswell timing gate** | `just honk-roswell-timed` | `bazel test //assets/native:roswell_compile_bench` | manual benchmark; 63.71 s isolated post-rebase |
@@ -283,15 +283,15 @@ require a named waiver rather than a silent pass.
 
 | Path | Exists | Notes |
 |---|---|---|
-| `crates/honk/` | ✓ | primary native compiler |
-| `crates/hatch/` | ✓ | Hoon parser |
-| `crates/hoonc/` | ✓ | canonical reference compiler (Hoon source, Rust wrapper) |
-| `hoon/common/hoon.hoon` | ✓ | prelude (symlinked to `crates/hoonc/hoon/hoon-138.hoon` in some contexts) |
-| `crates/honk/assets/hoonc-octs-type-138.jam` | ✓ | canonical `$octs` type for data imports |
-| `crates/honk/test-assets/` | ✓ | contains parity test scripts |
-| `crates/honk/test-assets/compiler_artifact_parity_test.sh` | ✓ | single-file compile parity |
-| `crates/honk/test-assets/honk_138_native_parity.sh` | ✓ | hoon-138 arbitrary parity (with memory guard) |
-| `crates/honk/test-assets/wrapper_asset_parity_test.sh` | ✓ | wrapper asset parity |
+| `crates/tools/honk/` | ✓ | primary native compiler |
+| `crates/tools/hatch/` | ✓ | Hoon parser |
+| `crates/tools/hoonc/` | ✓ | canonical reference compiler (Hoon source, Rust wrapper) |
+| `hoon/common/hoon.hoon` | ✓ | prelude (symlinked to `crates/tools/hoonc/hoon/hoon-138.hoon` in some contexts) |
+| `crates/tools/honk/assets/hoonc-octs-type-138.jam` | ✓ | canonical `$octs` type for data imports |
+| `crates/tools/honk/test-assets/` | ✓ | contains parity test scripts |
+| `crates/tools/honk/test-assets/compiler_artifact_parity_test.sh` | ✓ | single-file compile parity |
+| `crates/tools/honk/test-assets/honk_138_native_parity.sh` | ✓ | hoon-138 arbitrary parity (with memory guard) |
+| `crates/tools/honk/test-assets/wrapper_asset_parity_test.sh` | ✓ | wrapper asset parity |
 | `assets/native/kernel_parity_test.sh` | ✓ | kernel parity harness (bash script) |
 | `docs/native-parser/` | ? | external tree reference; not in this checkout |
 
@@ -315,5 +315,5 @@ classified. The stale-path table above is retained only as review provenance.
 - **TODOS.md:** Resolved items section lists H0 kernel-parity harness
 - **TODOS-PERF.md:** Current native compiler performance work
 - **justfile:** Canonical cargo recipes
-- **bazel.just:** Bazel equivalents
+- **tools/bazel/recipes.just:** Bazel equivalents
 - **artifact-parity.md:** Parity test policy and workflow

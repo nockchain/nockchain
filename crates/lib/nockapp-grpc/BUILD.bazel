@@ -1,0 +1,39 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:tools/bazel/lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "nockapp-grpc",
+    srcs = glob([
+        "src/**/*.rs",
+        "src/*.rs",
+    ]),
+    aliases = aliases(),
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/lib/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/lib/nockapp",
+        "//crates/lib/nockapp-grpc-proto:nockapp-grpc",
+        "//crates/lib/nockchain-libp2p-io",
+        "//crates/lib/nockchain-math",
+        "//crates/lib/nockchain-types",
+        "//crates/lib/nockvm/rust/ibig",
+        "//crates/lib/nockvm/rust/nockvm",
+        "//crates/lib/noun-serde",
+    ] + all_crate_deps(),
+)
+
+rust_test(
+    name = "nockapp_grpc_unit_tests",
+    size = "small",
+    timeout = "short",
+    crate = ":nockapp-grpc",
+)

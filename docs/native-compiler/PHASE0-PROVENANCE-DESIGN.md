@@ -966,5 +966,4 @@ Recommendation: No. The cache is valid only for a single to_noun walk. After ret
 - **honk/src/lib.rs**: `jam()` and `jam_dynock()` boundaries (lines 83–118)
 - **NATIVE-TYPES-MIGRATION-RT.md**: RT-04 (bare Noun leaves), RT-16 (output-assembly RSS)
 - **NOUN-PROVENANCE-AND-BRANDED-HANDLES.md**: Provenance audit, branded API guidance
-- **OSS-NEXT-PLAN.md**: H7 frame-arena work, NounSlab region stack, copy_to_base
 
