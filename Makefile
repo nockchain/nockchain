@@ -213,6 +213,11 @@ install-nockchain-wallet: assets/wal.jam
 	$(call show_env_vars)
 	cargo install --locked --force --path crates/nockchain-wallet --bin nockchain-wallet
 
+.PHONY: install-zk-pow-mine
+install-zk-pow-mine: assets/miner.jam
+	$(call show_env_vars)
+	cargo install --locked --force --path crates/zk-pow-miner --bin zk-pow-mine
+
 .PHONY: install-nockchain-peek
 install-nockchain-peek: assets/peek.jam
 	$(call show_env_vars)

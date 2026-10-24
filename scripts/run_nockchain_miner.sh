@@ -23,6 +23,9 @@ threads=$((total_threads - 2))
 # minimum 1
 num_threads=$((threads > 1 ? threads : 1))
 
-echo "Starting nockchain miner with $num_threads mining threads:"
+echo "Starting zk-pow-mine with $num_threads mining threads:"
 
-nockchain --mining-pkh ${MINING_PKH} --mine --num-threads $num_threads
+# Mining runs in its own process. Start the node first
+# (scripts/run_nockchain_node.sh) and wait for it to finish starting up;
+# zk-pow-mine connects to its private gRPC port, 127.0.0.1:5555 by default.
+zk-pow-mine --mining-pkh ${MINING_PKH} --num-threads $num_threads

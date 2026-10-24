@@ -222,6 +222,12 @@ make install-nockchain
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
+To mine, also install the miner:
+
+```
+make install-zk-pow-mine
+```
+
 ## Setup Keys
 
 To generate a new key pair:
@@ -277,11 +283,18 @@ To run a Nockchain node without mining.
 bash ./scripts/run_nockchain_node.sh
 ```
 
-To run a Nockchain node and mine to a pkh:
+To mine to a pkh, start the node first and wait for it to finish starting
+up. The first start builds a verifier setup table and can take a while. Then
+start the miner in another terminal. The miner is a separate `zk-pow-mine`
+process that mines the ZK-PoW puzzle and connects to the node's private gRPC
+port. It exits if it cannot reach the node after a few attempts.
 
 ```
 bash ./scripts/run_nockchain_miner.sh
 ```
+
+AI-PoW mining uses `ai-pow-mine`. See the
+[ai-pow-miner README](./crates/ai-pow-miner/README.md).
 
 For launch, make sure you run in a fresh working directory that does not include a .data.nockchain file from testing.
 
@@ -320,16 +333,13 @@ cp .env fakenet-hub/
 cp .env fakenet-node/
 
 # Run each instance in its own directory with .env loaded
-cd fakenet-hub && sh ../scripts/run_nockchain_node_fakenet.sh
-cd fakenet-node && sh ../scripts/run_nockchain_miner_fakenet.sh
+cd fakenet-hub && bash ../scripts/run_nockchain_node_fakenet.sh
+cd fakenet-node && bash ../scripts/run_nockchain_miner_fakenet.sh
 ```
 
-The hub script is bound to a fixed multiaddr and the node script sets that multiaddr as an initial
-peer so that nodes have a way of discovering eachother initially.
-
-You can run multiple instances using `run_nockchain_miner_fakenet.sh`, just make sure that
-you are running them from different directories because the checkpoint data is located in the
-working directory of the script.
+The hub script runs a fakenet node. The miner script runs `zk-pow-mine`, which
+connects to the hub's private gRPC port and mines on the fakenet. Start it
+after the hub has finished starting up.
 
 ### What are the networking requirements?
 
@@ -536,7 +546,7 @@ ssh -L 8087:backbone-us-south-mig:8086 backbone-us-south-mig
 
 3. **Mining Not Working**:
    - Verify mining pkh
-   - Check --mine flag
+   - Check that `zk-pow-mine` is running and connected to the node
    - Ensure peers are connected
    - Check system resources
 
