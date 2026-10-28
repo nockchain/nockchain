@@ -25,10 +25,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::{env, fs, process, thread};
 
-use honk::eval::{catch_nock_panic, create_eval_context};
+use honk::eval::{catch_nock_panic, create_eval_context_with};
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockvm::ext::{AtomExt, NounExt};
 use nockvm::interpreter::{interpret, Context};
+use nockvm::jets::JetDispatchMode;
 use nockvm::noun::{Atom, Noun, D, T};
 use num_bigint::BigUint;
 
@@ -162,7 +163,15 @@ fn fire(
 fn run(args: &Args) -> Result<(), String> {
     let label = args.input.display().to_string();
     let jam = fs::read(&args.input).map_err(|err| format!("cannot read {label}: {err}"))?;
-    let mut context = create_eval_context();
+    //  `Exact` dispatch, not honk's `HintBlind`: hint-blind matching exists
+    //  to bridge honk's EMBEDDED cold state (honc-cold-138.jam) against
+    //  cores it reconstructs natively, and kick loads no such asset --- it
+    //  starts from an empty cold state and registers organically out of the
+    //  trap it is handed, so its registrations and its queries come from the
+    //  same evaluation.  Nothing to be blind about, and the walk that mode
+    //  pays on every warm miss is not free:  3.3x the wall clock on jock's
+    //  corpus for byte-identical jet behaviour.  See create_eval_context_with.
+    let mut context = create_eval_context_with(JetDispatchMode::Exact);
     let bytes = catch_nock_panic(format!("firing {label}"), || {
         fire(&mut context, &jam, &label, args.axis.as_ref())
     })?;

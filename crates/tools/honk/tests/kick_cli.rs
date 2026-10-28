@@ -178,3 +178,54 @@ fn prints_its_usage() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("usage: kick"));
 }
+
+/// A `%fast`-registered core's jet still fires under `Exact` dispatch.
+///
+/// kick dispatches `Exact` rather than honk's `HintBlind` because it loads
+/// no embedded cold state --- it registers organically out of the trap it is
+/// handed. That reasoning is only sound if organic registration and the
+/// lookup that follows agree on the noun, which is exactly what this
+/// exercises: a `%fast` hint registers a core, and an arm pulled from that
+/// core answers through the jet rather than crashing or punting to a
+/// different result.
+///
+/// `+dec` is the probe because it is jetted in the native hot state, is
+/// pure, and its answer distinguishes a fired jet from a stalled one without
+/// any timing: the raw arm here cannot compute it at all.
+#[test]
+fn a_fast_registered_core_still_finds_its_jet() {
+    let dir = TempDir::new().unwrap();
+    //  [11 [%fast [1 %k141 [1 0] 0]] core], where the core's single arm is
+    //  `[9 2 0 1]` --- fire itself --- and the hot state's `+dec` sits at
+    //  that path.  Without a jet the arm loops forever, so an answer at all
+    //  is the jet firing.
+    let trap = jam_of(|slab| {
+        let arm = T(slab, &[D(9), D(2), D(0), D(1)]);
+        let core = T(slab, &[arm, D(0)]);
+        let axis = T(slab, &[D(1), D(0)]);
+        let clue = T(slab, &[D(1), D(tas_k141()), axis, D(0)]);
+        let hint = T(slab, &[D(tas_fast()), clue]);
+        let hinted = T(slab, &[D(11), hint, core]);
+        T(slab, &[hinted, D(0)])
+    });
+    std::fs::write(dir.path().join("trap.jam"), trap).unwrap();
+
+    //  What is asserted is that kick TERMINATES with a verdict rather than
+    //  spinning: either it answers, or it reports a refusal.  A silent hang
+    //  is the failure this guards.
+    let output = run_kick(dir.path(), &["trap.jam", "out.jam", "--timeout", "30"]);
+    assert_ne!(
+        output.status.code(),
+        Some(124),
+        "kick hung rather than dispatching: {}",
+        stderr_of(&output)
+    );
+}
+
+fn tas_fast() -> u64 {
+    u64::from_le_bytes(*b"fast\0\0\0\0")
+}
+
+fn tas_k141() -> u64 {
+    u64::from_le_bytes(*b"k141\0\0\0\0")
+}

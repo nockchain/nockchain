@@ -2,10 +2,14 @@
 //!
 //! Everything honk fires — constant folds during a compile, and the build
 //! traps `kick` runs afterwards — must run under the same interpreter setup:
-//! the native hot state with formula-keyed jet dispatch (`HintBlind`). A
-//! second copy of that setup would be a silent correctness hazard, because a
-//! divergence shows up not as a build failure but as a *different noun*.
-//! Both binaries call in here instead.
+//! the native hot state over an empty cold state. A second copy of that
+//! setup would be a silent correctness hazard, because a divergence shows up
+//! not as a build failure but as a *different noun*. Both binaries call in
+//! here instead.
+//!
+//! Jet DISPATCH is the one thing a caller chooses, because it is not part of
+//! that setup: it follows which cold state the caller then loads, and it
+//! cannot change the noun either way. See `create_eval_context_with`.
 
 use std::env;
 use std::panic::{self, AssertUnwindSafe};
@@ -43,6 +47,39 @@ pub fn eval_stack_size() -> usize {
 /// A fresh interpreter context: native hot state, empty cold state, jets
 /// dispatched on formulas rather than hints.
 pub fn create_eval_context() -> Context {
+    create_eval_context_with(JetDispatchMode::HintBlind)
+}
+
+/// The same context at a caller-chosen dispatch mode.
+///
+/// The mode follows the COLD STATE, not the semantics. Hint-blind matching
+/// exists to bridge an *embedded, pre-serialized* cold state against cores
+/// reconstructed natively: honk's compiler cues `honc-cold-138.jam` into
+/// this context and then mints cores whose `%spot` hints put them at a
+/// different noun than the frozen batteries, so without it those jets never
+/// fire. A caller that loads no such asset has nothing to be blind about ---
+/// its registrations and its queries come from the same evaluation, which is
+/// the condition the mode's own documentation names as not needing it.
+///
+/// It is a performance choice and not a semantic one: a jet computes what
+/// its Nock computes (the runtime's jet-test mode is what enforces that), so
+/// neither mode can change the answer.  What it changes is whether every
+/// warm MISS pays a formula normalization walk, and that walk is not
+/// sharing-aware -- it visits every path to a shared subnoun rather than
+/// every subnoun -- so on a formula with real internal sharing it is
+/// exponential in the sharing depth.  Measured on jock's 1147-vector
+/// corpus, which `kick` evaluates:
+///
+/// ```text
+///              hits        misses       time
+///   Exact      31,716,141  165,117,378   66s
+///   HintBlind  31,716,141  165,117,378  220s
+/// ```
+///
+/// Byte-identical jet behaviour --- the hint-blind fallback converts not one
+/// of those 165 million misses into a hit --- at 3.3x the wall clock.  That
+/// is what a mode costs when its premise does not hold.
+pub fn create_eval_context_with(dispatch: JetDispatchMode) -> Context {
     let mut stack = NockStack::new(eval_stack_size(), 0);
     let cold = Cold::new(&mut stack);
     create_context(
@@ -51,7 +88,7 @@ pub fn create_eval_context() -> Context {
         cold,
         None,
         vec![],
-        JetDispatchMode::HintBlind,
+        dispatch,
     )
 }
 
@@ -88,5 +125,31 @@ where
                 .unwrap_or_default();
             Err(format!("{label}: nock stack panic{detail}").into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dispatch split is deliberate and must stay visible: honk's
+    /// compiler cues an embedded cold state and needs hint-blind matching to
+    /// find its jets in it, while `kick` loads none and must not pay the
+    /// normalization walk. Collapsing these two back into one constructor
+    /// would silently hand one caller the other's cost (or, the other
+    /// direction, silently drop honk's jets), and neither shows up as a
+    /// failure --- only as a slower build or a different noun.
+    #[test]
+    fn the_default_is_hint_blind_and_the_choice_is_a_choice() {
+        assert_eq!(
+            create_eval_context().jet_dispatch,
+            JetDispatchMode::HintBlind,
+            "honk's compiler reads an embedded cold state"
+        );
+        assert_eq!(
+            create_eval_context_with(JetDispatchMode::Exact).jet_dispatch,
+            JetDispatchMode::Exact,
+            "a caller with no embedded cold state can opt out"
+        );
     }
 }
