@@ -450,6 +450,48 @@ mod tests {
         // (because Rust doesn't support test order dependencies either).
     }
 
+    /// A blocked scry must leave `interpret` the way every other error
+    /// does: through `exit`, with the frames it pushed popped and its path
+    /// still live.
+    ///
+    /// The direct jet tests in this file cannot catch this. They call the
+    /// jet with no OUTER computation, and an unrestored stack only does
+    /// damage to one --- which is how a block arriving as a whole program's
+    /// product went unnoticed while `jet_mink` itself tested clean.
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn test_scry_block_unwinds_the_stack() {
+        use crate::interpreter::{interpret, Error};
+
+        let context = &mut init_context();
+        //  a scry gate answering ~, i.e. blocked
+        let handler_formula = T(&mut context.stack, &[D(1), D(0)]);
+        let handler = T(&mut context.stack, &[handler_formula, D(0), D(0)]);
+        context.scry_stack = T(&mut context.stack, &[handler, D(0)]);
+
+        let reff = T(&mut context.stack, &[D(1), D(7)]);
+        let path = T(&mut context.stack, &[D(1), D(13)]);
+        let form = T(&mut context.stack, &[D(12), reff, path]);
+
+        let before = context.stack.get_frame_pointer();
+        let res = interpret(context, D(0), form);
+        let after = context.stack.get_frame_pointer();
+
+        match res {
+            Err(Error::ScryBlocked(p)) => {
+                assert!(
+                    unsafe { p.raw_equals(&D(13)) },
+                    "the blocked path must survive the unwind"
+                );
+            }
+            other => panic!("expected a block, got {other:?}"),
+        }
+        assert!(
+            std::ptr::eq(before, after),
+            "a blocked scry must pop the frames it pushed"
+        );
+    }
+
     #[test]
     #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_mink_success() {

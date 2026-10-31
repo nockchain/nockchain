@@ -1196,10 +1196,21 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
                     };
                 }
                 NockWork::Work12(scry) => {
+                    //  EVERY error breaks, so every error leaves through
+                    //  `exit` below. A bare `return` here skipped it, and
+                    //  `exit` is what restores the context snapshot and pops
+                    //  the frames this computation pushed. Skipping it left
+                    //  `interpret` returning with the stack still parked in
+                    //  the abandoned computation: a jetted `+mink` would then
+                    //  build its `[%1 path]` tone on that stack and hand it
+                    //  back to the OUTER interpreter, whose continuation was
+                    //  already clobbered --- so a block arrived as the whole
+                    //  program's product instead of as a value
+                    //  (sigilante/jock docs/record/scry-block-escape.md).
+                    //  Only %2 was spared, because Deterministic alone broke.
                     match cold_paths::step_work12(context, scry, &mut res, &space) {
                         Ok(_) => continue,
-                        Err(err @ Error::Deterministic(_, _)) => break Err(err),
-                        Err(err) => return Err(err),
+                        Err(err) => break Err(err),
                     }
                 }
             };
@@ -1728,11 +1739,22 @@ fn exit(
             stack.frame_pop();
         }
 
+        //  Every variant is rebuilt around `preserve`, ScryBlocked included.
+        //  `Error` is Copy, so the `match` above only COPIED the path out:
+        //  returning `error` here would hand back its original pointer,
+        //  which the frame_pop loop just invalidated. `preserve` is that
+        //  same noun copied down to the surviving frame, and it is the only
+        //  one still live. Returning the stale pointer instead read whatever
+        //  later occupied the address --- in the reported case the `[%1 path]`
+        //  tone built from it, so `+mink`'s block arrived as the program's
+        //  product rather than as a value (sigilante/jock
+        //  docs/record/scry-block-escape.md). %2 was unaffected precisely
+        //  because Deterministic already rebuilt.
         match error {
             Error::Deterministic(mote, _) => Error::Deterministic(mote, preserve),
             Error::NonDeterministic(mote, _) => Error::NonDeterministic(mote, preserve),
             Error::ScryCrashed(_) => Error::ScryCrashed(preserve),
-            Error::ScryBlocked(_) => error,
+            Error::ScryBlocked(_) => Error::ScryBlocked(preserve),
         }
     }
 }
