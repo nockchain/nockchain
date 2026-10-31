@@ -1198,8 +1198,7 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
                 NockWork::Work12(scry) => {
                     match cold_paths::step_work12(context, scry, &mut res, &space) {
                         Ok(_) => continue,
-                        Err(err @ Error::Deterministic(_, _)) => break Err(err),
-                        Err(err) => return Err(err),
+                        Err(err) => break Err(err),
                     }
                 }
             };
@@ -1732,7 +1731,7 @@ fn exit(
             Error::Deterministic(mote, _) => Error::Deterministic(mote, preserve),
             Error::NonDeterministic(mote, _) => Error::NonDeterministic(mote, preserve),
             Error::ScryCrashed(_) => Error::ScryCrashed(preserve),
-            Error::ScryBlocked(_) => error,
+            Error::ScryBlocked(_) => Error::ScryBlocked(preserve),
         }
     }
 }
