@@ -31,10 +31,9 @@ use nockapp::AtomExt;
 use nockvm::ext::NounExt;
 use nockvm::hamt::Hamt;
 use nockvm::interpreter::{interpret, Context, Error as NockError};
-use nockvm::jets::cold::{Cold, Nounable};
+use nockvm::jets::cold::Nounable;
 use nockvm::jets::math::util::lth_b;
 use nockvm::jets::nock::util::mook;
-use nockvm::jets::warm::Warm;
 use nockvm::mem::NockStack;
 use nockvm::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
 use nockvm::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, DIRECT_MAX, T};
@@ -4016,33 +4015,14 @@ fn cue_noun_to_slab(slab: &mut NounSlab<NockJammer>, raw: &[u8], label: &str) ->
 }
 
 fn load_cold_state(context: &mut Context, raw: &[u8], label: &str) -> Result<()> {
-    let cold_noun = trace_timed(format!("{label} cold cue"), || {
-        <Noun as NounExt>::cue_bytes_slice(&mut context.stack, raw)
-            .map_err(|err| format!("cue {label} cold jam: {err:?}").into())
-    })?;
-    let stack_space = context.stack.noun_space();
-    let (battery_to_paths, root_to_paths, path_to_batteries) =
-        trace_timed(format!("{label} cold from_noun"), || {
-            // The cold noun was cued into this same stack above, so the
-            // resident decode borrows batteries and paths in place instead of
-            // deep-copying every core a second time.
-            nockvm::jets::cold::cold_from_noun_resident(
-                &mut context.stack, &cold_noun, &stack_space,
-            )
-            .map_err(|err| format!("decode {label} cold state: {err:?}").into())
-        })?;
-    context.cold = trace_timed(format!("{label} cold from_vecs"), || {
-        Ok(Cold::from_vecs(
-            &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
-        ))
-    })?;
-    context.warm = trace_timed(format!("{label} warm init"), || {
-        Ok(Warm::init(
-            &mut context.stack, &mut context.cold, &context.hot, &context.test_jets,
-            context.jet_dispatch,
-        ))
-    })?;
-    Ok(())
+    //  ONE authority for the decode, in honk::eval, because `kick` loads the
+    //  same asset into the same interpreter setup and a divergence between
+    //  two copies would show up not as a build failure but as a different
+    //  noun (see that module's own note).
+    trace_timed(format!("{label} cold load"), || {
+        honk::eval::load_cold_state(context, raw, label)
+            .map_err(|err| -> DynError { err.into() })
+    })
 }
 
 fn extract_subject_type_root(root: Noun, space: &NounSpace) -> Result<Noun> {

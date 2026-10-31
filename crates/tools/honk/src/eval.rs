@@ -15,10 +15,13 @@ use std::env;
 use std::panic::{self, AssertUnwindSafe};
 
 use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
+use nockvm::ext::NounExt;
 use nockvm::interpreter::Context;
-use nockvm::jets::cold::Cold;
+use nockvm::jets::cold::{cold_from_noun_resident, Cold};
+use nockvm::jets::warm::Warm;
 use nockvm::jets::JetDispatchMode;
 use nockvm::mem::{AllocationError, NockStack};
+use nockvm::noun::Noun;
 
 /// Words of `NockStack` reserved for evaluation, absent an override.
 ///
@@ -90,6 +93,53 @@ pub fn create_eval_context_with(dispatch: JetDispatchMode) -> Context {
         vec![],
         dispatch,
     )
+}
+
+/// Load a serialized cold state into `context`, replacing what it has.
+///
+/// WHY A CALLER WANTS THIS. A cold state maps a BATTERY to the label path
+/// the hot state is keyed by, and `%fast` is the only thing that fills it.
+/// An artifact whose cores were built in some *other* process therefore
+/// arrives with its batteries unregistered: nothing evaluates here to
+/// re-fire those hints, so the hot state is unreachable and the kernel's own
+/// arms interpret. That is not a modest slowdown. Hoon's `+add` loops on its
+/// LEFT operand and calls `+dec` each turn, and an unjetted `+dec` counts up
+/// from zero, so one unjetted addition is quadratic in that operand: swapping
+/// the arguments of `add` changed a measured Jock program from 72.64s to
+/// 0.56s. Loading the cold state the kernel was frozen with is what makes
+/// the hot state reachable at all.
+///
+/// A HIT IS CORRECT BY CONSTRUCTION, so there is no mismatch to guard
+/// against. The map is keyed by the battery NOUN: a match means
+/// byte-identical code, and identical code has the same jet. The only
+/// failure mode is an ABSENT entry, which costs speed and never an answer.
+///
+/// `Warm` is rebuilt because it IS the cold-by-hot join --- a cold state on
+/// its own dispatches nothing.
+pub fn load_cold_state(context: &mut Context, raw: &[u8], label: &str) -> Result<(), String> {
+    let cold_noun = <Noun as NounExt>::cue_bytes_slice(&mut context.stack, raw)
+        .map_err(|err| format!("cue {label} cold jam: {err:?}"))?;
+    let space = context.stack.noun_space();
+    //  The noun was cued into this same stack just above, so the resident
+    //  decode borrows batteries and paths in place rather than deep-copying
+    //  every core a second time.
+    let (battery_to_paths, root_to_paths, path_to_batteries) =
+        cold_from_noun_resident(&mut context.stack, &cold_noun, &space)
+            .map_err(|err| format!("decode {label} cold state: {err:?}"))?;
+    context.cold = Cold::from_vecs(
+        &mut context.stack,
+        battery_to_paths,
+        root_to_paths,
+        path_to_batteries,
+    );
+    context.warm = Warm::init(
+        &mut context.stack,
+        &mut context.cold,
+        &context.hot,
+        &context.test_jets,
+        context.jet_dispatch,
+    );
+    Ok(())
 }
 
 /// Run `f`, converting a nock-stack panic into an ordinary error.

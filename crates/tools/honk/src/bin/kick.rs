@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::{env, fs, process, thread};
 
-use honk::eval::{catch_nock_panic, create_eval_context_with};
+use honk::eval::{catch_nock_panic, create_eval_context_with, load_cold_state};
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockvm::ext::{AtomExt, NounExt};
 use nockvm::interpreter::{interpret, Context};
@@ -164,19 +164,51 @@ fn run(args: &Args) -> Result<(), String> {
     let label = args.input.display().to_string();
     let jam = fs::read(&args.input).map_err(|err| format!("cannot read {label}: {err}"))?;
     //  `Exact` dispatch, not honk's `HintBlind`: hint-blind matching exists
-    //  to bridge honk's EMBEDDED cold state (honc-cold-138.jam) against
-    //  cores it reconstructs natively, and kick loads no such asset --- it
-    //  starts from an empty cold state and registers organically out of the
-    //  trap it is handed, so its registrations and its queries come from the
-    //  same evaluation.  Nothing to be blind about, and the walk that mode
-    //  pays on every warm miss is not free:  3.3x the wall clock on jock's
-    //  corpus for byte-identical jet behaviour.  See create_eval_context_with.
+    //  to bridge an embedded cold state against cores a caller reconstructs
+    //  NATIVELY, and kick reconstructs nothing --- it fires a trap built in
+    //  honk's process, so the batteries it queries are the ones honk froze,
+    //  matchable as they stand.  The walk that mode pays on every warm miss
+    //  is not free:  3.3x the wall clock on jock's corpus for byte-identical
+    //  jet behaviour.  See create_eval_context_with.
     let mut context = create_eval_context_with(JetDispatchMode::Exact);
+    load_canonical_cold_state(&mut context)?;
     let bytes = catch_nock_panic(format!("firing {label}"), || {
         fire(&mut context, &jam, &label, args.axis.as_ref())
     })?;
     fs::write(&args.output, &bytes)
         .map_err(|err| format!("cannot write {}: {err}", args.output.display()))
+}
+
+/// Register the kernel's batteries, so the hot state is reachable at all.
+///
+/// kick fires a PREBUILT trap. Its cores were minted in honk's process, not
+/// this one, so no `%fast` hint fires here, and over an empty cold state the
+/// hot state is unreachable: every kernel arm interprets, `+add` and `+dec`
+/// included. That is the difference between 0.56s and 72.64s on a measured
+/// Jock program, because an unjetted `+add` is quadratic in its left operand
+/// (`honk::eval::load_cold_state` has the mechanism).
+///
+/// honk freezes the cold state of its canonical hoon-138 build into
+/// `honc-cold-138.jam` for precisely this reason. kick loads the same asset,
+/// and a hit is correct by construction --- the map is keyed by the battery
+/// noun, so a match is identical code.
+///
+/// `KICK_NO_COLD_STATE` skips it, which is how the unjetted cost above is
+/// measured rather than guessed.
+fn load_canonical_cold_state(context: &mut Context) -> Result<(), String> {
+    if env::var_os("KICK_NO_COLD_STATE").is_some() {
+        return Ok(());
+    }
+    if honc_cold_138::HONC_COLD_138_JAM.is_empty() {
+        //  the bootstrap placeholder stands in when the asset was never
+        //  built;  say so, because the symptom is otherwise just slowness
+        eprintln!(
+            "kick: no embedded cold state, so every kernel arm will \
+             interpret (build the honk assets to populate it)"
+        );
+        return Ok(());
+    }
+    load_cold_state(context, honc_cold_138::HONC_COLD_138_JAM, "canonical honc")
 }
 
 /// Abandon the process once `limit` has elapsed.
